@@ -2,8 +2,8 @@ use gpui::{App, Application, Bounds, WindowBounds, WindowOptions, prelude::*, px
 
 use crate::{fonts, views::RootView};
 
-const WINDOW_WIDTH: f32 = 1440.0;
-const WINDOW_HEIGHT: f32 = 900.0;
+const WINDOW_WIDTH: f32 = 1280.0;
+const WINDOW_HEIGHT: f32 = 760.0;
 
 pub fn run() {
     Application::new().run(|cx: &mut App| {

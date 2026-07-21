@@ -50,15 +50,15 @@ pub fn panel_hover() -> Rgba {
 }
 
 pub fn edge() -> Rgba {
-    rgba(0xebe4_d614)
+    rgba(0xebe4_d618)
 }
 
 pub fn edge_hard() -> Rgba {
-    rgba(0xebe4_d622)
+    rgba(0xebe4_d62c)
 }
 
 pub fn edge_soft() -> Rgba {
-    rgba(0xebe4_d60e)
+    rgba(0xebe4_d612)
 }
 
 // Text and semantic accents
@@ -71,11 +71,11 @@ pub fn bone_dim() -> Rgba {
 }
 
 pub fn ash() -> Rgba {
-    rgb(0x7d756b)
+    rgb(0x9a9082)
 }
 
 pub fn smoke() -> Rgba {
-    rgb(0x554e47)
+    rgb(0x847b70)
 }
 
 pub fn signal() -> Rgba {
