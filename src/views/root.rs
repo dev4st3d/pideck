@@ -1,20 +1,21 @@
 //! Live Pi shell with an authoritative streaming conversation.
 
 use std::collections::{HashMap, HashSet};
+use std::time::Duration;
 
 use gpui::{
     Context, Entity, FocusHandle, Focusable, FontWeight, IntoElement, Render, ScrollHandle,
-    Subscription, Window, div, prelude::*, px,
+    Subscription, Task, Window, div, prelude::*, px,
 };
 
 use crate::actions::{AbortRun, ActivateRecovery, Connect, FocusNext, FocusPrevious, Retry, Stop};
 use crate::controller::{
-    AcceptedSubmission, AcceptedSubmissionKind, ComposerRuntime, ConversationProjection,
-    RuntimeController, SubmissionPreference,
+    AcceptedSubmission, AcceptedSubmissionKind, CatalogProjection, CatalogStatus, ComposerRuntime,
+    ConversationProjection, RuntimeController, SubmissionPreference,
 };
 use crate::state::runtime::{
     BashStatus, CompactionState, PromptDelivery, QueueContents, QueueDeliveryMode, RetryState,
-    RuntimeLifecycle, RuntimeOperation,
+    RuntimeLifecycle, RuntimeOperation, SubmissionKind,
 };
 use crate::state::{RecoveryAction, ShellProjection};
 use crate::theme;
@@ -31,6 +32,8 @@ struct PendingDraft {
 pub struct RootView {
     controller: Entity<RuntimeController>,
     composer: Entity<Composer>,
+    compaction_composer: Entity<Composer>,
+    session_name_composer: Entity<Composer>,
     conversation: ConversationProjection,
     conversation_scroll: ScrollHandle,
     scroll_pinning: ScrollPinning,
@@ -38,9 +41,14 @@ pub struct RootView {
     tool_cards: HashMap<String, Entity<ToolCard>>,
     pending_draft: Option<PendingDraft>,
     pending_bash: Option<crate::services::rpc::RequestId>,
+    pending_compaction_focus: Option<String>,
+    pending_session_name: Option<String>,
+    retry_tick_task: Option<Task<()>>,
     focus_handle: FocusHandle,
     _controller_observation: Subscription,
     _composer_subscription: Subscription,
+    _compaction_subscription: Subscription,
+    _session_name_subscription: Subscription,
 }
 
 impl RootView {
@@ -51,6 +59,16 @@ impl RootView {
     ) -> Self {
         let focus_handle = cx.focus_handle();
         let composer = cx.new(Composer::new);
+        let compaction_composer = cx.new(|cx| {
+            Composer::scoped(
+                "compaction-focus",
+                "Optional summary focus instructions…",
+                "Compact",
+                cx,
+            )
+        });
+        let session_name_composer =
+            cx.new(|cx| Composer::scoped("session-name", "New session name…", "Rename", cx));
         let conversation = controller.read(cx).conversation_projection();
         let transcript_texts = conversation::text_fragments(&conversation)
             .into_iter()
@@ -73,9 +91,19 @@ impl RootView {
         let composer_subscription = cx.subscribe_in(&composer, window, |view, _, event, _, cx| {
             view.on_composer_event(event, cx)
         });
+        let compaction_subscription =
+            cx.subscribe_in(&compaction_composer, window, |view, _, event, _, cx| {
+                view.on_compaction_event(event, cx)
+            });
+        let session_name_subscription =
+            cx.subscribe_in(&session_name_composer, window, |view, _, event, _, cx| {
+                view.on_session_name_event(event, cx)
+            });
         Self {
             controller,
             composer,
+            compaction_composer,
+            session_name_composer,
             conversation,
             conversation_scroll: ScrollHandle::new(),
             scroll_pinning: ScrollPinning::default(),
@@ -83,9 +111,14 @@ impl RootView {
             tool_cards,
             pending_draft: None,
             pending_bash: None,
+            pending_compaction_focus: None,
+            pending_session_name: None,
+            retry_tick_task: None,
             focus_handle,
             _controller_observation: controller_observation,
             _composer_subscription: composer_subscription,
+            _compaction_subscription: compaction_subscription,
+            _session_name_subscription: session_name_subscription,
         }
     }
 
@@ -236,6 +269,68 @@ impl RootView {
         });
     }
 
+    fn on_compaction_event(&mut self, event: &ComposerEvent, cx: &mut Context<Self>) {
+        let ComposerEvent::Accept { text } = event else {
+            return;
+        };
+        let focus = text.trim().to_owned();
+        if focus.is_empty() || self.pending_compaction_focus.is_some() {
+            return;
+        }
+        let accepted = self.controller.update(cx, |controller, cx| {
+            controller.compact(Some(focus.clone()), cx)
+        });
+        if accepted {
+            self.pending_compaction_focus = Some(focus);
+            self.compaction_composer.update(cx, |composer, cx| {
+                composer.set_feedback(ComposerFeedback::Pending(SubmissionKind::Prompt), cx)
+            });
+        }
+    }
+
+    fn on_session_name_event(&mut self, event: &ComposerEvent, cx: &mut Context<Self>) {
+        let ComposerEvent::Accept { text } = event else {
+            return;
+        };
+        let name = text.trim().to_owned();
+        if name.is_empty() || self.pending_session_name.is_some() {
+            return;
+        }
+        let accepted = self.controller.update(cx, |controller, cx| {
+            controller.set_session_name(name.clone(), cx)
+        });
+        if accepted {
+            self.pending_session_name = Some(name);
+            self.session_name_composer.update(cx, |composer, cx| {
+                composer.set_feedback(ComposerFeedback::Pending(SubmissionKind::Prompt), cx)
+            });
+        }
+    }
+
+    fn new_session(&mut self, cx: &mut Context<Self>) {
+        self.controller.update(cx, |controller, cx| {
+            controller.new_session(cx);
+        });
+    }
+
+    fn switch_session(&mut self, path: std::path::PathBuf, cx: &mut Context<Self>) {
+        self.controller.update(cx, |controller, cx| {
+            controller.switch_session(path, cx);
+        });
+    }
+
+    fn refresh_sessions(&mut self, cx: &mut Context<Self>) {
+        self.controller.update(cx, |controller, cx| {
+            controller.refresh_sessions(cx);
+        });
+    }
+
+    fn export_session(&mut self, cx: &mut Context<Self>) {
+        self.controller.update(cx, |controller, cx| {
+            controller.export_html(None, cx);
+        });
+    }
+
     fn sync_runtime(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let conversation = self.controller.read(cx).conversation_projection();
         let epoch_changed = conversation.epoch != self.conversation.epoch;
@@ -272,6 +367,36 @@ impl RootView {
             }
         }
         self.conversation = conversation;
+        self.sync_retry_tick(cx);
+
+        let compact_available = matches!(
+            self.conversation.lifecycle,
+            RuntimeLifecycle::Ready | RuntimeLifecycle::Settled
+        ) && self.conversation.pending_operation.is_none();
+        self.compaction_composer.update(cx, |composer, cx| {
+            composer.set_availability(
+                if compact_available {
+                    ComposerAvailability::Idle
+                } else {
+                    ComposerAvailability::Unavailable
+                },
+                cx,
+            )
+        });
+        let catalog = self.controller.read(cx).catalog_projection();
+        let rename_available =
+            compact_available && catalog.current_session_file.is_some() && !catalog.switching;
+        self.session_name_composer.update(cx, |composer, cx| {
+            composer.set_availability(
+                if rename_available {
+                    ComposerAvailability::Idle
+                } else {
+                    ComposerAvailability::Unavailable
+                },
+                cx,
+            )
+        });
+        self.reconcile_scoped_operations(&catalog, cx);
 
         let projection = self.controller.read(cx).composer_projection();
         let availability = match projection.runtime {
@@ -395,6 +520,74 @@ impl RootView {
         cx.notify();
     }
 
+    fn sync_retry_tick(&mut self, cx: &mut Context<Self>) {
+        let waiting = matches!(self.conversation.retry, RetryState::Waiting { .. });
+        if !waiting {
+            self.retry_tick_task = None;
+            return;
+        }
+        if self.retry_tick_task.is_some() {
+            return;
+        }
+        self.retry_tick_task = Some(cx.spawn(async move |view, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_millis(100))
+                    .await;
+                let keep_ticking = view
+                    .update(cx, |view, cx| {
+                        let waiting = matches!(view.conversation.retry, RetryState::Waiting { .. });
+                        if waiting {
+                            cx.notify();
+                        }
+                        waiting
+                    })
+                    .unwrap_or(false);
+                if !keep_ticking {
+                    break;
+                }
+            }
+        }));
+    }
+
+    fn reconcile_scoped_operations(&mut self, catalog: &CatalogProjection, cx: &mut Context<Self>) {
+        if let Some(focus) = self.pending_compaction_focus.clone()
+            && self.conversation.pending_operation.is_none()
+        {
+            let completed = matches!(
+                self.conversation.compaction,
+                CompactionState::Completed { .. }
+            );
+            self.compaction_composer.update(cx, |composer, cx| {
+                if completed {
+                    composer.clear_accepted(&focus, SubmissionKind::Prompt, cx);
+                } else {
+                    composer.set_feedback(
+                        ComposerFeedback::Rejected("Compaction did not complete.".to_owned()),
+                        cx,
+                    );
+                }
+            });
+            self.pending_compaction_focus = None;
+        }
+        if let Some(name) = self.pending_session_name.clone()
+            && self.conversation.pending_operation.is_none()
+        {
+            let renamed = catalog.current_session_name.as_deref() == Some(name.as_str());
+            self.session_name_composer.update(cx, |composer, cx| {
+                if renamed {
+                    composer.clear_accepted(&name, SubmissionKind::Prompt, cx);
+                } else {
+                    composer.set_feedback(
+                        ComposerFeedback::Rejected("Session rename did not complete.".to_owned()),
+                        cx,
+                    );
+                }
+            });
+            self.pending_session_name = None;
+        }
+    }
+
     fn on_activate_recovery(
         &mut self,
         _: &ActivateRecovery,
@@ -419,6 +612,7 @@ impl RootView {
 impl Render for RootView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let projection = self.controller.read(cx).projection();
+        let catalog = self.controller.read(cx).catalog_projection();
         let selection_active = self
             .transcript_texts
             .values()
@@ -456,6 +650,12 @@ impl Render for RootView {
                     .min_h_0()
                     .flex()
                     .flex_row()
+                    .child(sessions_panel(
+                        &catalog,
+                        &self.conversation,
+                        &self.session_name_composer,
+                        cx,
+                    ))
                     .child(conversation_area(
                         &projection,
                         &self.conversation,
@@ -465,7 +665,12 @@ impl Render for RootView {
                         &self.composer,
                         cx,
                     ))
-                    .child(inspector(&projection, &self.conversation, cx)),
+                    .child(inspector(
+                        &projection,
+                        &self.conversation,
+                        &self.compaction_composer,
+                        cx,
+                    )),
             )
     }
 }
@@ -551,6 +756,36 @@ fn meta(value: String) -> impl IntoElement {
         .child(value)
 }
 
+fn runtime_error_notice(projection: &ShellProjection) -> impl IntoElement {
+    div()
+        .mx(px(theme::STREAM_PAD_X))
+        .mt(px(14.0))
+        .p(px(12.0))
+        .rounded(px(theme::RADIUS_SM))
+        .bg(theme::panel())
+        .border_1()
+        .border_color(theme::error())
+        .flex()
+        .flex_col()
+        .gap(px(4.0))
+        .child(
+            div()
+                .font_family(theme::SANS)
+                .text_size(px(theme::T_UI))
+                .font_weight(FontWeight::BOLD)
+                .text_color(theme::error())
+                .child(projection.headline.clone()),
+        )
+        .child(
+            div()
+                .font_family(theme::SANS)
+                .text_size(px(theme::T_UI_SM))
+                .line_height(gpui::relative(1.4))
+                .text_color(theme::bone_dim())
+                .child(projection.detail.clone()),
+        )
+}
+
 fn conversation_area(
     projection: &ShellProjection,
     conversation_projection: &ConversationProjection,
@@ -626,6 +861,13 @@ fn conversation_area(
                     ))
                 }),
         )
+        .when(
+            matches!(
+                projection.lifecycle.as_str(),
+                "Connection error" | "No model"
+            ),
+            |area| area.child(runtime_error_notice(projection)),
+        )
         .child(
             div()
                 .id("conversation-scroll")
@@ -661,12 +903,187 @@ fn conversation_area(
         )
 }
 
+fn sessions_panel(
+    catalog: &CatalogProjection,
+    conversation: &ConversationProjection,
+    name_composer: &Entity<Composer>,
+    cx: &mut Context<RootView>,
+) -> impl IntoElement {
+    let session_actions_enabled = matches!(
+        conversation.lifecycle,
+        RuntimeLifecycle::Ready | RuntimeLifecycle::Settled
+    ) && conversation.pending_operation.is_none()
+        && !catalog.switching;
+    let current_path = catalog.current_session_file.as_ref();
+    let state_copy = match catalog.status {
+        CatalogStatus::Loading if catalog.sessions.is_empty() => "Scanning sessions…".to_owned(),
+        CatalogStatus::Loading => "Refreshing; existing results may be stale.".to_owned(),
+        CatalogStatus::Ready => format!("{} sessions", catalog.sessions.len()),
+        CatalogStatus::Empty => "No saved sessions for this workspace.".to_owned(),
+        CatalogStatus::Inaccessible => catalog
+            .error
+            .clone()
+            .unwrap_or_else(|| "Session directory is inaccessible.".to_owned()),
+        CatalogStatus::Stale => catalog
+            .error
+            .clone()
+            .unwrap_or_else(|| "Refresh failed; showing stale sessions.".to_owned()),
+    };
+
+    div()
+        .w(px(286.0))
+        .flex_shrink_0()
+        .h_full()
+        .p(px(14.0))
+        .flex()
+        .flex_col()
+        .gap(px(10.0))
+        .bg(theme::floor())
+        .border_r_1()
+        .border_color(theme::edge_hard())
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .child(section_label("Sessions"))
+                .child(
+                    div()
+                        .font_family(theme::MONO)
+                        .text_size(px(theme::T_TINY))
+                        .text_color(theme::ash())
+                        .child(state_copy),
+                ),
+        )
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(8.0))
+                .child(controls::operation_button(
+                    "new-session",
+                    "New session",
+                    if session_actions_enabled {
+                        "Create and switch atomically"
+                    } else {
+                        "Wait for the current operation"
+                    },
+                    session_actions_enabled,
+                    controls::ControlTone::Normal,
+                    Box::new(cx.listener(|view, _, _, cx| view.new_session(cx))),
+                ))
+                .child(controls::operation_button(
+                    "refresh-sessions",
+                    "Refresh catalog",
+                    "Read session metadata again",
+                    catalog.status != CatalogStatus::Loading,
+                    controls::ControlTone::Normal,
+                    Box::new(cx.listener(|view, _, _, cx| view.refresh_sessions(cx))),
+                )),
+        )
+        .when_some(catalog.current_session_id.as_ref(), |panel, id| {
+            panel.child(
+                div()
+                    .p(px(10.0))
+                    .rounded(px(theme::RADIUS_SM))
+                    .bg(theme::panel())
+                    .border_1()
+                    .border_color(theme::edge_soft())
+                    .flex()
+                    .flex_col()
+                    .gap(px(5.0))
+                    .child(status_line(
+                        "Current",
+                        catalog
+                            .current_session_name
+                            .clone()
+                            .unwrap_or_else(|| id.clone()),
+                    ))
+                    .child(status_line(
+                        "ID",
+                        id.clone(),
+                    )),
+            )
+        })
+        .when(catalog.current_session_file.is_some(), |panel| {
+            panel
+                .child(name_composer.clone())
+                .child(controls::operation_button(
+                    "export-session",
+                    "Export HTML",
+                    "Pi chooses the default output path",
+                    session_actions_enabled,
+                    controls::ControlTone::Normal,
+                    Box::new(cx.listener(|view, _, _, cx| view.export_session(cx))),
+                ))
+        })
+        .when(!catalog.corrupt.is_empty(), |panel| {
+            panel.child(
+                div()
+                    .p(px(9.0))
+                    .rounded(px(theme::RADIUS_SM))
+                    .bg(theme::panel())
+                    .border_1()
+                    .border_color(theme::error())
+                    .font_family(theme::SANS)
+                    .text_size(px(theme::T_TINY))
+                    .text_color(theme::bone_dim())
+                    .child(format!(
+                        "{} corrupt session file{} excluded. The current session was not changed.",
+                        catalog.corrupt.len(),
+                        if catalog.corrupt.len() == 1 { "" } else { "s" }
+                    )),
+            )
+        })
+        .child(
+            div()
+                .id("sessions-scroll")
+                .flex_1()
+                .min_h_0()
+                .overflow_y_scroll()
+                .flex()
+                .flex_col()
+                .gap(px(8.0))
+                .children(catalog.sessions.iter().map(|session| {
+                    let selected = current_path.is_some_and(|path| path == &session.path);
+                    let path = session.path.clone();
+                    let title = session
+                        .name
+                        .clone()
+                        .or_else(|| session.first_user_summary.clone())
+                        .unwrap_or_else(|| "Untitled session".to_owned());
+                    controls::operation_button(
+                        format!("session-{}", session.id),
+                        title,
+                        format!(
+                            "{} messages · v{} · {}",
+                            session.counts.messages, session.version, session.updated_at
+                        ),
+                        session_actions_enabled && !selected,
+                        controls::ControlTone::Normal,
+                        Box::new(cx.listener(move |view, _, _, cx| {
+                            view.switch_session(path.clone(), cx)
+                        })),
+                    )
+                })),
+        )
+        .child(
+            div()
+                .font_family(theme::SANS)
+                .text_size(px(theme::T_TINY))
+                .text_color(theme::smoke())
+                .child("Trash is unavailable until file ownership and a reversible platform provider are proven."),
+        )
+}
+
 fn inspector(
     projection: &ShellProjection,
     conversation: &ConversationProjection,
+    compaction_composer: &Entity<Composer>,
     cx: &mut Context<RootView>,
 ) -> impl IntoElement {
     div()
+        .id("inspector-scroll")
         .w(px(theme::INSPECT_W))
         .flex_shrink_0()
         .h_full()
@@ -674,6 +1091,7 @@ fn inspector(
         .py(px(18.0))
         .flex()
         .flex_col()
+        .overflow_y_scroll()
         .bg(theme::floor())
         .border_l_1()
         .border_color(theme::edge_hard())
@@ -699,12 +1117,13 @@ fn inspector(
         .child(controls::metric("Cost", projection.cost.label()))
         .child(controls::metric("Model", projection.model.label()))
         .child(controls::metric("Thinking", projection.thinking.label()))
-        .child(run_controls(conversation, cx))
+        .child(run_controls(conversation, compaction_composer, cx))
         .child(queue_panel(conversation))
 }
 
 fn run_controls(
     conversation: &ConversationProjection,
+    compaction_composer: &Entity<Composer>,
     cx: &mut Context<RootView>,
 ) -> impl IntoElement {
     let locked = conversation.pending_operation.is_some();
@@ -790,6 +1209,7 @@ fn run_controls(
                     Box::new(cx.listener(|view, _, _, cx| view.compact(cx))),
                 )),
         )
+        .child(compaction_composer.clone())
         .child(mode_controls(
             "steering",
             "Steering mode",
@@ -1038,6 +1458,8 @@ fn operation_label(operation: &RuntimeOperation) -> &'static str {
         RuntimeOperation::Compact => "Compacting",
         RuntimeOperation::SetAutoCompaction(_) => "Changing auto compaction",
         RuntimeOperation::SetAutoRetry(_) => "Changing auto retry",
+        RuntimeOperation::SetSessionName(_) => "Renaming session",
+        RuntimeOperation::ExportHtml => "Exporting session",
     }
 }
 

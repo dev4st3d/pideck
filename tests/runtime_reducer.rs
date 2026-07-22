@@ -1134,6 +1134,10 @@ fn all_session_replacements_increment_epoch_before_emission_and_rehydrate() {
 #[test]
 fn cancelled_or_rejected_session_replacement_resyncs_new_epoch() {
     let (mut state, _) = connected_state("s1");
+    state
+        .messages
+        .ready(vec![message("old", "preserved", true)]);
+    let display_epoch = state.display_epoch;
     let mutation = SessionMutation::Clone;
     apply(
         &mut state,
@@ -1148,6 +1152,11 @@ fn cancelled_or_rejected_session_replacement_resyncs_new_epoch() {
         effects[0].effect,
         EffectKind::Request(RuntimeRequest::GetState)
     ));
+    assert_eq!(state.display_epoch, display_epoch);
+    assert_eq!(
+        state.messages.data.as_ref().unwrap()[0].key,
+        MessageKey("old".to_owned())
+    );
 
     let effects = response(
         &mut state,
@@ -1158,6 +1167,57 @@ fn cancelled_or_rejected_session_replacement_resyncs_new_epoch() {
         effects[0].effect,
         EffectKind::Request(RuntimeRequest::GetState)
     ));
+}
+
+#[test]
+fn session_rename_and_export_use_serialized_runtime_operations() {
+    let (mut state, _) = connected_state("s1");
+    let rename = apply(
+        &mut state,
+        RuntimeInput::Intent(RuntimeIntent::SetSessionName {
+            name: "  Build audit  ".to_owned(),
+        }),
+    );
+    assert!(matches!(
+        dispatch_for_effect(&rename[0]),
+        RpcDispatch::Command(Command::SetSessionName { ref name }) if name == "Build audit"
+    ));
+    assert!(matches!(
+        state.pending_operation,
+        Some(RuntimeOperation::SetSessionName(ref name)) if name == "Build audit"
+    ));
+    response(
+        &mut state,
+        RuntimeRequest::SetSessionName {
+            name: "Build audit".to_owned(),
+        },
+        Ok(NormalizedResponse::Accepted),
+    );
+    assert_eq!(
+        state.session.data.as_ref().unwrap().name.as_deref(),
+        Some("Build audit")
+    );
+
+    let export = apply(
+        &mut state,
+        RuntimeInput::Intent(RuntimeIntent::ExportHtml { output_path: None }),
+    );
+    assert!(matches!(
+        dispatch_for_effect(&export[0]),
+        RpcDispatch::Command(Command::ExportHtml { output_path: None })
+    ));
+    response(
+        &mut state,
+        RuntimeRequest::ExportHtml { output_path: None },
+        Ok(NormalizedResponse::Exported {
+            path: "session.html".to_owned(),
+        }),
+    );
+    assert!(state.pending_operation.is_none());
+    assert_eq!(
+        state.notifications.back().unwrap().message,
+        "Session exported to session.html"
+    );
 }
 
 #[test]
@@ -1893,6 +1953,7 @@ fn cancellation_scopes_do_not_cross_target_operations() {
         attempt: 2,
         max_attempts: 3,
         delay_ms: 1_000,
+        started_at: Instant::now(),
     };
     state.bash_executions.push(BashExecution {
         request: RequestId::from("bash-scope"),

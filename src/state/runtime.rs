@@ -106,6 +106,8 @@ pub enum RuntimeOperation {
     Compact,
     SetAutoCompaction(bool),
     SetAutoRetry(bool),
+    SetSessionName(String),
+    ExportHtml,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -479,6 +481,7 @@ pub enum RetryState {
         attempt: u32,
         max_attempts: u32,
         delay_ms: u64,
+        started_at: Instant,
     },
     Succeeded {
         attempt: u32,
@@ -488,6 +491,20 @@ pub enum RetryState {
         summary: String,
     },
     Cancelling,
+}
+
+impl RetryState {
+    pub fn remaining_ms(&self, now: Instant) -> Option<u64> {
+        let Self::Waiting {
+            delay_ms,
+            started_at,
+            ..
+        } = self
+        else {
+            return None;
+        };
+        Some(delay_ms.saturating_sub(now.saturating_duration_since(*started_at).as_millis() as u64))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -637,6 +654,7 @@ pub enum HydrationMode {
 pub struct RuntimeState {
     pub generation: ConnectionGeneration,
     pub epoch: SessionEpoch,
+    pub display_epoch: SessionEpoch,
     pub lifecycle: RuntimeLifecycle,
     pub session: Facet<SessionSnapshot>,
     pub messages: Facet<Vec<RuntimeMessage>>,
@@ -683,6 +701,7 @@ impl RuntimeState {
         Self {
             generation,
             epoch: SessionEpoch::default(),
+            display_epoch: SessionEpoch::default(),
             lifecycle: RuntimeLifecycle::Loading,
             session: Facet::default(),
             messages: Facet::default(),
@@ -811,6 +830,12 @@ pub enum RuntimeIntent {
     SetAutoRetry {
         enabled: bool,
     },
+    SetSessionName {
+        name: String,
+    },
+    ExportHtml {
+        output_path: Option<String>,
+    },
     ReplaceSession(SessionMutation),
     AnswerDialog {
         request: RequestId,
@@ -870,6 +895,12 @@ pub enum RuntimeRequest {
     SetAutoRetry {
         enabled: bool,
     },
+    SetSessionName {
+        name: String,
+    },
+    ExportHtml {
+        output_path: Option<String>,
+    },
     SessionMutation(SessionMutation),
 }
 
@@ -892,6 +923,9 @@ pub enum NormalizedResponse {
     Bash(DirectBashResult),
     Compacted {
         summary: String,
+    },
+    Exported {
+        path: String,
     },
     SessionMutation {
         cancelled: bool,

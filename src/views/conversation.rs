@@ -941,13 +941,13 @@ fn notices(projection: &ConversationProjection) -> Vec<AnyElement> {
         RetryState::Waiting {
             attempt,
             max_attempts,
-            delay_ms,
+            ..
         } => notices.push(system_notice(
             &format!("retry-{attempt}"),
             "Provider retry",
             &format!(
                 "Attempt {attempt} of {max_attempts} starts in {} ms. A timeout does not cancel the run.",
-                delay_ms
+                projection.retry.remaining_ms(std::time::Instant::now()).unwrap_or_default()
             ),
             false,
         )),

@@ -53,6 +53,8 @@ pub enum ComposerEvent {
 }
 
 pub struct Composer {
+    id_prefix: SharedString,
+    action_label: SharedString,
     pub(super) focus_handle: FocusHandle,
     buffer: TextBuffer,
     placeholder: SharedString,
@@ -69,6 +71,8 @@ pub struct Composer {
 impl Composer {
     pub fn new(cx: &mut Context<Self>) -> Self {
         Self {
+            id_prefix: "composer".into(),
+            action_label: "Send".into(),
             focus_handle: cx.focus_handle(),
             buffer: TextBuffer::default(),
             placeholder: "Describe what Pi should do…".into(),
@@ -81,6 +85,21 @@ impl Composer {
             reveal_cursor: true,
             last_layout: None,
         }
+    }
+
+    pub fn scoped(
+        id: impl Into<SharedString>,
+        placeholder: impl Into<SharedString>,
+        action_label: impl Into<SharedString>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let mut composer = Self::new(cx);
+        composer.id_prefix = id.into();
+        composer.placeholder = placeholder.into();
+        composer.action_label = action_label.into();
+        composer.availability = ComposerAvailability::Idle;
+        composer.update_disabled();
+        composer
     }
 
     pub fn draft(&self) -> &str {

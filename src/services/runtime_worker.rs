@@ -2,7 +2,7 @@
 
 use std::fmt;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, mpsc};
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::Duration;
 
@@ -81,6 +81,8 @@ pub trait RuntimeService: Send + Sync + 'static {
         &self,
         generation: ConnectionGeneration,
     ) -> Result<Arc<dyn RuntimeConnection>, RuntimeStartFailure>;
+
+    fn set_resume_session(&self, _session_file: Option<std::path::PathBuf>) {}
 }
 
 /// One connected runtime. Every method may block and is called only on worker threads.
@@ -90,14 +92,17 @@ pub trait RuntimeConnection: Send + Sync + 'static {
     fn stop(&self);
 }
 
-#[derive(Clone)]
 pub struct RpcRuntimeService {
     config: PiLaunchConfig,
+    resume_session: Mutex<Option<std::path::PathBuf>>,
 }
 
 impl RpcRuntimeService {
     pub fn new(config: PiLaunchConfig) -> Self {
-        Self { config }
+        Self {
+            config,
+            resume_session: Mutex::new(None),
+        }
     }
 
     pub fn default_profile(working_directory: impl Into<std::path::PathBuf>) -> Self {
@@ -111,6 +116,21 @@ impl RpcRuntimeService {
         config.offline = false;
         Self::new(config)
     }
+
+    pub fn persisted_profile(
+        working_directory: impl Into<std::path::PathBuf>,
+        session_directory: impl Into<std::path::PathBuf>,
+    ) -> Self {
+        let mut config = PiLaunchConfig::new(
+            working_directory,
+            ProjectTrust::Reject,
+            SessionLaunch::NewInDirectory(session_directory.into()),
+            ResourcePolicy::disabled(),
+        );
+        config.disable_tools = false;
+        config.offline = false;
+        Self::new(config)
+    }
 }
 
 impl RuntimeService for RpcRuntimeService {
@@ -118,12 +138,28 @@ impl RuntimeService for RpcRuntimeService {
         &self,
         generation: ConnectionGeneration,
     ) -> Result<Arc<dyn RuntimeConnection>, RuntimeStartFailure> {
-        let client = RpcClient::start(self.config.clone()).map_err(start_failure)?;
+        let mut config = self.config.clone();
+        if let Some(session_file) = self
+            .resume_session
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+        {
+            config.session = SessionLaunch::Existing(session_file);
+        }
+        let client = RpcClient::start(config).map_err(start_failure)?;
         Ok(Arc::new(RpcRuntimeConnection {
             client,
             generation,
             disconnect_reported: AtomicBool::new(false),
         }))
+    }
+
+    fn set_resume_session(&self, session_file: Option<std::path::PathBuf>) {
+        *self
+            .resume_session
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = session_file;
     }
 }
 

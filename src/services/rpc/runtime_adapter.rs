@@ -153,6 +153,10 @@ fn command_for_request(request: &RuntimeRequest) -> Command {
             Command::SetAutoCompaction { enabled: *enabled }
         }
         RuntimeRequest::SetAutoRetry { enabled } => Command::SetAutoRetry { enabled: *enabled },
+        RuntimeRequest::SetSessionName { name } => Command::SetSessionName { name: name.clone() },
+        RuntimeRequest::ExportHtml { output_path } => Command::ExportHtml {
+            output_path: output_path.clone(),
+        },
         RuntimeRequest::SessionMutation(mutation) => match mutation {
             SessionMutation::New { parent_session } => Command::NewSession {
                 parent_session: parent_session.clone(),
@@ -280,8 +284,12 @@ fn normalize_response(
         | (RuntimeRequest::SetSteeringMode { .. }, ResponseResult::SetSteeringMode)
         | (RuntimeRequest::SetFollowUpMode { .. }, ResponseResult::SetFollowUpMode)
         | (RuntimeRequest::SetAutoCompaction { .. }, ResponseResult::SetAutoCompaction)
-        | (RuntimeRequest::SetAutoRetry { .. }, ResponseResult::SetAutoRetry) => {
+        | (RuntimeRequest::SetAutoRetry { .. }, ResponseResult::SetAutoRetry)
+        | (RuntimeRequest::SetSessionName { .. }, ResponseResult::SetSessionName) => {
             NormalizedResponse::Accepted
+        }
+        (RuntimeRequest::ExportHtml { .. }, ResponseResult::ExportHtml(result)) => {
+            NormalizedResponse::Exported { path: result.path }
         }
         (RuntimeRequest::Compact { .. }, ResponseResult::Compact(result)) => {
             NormalizedResponse::Compacted {
@@ -1078,6 +1086,8 @@ fn operation_name(request: &RuntimeRequest) -> &'static str {
         RuntimeRequest::Compact { .. } => "manual compaction",
         RuntimeRequest::SetAutoCompaction { .. } => "auto-compaction update",
         RuntimeRequest::SetAutoRetry { .. } => "auto-retry update",
+        RuntimeRequest::SetSessionName { .. } => "session rename",
+        RuntimeRequest::ExportHtml { .. } => "session export",
         RuntimeRequest::SessionMutation(_) => "session replacement",
     }
 }

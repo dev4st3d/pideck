@@ -10,19 +10,23 @@ use crate::actions::{
 };
 use crate::controller::RuntimeController;
 use crate::services::runtime_worker::{RpcRuntimeService, RuntimeService};
+use crate::services::session_catalog::{SessionCatalogConfig, without_windows_verbatim_prefix};
 use crate::{fonts, views::RootView};
 
-const WINDOW_WIDTH: f32 = 1080.0;
+const WINDOW_WIDTH: f32 = 1380.0;
 const WINDOW_HEIGHT: f32 = 680.0;
 
 pub fn run() {
     let working_directory = std::env::current_dir()
-        .ok()
-        .and_then(|path| std::fs::canonicalize(&path).ok().or(Some(path)))
-        .unwrap_or_else(|| std::path::PathBuf::from("."));
+        .map(|path| without_windows_verbatim_prefix(&path))
+        .unwrap_or_else(|_| std::path::PathBuf::from("."));
     let workspace = working_directory.to_string_lossy().into_owned();
-    let service: Arc<dyn RuntimeService> =
-        Arc::new(RpcRuntimeService::default_profile(working_directory));
+    let catalog_config = SessionCatalogConfig::from_environment(working_directory.clone());
+    let session_root = catalog_config.resolve_root().path;
+    let service: Arc<dyn RuntimeService> = Arc::new(RpcRuntimeService::persisted_profile(
+        working_directory,
+        session_root,
+    ));
 
     Application::new().run(move |cx: &mut App| {
         fonts::register(cx);
@@ -49,8 +53,14 @@ pub fn run() {
                 ..Default::default()
             },
             move |window, cx| {
-                let controller = cx
-                    .new(|cx| RuntimeController::new(workspace.clone(), Arc::clone(&service), cx));
+                let controller = cx.new(|cx| {
+                    RuntimeController::new(
+                        workspace.clone(),
+                        Arc::clone(&service),
+                        catalog_config.clone(),
+                        cx,
+                    )
+                });
                 let weak_controller = controller.downgrade();
                 cx.on_window_closed(move |cx| {
                     weak_controller

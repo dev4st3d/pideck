@@ -1,6 +1,7 @@
 //! GPUI-owned runtime controller and its pure generation gate.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -9,6 +10,10 @@ use gpui::{Context, Task};
 use crate::services::rpc::{ConnectionGeneration, RequestId, SessionEpoch};
 use crate::services::runtime_worker::{
     AttemptGeneration, RuntimeService, RuntimeWorkerHandle, WorkerResult,
+};
+use crate::services::session_catalog::{
+    CatalogWorkerResult, CorruptSession, SessionCatalogConfig, SessionCatalogWorker, SessionRoot,
+    SessionSummary,
 };
 use crate::state::reducer::reduce;
 use crate::state::runtime::{
@@ -67,6 +72,28 @@ pub struct ConversationProjection {
     pub retry: RetryState,
     pub compaction: CompactionState,
     pub error: Option<SafeError>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CatalogStatus {
+    Loading,
+    Ready,
+    Empty,
+    Inaccessible,
+    Stale,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CatalogProjection {
+    pub status: CatalogStatus,
+    pub sessions: Vec<SessionSummary>,
+    pub corrupt: Vec<CorruptSession>,
+    pub root: Option<SessionRoot>,
+    pub error: Option<String>,
+    pub current_session_id: Option<String>,
+    pub current_session_name: Option<String>,
+    pub current_session_file: Option<PathBuf>,
+    pub switching: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -302,23 +329,20 @@ impl ControllerCore {
                 .cloned(),
         };
         ConversationProjection {
-            epoch: self.runtime.epoch,
+            epoch: self.runtime.display_epoch,
             revision: self.runtime.revision,
             lifecycle: self.runtime.lifecycle,
             status: self.runtime.messages.status.clone(),
-            messages: if self.runtime.replacement_awaiting_state {
-                Vec::new()
-            } else {
-                self.runtime
-                    .messages
-                    .data
-                    .as_deref()
-                    .unwrap_or_default()
-                    .iter()
-                    .filter(|message| message.visible)
-                    .cloned()
-                    .collect()
-            },
+            messages: self
+                .runtime
+                .messages
+                .data
+                .as_deref()
+                .unwrap_or_default()
+                .iter()
+                .filter(|message| message.visible)
+                .cloned()
+                .collect(),
             accepted_user_inputs: self
                 .runtime
                 .optimistic_user_inputs
@@ -337,16 +361,8 @@ impl ControllerCore {
                     kind: input.kind,
                 })
                 .collect(),
-            tools: if self.runtime.replacement_awaiting_state {
-                HashMap::new()
-            } else {
-                self.runtime.tools.clone()
-            },
-            bash_executions: if self.runtime.replacement_awaiting_state {
-                Vec::new()
-            } else {
-                self.runtime.bash_executions.clone()
-            },
+            tools: self.runtime.tools.clone(),
+            bash_executions: self.runtime.bash_executions.clone(),
             queue: self.runtime.queue.clone(),
             steering_mode: self
                 .runtime
@@ -543,6 +559,45 @@ impl ControllerCore {
         self.intent(RuntimeIntent::SetAutoRetry { enabled })
     }
 
+    pub fn new_session(&mut self) -> Vec<crate::state::runtime::RuntimeEffect> {
+        self.intent(RuntimeIntent::ReplaceSession(
+            crate::state::runtime::SessionMutation::New {
+                parent_session: None,
+            },
+        ))
+    }
+
+    pub fn switch_session(
+        &mut self,
+        session_path: String,
+    ) -> Vec<crate::state::runtime::RuntimeEffect> {
+        if self
+            .runtime
+            .session
+            .data
+            .as_ref()
+            .and_then(|session| session.file.as_deref())
+            == Some(session_path.as_str())
+            || self.runtime.replacement_awaiting_state
+        {
+            return Vec::new();
+        }
+        self.intent(RuntimeIntent::ReplaceSession(
+            crate::state::runtime::SessionMutation::Switch { session_path },
+        ))
+    }
+
+    pub fn set_session_name(&mut self, name: String) -> Vec<crate::state::runtime::RuntimeEffect> {
+        self.intent(RuntimeIntent::SetSessionName { name })
+    }
+
+    pub fn export_html(
+        &mut self,
+        output_path: Option<String>,
+    ) -> Vec<crate::state::runtime::RuntimeEffect> {
+        self.intent(RuntimeIntent::ExportHtml { output_path })
+    }
+
     fn intent(&mut self, intent: RuntimeIntent) -> Vec<crate::state::runtime::RuntimeEffect> {
         let epoch = self.runtime.epoch;
         reduce(
@@ -574,17 +629,28 @@ fn parse_bash_submission(text: &str) -> Option<Result<(String, bool), Submission
 
 pub struct RuntimeController {
     core: ControllerCore,
+    service: Arc<dyn RuntimeService>,
     worker: RuntimeWorkerHandle,
+    catalog_worker: SessionCatalogWorker,
+    catalog_generation: u64,
+    catalog_status: CatalogStatus,
+    catalog_sessions: Vec<SessionSummary>,
+    catalog_corrupt: Vec<CorruptSession>,
+    catalog_root: Option<SessionRoot>,
+    catalog_error: Option<String>,
     _event_task: Task<()>,
+    _catalog_task: Task<()>,
 }
 
 impl RuntimeController {
     pub fn new(
         workspace: impl Into<String>,
         service: Arc<dyn RuntimeService>,
+        catalog_config: SessionCatalogConfig,
         cx: &mut Context<Self>,
     ) -> Self {
-        let worker = RuntimeWorkerHandle::spawn(service);
+        let workspace = workspace.into();
+        let worker = RuntimeWorkerHandle::spawn(Arc::clone(&service));
         let results = worker.results();
         let event_task = cx.spawn(async move |controller, cx| {
             while let Ok(result) = results.recv().await {
@@ -597,10 +663,34 @@ impl RuntimeController {
                 }
             }
         });
+        let catalog_worker = SessionCatalogWorker::spawn(catalog_config);
+        let catalog_results = catalog_worker.results();
+        let catalog_task = cx.spawn(async move |controller, cx| {
+            while let Ok(result) = catalog_results.recv().await {
+                let updated = controller.update(cx, |controller, cx| {
+                    controller.receive_catalog(result);
+                    cx.notify();
+                });
+                if updated.is_err() {
+                    break;
+                }
+            }
+        });
+        let catalog_generation = 1;
+        let _ = catalog_worker.refresh(catalog_generation);
         Self {
             core: ControllerCore::new(workspace),
+            service,
             worker,
+            catalog_worker,
+            catalog_generation,
+            catalog_status: CatalogStatus::Loading,
+            catalog_sessions: Vec::new(),
+            catalog_corrupt: Vec::new(),
+            catalog_root: None,
+            catalog_error: None,
             _event_task: event_task,
+            _catalog_task: catalog_task,
         }
     }
 
@@ -614,6 +704,23 @@ impl RuntimeController {
 
     pub fn conversation_projection(&self) -> ConversationProjection {
         self.core.conversation_projection()
+    }
+
+    pub fn catalog_projection(&self) -> CatalogProjection {
+        let session = self.core.runtime.session.data.as_ref();
+        CatalogProjection {
+            status: self.catalog_status,
+            sessions: self.catalog_sessions.clone(),
+            corrupt: self.catalog_corrupt.clone(),
+            root: self.catalog_root.clone(),
+            error: self.catalog_error.clone(),
+            current_session_id: session.map(|session| session.id.to_string()),
+            current_session_name: session.and_then(|session| session.name.clone()),
+            current_session_file: session
+                .and_then(|session| session.file.as_deref())
+                .map(PathBuf::from),
+            switching: self.core.runtime.replacement_awaiting_state,
+        }
     }
 
     pub fn submit(
@@ -672,6 +779,28 @@ impl RuntimeController {
         self.send_core_effects(|core| core.set_auto_retry(enabled), cx)
     }
 
+    pub fn new_session(&mut self, cx: &mut Context<Self>) -> bool {
+        self.send_core_effects(ControllerCore::new_session, cx)
+    }
+
+    pub fn switch_session(&mut self, path: PathBuf, cx: &mut Context<Self>) -> bool {
+        let path = path.to_string_lossy().into_owned();
+        self.send_core_effects(|core| core.switch_session(path), cx)
+    }
+
+    pub fn set_session_name(&mut self, name: String, cx: &mut Context<Self>) -> bool {
+        self.send_core_effects(|core| core.set_session_name(name), cx)
+    }
+
+    pub fn export_html(&mut self, output_path: Option<String>, cx: &mut Context<Self>) -> bool {
+        self.send_core_effects(|core| core.export_html(output_path), cx)
+    }
+
+    pub fn refresh_sessions(&mut self, cx: &mut Context<Self>) {
+        self.start_catalog_refresh();
+        cx.notify();
+    }
+
     pub fn connect(&mut self, cx: &mut Context<Self>) {
         if !matches!(
             self.core.projection().action,
@@ -680,6 +809,15 @@ impl RuntimeController {
             return;
         }
         let (attempt, generation) = self.core.begin_connect();
+        let resume_session = self
+            .core
+            .runtime
+            .session
+            .data
+            .as_ref()
+            .and_then(|session| session.file.as_deref())
+            .map(PathBuf::from);
+        self.service.set_resume_session(resume_session);
         if !self.worker.connect(attempt, generation) {
             self.core
                 .apply_worker_result(WorkerResult::ConnectionFailed {
@@ -706,8 +844,61 @@ impl RuntimeController {
     }
 
     fn receive(&mut self, result: WorkerResult) {
+        let before = self.catalog_refresh_identity();
         let effects = self.core.apply_worker_result(result);
         self.send_effects(effects);
+        if before != self.catalog_refresh_identity() {
+            self.start_catalog_refresh();
+        }
+    }
+
+    fn receive_catalog(&mut self, result: CatalogWorkerResult) {
+        if !catalog_result_is_current(self.catalog_generation, &result) {
+            return;
+        }
+        match result.result {
+            Ok(scan) => {
+                self.catalog_status = if scan.sessions.is_empty() {
+                    CatalogStatus::Empty
+                } else {
+                    CatalogStatus::Ready
+                };
+                self.catalog_sessions = scan.sessions;
+                self.catalog_corrupt = scan.corrupt;
+                self.catalog_root = Some(scan.root);
+                self.catalog_error = None;
+            }
+            Err(error) => {
+                self.catalog_status = if self.catalog_sessions.is_empty() {
+                    CatalogStatus::Inaccessible
+                } else {
+                    CatalogStatus::Stale
+                };
+                self.catalog_error = Some(error.summary);
+            }
+        }
+    }
+
+    fn start_catalog_refresh(&mut self) {
+        self.catalog_generation = self.catalog_generation.saturating_add(1);
+        self.catalog_status = CatalogStatus::Loading;
+        self.catalog_error = None;
+        let _ = self.catalog_worker.refresh(self.catalog_generation);
+    }
+
+    fn catalog_refresh_identity(
+        &self,
+    ) -> (
+        crate::services::rpc::SessionEpoch,
+        Option<String>,
+        Option<String>,
+    ) {
+        let session = self.core.runtime.session.data.as_ref();
+        (
+            self.core.runtime.display_epoch,
+            session.and_then(|session| session.file.clone()),
+            session.and_then(|session| session.name.clone()),
+        )
     }
 
     fn send_core_effects(
@@ -730,6 +921,10 @@ impl RuntimeController {
             let _ = self.worker.execute(attempt, effect);
         }
     }
+}
+
+fn catalog_result_is_current(generation: u64, result: &CatalogWorkerResult) -> bool {
+    result.generation == generation
 }
 
 impl Drop for RuntimeController {
@@ -1073,6 +1268,18 @@ mod tests {
                 .accepted_user_inputs
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn stale_catalog_scan_generation_is_rejected() {
+        let result = CatalogWorkerResult {
+            generation: 3,
+            result: Err(crate::services::session_catalog::SessionCatalogError {
+                summary: "stale".to_owned(),
+            }),
+        };
+        assert!(!catalog_result_is_current(4, &result));
+        assert!(catalog_result_is_current(3, &result));
     }
 
     #[test]

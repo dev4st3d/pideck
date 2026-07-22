@@ -295,6 +295,23 @@ fn reduce_intent(
             state.bump_revision();
             vec![effect(state, RuntimeRequest::SetAutoRetry { enabled })]
         }
+        RuntimeIntent::SetSessionName { name } => {
+            let name = name.trim().to_owned();
+            if name.is_empty() || !settings_allowed(state) || state.pending_operation.is_some() {
+                return Vec::new();
+            }
+            state.pending_operation = Some(RuntimeOperation::SetSessionName(name.clone()));
+            state.bump_revision();
+            vec![effect(state, RuntimeRequest::SetSessionName { name })]
+        }
+        RuntimeIntent::ExportHtml { output_path } => {
+            if !settings_allowed(state) || state.pending_operation.is_some() {
+                return Vec::new();
+            }
+            state.pending_operation = Some(RuntimeOperation::ExportHtml);
+            state.bump_revision();
+            vec![effect(state, RuntimeRequest::ExportHtml { output_path })]
+        }
         RuntimeIntent::ReplaceSession(mutation) => begin_session_replacement(state, mutation),
         RuntimeIntent::AnswerDialog { request, answer } => {
             if state.dialogs.remove(&request).is_none() {
@@ -555,6 +572,33 @@ fn reduce_response(
             }
             Vec::new()
         }
+        (RuntimeRequest::SetSessionName { name }, Ok(NormalizedResponse::Accepted)) => {
+            if matches!(state.pending_operation.as_ref(), Some(RuntimeOperation::SetSessionName(pending)) if pending == &name)
+            {
+                if let Some(session) = state.session.data.as_mut() {
+                    session.name = Some(name);
+                }
+                state.pending_operation = None;
+                state.bump_revision();
+            }
+            Vec::new()
+        }
+        (RuntimeRequest::ExportHtml { .. }, Ok(NormalizedResponse::Exported { path })) => {
+            if matches!(state.pending_operation, Some(RuntimeOperation::ExportHtml)) {
+                state.pending_operation = None;
+                state
+                    .notifications
+                    .push_back(super::runtime::RuntimeNotification {
+                        message: format!("Session exported to {path}"),
+                        kind: super::runtime::NotificationKind::Info,
+                    });
+                while state.notifications.len() > MAX_NOTIFICATIONS {
+                    state.notifications.pop_front();
+                }
+                state.bump_revision();
+            }
+            Vec::new()
+        }
         (RuntimeRequest::AbortBash, Ok(NormalizedResponse::Accepted)) => Vec::new(),
         (RuntimeRequest::AbortBash, Err(failure)) => {
             if let Some(execution) = state
@@ -587,7 +631,9 @@ fn reduce_response(
             | RuntimeRequest::SetFollowUpMode { .. }
             | RuntimeRequest::Compact { .. }
             | RuntimeRequest::SetAutoCompaction { .. }
-            | RuntimeRequest::SetAutoRetry { .. }),
+            | RuntimeRequest::SetAutoRetry { .. }
+            | RuntimeRequest::SetSessionName { .. }
+            | RuntimeRequest::ExportHtml { .. }),
             Err(failure),
         ) => {
             if matches!(request, RuntimeRequest::Compact { .. }) {
@@ -664,6 +710,7 @@ fn apply_state_hydration(
     }
     if session_changed || replacing_session {
         clear_session_scoped_state(state);
+        state.display_epoch = state.epoch;
     }
     state.replacement_awaiting_state = false;
 
@@ -910,6 +957,7 @@ fn reduce_event(state: &mut RuntimeState, event: NormalizedEvent, observed_at: I
                 attempt,
                 max_attempts,
                 delay_ms,
+                started_at: observed_at,
             };
             state.lifecycle = RuntimeLifecycle::Running;
             state.bump_revision();
@@ -1311,6 +1359,8 @@ fn request_name(request: &RuntimeRequest) -> &'static str {
         RuntimeRequest::Compact { .. } => "compact",
         RuntimeRequest::SetAutoCompaction { .. } => "set_auto_compaction",
         RuntimeRequest::SetAutoRetry { .. } => "set_auto_retry",
+        RuntimeRequest::SetSessionName { .. } => "set_session_name",
+        RuntimeRequest::ExportHtml { .. } => "export_html",
         RuntimeRequest::SessionMutation(_) => "session mutation",
     }
 }

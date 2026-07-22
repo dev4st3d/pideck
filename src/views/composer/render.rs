@@ -10,7 +10,11 @@ impl Composer {
         let handles_composer_keys = self.availability != ComposerAvailability::Unavailable;
         let running = self.availability == ComposerAvailability::Running;
         let bash_running = self.availability == ComposerAvailability::BashRunning;
-        let primary_label = if running { "Steer" } else { "Send" };
+        let primary_label = if running {
+            "Steer".into()
+        } else {
+            self.action_label.clone()
+        };
         let status_color = match self.feedback {
             ComposerFeedback::Rejected(_) | ComposerFeedback::Uncertain => theme::error(),
             ComposerFeedback::Pending(_) | ComposerFeedback::BashRunning { .. } => theme::data(),
@@ -19,13 +23,16 @@ impl Composer {
         };
 
         div()
-            .id("composer")
+            .id(self.id_prefix.clone())
             .flex()
             .flex_col()
             .gap(px(8.0))
             .child(
                 div()
-                    .id("composer-input")
+                    .id(gpui::SharedString::from(format!(
+                        "{}-input",
+                        self.id_prefix
+                    )))
                     .track_focus(&self.focus_handle)
                     .when(!self.disabled, |input| input.tab_index(0))
                     .when(handles_composer_keys, |input| input.key_context("Composer"))
@@ -131,7 +138,10 @@ impl Composer {
                                 actions
                                     .child(
                                         div()
-                                            .id("composer-abort")
+                                            .id(gpui::SharedString::from(format!(
+                                                "{}-abort",
+                                                self.id_prefix
+                                            )))
                                             .tab_index(0)
                                             .cursor_pointer()
                                             .min_h(px(34.0))
@@ -160,7 +170,10 @@ impl Composer {
                                     .when(running, |actions| {
                                         actions.child(
                                             div()
-                                                .id("composer-follow-up")
+                                                .id(gpui::SharedString::from(format!(
+                                                    "{}-follow-up",
+                                                    self.id_prefix
+                                                )))
                                                 .when(can_submit, |button| {
                                                     button
                                                         .tab_index(0)
@@ -189,7 +202,10 @@ impl Composer {
                             })
                             .child(
                                 div()
-                                    .id("composer-submit")
+                                    .id(gpui::SharedString::from(format!(
+                                        "{}-submit",
+                                        self.id_prefix
+                                    )))
                                     .h(px(34.0))
                                     .min_w(px(72.0))
                                     .px(px(14.0))

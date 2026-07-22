@@ -4,7 +4,7 @@ Native Windows-first desktop shell for Pi, built with Rust and GPUI 0.2.2.
 
 ## Current maturity
 
-Phase 8 connects the native conversation surface to the supervised external Pi 0.80.10 runtime, including generic tool execution cards and direct RPC Bash. Startup, discovery, correlated readiness, hydration, prompt acceptance, message streaming, tools, retries, direct Bash, and shutdown all run behind a dedicated standard-thread worker. The GPUI-owned controller observes normalized reducer state and never performs I/O from `render`.
+Phases 9 and 10 complete run-control recovery UX and replace the session fixture concept with Pi's persisted session lifecycle. Startup, discovery, correlated readiness, hydration, prompt acceptance, message streaming, tools, retries, compaction, session catalog scanning, direct Bash, and shutdown all run behind dedicated workers. The GPUI-owned controller observes normalized state and never performs I/O from `render`.
 
 The visible shell now shows only live or explicitly Loading, Awaiting, Unknown, stale, stopped, and error values:
 
@@ -17,10 +17,13 @@ The visible shell now shows only live or explicitly Loading, Awaiting, Unknown, 
 - expandable sanitized tool arguments, bounded text/diff previews, image results, opaque detail fallback, copy controls, elapsed time, truncation metadata, and explicit full-output Reveal/Open folder actions;
 - provider/model/time/stop/usage metadata with raw provider diagnostics and private payloads excluded from normalized diagnostics;
 - selectable transcript text and near-bottom-only auto-follow, preserving manual scroll and selection during streaming.
+- complete steering/follow-up queue visibility and delivery modes, scoped abort controls, retry countdown/attempt/final-error state, manual compaction with optional focus instructions, and auto-compaction/auto-retry controls;
+- a real workspace-filtered v1-v3 JSONL session catalog with loading, empty, inaccessible, corrupt, refreshing/stale, and active-switch states;
+- atomic new/switch/rename/export operations that retain the old transcript read-only until Pi confirms a replacement and never replay an uncertain prompt.
 
 Accepted idle input uses `prompt`. While Pi is running, the primary action uses `steer` and follow-ups use `follow_up`. A composer line beginning with `!` executes the remaining text through Pi's direct `bash` RPC; `!!` does the same with `excludeFromContext=true`. Direct Bash is recorded locally until the authoritative session message reconciles it. Escape and the visible abort action route to `abort_bash` while direct Bash is active, independently from agent `abort`. Empty and rapid duplicate submissions are rejected. Prompt drafts clear only after the matching accepted response; Bash drafts clear when the local execution is recorded. Rejection and uncertain disconnect never trigger replay.
 
-There is no model switching, session browser, auth UI, rich Markdown/link rendering, task/subagent view, resource browser, full queue management UI, or fake backend content. Those capabilities remain later phases.
+There is no model switching, auth UI, rich Markdown/link rendering, task/subagent view, resource browser, JSONL import/share/branch navigation, or concurrent session process UI. Queue items are authoritative and read-only because stock Pi RPC has no remove/restore operation. Reversible trash stays unavailable until both catalog ownership and a platform trash provider are proven.
 
 ## Prerequisite and launch
 
@@ -40,7 +43,7 @@ If Cargo is not on `PATH` on Windows:
 The app connects automatically using the canonical current working directory with:
 
 - `ProjectTrust::Reject` (`--no-approve`);
-- an ephemeral session (`--no-session`);
+- a persisted session directory resolved with Pi precedence (`PI_CODING_AGENT_SESSION_DIR`, configured `sessionDir`, then the encoded default under the agent directory);
 - extensions, skills, prompt templates, themes, and context files disabled;
 - built-in Pi tools enabled so generic tool cards can observe their execution;
 - offline mode disabled so Pi can resolve existing Pi-managed credentials and models.
@@ -73,6 +76,7 @@ The interface preserves the warm-charcoal Switzer/Tanker identity, with Cascadia
 - `src/actions.rs` - logical runtime and focus actions
 - `src/controller.rs` - GPUI-owned controller plus pure attempt/generation gate
 - `src/services/runtime_worker.rs` - injectable GPUI-independent service boundary and responsive worker coordinator
+- `src/services/session_catalog.rs` - strict streaming v1-v3 JSONL metadata scanner, directory precedence, canonical workspace filtering, corruption reporting, and stale-scan worker
 - `src/services/rpc/` - Pi 0.80.10 wire contract, strict JSONL framing, correlated client, and runtime adapter
 - `src/services/pi_process/` - executable discovery, capability probing, launch policy, and process-tree supervision
 - `src/state/runtime.rs` - normalized owned runtime/transcript state, safe message metadata, stamped inputs, requests, and effects
@@ -86,4 +90,4 @@ The interface preserves the warm-charcoal Switzer/Tanker identity, with Cascadia
 
 The worker uses a controller attempt generation in addition to `ConnectionGeneration` and `SessionEpoch`. A retry starts a fresh process and generation; prior-attempt startup/results cannot overwrite it, and a late obsolete client is stopped immediately. Recovery hydrates state and never resends a prompt.
 
-Initial and recovery hydration request `get_state` first, then messages, durable entries, session statistics, commands, available models, and tree state. Optional facet failures preserve prior valid values and do not make an otherwise ready connection unusable. Window/controller release requests shutdown without waiting for `RpcClient::stop` on the GPUI event loop.
+Initial, recovery, and session-replacement hydration request `get_state` first, then messages, durable entries, session statistics, commands, available models, and tree state. Recovery resumes the persisted session and requests entries after the last durable cursor; an invalid cursor falls back to one full rebuild. Optional facet failures preserve prior valid values and do not make an otherwise ready connection unusable. Window/controller release requests shutdown without waiting for `RpcClient::stop` on the GPUI event loop.
