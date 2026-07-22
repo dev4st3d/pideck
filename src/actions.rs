@@ -34,9 +34,19 @@ actions!(
         InsertNewline,
         AcceptInput,
         QueueFollowUp,
-        AbortRun
+        AbortRun,
+        TranscriptCopy,
+        TranscriptSelectAll
     ]
 );
+
+pub(crate) fn transcript_key_bindings() -> Vec<KeyBinding> {
+    let context = Some("TranscriptText");
+    vec![
+        KeyBinding::new("ctrl-c", TranscriptCopy, context),
+        KeyBinding::new("ctrl-a", TranscriptSelectAll, context),
+    ]
+}
 
 pub(crate) fn composer_key_bindings() -> Vec<KeyBinding> {
     let context = Some("Composer");

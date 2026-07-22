@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
 use serde_json::Value;
 
@@ -163,15 +163,45 @@ pub enum CommandSource {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct MessageKey(pub String);
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct BlockKey(pub String);
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct MessageUsage {
+    pub input: u64,
+    pub output: u64,
+    pub cache_read: u64,
+    pub cache_write: u64,
+    pub cache_write_1h: Option<u64>,
+    pub reasoning: Option<u64>,
+    pub total_tokens: u64,
+    pub input_cost: f64,
+    pub output_cost: f64,
+    pub cache_read_cost: f64,
+    pub cache_write_cost: f64,
+    pub total_cost: f64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct AssistantMetadata {
+    pub api: String,
+    pub provider: String,
+    pub model: String,
+    pub response_model: Option<String>,
+    pub usage: MessageUsage,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct RuntimeMessage {
     pub key: MessageKey,
     pub role: MessageRole,
     pub timestamp: u64,
     pub content: Vec<MessageBlock>,
+    pub visible: bool,
     pub terminal: bool,
     pub stop_reason: Option<MessageStopReason>,
     pub error: Option<String>,
+    pub assistant: Option<AssistantMetadata>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -188,36 +218,67 @@ pub enum MessageRole {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum MessageBlock {
-    Text(String),
+    Text {
+        key: BlockKey,
+        text: String,
+    },
     Thinking {
+        key: BlockKey,
         text: String,
         redacted: bool,
     },
     Image {
+        key: BlockKey,
         mime_type: String,
     },
     ToolCall {
+        key: BlockKey,
         id: ToolCallId,
         name: String,
         arguments: Value,
     },
     ToolResult {
+        key: BlockKey,
         id: ToolCallId,
         name: String,
         content: String,
         is_error: bool,
     },
     Bash {
+        key: BlockKey,
         command: String,
         output: String,
         cancelled: bool,
     },
-    Summary(String),
+    Summary {
+        key: BlockKey,
+        text: String,
+    },
     Custom {
+        key: BlockKey,
         kind: String,
         text: String,
     },
-    Unsupported(String),
+    Unsupported {
+        key: BlockKey,
+        kind: String,
+    },
+}
+
+impl MessageBlock {
+    pub fn key(&self) -> &BlockKey {
+        match self {
+            Self::Text { key, .. }
+            | Self::Thinking { key, .. }
+            | Self::Image { key, .. }
+            | Self::ToolCall { key, .. }
+            | Self::ToolResult { key, .. }
+            | Self::Bash { key, .. }
+            | Self::Summary { key, .. }
+            | Self::Custom { key, .. }
+            | Self::Unsupported { key, .. } => key,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -239,7 +300,7 @@ pub struct RuntimeEntry {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum EntryKind {
-    Message(RuntimeMessage),
+    Message(Box<RuntimeMessage>),
     ThinkingLevel(String),
     Model {
         provider: String,
@@ -253,6 +314,11 @@ pub enum EntryKind {
     },
     Custom {
         kind: String,
+    },
+    CustomMessage {
+        kind: String,
+        content: Vec<MessageBlock>,
+        display: bool,
     },
     Label {
         target: EntryId,
@@ -358,6 +424,16 @@ pub enum SubmissionKind {
     Prompt,
     Steer,
     FollowUp,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OptimisticUserInput {
+    pub request: RequestId,
+    pub text: String,
+    pub kind: SubmissionKind,
+    pub accepted: bool,
+    pub authoritative_seen: bool,
+    pub baseline: HashSet<MessageKey>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -486,8 +562,11 @@ pub struct RuntimeState {
     pub unknown_records: VecDeque<UnknownRecord>,
     pub durable_cursor: Option<EntryId>,
     pub cursor_session_id: Option<SessionId>,
+    pub live_message_keys: HashSet<MessageKey>,
+    pub optimistic_user_inputs: Vec<OptimisticUserInput>,
     pub prompt_delivery: PromptDelivery,
     pub pending_prompt_settled: bool,
+    pub replacement_awaiting_state: bool,
     pub low_level_agent_end_seen: bool,
     pub stale_inputs_ignored: u64,
     pub hydration_mode: HydrationMode,
@@ -524,8 +603,11 @@ impl RuntimeState {
             unknown_records: VecDeque::new(),
             durable_cursor: None,
             cursor_session_id: None,
+            live_message_keys: HashSet::new(),
+            optimistic_user_inputs: Vec::new(),
             prompt_delivery: PromptDelivery::None,
             pending_prompt_settled: false,
+            replacement_awaiting_state: false,
             low_level_agent_end_seen: false,
             stale_inputs_ignored: 0,
             hydration_mode: HydrationMode::Initial,

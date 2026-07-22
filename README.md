@@ -4,7 +4,7 @@ Native Windows-first desktop shell for Pi, built with Rust and GPUI 0.2.2.
 
 ## Current maturity
 
-Phase 6 connects a native multiline composer to the supervised external Pi 0.80.10 runtime. Startup, discovery, correlated readiness, hydration, prompt acceptance, event reads, retries, and shutdown all run behind a dedicated standard-thread worker. The GPUI-owned controller observes normalized reducer state and never performs I/O from `render`.
+Phase 7 connects the native conversation surface to the supervised external Pi 0.80.10 runtime. Startup, discovery, correlated readiness, hydration, prompt acceptance, message streaming, retries, and shutdown all run behind a dedicated standard-thread worker. The GPUI-owned controller observes normalized reducer state and never performs I/O from `render`.
 
 The visible shell now shows only live or explicitly Loading, Awaiting, Unknown, stale, stopped, and error values:
 
@@ -12,11 +12,14 @@ The visible shell now shows only live or explicitly Loading, Awaiting, Unknown, 
 - canonical current workspace and connection/recovery state in the main area;
 - context, input/output tokens, cache usage, cost, model, and thinking in the inspector;
 - one applicable Connect, Retry, or Stop action with pointer and keyboard paths;
-- a native multiline composer with grapheme-safe editing, IME, clipboard, selection, undo, wrapping, scrolling, and visible pending/accepted/rejected/uncertain delivery state.
+- a native multiline composer with grapheme-safe editing, IME, clipboard, selection, undo, wrapping, scrolling, and visible pending/accepted/rejected/uncertain delivery state;
+- the authoritative current transcript with user and assistant text, thinking, visible custom messages, branch/compaction summaries, compact tool/Bash placeholders, lifecycle notices, and in-place partial updates;
+- provider/model/time/stop/usage metadata with raw provider diagnostics and private payloads excluded from normalized diagnostics;
+- selectable transcript text and near-bottom-only auto-follow, preserving manual scroll and selection during streaming.
 
-Accepted idle input uses `prompt`. While Pi is running, the primary action uses `steer` and follow-ups use `follow_up`; Escape sends `abort`. Empty and rapid duplicate submissions are rejected. The draft clears only after the matching accepted response and remains intact after rejection or uncertain disconnect.
+Accepted idle input uses `prompt`. While Pi is running, the primary action uses `steer` and follow-ups use `follow_up`; Escape sends `abort`. Empty and rapid duplicate submissions are rejected. The draft clears only after the matching accepted response. Accepted input appears locally until the matching authoritative user event arrives; rejection and uncertain disconnect keep the draft and never trigger replay.
 
-There is no model switching, session browser, auth UI, transcript rendering, task/subagent view, resource browser, full queue management UI, or fake backend content. Those capabilities remain later phases.
+There is no model switching, session browser, auth UI, rich Markdown/link rendering, expanded tool cards, task/subagent view, resource browser, full queue management UI, or fake backend content. Those capabilities remain later phases.
 
 ## Prerequisite and launch
 
@@ -68,10 +71,11 @@ The interface preserves the warm-charcoal Switzer/Tanker identity, with Cascadia
 - `src/services/runtime_worker.rs` - injectable GPUI-independent service boundary and responsive worker coordinator
 - `src/services/rpc/` - Pi 0.80.10 wire contract, strict JSONL framing, correlated client, and runtime adapter
 - `src/services/pi_process/` - executable discovery, capability probing, launch policy, and process-tree supervision
-- `src/state/runtime.rs` - normalized owned runtime state, stamped inputs, requests, and effects
-- `src/state/reducer.rs` - pure lifecycle, hydration, streaming, tool, queue, and extension reducer
+- `src/state/runtime.rs` - normalized owned runtime/transcript state, safe message metadata, stamped inputs, requests, and effects
+- `src/state/reducer.rs` - pure lifecycle, hydration, streaming reconciliation, tool, queue, and extension reducer
 - `src/state.rs` - truthful owned shell projections with stale/unknown semantics
-- `src/views/root.rs` - observed runtime shell and draft/acceptance correlation
+- `src/views/root.rs` - observed runtime shell, conversation ownership, scroll pinning, and draft/acceptance correlation
+- `src/views/conversation.rs` - turn-grouped live transcript, stable text entities, safe metadata, notices, and selectable plain text
 - `src/views/composer/` - native GPUI input handler, text buffer, multiline layout/paint, and focused tests
 - `src/views/controls.rs` - focus-visible recovery control and inspector rows
 

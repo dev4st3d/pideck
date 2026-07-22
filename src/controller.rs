@@ -4,14 +4,14 @@ use std::sync::Arc;
 
 use gpui::{Context, Task};
 
-use crate::services::rpc::{ConnectionGeneration, RequestId};
+use crate::services::rpc::{ConnectionGeneration, RequestId, SessionEpoch};
 use crate::services::runtime_worker::{
     AttemptGeneration, RuntimeService, RuntimeWorkerHandle, WorkerResult,
 };
 use crate::state::reducer::reduce;
 use crate::state::runtime::{
-    PromptDelivery, RuntimeInput, RuntimeIntent, RuntimeLifecycle, RuntimeState, StampedInput,
-    SubmissionKind,
+    CompactionState, FacetStatus, PromptDelivery, RetryState, RuntimeInput, RuntimeIntent,
+    RuntimeLifecycle, RuntimeMessage, RuntimeState, SafeError, StampedInput, SubmissionKind,
 };
 use crate::state::{ControllerStatus, ShellProjection};
 
@@ -33,6 +33,26 @@ pub enum ComposerRuntime {
 pub struct ComposerProjection {
     pub runtime: ComposerRuntime,
     pub delivery: PromptDelivery,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AcceptedUserInput {
+    pub request: RequestId,
+    pub text: String,
+    pub kind: SubmissionKind,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ConversationProjection {
+    pub epoch: SessionEpoch,
+    pub revision: u64,
+    pub lifecycle: RuntimeLifecycle,
+    pub status: FacetStatus,
+    pub messages: Vec<RuntimeMessage>,
+    pub accepted_user_inputs: Vec<AcceptedUserInput>,
+    pub retry: RetryState,
+    pub compaction: CompactionState,
+    pub error: Option<SafeError>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -228,6 +248,57 @@ impl ControllerCore {
         }
     }
 
+    pub fn conversation_projection(&self) -> ConversationProjection {
+        let error = match &self.runtime.messages.status {
+            FacetStatus::Failed(error) => Some(error.clone()),
+            FacetStatus::Loading | FacetStatus::Ready => self
+                .runtime
+                .errors
+                .back()
+                .filter(|_| {
+                    matches!(
+                        self.runtime.lifecycle,
+                        RuntimeLifecycle::Disconnected | RuntimeLifecycle::Failed
+                    )
+                })
+                .cloned(),
+        };
+        ConversationProjection {
+            epoch: self.runtime.epoch,
+            revision: self.runtime.revision,
+            lifecycle: self.runtime.lifecycle,
+            status: self.runtime.messages.status.clone(),
+            messages: if self.runtime.replacement_awaiting_state {
+                Vec::new()
+            } else {
+                self.runtime
+                    .messages
+                    .data
+                    .as_deref()
+                    .unwrap_or_default()
+                    .iter()
+                    .filter(|message| message.visible)
+                    .cloned()
+                    .collect()
+            },
+            accepted_user_inputs: self
+                .runtime
+                .optimistic_user_inputs
+                .iter()
+                .filter(|_| !self.runtime.replacement_awaiting_state)
+                .filter(|input| input.accepted && !input.authoritative_seen)
+                .map(|input| AcceptedUserInput {
+                    request: input.request.clone(),
+                    text: input.text.clone(),
+                    kind: input.kind,
+                })
+                .collect(),
+            retry: self.runtime.retry.clone(),
+            compaction: self.runtime.compaction.clone(),
+            error,
+        }
+    }
+
     pub fn submit(
         &mut self,
         text: String,
@@ -333,6 +404,10 @@ impl RuntimeController {
 
     pub fn composer_projection(&self) -> ComposerProjection {
         self.core.composer_projection()
+    }
+
+    pub fn conversation_projection(&self) -> ConversationProjection {
+        self.core.conversation_projection()
     }
 
     pub fn submit(
@@ -603,6 +678,39 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn conversation_projection_hides_non_display_custom_messages() {
+        use crate::state::runtime::{
+            BlockKey, MessageBlock, MessageKey, MessageRole, RuntimeMessage,
+        };
+
+        fn custom(key: &str, visible: bool) -> RuntimeMessage {
+            RuntimeMessage {
+                key: MessageKey(key.to_owned()),
+                role: MessageRole::Custom,
+                timestamp: 1,
+                content: vec![MessageBlock::Custom {
+                    key: BlockKey("custom:0".to_owned()),
+                    kind: "synthetic".to_owned(),
+                    text: "private context".to_owned(),
+                }],
+                visible,
+                terminal: true,
+                stop_reason: None,
+                error: None,
+                assistant: None,
+            }
+        }
+
+        let mut core = ready_core();
+        core.runtime
+            .messages
+            .ready(vec![custom("visible", true), custom("hidden", false)]);
+        let projection = core.conversation_projection();
+        assert_eq!(projection.messages.len(), 1);
+        assert_eq!(projection.messages[0].key, MessageKey("visible".to_owned()));
     }
 
     #[test]

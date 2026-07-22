@@ -9,13 +9,14 @@ use super::{
     TaggedIncomingRecord, ThinkingLevel, UserContent, UserContentBlock,
 };
 use crate::state::runtime::{
-    CommandSource, CompactionKind, DialogAnswer, DialogRequest, EffectKind, EntryKind, ErrorKind,
-    ExtensionFailure, ExtensionStatus, ExtensionWidget, MessageBlock, MessageKey, MessageRole,
-    MessageStopReason, ModelSummary, NormalizedEvent, NormalizedResponse, NormalizedSessionState,
-    NotificationKind, QueueDeliveryMode, RequestFailure, RequestFailureKind, RuntimeCommand,
-    RuntimeEffect, RuntimeEntry, RuntimeInput, RuntimeMessage, RuntimeNotification, RuntimeRequest,
-    RuntimeStats, RuntimeThinkingLevel, RuntimeTreeNode, SafeError, SessionMutation,
-    SessionSnapshot, StampedInput, SubmissionKind, WidgetPlacement,
+    AssistantMetadata, BlockKey, CommandSource, CompactionKind, DialogAnswer, DialogRequest,
+    EffectKind, EntryKind, ErrorKind, ExtensionFailure, ExtensionStatus, ExtensionWidget,
+    MessageBlock, MessageKey, MessageRole, MessageStopReason, MessageUsage, ModelSummary,
+    NormalizedEvent, NormalizedResponse, NormalizedSessionState, NotificationKind,
+    QueueDeliveryMode, RequestFailure, RequestFailureKind, RuntimeCommand, RuntimeEffect,
+    RuntimeEntry, RuntimeInput, RuntimeMessage, RuntimeNotification, RuntimeRequest, RuntimeStats,
+    RuntimeThinkingLevel, RuntimeTreeNode, SafeError, SessionMutation, SessionSnapshot,
+    StampedInput, SubmissionKind, WidgetPlacement,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -504,33 +505,69 @@ fn extension_error(error: ExtensionError) -> ExtensionFailure {
 
 fn runtime_message(message: AgentMessage) -> RuntimeMessage {
     match message {
-        AgentMessage::User(message) => RuntimeMessage {
-            key: message_key("user", message.timestamp, None),
-            role: MessageRole::User,
-            timestamp: message.timestamp,
-            content: user_content(message.content),
-            terminal: true,
-            stop_reason: None,
-            error: None,
-        },
-        AgentMessage::Assistant(message) => {
-            let discriminator = format!("{}:{}", message.provider, message.model);
+        AgentMessage::User(message) => {
+            let fingerprint = user_content_fingerprint(&message.content);
             RuntimeMessage {
-                key: message_key("assistant", message.timestamp, Some(&discriminator)),
+                key: message_key("user", message.timestamp, fingerprint),
+                role: MessageRole::User,
+                timestamp: message.timestamp,
+                content: user_content(message.content),
+                visible: true,
+                terminal: true,
+                stop_reason: None,
+                error: None,
+                assistant: None,
+            }
+        }
+        AgentMessage::Assistant(message) => {
+            let identity = stable_hash(
+                format!("{}\0{}\0{}", message.api, message.provider, message.model).as_bytes(),
+            );
+            let content = message
+                .content
+                .into_iter()
+                .enumerate()
+                .map(|(index, block)| assistant_block(index, block))
+                .collect();
+            let usage = MessageUsage {
+                input: message.usage.input,
+                output: message.usage.output,
+                cache_read: message.usage.cache_read,
+                cache_write: message.usage.cache_write,
+                cache_write_1h: message.usage.cache_write_1h,
+                reasoning: message.usage.reasoning,
+                total_tokens: message.usage.total_tokens,
+                input_cost: message.usage.cost.input,
+                output_cost: message.usage.cost.output,
+                cache_read_cost: message.usage.cost.cache_read,
+                cache_write_cost: message.usage.cost.cache_write,
+                total_cost: message.usage.cost.total,
+            };
+            let stop_reason = match message.stop_reason {
+                StopReason::Stop => MessageStopReason::Stop,
+                StopReason::Length => MessageStopReason::Length,
+                StopReason::ToolUse => MessageStopReason::ToolUse,
+                StopReason::Error => MessageStopReason::Error,
+                StopReason::Aborted => MessageStopReason::Aborted,
+            };
+            RuntimeMessage {
+                key: message_key("assistant", message.timestamp, identity),
                 role: MessageRole::Assistant,
                 timestamp: message.timestamp,
-                content: message.content.into_iter().map(assistant_block).collect(),
+                content,
+                visible: true,
                 terminal: false,
-                stop_reason: Some(match message.stop_reason {
-                    StopReason::Stop => MessageStopReason::Stop,
-                    StopReason::Length => MessageStopReason::Length,
-                    StopReason::ToolUse => MessageStopReason::ToolUse,
-                    StopReason::Error => MessageStopReason::Error,
-                    StopReason::Aborted => MessageStopReason::Aborted,
-                }),
+                stop_reason: Some(stop_reason),
                 error: message
                     .error_message
                     .map(|_| "Assistant request failed".to_owned()),
+                assistant: Some(AssistantMetadata {
+                    api: message.api,
+                    provider: message.provider,
+                    model: message.model,
+                    response_model: message.response_model,
+                    usage,
+                }),
             }
         }
         AgentMessage::ToolResult(message) => {
@@ -543,81 +580,120 @@ fn runtime_message(message: AgentMessage) -> RuntimeMessage {
                 })
                 .collect::<Vec<_>>()
                 .join("\n");
+            let tool_id = message.tool_call_id;
             RuntimeMessage {
                 key: message_key(
                     "tool-result",
                     message.timestamp,
-                    Some(message.tool_call_id.as_str()),
+                    stable_hash(tool_id.as_str().as_bytes()),
                 ),
                 role: MessageRole::ToolResult,
                 timestamp: message.timestamp,
                 content: vec![MessageBlock::ToolResult {
-                    id: message.tool_call_id,
+                    key: block_key("tool-result", 0, Some(tool_id.as_str())),
+                    id: tool_id,
                     name: message.tool_name,
                     content: text,
                     is_error: message.is_error,
                 }],
+                visible: true,
                 terminal: true,
                 stop_reason: None,
                 error: None,
+                assistant: None,
             }
         }
-        AgentMessage::BashExecution(message) => RuntimeMessage {
-            key: message_key("bash", message.timestamp, Some(&message.command)),
-            role: MessageRole::BashExecution,
-            timestamp: message.timestamp,
-            content: vec![MessageBlock::Bash {
-                command: message.command,
-                output: message.output,
-                cancelled: message.cancelled,
-            }],
-            terminal: true,
-            stop_reason: None,
-            error: None,
-        },
-        AgentMessage::Custom(message) => RuntimeMessage {
-            key: message_key("custom", message.timestamp, Some(&message.custom_type)),
-            role: MessageRole::Custom,
-            timestamp: message.timestamp,
-            content: vec![MessageBlock::Custom {
-                kind: message.custom_type,
-                text: user_content_text(message.content),
-            }],
-            terminal: true,
-            stop_reason: None,
-            error: None,
-        },
+        AgentMessage::BashExecution(message) => {
+            let identity = stable_hash(message.command.as_bytes());
+            RuntimeMessage {
+                key: message_key("bash", message.timestamp, identity),
+                role: MessageRole::BashExecution,
+                timestamp: message.timestamp,
+                content: vec![MessageBlock::Bash {
+                    key: block_key("bash", 0, None),
+                    command: message.command,
+                    output: message.output,
+                    cancelled: message.cancelled,
+                }],
+                visible: true,
+                terminal: true,
+                stop_reason: None,
+                error: None,
+                assistant: None,
+            }
+        }
+        AgentMessage::Custom(message) => {
+            let fingerprint = user_content_fingerprint(&message.content)
+                ^ stable_hash(message.custom_type.as_bytes());
+            RuntimeMessage {
+                key: message_key("custom", message.timestamp, fingerprint),
+                role: MessageRole::Custom,
+                timestamp: message.timestamp,
+                content: custom_content(message.custom_type, message.content),
+                visible: message.display,
+                terminal: true,
+                stop_reason: None,
+                error: None,
+                assistant: None,
+            }
+        }
         AgentMessage::BranchSummary(message) => RuntimeMessage {
             key: message_key(
                 "branch-summary",
                 message.timestamp,
-                Some(message.from_id.as_str()),
+                stable_hash(message.from_id.as_str().as_bytes()),
             ),
             role: MessageRole::BranchSummary,
             timestamp: message.timestamp,
-            content: vec![MessageBlock::Summary(message.summary)],
+            content: vec![MessageBlock::Summary {
+                key: block_key("branch-summary", 0, Some(message.from_id.as_str())),
+                text: message.summary,
+            }],
+            visible: true,
             terminal: true,
             stop_reason: None,
             error: None,
+            assistant: None,
         },
         AgentMessage::CompactionSummary(message) => RuntimeMessage {
-            key: message_key("compaction-summary", message.timestamp, None),
+            key: message_key(
+                "compaction-summary",
+                message.timestamp,
+                message.tokens_before,
+            ),
             role: MessageRole::CompactionSummary,
             timestamp: message.timestamp,
-            content: vec![MessageBlock::Summary(message.summary)],
+            content: vec![MessageBlock::Summary {
+                key: block_key("compaction-summary", 0, None),
+                text: message.summary,
+            }],
+            visible: true,
             terminal: true,
             stop_reason: None,
             error: None,
+            assistant: None,
         },
-        AgentMessage::Unknown { role, .. } => RuntimeMessage {
-            key: message_key("unknown", 0, Some(&role)),
-            role: MessageRole::Unknown,
-            timestamp: 0,
-            content: vec![MessageBlock::Unsupported(safe_identifier(&role))],
-            terminal: true,
-            stop_reason: None,
-            error: None,
-        },
+        AgentMessage::Unknown { role, raw } => {
+            let timestamp = raw.get("timestamp").and_then(Value::as_u64).unwrap_or(0);
+            let identity = serde_json::to_vec(&raw)
+                .map(|bytes| stable_hash(&bytes))
+                .unwrap_or_else(|_| stable_hash(role.as_bytes()));
+            let kind = safe_identifier(&role);
+            RuntimeMessage {
+                key: message_key("unknown", timestamp, identity),
+                role: MessageRole::Unknown,
+                timestamp,
+                content: vec![MessageBlock::Unsupported {
+                    key: block_key("unsupported", 0, Some(&kind)),
+                    kind,
+                }],
+                visible: true,
+                terminal: true,
+                stop_reason: None,
+                error: None,
+                assistant: None,
+            }
+        }
     }
 }
 
@@ -627,12 +703,16 @@ fn persisted_message(message: AgentMessage) -> RuntimeMessage {
     message
 }
 
-fn assistant_block(block: AssistantContentBlock) -> MessageBlock {
+fn assistant_block(index: usize, block: AssistantContentBlock) -> MessageBlock {
     match block {
-        AssistantContentBlock::Text { text, .. } => MessageBlock::Text(text),
+        AssistantContentBlock::Text { text, .. } => MessageBlock::Text {
+            key: block_key("text", index, None),
+            text,
+        },
         AssistantContentBlock::Thinking {
             thinking, redacted, ..
         } => MessageBlock::Thinking {
+            key: block_key("thinking", index, None),
             text: thinking,
             redacted: redacted.unwrap_or(false),
         },
@@ -642,6 +722,7 @@ fn assistant_block(block: AssistantContentBlock) -> MessageBlock {
             arguments,
             ..
         } => MessageBlock::ToolCall {
+            key: block_key("tool-call", index, Some(id.as_str())),
             id,
             name,
             arguments: Value::Object(arguments),
@@ -651,33 +732,71 @@ fn assistant_block(block: AssistantContentBlock) -> MessageBlock {
 
 fn user_content(content: UserContent) -> Vec<MessageBlock> {
     match content {
-        UserContent::Text(text) => vec![MessageBlock::Text(text)],
+        UserContent::Text(text) => vec![MessageBlock::Text {
+            key: block_key("text", 0, None),
+            text,
+        }],
         UserContent::Blocks(blocks) => blocks
             .into_iter()
-            .map(|block| match block {
-                UserContentBlock::Text { text, .. } => MessageBlock::Text(text),
-                UserContentBlock::Image { mime_type, .. } => MessageBlock::Image { mime_type },
+            .enumerate()
+            .map(|(index, block)| match block {
+                UserContentBlock::Text { text, .. } => MessageBlock::Text {
+                    key: block_key("text", index, None),
+                    text,
+                },
+                UserContentBlock::Image { mime_type, .. } => MessageBlock::Image {
+                    key: block_key("image", index, Some(&mime_type)),
+                    mime_type,
+                },
             })
             .collect(),
     }
 }
 
-fn user_content_text(content: UserContent) -> String {
-    user_content(content)
-        .into_iter()
-        .filter_map(|block| match block {
-            MessageBlock::Text(text) => Some(text),
-            _ => None,
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
+fn custom_content(kind: String, content: UserContent) -> Vec<MessageBlock> {
+    match content {
+        UserContent::Text(text) => vec![MessageBlock::Custom {
+            key: block_key("custom", 0, Some(&kind)),
+            kind,
+            text,
+        }],
+        UserContent::Blocks(blocks) => blocks
+            .into_iter()
+            .enumerate()
+            .map(|(index, block)| match block {
+                UserContentBlock::Text { text, .. } => MessageBlock::Custom {
+                    key: block_key("custom", index, Some(&kind)),
+                    kind: kind.clone(),
+                    text,
+                },
+                UserContentBlock::Image { mime_type, .. } => MessageBlock::Image {
+                    key: block_key("image", index, Some(&mime_type)),
+                    mime_type,
+                },
+            })
+            .collect(),
+    }
 }
 
-fn message_key(role: &str, timestamp: u64, discriminator: Option<&str>) -> MessageKey {
-    MessageKey(format!(
-        "{role}:{timestamp}:{}",
-        discriminator.unwrap_or_default()
-    ))
+fn user_content_fingerprint(content: &UserContent) -> u64 {
+    serde_json::to_vec(content)
+        .map(|bytes| stable_hash(&bytes))
+        .unwrap_or_default()
+}
+
+fn message_key(role: &str, timestamp: u64, identity: u64) -> MessageKey {
+    MessageKey(format!("{role}:{timestamp}:{identity:016x}"))
+}
+
+fn block_key(kind: &str, index: usize, identity: Option<&str>) -> BlockKey {
+    let identity = identity.map_or(0, |value| stable_hash(value.as_bytes()));
+    BlockKey(format!("{kind}:{index}:{identity:016x}"))
+}
+
+fn stable_hash(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
+        (hash ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3)
+    })
 }
 
 fn runtime_entry(entry: SessionEntry) -> RuntimeEntry {
@@ -687,7 +806,7 @@ fn runtime_entry(entry: SessionEntry) -> RuntimeEntry {
                 id: base.id,
                 parent_id: base.parent_id,
                 timestamp: base.timestamp,
-                kind: EntryKind::Message(persisted_message(message)),
+                kind: EntryKind::Message(Box::new(persisted_message(message))),
             },
             KnownSessionEntry::ThinkingLevelChange {
                 base,
@@ -722,14 +841,27 @@ fn runtime_entry(entry: SessionEntry) -> RuntimeEntry {
             },
             KnownSessionEntry::Custom {
                 base, custom_type, ..
-            }
-            | KnownSessionEntry::CustomMessage {
-                base, custom_type, ..
             } => RuntimeEntry {
                 id: base.id,
                 parent_id: base.parent_id,
                 timestamp: base.timestamp,
                 kind: EntryKind::Custom { kind: custom_type },
+            },
+            KnownSessionEntry::CustomMessage {
+                base,
+                custom_type,
+                content,
+                display,
+                ..
+            } => RuntimeEntry {
+                id: base.id,
+                parent_id: base.parent_id,
+                timestamp: base.timestamp,
+                kind: EntryKind::CustomMessage {
+                    kind: custom_type,
+                    content: user_content(content),
+                    display,
+                },
             },
             KnownSessionEntry::Label {
                 base,

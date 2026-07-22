@@ -6,6 +6,7 @@ use gpui::{
 
 use crate::actions::{
     ActivateRecovery, Connect, FocusNext, FocusPrevious, Retry, Stop, composer_key_bindings,
+    transcript_key_bindings,
 };
 use crate::controller::RuntimeController;
 use crate::services::runtime_worker::{RpcRuntimeService, RuntimeService};
@@ -35,6 +36,7 @@ pub fn run() {
             KeyBinding::new("shift-tab", FocusPrevious, None),
         ]);
         cx.bind_keys(composer_key_bindings());
+        cx.bind_keys(transcript_key_bindings());
 
         let bounds = Bounds::centered(None, size(px(WINDOW_WIDTH), px(WINDOW_HEIGHT)), cx);
         let workspace = workspace.clone();

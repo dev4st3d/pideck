@@ -2,10 +2,11 @@ use std::collections::HashSet;
 
 use super::runtime::{
     CompactionState, EffectKind, ErrorKind, FacetStatus, HydrationMode, MAX_NOTIFICATIONS,
-    MAX_UNKNOWN_RECORDS, NormalizedEvent, NormalizedResponse, PromptDelivery, QueueContents,
-    RequestFailureKind, RetryState, RuntimeEffect, RuntimeInput, RuntimeIntent, RuntimeLifecycle,
-    RuntimeMessage, RuntimeRequest, RuntimeState, SafeError, SessionMutation, StampedInput,
-    SubmissionKind, ToolExecution, ToolStatus, UnknownRecord, push_bounded,
+    MAX_UNKNOWN_RECORDS, MessageBlock, MessageRole, NormalizedEvent, NormalizedResponse,
+    OptimisticUserInput, PromptDelivery, QueueContents, RequestFailureKind, RetryState,
+    RuntimeEffect, RuntimeInput, RuntimeIntent, RuntimeLifecycle, RuntimeMessage, RuntimeRequest,
+    RuntimeState, SafeError, SessionMutation, StampedInput, SubmissionKind, ToolExecution,
+    ToolStatus, UnknownRecord, push_bounded,
 };
 use crate::services::rpc::{EntryId, RequestId};
 
@@ -25,7 +26,11 @@ pub fn reduce(state: &mut RuntimeState, stamped: StampedInput) -> Vec<RuntimeEff
         RuntimeInput::Intent(intent) => reduce_intent(state, intent),
         RuntimeInput::Response { request, result } => reduce_response(state, request, result),
         RuntimeInput::Event(event) => {
-            reduce_event(state, event);
+            if state.replacement_awaiting_state {
+                state.stale_inputs_ignored = state.stale_inputs_ignored.saturating_add(1);
+            } else {
+                reduce_event(state, event);
+            }
             Vec::new()
         }
     }
@@ -46,18 +51,20 @@ fn connect(
     if generation_changed {
         state.generation = generation;
         state.epoch = epoch;
+        state.replacement_awaiting_state = false;
         invalidate_extension_ui(state);
     }
     if matches!(state.prompt_delivery, PromptDelivery::Pending { .. }) {
         mark_prompt_uncertain(state);
     }
     state.lifecycle = RuntimeLifecycle::Loading;
-    state.hydration_mode = if recovery || generation_changed {
+    state.hydration_mode = if recovery {
         HydrationMode::Recovery
     } else {
         HydrationMode::Initial
     };
     state.incremental_fallback_used = false;
+    state.live_message_keys.clear();
     state.mark_hydration_loading();
     vec![effect(state, RuntimeRequest::GetState)]
 }
@@ -69,6 +76,7 @@ fn disconnect(state: &mut RuntimeState, error: SafeError) -> Vec<RuntimeEffect> 
     state.lifecycle = RuntimeLifecycle::Disconnected;
     invalidate_extension_ui(state);
     state.bounded_error(error);
+    state.bump_revision();
     Vec::new()
 }
 
@@ -103,6 +111,22 @@ fn reduce_intent(state: &mut RuntimeState, intent: RuntimeIntent) -> Vec<Runtime
                 return Vec::new();
             }
 
+            let baseline = state
+                .messages
+                .data
+                .as_ref()
+                .into_iter()
+                .flatten()
+                .map(|message| message.key.clone())
+                .collect();
+            state.optimistic_user_inputs.push(OptimisticUserInput {
+                request: request.clone(),
+                text: text.clone(),
+                kind,
+                accepted: false,
+                authoritative_seen: false,
+                baseline,
+            });
             state.pending_prompt_settled = false;
             state.prompt_delivery = PromptDelivery::Pending {
                 request: request.clone(),
@@ -143,6 +167,7 @@ fn begin_session_replacement(
     state.epoch = state.epoch.next();
     state.lifecycle = RuntimeLifecycle::Loading;
     state.hydration_mode = HydrationMode::SessionReplacement;
+    state.replacement_awaiting_state = true;
     invalidate_extension_ui(state);
     state.mark_hydration_loading();
     vec![effect(state, RuntimeRequest::SessionMutation(mutation))]
@@ -158,15 +183,21 @@ fn reduce_response(
             apply_state_hydration(state, snapshot)
         }
         (
-            RuntimeRequest::GetMessages { base_revision },
+            RuntimeRequest::GetMessages { base_revision: _ },
             Ok(NormalizedResponse::Messages(messages)),
         ) => {
-            if state.revision == base_revision {
-                state.messages.ready(dedup_messages(messages));
-            } else {
-                let existing = state.messages.data.take().unwrap_or_default();
-                state.messages.ready(merge_messages(messages, existing));
-            }
+            let live = state
+                .messages
+                .data
+                .take()
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|message| state.live_message_keys.contains(&message.key))
+                .collect();
+            state.messages.ready(merge_messages(messages, live));
+            state.live_message_keys.clear();
+            reconcile_optimistic_user_inputs(state);
+            state.bump_revision();
             Vec::new()
         }
         (
@@ -211,7 +242,19 @@ fn reduce_response(
         }
         (RuntimeRequest::Submit { request, kind, .. }, Ok(NormalizedResponse::Accepted)) => {
             if prompt_request_matches(&state.prompt_delivery, &request) {
-                state.prompt_delivery = PromptDelivery::Accepted { request, kind };
+                state.prompt_delivery = PromptDelivery::Accepted {
+                    request: request.clone(),
+                    kind,
+                };
+                if let Some(input) = state
+                    .optimistic_user_inputs
+                    .iter_mut()
+                    .find(|input| input.request == request)
+                {
+                    input.accepted = true;
+                }
+                reconcile_optimistic_user_inputs(state);
+                state.bump_revision();
                 if kind == SubmissionKind::Prompt && !state.pending_prompt_settled {
                     state.lifecycle = RuntimeLifecycle::Running;
                 }
@@ -225,15 +268,21 @@ fn reduce_response(
                     failure.kind,
                     RequestFailureKind::UnknownOutcome | RequestFailureKind::Disconnected
                 ) {
-                    PromptDelivery::Uncertain { request, kind }
+                    PromptDelivery::Uncertain {
+                        request: request.clone(),
+                        kind,
+                    }
                 } else {
                     PromptDelivery::Rejected {
-                        request,
+                        request: request.clone(),
                         kind,
                         summary: failure.error.summary.clone(),
                     }
                 };
             }
+            state
+                .optimistic_user_inputs
+                .retain(|input| input.request != request);
             if kind == SubmissionKind::Prompt {
                 state.pending_prompt_settled = false;
             }
@@ -250,6 +299,7 @@ fn reduce_response(
             Ok(NormalizedResponse::SessionMutation { cancelled }),
         ) => {
             state.hydration_mode = if cancelled {
+                state.replacement_awaiting_state = false;
                 HydrationMode::Resync
             } else {
                 HydrationMode::SessionReplacement
@@ -257,6 +307,7 @@ fn reduce_response(
             vec![effect(state, RuntimeRequest::GetState)]
         }
         (RuntimeRequest::SessionMutation(_), Err(failure)) => {
+            state.replacement_awaiting_state = false;
             state.bounded_error(failure.error.clone());
             if matches!(
                 failure.kind,
@@ -311,13 +362,15 @@ fn apply_state_hydration(
     let session_changed = previous_id
         .as_ref()
         .is_some_and(|previous| previous != &snapshot.session.id);
+    let replacing_session = state.hydration_mode == HydrationMode::SessionReplacement;
 
-    if session_changed {
-        if state.hydration_mode != HydrationMode::SessionReplacement {
-            state.epoch = state.epoch.next();
-        }
+    if session_changed && !replacing_session {
+        state.epoch = state.epoch.next();
+    }
+    if session_changed || replacing_session {
         clear_session_scoped_state(state);
     }
+    state.replacement_awaiting_state = false;
 
     let same_cursor_session = state
         .cursor_session_id
@@ -325,7 +378,8 @@ fn apply_state_hydration(
         .is_some_and(|id| id == &snapshot.session.id);
     let incremental_cursor = (state.hydration_mode == HydrationMode::Recovery
         && same_cursor_session
-        && !session_changed)
+        && !session_changed
+        && !replacing_session)
         .then(|| state.durable_cursor.clone())
         .flatten();
 
@@ -382,7 +436,7 @@ fn reduce_event(state: &mut RuntimeState, event: NormalizedEvent) {
             state.low_level_agent_end_seen = false;
         }
         NormalizedEvent::AgentEnd { messages, .. } => {
-            upsert_messages(state, messages, true);
+            upsert_messages(state, messages, MessagePhase::Terminal);
             state.low_level_agent_end_seen = true;
         }
         NormalizedEvent::AgentSettled => settle(state),
@@ -392,11 +446,17 @@ fn reduce_event(state: &mut RuntimeState, event: NormalizedEvent) {
         } => {
             let mut messages = vec![message];
             messages.extend(tool_results);
-            upsert_messages(state, messages, true);
+            upsert_messages(state, messages, MessagePhase::Terminal);
         }
-        NormalizedEvent::MessageStart(message) => upsert_messages(state, vec![message], false),
-        NormalizedEvent::MessageUpdate(message) => upsert_messages(state, vec![message], false),
-        NormalizedEvent::MessageEnd(message) => upsert_messages(state, vec![message], true),
+        NormalizedEvent::MessageStart(message) => {
+            upsert_messages(state, vec![message], MessagePhase::Start)
+        }
+        NormalizedEvent::MessageUpdate(message) => {
+            upsert_messages(state, vec![message], MessagePhase::Update)
+        }
+        NormalizedEvent::MessageEnd(message) => {
+            upsert_messages(state, vec![message], MessagePhase::Terminal)
+        }
         NormalizedEvent::ToolStart {
             id,
             name,
@@ -488,6 +548,7 @@ fn reduce_event(state: &mut RuntimeState, event: NormalizedEvent) {
         NormalizedEvent::CompactionStart { reason } => {
             state.compaction = CompactionState::Running { reason };
             state.lifecycle = RuntimeLifecycle::Running;
+            state.bump_revision();
         }
         NormalizedEvent::CompactionEnd {
             reason,
@@ -517,6 +578,7 @@ fn reduce_event(state: &mut RuntimeState, event: NormalizedEvent) {
                 stats.context_tokens = None;
                 stats.context_percent = None;
             }
+            state.bump_revision();
         }
         NormalizedEvent::RetryStart {
             attempt,
@@ -529,6 +591,7 @@ fn reduce_event(state: &mut RuntimeState, event: NormalizedEvent) {
                 delay_ms,
             };
             state.lifecycle = RuntimeLifecycle::Running;
+            state.bump_revision();
         }
         NormalizedEvent::RetryEnd {
             success,
@@ -543,6 +606,7 @@ fn reduce_event(state: &mut RuntimeState, event: NormalizedEvent) {
                     summary: final_error.unwrap_or_else(|| "Automatic retry failed".to_owned()),
                 }
             };
+            state.bump_revision();
         }
         NormalizedEvent::EntryAppended(entry) => append_entry(state, entry),
         NormalizedEvent::SessionInfoChanged { name } => {
@@ -612,6 +676,7 @@ fn settle(state: &mut RuntimeState) {
             tool.status = ToolStatus::Cancelled;
         }
     }
+    state.bump_revision();
 }
 
 fn clear_session_scoped_state(state: &mut RuntimeState) {
@@ -625,6 +690,10 @@ fn clear_session_scoped_state(state: &mut RuntimeState) {
     state.compaction = CompactionState::Idle;
     state.durable_cursor = None;
     state.cursor_session_id = None;
+    state.live_message_keys.clear();
+    state.optimistic_user_inputs.clear();
+    state.prompt_delivery = PromptDelivery::None;
+    state.pending_prompt_settled = false;
     invalidate_extension_ui(state);
 }
 
@@ -639,10 +708,14 @@ fn invalidate_extension_ui(state: &mut RuntimeState) {
 fn mark_prompt_uncertain(state: &mut RuntimeState) {
     state.pending_prompt_settled = false;
     if let PromptDelivery::Pending { request, kind } = &state.prompt_delivery {
+        let request = request.clone();
         state.prompt_delivery = PromptDelivery::Uncertain {
             request: request.clone(),
             kind: *kind,
         };
+        state
+            .optimistic_user_inputs
+            .retain(|input| input.request != request);
     }
 }
 
@@ -728,41 +801,102 @@ fn merge_entries(
     existing
 }
 
-fn upsert_messages(state: &mut RuntimeState, messages: Vec<RuntimeMessage>, terminal: bool) {
-    let transcript = state.messages.data.get_or_insert_with(Vec::new);
-    for message in messages {
-        upsert_message(transcript, message, terminal);
-    }
-    state.messages.status = FacetStatus::Ready;
-    state.bump_revision();
+#[derive(Clone, Copy)]
+enum MessagePhase {
+    Start,
+    Update,
+    Terminal,
 }
 
-fn dedup_messages(messages: Vec<RuntimeMessage>) -> Vec<RuntimeMessage> {
-    merge_messages(Vec::new(), messages)
+fn upsert_messages(state: &mut RuntimeState, messages: Vec<RuntimeMessage>, phase: MessagePhase) {
+    let transcript = state.messages.data.get_or_insert_with(Vec::new);
+    let mut changed = false;
+    for message in messages {
+        state.live_message_keys.insert(message.key.clone());
+        changed |= upsert_message(transcript, message, phase);
+    }
+    state.messages.status = FacetStatus::Ready;
+    reconcile_optimistic_user_inputs(state);
+    if changed {
+        state.bump_revision();
+    }
 }
 
 fn merge_messages(
     mut first: Vec<RuntimeMessage>,
     second: Vec<RuntimeMessage>,
 ) -> Vec<RuntimeMessage> {
-    for message in second {
-        upsert_message(&mut first, message, false);
+    let original = std::mem::take(&mut first);
+    for message in original.into_iter().chain(second) {
+        let phase = if message.terminal {
+            MessagePhase::Terminal
+        } else {
+            MessagePhase::Update
+        };
+        upsert_message(&mut first, message, phase);
     }
     first
 }
 
-fn upsert_message(messages: &mut Vec<RuntimeMessage>, mut message: RuntimeMessage, terminal: bool) {
-    message.terminal |= terminal;
-    if let Some(existing) = messages
+fn upsert_message(
+    messages: &mut Vec<RuntimeMessage>,
+    mut message: RuntimeMessage,
+    phase: MessagePhase,
+) -> bool {
+    message.terminal |= matches!(phase, MessagePhase::Terminal);
+    let Some(existing) = messages
         .iter_mut()
         .find(|existing| existing.key == message.key)
-    {
-        if !existing.terminal || message.terminal {
-            *existing = message;
-        }
-    } else {
+    else {
         messages.push(message);
+        return true;
+    };
+
+    match phase {
+        MessagePhase::Start => false,
+        MessagePhase::Update if existing.terminal => false,
+        MessagePhase::Update | MessagePhase::Terminal => {
+            if existing == &message {
+                false
+            } else {
+                *existing = message;
+                true
+            }
+        }
     }
+}
+
+fn reconcile_optimistic_user_inputs(state: &mut RuntimeState) {
+    let messages = state.messages.data.as_deref().unwrap_or_default();
+    for input in &mut state.optimistic_user_inputs {
+        input.authoritative_seen |= messages.iter().any(|message| {
+            message.role == MessageRole::User
+                && !input.baseline.contains(&message.key)
+                && message_text(message) == input.text
+        });
+    }
+    state
+        .optimistic_user_inputs
+        .retain(|input| !(input.accepted && input.authoritative_seen));
+}
+
+fn message_text(message: &RuntimeMessage) -> String {
+    message
+        .content
+        .iter()
+        .filter_map(|block| match block {
+            MessageBlock::Text { text, .. } => Some(text.as_str()),
+            MessageBlock::Thinking { .. }
+            | MessageBlock::Image { .. }
+            | MessageBlock::ToolCall { .. }
+            | MessageBlock::ToolResult { .. }
+            | MessageBlock::Bash { .. }
+            | MessageBlock::Summary { .. }
+            | MessageBlock::Custom { .. }
+            | MessageBlock::Unsupported { .. } => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn fail_hydration_facet(state: &mut RuntimeState, request: &RuntimeRequest, error: SafeError) {

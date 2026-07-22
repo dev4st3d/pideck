@@ -1,19 +1,23 @@
-//! Minimal live shell for the supervised Pi runtime.
+//! Live Pi shell with an authoritative streaming conversation.
+
+use std::collections::{HashMap, HashSet};
 
 use gpui::{
-    Context, Entity, FocusHandle, Focusable, FontWeight, IntoElement, Render, Subscription, Window,
-    div, prelude::*, px, relative,
+    Context, Entity, FocusHandle, Focusable, FontWeight, IntoElement, Render, ScrollHandle,
+    Subscription, Window, div, prelude::*, px,
 };
 
 use crate::actions::{AbortRun, ActivateRecovery, Connect, FocusNext, FocusPrevious, Retry, Stop};
 use crate::controller::{
-    AcceptedSubmission, ComposerRuntime, RuntimeController, SubmissionPreference,
+    AcceptedSubmission, ComposerRuntime, ConversationProjection, RuntimeController,
+    SubmissionPreference,
 };
 use crate::state::runtime::PromptDelivery;
 use crate::state::{RecoveryAction, ShellProjection};
 use crate::theme;
 use crate::views::composer::{Composer, ComposerAvailability, ComposerEvent, ComposerFeedback};
 use crate::views::controls;
+use crate::views::conversation::{self, ScrollPinning, TranscriptText};
 
 struct PendingDraft {
     request: crate::services::rpc::RequestId,
@@ -23,6 +27,10 @@ struct PendingDraft {
 pub struct RootView {
     controller: Entity<RuntimeController>,
     composer: Entity<Composer>,
+    conversation: ConversationProjection,
+    conversation_scroll: ScrollHandle,
+    scroll_pinning: ScrollPinning,
+    transcript_texts: HashMap<String, Entity<TranscriptText>>,
     pending_draft: Option<PendingDraft>,
     focus_handle: FocusHandle,
     _controller_observation: Subscription,
@@ -37,9 +45,17 @@ impl RootView {
     ) -> Self {
         let focus_handle = cx.focus_handle();
         let composer = cx.new(Composer::new);
+        let conversation = controller.read(cx).conversation_projection();
+        let transcript_texts = conversation::text_fragments(&conversation)
+            .into_iter()
+            .map(|(key, text)| {
+                let entity = cx.new(|cx| TranscriptText::new(key.clone(), text, cx));
+                (key, entity)
+            })
+            .collect();
         window.focus(&composer.read(cx).focus_handle(cx));
         let controller_observation = cx.observe_in(&controller, window, |view, _, window, cx| {
-            view.sync_composer(window, cx)
+            view.sync_runtime(window, cx)
         });
         let composer_subscription = cx.subscribe_in(&composer, window, |view, _, event, _, cx| {
             view.on_composer_event(event, cx)
@@ -47,6 +63,10 @@ impl RootView {
         Self {
             controller,
             composer,
+            conversation,
+            conversation_scroll: ScrollHandle::new(),
+            scroll_pinning: ScrollPinning::default(),
+            transcript_texts,
             pending_draft: None,
             focus_handle,
             _controller_observation: controller_observation,
@@ -139,7 +159,27 @@ impl RootView {
         });
     }
 
-    fn sync_composer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn sync_runtime(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let conversation = self.controller.read(cx).conversation_projection();
+        if conversation.epoch != self.conversation.epoch {
+            self.transcript_texts.clear();
+        }
+        let fragments = conversation::text_fragments(&conversation);
+        let active = fragments
+            .iter()
+            .map(|(key, _)| key.clone())
+            .collect::<HashSet<_>>();
+        self.transcript_texts.retain(|key, _| active.contains(key));
+        for (key, text) in fragments {
+            if let Some(entity) = self.transcript_texts.get(&key) {
+                entity.update(cx, |text_view, cx| text_view.set_text(text, cx));
+            } else {
+                let entity = cx.new(|cx| TranscriptText::new(key.clone(), text, cx));
+                self.transcript_texts.insert(key, entity);
+            }
+        }
+        self.conversation = conversation;
+
         let projection = self.controller.read(cx).composer_projection();
         let availability = match projection.runtime {
             ComposerRuntime::Unavailable => ComposerAvailability::Unavailable,
@@ -234,6 +274,19 @@ impl RootView {
 impl Render for RootView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let projection = self.controller.read(cx).projection();
+        let selection_active = self
+            .transcript_texts
+            .values()
+            .any(|text| text.read(cx).selection_active());
+        if self.scroll_pinning.should_follow(
+            self.conversation.epoch,
+            self.conversation.revision,
+            self.conversation_scroll.offset().y,
+            self.conversation_scroll.max_offset().height,
+            selection_active,
+        ) {
+            self.conversation_scroll.scroll_to_bottom();
+        }
 
         div()
             .id("runtime-shell")
@@ -258,7 +311,14 @@ impl Render for RootView {
                     .min_h_0()
                     .flex()
                     .flex_row()
-                    .child(runtime_status(&projection, &self.composer, cx))
+                    .child(conversation_area(
+                        &projection,
+                        &self.conversation,
+                        &self.conversation_scroll,
+                        &self.transcript_texts,
+                        &self.composer,
+                        cx,
+                    ))
                     .child(inspector(&projection)),
             )
     }
@@ -345,117 +405,118 @@ fn meta(value: String) -> impl IntoElement {
         .child(value)
 }
 
-fn runtime_status(
+fn conversation_area(
     projection: &ShellProjection,
+    conversation_projection: &ConversationProjection,
+    scroll: &ScrollHandle,
+    transcript_texts: &HashMap<String, Entity<TranscriptText>>,
     composer: &Entity<Composer>,
     cx: &mut Context<RootView>,
 ) -> impl IntoElement {
     let action = projection.action;
+    let scroll = scroll.clone();
+
     div()
         .flex_1()
         .min_w_0()
         .h_full()
-        .px(px(48.0))
-        .py(px(28.0))
         .flex()
         .flex_col()
-        .justify_between()
+        .bg(theme::canvas())
         .child(
             div()
-                .max_w(px(620.0))
-                .flex_1()
-                .min_h_0()
+                .min_h(px(62.0))
+                .px(px(theme::STREAM_PAD_X))
+                .py(px(10.0))
                 .flex()
-                .flex_col()
-                .gap(px(14.0))
+                .flex_row()
+                .items_center()
+                .justify_between()
+                .gap(px(18.0))
+                .bg(theme::floor())
+                .border_b_1()
+                .border_color(theme::edge_soft())
                 .child(
                     div()
-                        .font_family(theme::DISPLAY)
-                        .text_size(px(30.0))
-                        .line_height(relative(1.08))
-                        .font_weight(FontWeight::NORMAL)
-                        .text_color(if projection.no_model {
-                            theme::error()
-                        } else {
-                            theme::bone()
-                        })
-                        .child(projection.headline.clone()),
-                )
-                .child(
-                    div()
-                        .max_w(px(560.0))
-                        .font_family(theme::SANS)
-                        .text_size(px(theme::T_BODY))
-                        .line_height(relative(1.5))
-                        .text_color(theme::bone_dim())
-                        .child(projection.detail.clone()),
-                )
-                .when(projection.has_stale_values, |content| {
-                    content.child(
-                        div()
-                            .font_family(theme::SANS)
-                            .text_size(px(theme::T_UI_SM))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(theme::data())
-                            .child("Last valid values remain visible."),
-                    )
-                })
-                .when_some(action, |content, action| {
-                    content.child(div().mt(px(8.0)).flex().flex_row().child(
-                        controls::recovery_button(
-                            action_id(action),
-                            action.label().to_owned(),
-                            action.shortcut(),
-                            true,
-                            Box::new(cx.listener(move |view, _, _, cx| {
-                                view.activate_recovery(action, cx);
-                            })),
-                        ),
-                    ))
-                }),
-        )
-        .child(
-            div()
-                .flex_shrink_0()
-                .flex()
-                .flex_col()
-                .gap(px(16.0))
-                .child(
-                    div()
-                        .pt(px(14.0))
-                        .border_t_1()
-                        .border_color(theme::edge_soft())
+                        .min_w_0()
                         .flex()
                         .flex_col()
-                        .gap(px(5.0))
+                        .gap(px(3.0))
                         .child(
                             div()
                                 .font_family(theme::SANS)
                                 .text_size(px(theme::T_LABEL))
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .text_color(theme::ash())
-                                .child("Workspace"),
+                                .child(if projection.has_stale_values {
+                                    "Workspace · showing last valid values"
+                                } else {
+                                    "Workspace"
+                                }),
                         )
                         .child(
                             div()
-                                .font_family(theme::MONO)
-                                .text_size(px(theme::T_MONO))
-                                .line_height(relative(1.35))
-                                .font_weight(FontWeight::MEDIUM)
-                                .text_color(theme::data())
+                                .max_w(px(560.0))
                                 .overflow_hidden()
                                 .text_ellipsis()
                                 .whitespace_nowrap()
+                                .font_family(theme::MONO)
+                                .text_size(px(theme::T_MONO))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(theme::data())
                                 .child(projection.workspace.clone()),
                         ),
                 )
-                .child(div().h(px(154.0)).flex_shrink_0().child(composer.clone())),
+                .when_some(action, |header, action| {
+                    header.child(controls::recovery_button(
+                        action_id(action),
+                        action.label().to_owned(),
+                        action.shortcut(),
+                        true,
+                        Box::new(cx.listener(move |view, _, _, cx| {
+                            view.activate_recovery(action, cx);
+                        })),
+                    ))
+                }),
+        )
+        .child(
+            div()
+                .id("conversation-scroll")
+                .flex_1()
+                .min_h_0()
+                .w_full()
+                .overflow_y_scroll()
+                .track_scroll(&scroll)
+                .scrollbar_width(px(theme::SCROLLBAR))
+                .child(
+                    div()
+                        .w_full()
+                        .px(px(theme::STREAM_PAD_X))
+                        .pt(px(16.0))
+                        .pb(px(32.0))
+                        .child(conversation::stream(
+                            conversation_projection,
+                            transcript_texts,
+                        )),
+                ),
+        )
+        .child(
+            div()
+                .flex_shrink_0()
+                .px(px(theme::STREAM_PAD_X))
+                .pt(px(12.0))
+                .pb(px(10.0))
+                .bg(theme::floor())
+                .border_t_1()
+                .border_color(theme::edge_hard())
+                .child(composer.clone()),
         )
 }
 
 fn inspector(projection: &ShellProjection) -> impl IntoElement {
     div()
         .w(px(theme::INSPECT_W))
+        .flex_shrink_0()
         .h_full()
         .px(px(18.0))
         .py(px(18.0))

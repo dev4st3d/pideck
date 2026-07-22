@@ -1,7 +1,7 @@
 use pi_gui::services::rpc::{
     Command, ConnectionGeneration, EntryId, ExtensionError, ExtensionErrorRecordType,
     IncomingRecord, RequestId, RpcClientError, RpcClientErrorKind, RpcDispatch, SessionId,
-    TaggedIncomingRecord, ToolCallId, dispatch_for_effect, normalize_call_result,
+    TaggedIncomingRecord, ToolCallId, decode_record, dispatch_for_effect, normalize_call_result,
     normalize_tagged_record,
 };
 use pi_gui::state::reducer::reduce;
@@ -75,10 +75,32 @@ fn message(key: &str, text: &str, terminal: bool) -> RuntimeMessage {
         key: MessageKey(key.to_owned()),
         role: MessageRole::Assistant,
         timestamp: 42,
-        content: vec![MessageBlock::Text(text.to_owned())],
+        content: vec![MessageBlock::Text {
+            key: BlockKey("text:0".to_owned()),
+            text: text.to_owned(),
+        }],
+        visible: true,
         terminal,
         stop_reason: Some(MessageStopReason::Stop),
         error: None,
+        assistant: None,
+    }
+}
+
+fn user_message(key: &str, text: &str) -> RuntimeMessage {
+    RuntimeMessage {
+        key: MessageKey(key.to_owned()),
+        role: MessageRole::User,
+        timestamp: 43,
+        content: vec![MessageBlock::Text {
+            key: BlockKey("text:0".to_owned()),
+            text: text.to_owned(),
+        }],
+        visible: true,
+        terminal: true,
+        stop_reason: None,
+        error: None,
+        assistant: None,
     }
 }
 
@@ -426,9 +448,193 @@ fn streaming_uses_accumulated_replacement_and_terminal_events_are_idempotent() {
     assert_eq!(messages.len(), 1);
     assert_eq!(
         messages[0].content,
-        vec![MessageBlock::Text("Hello world".to_owned())]
+        vec![MessageBlock::Text {
+            key: BlockKey("text:0".to_owned()),
+            text: "Hello world".to_owned(),
+        }]
     );
     assert!(messages[0].terminal);
+}
+
+#[test]
+fn streaming_start_cannot_erase_a_newer_partial_or_terminal_message() {
+    let (mut state, _) = connected_state("s1");
+    let partial = message("ordered", "partial text", false);
+    apply(
+        &mut state,
+        RuntimeInput::Event(NormalizedEvent::MessageUpdate(partial.clone())),
+    );
+    apply(
+        &mut state,
+        RuntimeInput::Event(NormalizedEvent::MessageStart(message("ordered", "", false))),
+    );
+    assert_eq!(state.messages.data.as_ref().unwrap()[0], partial);
+
+    let terminal = message("ordered", "final text", true);
+    apply(
+        &mut state,
+        RuntimeInput::Event(NormalizedEvent::MessageEnd(terminal.clone())),
+    );
+    apply(
+        &mut state,
+        RuntimeInput::Event(NormalizedEvent::MessageUpdate(message(
+            "ordered",
+            "late partial",
+            false,
+        ))),
+    );
+    assert_eq!(state.messages.data.as_ref().unwrap()[0], terminal);
+}
+
+#[test]
+fn partial_messages_replace_text_and_thinking_blocks_in_place() {
+    let (mut state, _) = connected_state("s1");
+    let mut partial = message("blocks", "Hello", false);
+    partial.content.push(MessageBlock::Thinking {
+        key: BlockKey("thinking:1".to_owned()),
+        text: "Checking".to_owned(),
+        redacted: false,
+    });
+    apply(
+        &mut state,
+        RuntimeInput::Event(NormalizedEvent::MessageStart(message("blocks", "", false))),
+    );
+    apply(
+        &mut state,
+        RuntimeInput::Event(NormalizedEvent::MessageUpdate(partial.clone())),
+    );
+
+    let mut accumulated = message("blocks", "Hello world", false);
+    accumulated.content.push(MessageBlock::Thinking {
+        key: BlockKey("thinking:1".to_owned()),
+        text: "Checking the complete answer".to_owned(),
+        redacted: false,
+    });
+    apply(
+        &mut state,
+        RuntimeInput::Event(NormalizedEvent::MessageUpdate(accumulated.clone())),
+    );
+    assert_eq!(state.messages.data.as_ref().unwrap(), &vec![accumulated]);
+}
+
+#[test]
+fn adapter_preserves_safe_metadata_and_hidden_custom_visibility() {
+    let assistant = json!({
+        "type": "message_end",
+        "message": {
+            "role": "assistant",
+            "content": [
+                {"type": "thinking", "thinking": "safe thought", "redacted": false},
+                {"type": "text", "text": "safe answer"}
+            ],
+            "api": "synthetic-api",
+            "provider": "synthetic-provider",
+            "model": "synthetic-model",
+            "responseModel": "effective-model",
+            "responseId": "private-response-id",
+            "diagnostics": [{
+                "type": "provider-warning",
+                "timestamp": 123,
+                "details": {"secret": "never-store-this"}
+            }],
+            "usage": {
+                "input": 12,
+                "output": 7,
+                "cacheRead": 3,
+                "cacheWrite": 2,
+                "cacheWrite1h": 1,
+                "reasoning": 4,
+                "totalTokens": 24,
+                "cost": {
+                    "input": 0.01,
+                    "output": 0.02,
+                    "cacheRead": 0.003,
+                    "cacheWrite": 0.004,
+                    "total": 0.037
+                }
+            },
+            "stopReason": "length",
+            "errorMessage": "private provider payload",
+            "timestamp": 1733234567890u64
+        }
+    });
+    let record = decode_record(assistant.to_string().as_bytes()).expect("assistant record");
+    let input = normalize_tagged_record(
+        TaggedIncomingRecord {
+            generation: GENERATION,
+            record,
+        },
+        pi_gui::services::rpc::SessionEpoch::default(),
+    )
+    .expect("normalized assistant");
+    let RuntimeInput::Event(NormalizedEvent::MessageEnd(message)) = input.input else {
+        panic!("expected message end");
+    };
+    let metadata = message.assistant.as_ref().expect("assistant metadata");
+    assert_eq!(metadata.provider, "synthetic-provider");
+    assert_eq!(metadata.model, "synthetic-model");
+    assert_eq!(metadata.response_model.as_deref(), Some("effective-model"));
+    assert_eq!(metadata.usage.total_tokens, 24);
+    assert_eq!(metadata.usage.reasoning, Some(4));
+    assert_eq!(message.timestamp, 1_733_234_567_890);
+    assert_eq!(message.stop_reason, Some(MessageStopReason::Length));
+    assert_eq!(message.error.as_deref(), Some("Assistant request failed"));
+    let debug = format!("{message:?}");
+    assert!(!debug.contains("never-store-this"));
+    assert!(!debug.contains("private provider payload"));
+    assert!(!debug.contains("private-response-id"));
+
+    let hidden = json!({
+        "type": "message_start",
+        "message": {
+            "role": "custom",
+            "customType": "synthetic-hidden",
+            "content": "hidden context",
+            "display": false,
+            "details": {"secret": "not-a-diagnostic"},
+            "timestamp": 99
+        }
+    });
+    let record = decode_record(hidden.to_string().as_bytes()).expect("custom record");
+    let input = normalize_tagged_record(
+        TaggedIncomingRecord {
+            generation: GENERATION,
+            record,
+        },
+        pi_gui::services::rpc::SessionEpoch::default(),
+    )
+    .expect("normalized custom");
+    let RuntimeInput::Event(NormalizedEvent::MessageStart(message)) = input.input else {
+        panic!("expected custom start");
+    };
+    assert_eq!(message.role, MessageRole::Custom);
+    assert!(!message.visible);
+}
+
+#[test]
+fn synthesized_message_keys_do_not_use_vector_position_or_collapse_equal_timestamps() {
+    let mut keys = Vec::new();
+    for text in ["first", "second"] {
+        let event = json!({
+            "type": "message_start",
+            "message": {"role": "user", "content": text, "timestamp": 77}
+        });
+        let record = decode_record(event.to_string().as_bytes()).expect("user record");
+        let input = normalize_tagged_record(
+            TaggedIncomingRecord {
+                generation: GENERATION,
+                record,
+            },
+            pi_gui::services::rpc::SessionEpoch::default(),
+        )
+        .expect("normalized user");
+        let RuntimeInput::Event(NormalizedEvent::MessageStart(message)) = input.input else {
+            panic!("expected user start");
+        };
+        keys.push(message.key);
+    }
+    assert_ne!(keys[0], keys[1]);
+    assert!(keys[0].0.starts_with("user:77:"));
 }
 
 #[test]
@@ -608,6 +814,80 @@ fn prompt_acceptance_respects_event_before_response_ordering() {
 }
 
 #[test]
+fn accepted_user_input_is_optimistic_only_until_authoritative_message_arrives() {
+    let (mut state, _) = connected_state("s1");
+    let request = RequestId::from("optimistic");
+    let submit = RuntimeRequest::Submit {
+        request: request.clone(),
+        text: "Show this once".to_owned(),
+        kind: SubmissionKind::Prompt,
+    };
+    apply(
+        &mut state,
+        RuntimeInput::Intent(RuntimeIntent::Submit {
+            request: request.clone(),
+            text: "Show this once".to_owned(),
+            kind: SubmissionKind::Prompt,
+        }),
+    );
+    response(&mut state, submit, Ok(NormalizedResponse::Accepted));
+    assert_eq!(state.optimistic_user_inputs.len(), 1);
+    assert!(state.optimistic_user_inputs[0].accepted);
+
+    apply(
+        &mut state,
+        RuntimeInput::Event(NormalizedEvent::MessageStart(user_message(
+            "authoritative-user",
+            "Show this once",
+        ))),
+    );
+    assert!(state.optimistic_user_inputs.is_empty());
+    assert_eq!(
+        state
+            .messages
+            .data
+            .as_ref()
+            .unwrap()
+            .iter()
+            .filter(|message| message.role == MessageRole::User)
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn authoritative_user_event_before_acceptance_never_creates_a_duplicate() {
+    let (mut state, _) = connected_state("s1");
+    let request = RequestId::from("event-first");
+    apply(
+        &mut state,
+        RuntimeInput::Intent(RuntimeIntent::Submit {
+            request: request.clone(),
+            text: "Fast authoritative input".to_owned(),
+            kind: SubmissionKind::Prompt,
+        }),
+    );
+    apply(
+        &mut state,
+        RuntimeInput::Event(NormalizedEvent::MessageStart(user_message(
+            "fast-authoritative",
+            "Fast authoritative input",
+        ))),
+    );
+    assert!(state.optimistic_user_inputs[0].authoritative_seen);
+    response(
+        &mut state,
+        RuntimeRequest::Submit {
+            request,
+            text: "Fast authoritative input".to_owned(),
+            kind: SubmissionKind::Prompt,
+        },
+        Ok(NormalizedResponse::Accepted),
+    );
+    assert!(state.optimistic_user_inputs.is_empty());
+}
+
+#[test]
 fn all_session_replacements_increment_epoch_before_emission_and_rehydrate() {
     let mutations = [
         SessionMutation::New {
@@ -707,6 +987,160 @@ fn changed_session_performs_full_rebuild_and_advances_epoch() {
         effect.effect,
         EffectKind::Request(RuntimeRequest::GetEntries { since: None, .. })
     )));
+}
+
+#[test]
+fn session_replacement_suppresses_old_events_and_rebuilds_even_with_same_session_id() {
+    let (mut state, _) = connected_state("s1");
+    state
+        .messages
+        .ready(vec![message("old", "old transcript", true)]);
+    let ignored_before = state.stale_inputs_ignored;
+
+    let mutation = SessionMutation::Clone;
+    apply(
+        &mut state,
+        RuntimeInput::Intent(RuntimeIntent::ReplaceSession(mutation.clone())),
+    );
+    apply(
+        &mut state,
+        RuntimeInput::Event(NormalizedEvent::MessageEnd(message(
+            "old-late",
+            "late old session content",
+            true,
+        ))),
+    );
+    assert_eq!(state.stale_inputs_ignored, ignored_before + 1);
+    assert_eq!(state.messages.data.as_ref().unwrap().len(), 1);
+
+    response(
+        &mut state,
+        RuntimeRequest::SessionMutation(mutation),
+        Ok(NormalizedResponse::SessionMutation { cancelled: false }),
+    );
+    response(
+        &mut state,
+        RuntimeRequest::GetState,
+        Ok(NormalizedResponse::State(session_state("s1", false, 0))),
+    );
+    assert!(!state.replacement_awaiting_state);
+    assert!(state.messages.data.is_none());
+    assert!(state.optimistic_user_inputs.is_empty());
+}
+
+#[test]
+fn reconnect_hydration_replaces_stale_partials_but_keeps_new_generation_events() {
+    let (mut state, _) = connected_state("s1");
+    state
+        .messages
+        .ready(vec![message("stale", "old partial", false)]);
+    let epoch = state.epoch;
+    reduce(
+        &mut state,
+        StampedInput {
+            generation: ConnectionGeneration::new(2),
+            epoch,
+            input: RuntimeInput::Connected { recovery: true },
+        },
+    );
+    let hydration = response(
+        &mut state,
+        RuntimeRequest::GetState,
+        Ok(NormalizedResponse::State(session_state("s1", true, 0))),
+    );
+    let messages_request = hydration
+        .iter()
+        .find_map(|effect| match &effect.effect {
+            EffectKind::Request(request @ RuntimeRequest::GetMessages { .. }) => {
+                Some(request.clone())
+            }
+            _ => None,
+        })
+        .expect("messages request");
+
+    apply(
+        &mut state,
+        RuntimeInput::Event(NormalizedEvent::MessageUpdate(message(
+            "live",
+            "new generation partial",
+            false,
+        ))),
+    );
+    response(
+        &mut state,
+        messages_request,
+        Ok(NormalizedResponse::Messages(vec![message(
+            "hydrated",
+            "authoritative history",
+            true,
+        )])),
+    );
+
+    let keys = state
+        .messages
+        .data
+        .as_ref()
+        .unwrap()
+        .iter()
+        .map(|message| message.key.0.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(keys, vec!["hydrated", "live"]);
+    assert!(!keys.contains(&"stale"));
+}
+
+#[test]
+fn reconnect_hydration_reconciles_accepted_input_against_authoritative_history() {
+    let (mut state, _) = connected_state("s1");
+    let request = RequestId::from("accepted-before-reconnect");
+    apply(
+        &mut state,
+        RuntimeInput::Intent(RuntimeIntent::Submit {
+            request: request.clone(),
+            text: "Persisted while reconnecting".to_owned(),
+            kind: SubmissionKind::Prompt,
+        }),
+    );
+    response(
+        &mut state,
+        RuntimeRequest::Submit {
+            request,
+            text: "Persisted while reconnecting".to_owned(),
+            kind: SubmissionKind::Prompt,
+        },
+        Ok(NormalizedResponse::Accepted),
+    );
+    assert_eq!(state.optimistic_user_inputs.len(), 1);
+
+    let epoch = state.epoch;
+    reduce(
+        &mut state,
+        StampedInput {
+            generation: ConnectionGeneration::new(2),
+            epoch,
+            input: RuntimeInput::Connected { recovery: true },
+        },
+    );
+    let hydration = response(
+        &mut state,
+        RuntimeRequest::GetState,
+        Ok(NormalizedResponse::State(session_state("s1", false, 0))),
+    );
+    let messages_request = hydration
+        .into_iter()
+        .find_map(|effect| match effect.effect {
+            EffectKind::Request(request @ RuntimeRequest::GetMessages { .. }) => Some(request),
+            _ => None,
+        })
+        .expect("messages request");
+    response(
+        &mut state,
+        messages_request,
+        Ok(NormalizedResponse::Messages(vec![user_message(
+            "persisted-user",
+            "Persisted while reconnecting",
+        )])),
+    );
+    assert!(state.optimistic_user_inputs.is_empty());
 }
 
 #[test]
@@ -827,6 +1261,29 @@ fn unknown_records_and_extension_failures_are_bounded_without_raw_payloads() {
     }
     assert_eq!(state.unknown_records.len(), MAX_UNKNOWN_RECORDS);
     assert_eq!(state.extension_errors.len(), MAX_RUNTIME_ERRORS);
+}
+
+#[test]
+fn long_streamed_content_is_not_truncated_or_split_into_duplicate_messages() {
+    let (mut state, _) = connected_state("s1");
+    let long = "0123456789abcdef\n".repeat(12_000);
+    apply(
+        &mut state,
+        RuntimeInput::Event(NormalizedEvent::MessageUpdate(message(
+            "long", &long, false,
+        ))),
+    );
+    apply(
+        &mut state,
+        RuntimeInput::Event(NormalizedEvent::MessageEnd(message("long", &long, true))),
+    );
+    let messages = state.messages.data.as_ref().unwrap();
+    assert_eq!(messages.len(), 1);
+    let MessageBlock::Text { text, .. } = &messages[0].content[0] else {
+        panic!("expected text");
+    };
+    assert_eq!(text.len(), long.len());
+    assert_eq!(text, &long);
 }
 
 #[test]
