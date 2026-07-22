@@ -99,6 +99,15 @@ pub struct SessionSnapshot {
     pub message_count: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RuntimeOperation {
+    SetSteeringMode(QueueDeliveryMode),
+    SetFollowUpMode(QueueDeliveryMode),
+    Compact,
+    SetAutoCompaction(bool),
+    SetAutoRetry(bool),
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuntimeThinkingLevel {
     Off,
@@ -399,11 +408,15 @@ pub enum ToolStatus {
     Succeeded,
     Failed,
     Cancelled,
+    Uncertain,
 }
 
 impl ToolStatus {
     pub fn is_terminal(self) -> bool {
-        matches!(self, Self::Succeeded | Self::Failed | Self::Cancelled)
+        matches!(
+            self,
+            Self::Succeeded | Self::Failed | Self::Cancelled | Self::Uncertain
+        )
     }
 }
 
@@ -637,6 +650,9 @@ pub struct RuntimeState {
     pub queue: QueueContents,
     pub retry: RetryState,
     pub compaction: CompactionState,
+    pub pending_operation: Option<RuntimeOperation>,
+    pub context_awaiting_fresh_usage: bool,
+    pub auto_retry_enabled: Option<bool>,
     pub dialogs: HashMap<RequestId, DialogRequest>,
     pub statuses: BTreeMap<String, ExtensionStatus>,
     pub widgets: BTreeMap<String, ExtensionWidget>,
@@ -680,6 +696,9 @@ impl RuntimeState {
             queue: QueueContents::default(),
             retry: RetryState::Idle,
             compaction: CompactionState::Idle,
+            pending_operation: None,
+            context_awaiting_fresh_usage: false,
+            auto_retry_enabled: None,
             dialogs: HashMap::new(),
             statuses: BTreeMap::new(),
             widgets: BTreeMap::new(),
@@ -781,6 +800,17 @@ pub enum RuntimeIntent {
     Abort,
     AbortBash,
     AbortRetry,
+    SetSteeringMode(QueueDeliveryMode),
+    SetFollowUpMode(QueueDeliveryMode),
+    Compact {
+        custom_instructions: Option<String>,
+    },
+    SetAutoCompaction {
+        enabled: bool,
+    },
+    SetAutoRetry {
+        enabled: bool,
+    },
     ReplaceSession(SessionMutation),
     AnswerDialog {
         request: RequestId,
@@ -825,6 +855,21 @@ pub enum RuntimeRequest {
     Abort,
     AbortBash,
     AbortRetry,
+    SetSteeringMode {
+        mode: QueueDeliveryMode,
+    },
+    SetFollowUpMode {
+        mode: QueueDeliveryMode,
+    },
+    Compact {
+        custom_instructions: Option<String>,
+    },
+    SetAutoCompaction {
+        enabled: bool,
+    },
+    SetAutoRetry {
+        enabled: bool,
+    },
     SessionMutation(SessionMutation),
 }
 
@@ -845,6 +890,9 @@ pub enum NormalizedResponse {
     },
     Accepted,
     Bash(DirectBashResult),
+    Compacted {
+        summary: String,
+    },
     SessionMutation {
         cancelled: bool,
     },

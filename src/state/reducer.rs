@@ -6,8 +6,8 @@ use super::runtime::{
     MAX_NOTIFICATIONS, MAX_UNKNOWN_RECORDS, MessageBlock, MessageRole, NormalizedEvent,
     NormalizedResponse, OptimisticUserInput, PromptDelivery, QueueContents, RequestFailureKind,
     RetryState, RuntimeEffect, RuntimeInput, RuntimeIntent, RuntimeLifecycle, RuntimeMessage,
-    RuntimeRequest, RuntimeState, SafeError, SessionMutation, StampedInput, SubmissionKind,
-    ToolExecution, ToolStatus, UnknownRecord, push_bounded,
+    RuntimeOperation, RuntimeRequest, RuntimeState, SafeError, SessionMutation, StampedInput,
+    SubmissionKind, ToolExecution, ToolStatus, UnknownRecord, push_bounded,
 };
 use crate::services::rpc::{EntryId, RequestId};
 
@@ -55,6 +55,7 @@ fn connect(
         state.generation = generation;
         state.epoch = epoch;
         state.replacement_awaiting_state = false;
+        state.pending_operation = None;
         invalidate_extension_ui(state);
     }
     if matches!(state.prompt_delivery, PromptDelivery::Pending { .. }) {
@@ -77,6 +78,8 @@ fn disconnect(
     error: SafeError,
     observed_at: Instant,
 ) -> Vec<RuntimeEffect> {
+    state.pending_operation = None;
+    state.replacement_awaiting_state = false;
     if matches!(state.prompt_delivery, PromptDelivery::Pending { .. }) {
         mark_prompt_uncertain(state);
     }
@@ -85,6 +88,12 @@ fn disconnect(
             execution.status = BashStatus::Uncertain;
             execution.finished_at = Some(observed_at);
             execution.error = Some("Pi disconnected during Bash execution".to_owned());
+        }
+    }
+    for tool in state.tools.values_mut() {
+        if matches!(tool.status, ToolStatus::Pending | ToolStatus::Running) {
+            tool.status = ToolStatus::Uncertain;
+            tool.finished_at = Some(observed_at);
         }
     }
     state.lifecycle = RuntimeLifecycle::Disconnected;
@@ -228,6 +237,64 @@ fn reduce_intent(
             state.retry = RetryState::Cancelling;
             vec![effect(state, RuntimeRequest::AbortRetry)]
         }
+        RuntimeIntent::SetSteeringMode(mode) => {
+            if !settings_allowed(state) || state.pending_operation.is_some() {
+                return Vec::new();
+            }
+            state.pending_operation = Some(RuntimeOperation::SetSteeringMode(mode));
+            state.bump_revision();
+            vec![effect(state, RuntimeRequest::SetSteeringMode { mode })]
+        }
+        RuntimeIntent::SetFollowUpMode(mode) => {
+            if !settings_allowed(state) || state.pending_operation.is_some() {
+                return Vec::new();
+            }
+            state.pending_operation = Some(RuntimeOperation::SetFollowUpMode(mode));
+            state.bump_revision();
+            vec![effect(state, RuntimeRequest::SetFollowUpMode { mode })]
+        }
+        RuntimeIntent::Compact {
+            custom_instructions,
+        } => {
+            if !matches!(
+                state.lifecycle,
+                RuntimeLifecycle::Ready | RuntimeLifecycle::Settled
+            ) || state.pending_operation.is_some()
+                || !matches!(
+                    state.compaction,
+                    CompactionState::Idle | CompactionState::Completed { .. }
+                )
+            {
+                return Vec::new();
+            }
+            state.pending_operation = Some(RuntimeOperation::Compact);
+            state.compaction = CompactionState::Running {
+                reason: super::runtime::CompactionKind::Manual,
+            };
+            state.bump_revision();
+            vec![effect(
+                state,
+                RuntimeRequest::Compact {
+                    custom_instructions,
+                },
+            )]
+        }
+        RuntimeIntent::SetAutoCompaction { enabled } => {
+            if !settings_allowed(state) || state.pending_operation.is_some() {
+                return Vec::new();
+            }
+            state.pending_operation = Some(RuntimeOperation::SetAutoCompaction(enabled));
+            state.bump_revision();
+            vec![effect(state, RuntimeRequest::SetAutoCompaction { enabled })]
+        }
+        RuntimeIntent::SetAutoRetry { enabled } => {
+            if !settings_allowed(state) || state.pending_operation.is_some() {
+                return Vec::new();
+            }
+            state.pending_operation = Some(RuntimeOperation::SetAutoRetry(enabled));
+            state.bump_revision();
+            vec![effect(state, RuntimeRequest::SetAutoRetry { enabled })]
+        }
         RuntimeIntent::ReplaceSession(mutation) => begin_session_replacement(state, mutation),
         RuntimeIntent::AnswerDialog { request, answer } => {
             if state.dialogs.remove(&request).is_none() {
@@ -242,6 +309,7 @@ fn begin_session_replacement(
     state: &mut RuntimeState,
     mutation: SessionMutation,
 ) -> Vec<RuntimeEffect> {
+    state.pending_operation = None;
     state.epoch = state.epoch.next();
     state.lifecycle = RuntimeLifecycle::Loading;
     state.hydration_mode = HydrationMode::SessionReplacement;
@@ -295,6 +363,7 @@ fn reduce_response(
         }
         (RuntimeRequest::GetStats, Ok(NormalizedResponse::Stats(stats))) => {
             if state.session_id().is_some_and(|id| id == &stats.session_id) {
+                state.context_awaiting_fresh_usage = stats.context_tokens.is_none();
                 state.stats.ready(stats);
             } else {
                 state.stale_inputs_ignored = state.stale_inputs_ignored.saturating_add(1);
@@ -423,6 +492,69 @@ fn reduce_response(
             state.lifecycle = RuntimeLifecycle::Cancelling;
             Vec::new()
         }
+        (RuntimeRequest::SetSteeringMode { mode }, Ok(NormalizedResponse::Accepted)) => {
+            if matches!(state.pending_operation, Some(RuntimeOperation::SetSteeringMode(pending)) if pending == mode)
+            {
+                if let Some(session) = state.session.data.as_mut() {
+                    session.steering_mode = mode;
+                }
+                state.pending_operation = None;
+                state.bump_revision();
+            }
+            Vec::new()
+        }
+        (RuntimeRequest::SetFollowUpMode { mode }, Ok(NormalizedResponse::Accepted)) => {
+            if matches!(state.pending_operation, Some(RuntimeOperation::SetFollowUpMode(pending)) if pending == mode)
+            {
+                if let Some(session) = state.session.data.as_mut() {
+                    session.follow_up_mode = mode;
+                }
+                state.pending_operation = None;
+                state.bump_revision();
+            }
+            Vec::new()
+        }
+        (RuntimeRequest::Compact { .. }, Ok(NormalizedResponse::Compacted { summary })) => {
+            state.pending_operation = None;
+            state.compaction = CompactionState::Completed {
+                reason: super::runtime::CompactionKind::Manual,
+                summary,
+                will_retry: false,
+            };
+            state.context_awaiting_fresh_usage = true;
+            if let Some(stats) = state.stats.data.as_mut() {
+                stats.context_tokens = None;
+                stats.context_percent = None;
+            }
+            state.bump_revision();
+            vec![effect(
+                state,
+                RuntimeRequest::GetEntries {
+                    since: state.durable_cursor.clone(),
+                    base_revision: state.revision,
+                },
+            )]
+        }
+        (RuntimeRequest::SetAutoCompaction { enabled }, Ok(NormalizedResponse::Accepted)) => {
+            if matches!(state.pending_operation, Some(RuntimeOperation::SetAutoCompaction(pending)) if pending == enabled)
+            {
+                if let Some(session) = state.session.data.as_mut() {
+                    session.auto_compaction_enabled = enabled;
+                }
+                state.pending_operation = None;
+                state.bump_revision();
+            }
+            Vec::new()
+        }
+        (RuntimeRequest::SetAutoRetry { enabled }, Ok(NormalizedResponse::Accepted)) => {
+            if matches!(state.pending_operation, Some(RuntimeOperation::SetAutoRetry(pending)) if pending == enabled)
+            {
+                state.auto_retry_enabled = Some(enabled);
+                state.pending_operation = None;
+                state.bump_revision();
+            }
+            Vec::new()
+        }
         (RuntimeRequest::AbortBash, Ok(NormalizedResponse::Accepted)) => Vec::new(),
         (RuntimeRequest::AbortBash, Err(failure)) => {
             if let Some(execution) = state
@@ -449,6 +581,25 @@ fn reduce_response(
                 HydrationMode::SessionReplacement
             };
             vec![effect(state, RuntimeRequest::GetState)]
+        }
+        (
+            request @ (RuntimeRequest::SetSteeringMode { .. }
+            | RuntimeRequest::SetFollowUpMode { .. }
+            | RuntimeRequest::Compact { .. }
+            | RuntimeRequest::SetAutoCompaction { .. }
+            | RuntimeRequest::SetAutoRetry { .. }),
+            Err(failure),
+        ) => {
+            if matches!(request, RuntimeRequest::Compact { .. }) {
+                state.compaction = CompactionState::Failed {
+                    reason: super::runtime::CompactionKind::Manual,
+                    summary: failure.error.summary.clone(),
+                };
+            }
+            state.pending_operation = None;
+            state.bounded_error(failure.error);
+            state.bump_revision();
+            Vec::new()
         }
         (RuntimeRequest::SessionMutation(_), Err(failure)) => {
             state.replacement_awaiting_state = false;
@@ -684,7 +835,8 @@ fn reduce_event(state: &mut RuntimeState, event: NormalizedEvent, observed_at: I
                     finished_at: None,
                 });
             if !tool.status.is_terminal()
-                || (tool.status == ToolStatus::Cancelled && !tool.authoritative_end)
+                || (matches!(tool.status, ToolStatus::Cancelled | ToolStatus::Uncertain)
+                    && !tool.authoritative_end)
             {
                 tool.name = name;
                 tool.result = Some(result);
@@ -723,6 +875,8 @@ fn reduce_event(state: &mut RuntimeState, event: NormalizedEvent, observed_at: I
             will_retry,
             error,
         } => {
+            let compaction_succeeded = !aborted && error.is_none();
+            state.pending_operation = None;
             state.compaction = if aborted {
                 CompactionState::Aborted { reason }
             } else if let Some(error) = error {
@@ -740,6 +894,7 @@ fn reduce_event(state: &mut RuntimeState, event: NormalizedEvent, observed_at: I
             if will_retry {
                 state.lifecycle = RuntimeLifecycle::Running;
             }
+            state.context_awaiting_fresh_usage = compaction_succeeded;
             if let Some(stats) = state.stats.data.as_mut() {
                 stats.context_tokens = None;
                 stats.context_percent = None;
@@ -855,6 +1010,8 @@ fn clear_session_scoped_state(state: &mut RuntimeState) {
     state.queue = QueueContents::default();
     state.retry = RetryState::Idle;
     state.compaction = CompactionState::Idle;
+    state.pending_operation = None;
+    state.context_awaiting_fresh_usage = false;
     state.durable_cursor = None;
     state.cursor_session_id = None;
     state.live_message_keys.clear();
@@ -900,6 +1057,14 @@ fn submission_allowed(lifecycle: RuntimeLifecycle, kind: SubmissionKind) -> bool
         }
         SubmissionKind::Steer | SubmissionKind::FollowUp => lifecycle == RuntimeLifecycle::Running,
     }
+}
+
+fn settings_allowed(state: &RuntimeState) -> bool {
+    state.session.data.is_some()
+        && matches!(
+            state.lifecycle,
+            RuntimeLifecycle::Ready | RuntimeLifecycle::Running | RuntimeLifecycle::Settled
+        )
 }
 
 fn apply_entries(
@@ -1141,6 +1306,11 @@ fn request_name(request: &RuntimeRequest) -> &'static str {
         RuntimeRequest::Abort => "abort",
         RuntimeRequest::AbortBash => "abort_bash",
         RuntimeRequest::AbortRetry => "abort_retry",
+        RuntimeRequest::SetSteeringMode { .. } => "set_steering_mode",
+        RuntimeRequest::SetFollowUpMode { .. } => "set_follow_up_mode",
+        RuntimeRequest::Compact { .. } => "compact",
+        RuntimeRequest::SetAutoCompaction { .. } => "set_auto_compaction",
+        RuntimeRequest::SetAutoRetry { .. } => "set_auto_retry",
         RuntimeRequest::SessionMutation(_) => "session mutation",
     }
 }

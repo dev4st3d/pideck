@@ -12,7 +12,10 @@ use crate::controller::{
     AcceptedSubmission, AcceptedSubmissionKind, ComposerRuntime, ConversationProjection,
     RuntimeController, SubmissionPreference,
 };
-use crate::state::runtime::{BashStatus, PromptDelivery};
+use crate::state::runtime::{
+    BashStatus, CompactionState, PromptDelivery, QueueContents, QueueDeliveryMode, RetryState,
+    RuntimeLifecycle, RuntimeOperation,
+};
 use crate::state::{RecoveryAction, ShellProjection};
 use crate::theme;
 use crate::views::composer::{Composer, ComposerAvailability, ComposerEvent, ComposerFeedback};
@@ -194,6 +197,42 @@ impl RootView {
     fn abort_bash(&mut self, cx: &mut Context<Self>) {
         self.controller.update(cx, |controller, cx| {
             controller.abort_bash(cx);
+        });
+    }
+
+    fn abort_retry(&mut self, cx: &mut Context<Self>) {
+        self.controller.update(cx, |controller, cx| {
+            controller.abort_retry(cx);
+        });
+    }
+
+    fn set_steering_mode(&mut self, mode: QueueDeliveryMode, cx: &mut Context<Self>) {
+        self.controller.update(cx, |controller, cx| {
+            controller.set_steering_mode(mode, cx);
+        });
+    }
+
+    fn set_follow_up_mode(&mut self, mode: QueueDeliveryMode, cx: &mut Context<Self>) {
+        self.controller.update(cx, |controller, cx| {
+            controller.set_follow_up_mode(mode, cx);
+        });
+    }
+
+    fn set_auto_compaction(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        self.controller.update(cx, |controller, cx| {
+            controller.set_auto_compaction(enabled, cx);
+        });
+    }
+
+    fn set_auto_retry(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        self.controller.update(cx, |controller, cx| {
+            controller.set_auto_retry(enabled, cx);
+        });
+    }
+
+    fn compact(&mut self, cx: &mut Context<Self>) {
+        self.controller.update(cx, |controller, cx| {
+            controller.compact(None, cx);
         });
     }
 
@@ -426,7 +465,7 @@ impl Render for RootView {
                         &self.composer,
                         cx,
                     ))
-                    .child(inspector(&projection)),
+                    .child(inspector(&projection, &self.conversation, cx)),
             )
     }
 }
@@ -622,7 +661,11 @@ fn conversation_area(
         )
 }
 
-fn inspector(projection: &ShellProjection) -> impl IntoElement {
+fn inspector(
+    projection: &ShellProjection,
+    conversation: &ConversationProjection,
+    cx: &mut Context<RootView>,
+) -> impl IntoElement {
     div()
         .w(px(theme::INSPECT_W))
         .flex_shrink_0()
@@ -656,6 +699,361 @@ fn inspector(projection: &ShellProjection) -> impl IntoElement {
         .child(controls::metric("Cost", projection.cost.label()))
         .child(controls::metric("Model", projection.model.label()))
         .child(controls::metric("Thinking", projection.thinking.label()))
+        .child(run_controls(conversation, cx))
+        .child(queue_panel(conversation))
+}
+
+fn run_controls(
+    conversation: &ConversationProjection,
+    cx: &mut Context<RootView>,
+) -> impl IntoElement {
+    let locked = conversation.pending_operation.is_some();
+    let can_run_controls = conversation.steering_mode.is_some();
+    let compact_enabled = matches!(
+        conversation.lifecycle,
+        RuntimeLifecycle::Ready | RuntimeLifecycle::Settled
+    ) && !locked
+        && !matches!(conversation.compaction, CompactionState::Running { .. });
+    let abort_enabled = conversation.lifecycle == RuntimeLifecycle::Running;
+    let abort_retry_enabled = matches!(conversation.retry, RetryState::Waiting { .. });
+    let bash_running = conversation
+        .bash_executions
+        .iter()
+        .any(|execution| execution.status == BashStatus::Running);
+
+    div()
+        .mt(px(14.0))
+        .flex()
+        .flex_col()
+        .gap(px(8.0))
+        .child(section_label("Run controls"))
+        .when_some(
+            conversation.pending_operation.as_ref(),
+            |panel, operation| {
+                panel.child(status_line(
+                    "Pending",
+                    operation_label(operation).to_owned(),
+                ))
+            },
+        )
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(8.0))
+                .child(controls::operation_button(
+                    "abort-run",
+                    "Abort run",
+                    if abort_enabled {
+                        "Current agent only"
+                    } else {
+                        "No active run"
+                    },
+                    abort_enabled,
+                    controls::ControlTone::Danger,
+                    Box::new(cx.listener(|view, _, _, cx| view.abort(cx))),
+                ))
+                .child(controls::operation_button(
+                    "abort-bash",
+                    "Abort Bash",
+                    if bash_running {
+                        "Direct Bash only"
+                    } else {
+                        "No Bash running"
+                    },
+                    bash_running,
+                    controls::ControlTone::Danger,
+                    Box::new(cx.listener(|view, _, _, cx| view.abort_bash(cx))),
+                ))
+                .child(controls::operation_button(
+                    "abort-retry",
+                    "Abort retry",
+                    if abort_retry_enabled {
+                        "Retry timer only"
+                    } else {
+                        "No retry timer"
+                    },
+                    abort_retry_enabled,
+                    controls::ControlTone::Danger,
+                    Box::new(cx.listener(|view, _, _, cx| view.abort_retry(cx))),
+                ))
+                .child(controls::operation_button(
+                    "compact-now",
+                    "Compact",
+                    if compact_enabled {
+                        "Manual context summary"
+                    } else {
+                        "Wait until idle"
+                    },
+                    compact_enabled,
+                    controls::ControlTone::Normal,
+                    Box::new(cx.listener(|view, _, _, cx| view.compact(cx))),
+                )),
+        )
+        .child(mode_controls(
+            "steering",
+            "Steering mode",
+            conversation.steering_mode,
+            locked || !can_run_controls,
+            |view, mode, cx| view.set_steering_mode(mode, cx),
+            cx,
+        ))
+        .child(mode_controls(
+            "follow-up",
+            "Follow-up mode",
+            conversation.follow_up_mode,
+            locked || !can_run_controls,
+            |view, mode, cx| view.set_follow_up_mode(mode, cx),
+            cx,
+        ))
+        .child(toggle_row(
+            "auto-compaction",
+            "Auto compaction",
+            conversation.auto_compaction_enabled,
+            locked || !can_run_controls,
+            |view, enabled, cx| view.set_auto_compaction(enabled, cx),
+            cx,
+        ))
+        .child(toggle_row(
+            "auto-retry",
+            "Auto retry",
+            conversation.auto_retry_enabled,
+            locked || !can_run_controls,
+            |view, enabled, cx| view.set_auto_retry(enabled, cx),
+            cx,
+        ))
+}
+
+fn mode_controls(
+    prefix: &'static str,
+    title: &'static str,
+    current: Option<QueueDeliveryMode>,
+    locked: bool,
+    apply: fn(&mut RootView, QueueDeliveryMode, &mut Context<RootView>),
+    cx: &mut Context<RootView>,
+) -> impl IntoElement {
+    let current_label = current.map(mode_label).unwrap_or("Unknown");
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(6.0))
+        .child(status_line(title, current_label.to_owned()))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(8.0))
+                .child(mode_button(
+                    format!("{prefix}-all"),
+                    "All",
+                    QueueDeliveryMode::All,
+                    current,
+                    locked,
+                    apply,
+                    cx,
+                ))
+                .child(mode_button(
+                    format!("{prefix}-one"),
+                    "One at a time",
+                    QueueDeliveryMode::OneAtATime,
+                    current,
+                    locked,
+                    apply,
+                    cx,
+                )),
+        )
+}
+
+fn mode_button(
+    id: String,
+    label: &'static str,
+    mode: QueueDeliveryMode,
+    current: Option<QueueDeliveryMode>,
+    locked: bool,
+    apply: fn(&mut RootView, QueueDeliveryMode, &mut Context<RootView>),
+    cx: &mut Context<RootView>,
+) -> impl IntoElement {
+    let selected = current == Some(mode);
+    let detail = if selected { "Selected" } else { "Switch mode" };
+    controls::operation_button(
+        id,
+        label,
+        detail,
+        current.is_some() && !locked && !selected,
+        controls::ControlTone::Normal,
+        Box::new(cx.listener(move |view, _, _, cx| apply(view, mode, cx))),
+    )
+}
+
+fn toggle_row(
+    prefix: &'static str,
+    title: &'static str,
+    current: Option<bool>,
+    locked: bool,
+    apply: fn(&mut RootView, bool, &mut Context<RootView>),
+    cx: &mut Context<RootView>,
+) -> impl IntoElement {
+    let current_label = current.map(on_off).unwrap_or("Unknown");
+    let target = !current.unwrap_or(true);
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(6.0))
+        .child(status_line(title, current_label.to_owned()))
+        .child(controls::operation_button(
+            format!("{prefix}-toggle"),
+            if target { "Enable" } else { "Disable" },
+            "Protocol toggle",
+            current.is_some() && !locked,
+            controls::ControlTone::Normal,
+            Box::new(cx.listener(move |view, _, _, cx| apply(view, target, cx))),
+        ))
+}
+
+fn queue_panel(conversation: &ConversationProjection) -> impl IntoElement {
+    div()
+        .mt(px(14.0))
+        .flex()
+        .flex_col()
+        .gap(px(8.0))
+        .child(section_label("Queued input"))
+        .when(conversation.context_awaiting_fresh_usage, |panel| {
+            panel.child(status_line(
+                "Context",
+                "Awaiting fresh usage after compaction".to_owned(),
+            ))
+        })
+        .child(match &conversation.queue {
+            QueueContents::Unknown { pending_count } => status_line(
+                "Pending",
+                format!(
+                    "Pi reports {pending_count} queued item{}",
+                    plural(*pending_count)
+                ),
+            )
+            .into_any_element(),
+            QueueContents::Known {
+                steering,
+                follow_up,
+            } => div()
+                .flex()
+                .flex_col()
+                .gap(px(8.0))
+                .child(queue_group("Steering", steering))
+                .child(queue_group("Follow-up", follow_up))
+                .into_any_element(),
+        })
+}
+
+fn queue_group(title: &'static str, items: &[String]) -> impl IntoElement {
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(5.0))
+        .child(status_line(
+            title,
+            format!("{} item{}", items.len(), plural(items.len() as u64)),
+        ))
+        .when(items.is_empty(), |group| {
+            group.child(
+                div()
+                    .px(px(10.0))
+                    .py(px(8.0))
+                    .rounded(px(theme::RADIUS_SM))
+                    .bg(theme::canvas())
+                    .font_family(theme::SANS)
+                    .text_size(px(theme::T_UI_SM))
+                    .text_color(theme::smoke())
+                    .child("Empty"),
+            )
+        })
+        .children(items.iter().enumerate().map(|(index, item)| {
+            div()
+                .px(px(10.0))
+                .py(px(8.0))
+                .rounded(px(theme::RADIUS_SM))
+                .bg(theme::canvas())
+                .border_1()
+                .border_color(theme::edge_soft())
+                .flex()
+                .flex_col()
+                .gap(px(4.0))
+                .child(
+                    div()
+                        .font_family(theme::MONO)
+                        .text_size(px(theme::T_TINY))
+                        .text_color(theme::data())
+                        .child(format!("{} #{:02}", title, index + 1)),
+                )
+                .child(
+                    div()
+                        .font_family(theme::SANS)
+                        .text_size(px(theme::T_UI_SM))
+                        .line_height(gpui::relative(1.35))
+                        .text_color(theme::bone_dim())
+                        .child(item.clone()),
+                )
+        }))
+}
+
+fn section_label(text: &'static str) -> impl IntoElement {
+    div()
+        .font_family(theme::SANS)
+        .text_size(px(theme::T_UI_SM))
+        .font_weight(FontWeight::BOLD)
+        .text_color(theme::bone_dim())
+        .child(text)
+}
+
+fn status_line(label: &'static str, value: String) -> impl IntoElement {
+    div()
+        .flex()
+        .flex_row()
+        .items_baseline()
+        .justify_between()
+        .gap(px(10.0))
+        .child(
+            div()
+                .font_family(theme::SANS)
+                .text_size(px(theme::T_TINY))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(theme::ash())
+                .child(label),
+        )
+        .child(
+            div()
+                .min_w_0()
+                .font_family(theme::MONO)
+                .text_size(px(theme::T_TINY))
+                .text_color(theme::bone_dim())
+                .text_right()
+                .child(value),
+        )
+}
+
+fn operation_label(operation: &RuntimeOperation) -> &'static str {
+    match operation {
+        RuntimeOperation::SetSteeringMode(_) => "Changing steering mode",
+        RuntimeOperation::SetFollowUpMode(_) => "Changing follow-up mode",
+        RuntimeOperation::Compact => "Compacting",
+        RuntimeOperation::SetAutoCompaction(_) => "Changing auto compaction",
+        RuntimeOperation::SetAutoRetry(_) => "Changing auto retry",
+    }
+}
+
+fn mode_label(mode: QueueDeliveryMode) -> &'static str {
+    match mode {
+        QueueDeliveryMode::All => "All",
+        QueueDeliveryMode::OneAtATime => "One at a time",
+    }
+}
+
+fn on_off(enabled: bool) -> &'static str {
+    if enabled { "On" } else { "Off" }
+}
+
+fn plural(count: u64) -> &'static str {
+    if count == 1 { "" } else { "s" }
 }
 
 fn action_id(action: RecoveryAction) -> &'static str {

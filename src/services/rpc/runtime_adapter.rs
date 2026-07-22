@@ -138,6 +138,21 @@ fn command_for_request(request: &RuntimeRequest) -> Command {
         RuntimeRequest::Abort => Command::Abort,
         RuntimeRequest::AbortBash => Command::AbortBash,
         RuntimeRequest::AbortRetry => Command::AbortRetry,
+        RuntimeRequest::SetSteeringMode { mode } => Command::SetSteeringMode {
+            mode: queue_mode_for_command(*mode),
+        },
+        RuntimeRequest::SetFollowUpMode { mode } => Command::SetFollowUpMode {
+            mode: queue_mode_for_command(*mode),
+        },
+        RuntimeRequest::Compact {
+            custom_instructions,
+        } => Command::Compact {
+            custom_instructions: custom_instructions.clone(),
+        },
+        RuntimeRequest::SetAutoCompaction { enabled } => {
+            Command::SetAutoCompaction { enabled: *enabled }
+        }
+        RuntimeRequest::SetAutoRetry { enabled } => Command::SetAutoRetry { enabled: *enabled },
         RuntimeRequest::SessionMutation(mutation) => match mutation {
             SessionMutation::New { parent_session } => Command::NewSession {
                 parent_session: parent_session.clone(),
@@ -261,7 +276,18 @@ fn normalize_response(
         )
         | (RuntimeRequest::Abort, ResponseResult::Abort)
         | (RuntimeRequest::AbortBash, ResponseResult::AbortBash)
-        | (RuntimeRequest::AbortRetry, ResponseResult::AbortRetry) => NormalizedResponse::Accepted,
+        | (RuntimeRequest::AbortRetry, ResponseResult::AbortRetry)
+        | (RuntimeRequest::SetSteeringMode { .. }, ResponseResult::SetSteeringMode)
+        | (RuntimeRequest::SetFollowUpMode { .. }, ResponseResult::SetFollowUpMode)
+        | (RuntimeRequest::SetAutoCompaction { .. }, ResponseResult::SetAutoCompaction)
+        | (RuntimeRequest::SetAutoRetry { .. }, ResponseResult::SetAutoRetry) => {
+            NormalizedResponse::Accepted
+        }
+        (RuntimeRequest::Compact { .. }, ResponseResult::Compact(result)) => {
+            NormalizedResponse::Compacted {
+                summary: result.summary,
+            }
+        }
         (RuntimeRequest::ExecuteBash { .. }, ResponseResult::Bash(result)) => {
             NormalizedResponse::Bash(DirectBashResult {
                 output: result.output,
@@ -993,6 +1019,13 @@ fn queue_mode(mode: QueueMode) -> QueueDeliveryMode {
     }
 }
 
+fn queue_mode_for_command(mode: QueueDeliveryMode) -> QueueMode {
+    match mode {
+        QueueDeliveryMode::All => QueueMode::All,
+        QueueDeliveryMode::OneAtATime => QueueMode::OneAtATime,
+    }
+}
+
 fn compaction_kind(reason: CompactionReason) -> CompactionKind {
     match reason {
         CompactionReason::Manual => CompactionKind::Manual,
@@ -1040,6 +1073,11 @@ fn operation_name(request: &RuntimeRequest) -> &'static str {
         RuntimeRequest::Abort => "abort",
         RuntimeRequest::AbortBash => "Bash cancellation",
         RuntimeRequest::AbortRetry => "retry cancellation",
+        RuntimeRequest::SetSteeringMode { .. } => "steering mode update",
+        RuntimeRequest::SetFollowUpMode { .. } => "follow-up mode update",
+        RuntimeRequest::Compact { .. } => "manual compaction",
+        RuntimeRequest::SetAutoCompaction { .. } => "auto-compaction update",
+        RuntimeRequest::SetAutoRetry { .. } => "auto-retry update",
         RuntimeRequest::SessionMutation(_) => "session replacement",
     }
 }

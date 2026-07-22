@@ -946,7 +946,7 @@ fn notices(projection: &ConversationProjection) -> Vec<AnyElement> {
             &format!("retry-{attempt}"),
             "Provider retry",
             &format!(
-                "Attempt {attempt} of {max_attempts} starts after {} ms.",
+                "Attempt {attempt} of {max_attempts} starts in {} ms. A timeout does not cancel the run.",
                 delay_ms
             ),
             false,
@@ -1008,12 +1008,36 @@ fn notices(projection: &ConversationProjection) -> Vec<AnyElement> {
         CompactionState::Idle | CompactionState::Completed { .. } => {}
     }
 
+    if projection.context_awaiting_fresh_usage {
+        notices.push(system_notice(
+            "context-awaiting-usage",
+            "Context usage pending",
+            "Pi compacted context. Fresh usage will appear after the next provider response.",
+            false,
+        ));
+    }
     if projection.lifecycle == RuntimeLifecycle::Cancelling {
         notices.push(system_notice(
             "run-cancelling",
             "Cancelling response",
             "Partial content remains visible while Pi settles.",
             false,
+        ));
+    }
+    if projection.lifecycle == RuntimeLifecycle::Settled {
+        notices.push(system_notice(
+            "agent-settled",
+            "Run settled",
+            "The agent has finished this run. Send the next prompt or compact before continuing.",
+            false,
+        ));
+    }
+    if projection.lifecycle == RuntimeLifecycle::Disconnected {
+        notices.push(system_notice(
+            "transcript-read-only",
+            "Transcript is read-only",
+            "Reconnect to resync from the last durable entry. Uncertain prompts are never replayed automatically.",
+            true,
         ));
     }
     if let Some(error) = projection.error.as_ref() {

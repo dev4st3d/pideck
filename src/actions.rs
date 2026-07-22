@@ -2,6 +2,8 @@
 
 use gpui::{KeyBinding, actions};
 
+pub(crate) const RECOVERY_BUTTON_CONTEXT: &str = "RecoveryButton";
+
 actions!(
     pi_gui,
     [

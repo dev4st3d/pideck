@@ -94,7 +94,7 @@ impl ShellProjection {
         let model = project_model(runtime);
         let thinking = project_thinking(runtime);
         let cost = project_stats(&runtime.stats, |stats| format_cost(stats.cost));
-        let context = project_context(&runtime.stats);
+        let context = project_context(runtime);
         let input_tokens = project_stats(&runtime.stats, |stats| format_count(stats.input_tokens));
         let output_tokens =
             project_stats(&runtime.stats, |stats| format_count(stats.output_tokens));
@@ -261,7 +261,11 @@ fn project_thinking(runtime: &RuntimeState) -> DisplayValue {
     })
 }
 
-fn project_context(stats: &Facet<RuntimeStats>) -> DisplayValue {
+fn project_context(runtime: &RuntimeState) -> DisplayValue {
+    if runtime.context_awaiting_fresh_usage {
+        return DisplayValue::Awaiting;
+    }
+    let stats = &runtime.stats;
     match (&stats.status, stats.data.as_ref()) {
         (FacetStatus::Loading, None) => DisplayValue::Awaiting,
         (FacetStatus::Loading, Some(stats)) => context_value(stats, true),

@@ -5,8 +5,8 @@ use gpui::{
 };
 
 use crate::actions::{
-    ActivateRecovery, Connect, FocusNext, FocusPrevious, Retry, Stop, composer_key_bindings,
-    transcript_key_bindings,
+    ActivateRecovery, Connect, FocusNext, FocusPrevious, RECOVERY_BUTTON_CONTEXT, Retry, Stop,
+    composer_key_bindings, transcript_key_bindings,
 };
 use crate::controller::RuntimeController;
 use crate::services::runtime_worker::{RpcRuntimeService, RuntimeService};
@@ -30,8 +30,8 @@ pub fn run() {
             KeyBinding::new("ctrl-alt-c", Connect, None),
             KeyBinding::new("ctrl-alt-r", Retry, None),
             KeyBinding::new("ctrl-alt-s", Stop, None),
-            KeyBinding::new("enter", ActivateRecovery, None),
-            KeyBinding::new("space", ActivateRecovery, None),
+            KeyBinding::new("enter", ActivateRecovery, Some(RECOVERY_BUTTON_CONTEXT)),
+            KeyBinding::new("space", ActivateRecovery, Some(RECOVERY_BUTTON_CONTEXT)),
             KeyBinding::new("tab", FocusNext, None),
             KeyBinding::new("shift-tab", FocusPrevious, None),
         ]);

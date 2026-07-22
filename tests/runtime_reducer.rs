@@ -1804,3 +1804,245 @@ fn steer_and_follow_up_use_distinct_rpc_commands_and_disconnect_safely() {
         }
     );
 }
+
+#[test]
+fn run_control_operations_dispatch_and_update_authoritative_settings() {
+    let (mut state, _) = connected_state("s1");
+    let steer = apply(
+        &mut state,
+        RuntimeInput::Intent(RuntimeIntent::SetSteeringMode(QueueDeliveryMode::All)),
+    );
+    assert!(matches!(
+        dispatch_for_effect(&steer[0]),
+        RpcDispatch::Command(Command::SetSteeringMode {
+            mode: pi_gui::services::rpc::QueueMode::All,
+        })
+    ));
+    assert_eq!(
+        state.pending_operation,
+        Some(RuntimeOperation::SetSteeringMode(QueueDeliveryMode::All))
+    );
+    response(
+        &mut state,
+        RuntimeRequest::SetSteeringMode {
+            mode: QueueDeliveryMode::All,
+        },
+        Ok(NormalizedResponse::Accepted),
+    );
+    assert_eq!(
+        state.session.data.as_ref().unwrap().steering_mode,
+        QueueDeliveryMode::All
+    );
+    assert!(state.pending_operation.is_none());
+
+    let compact = apply(
+        &mut state,
+        RuntimeInput::Intent(RuntimeIntent::Compact {
+            custom_instructions: Some("Keep build errors visible".to_owned()),
+        }),
+    );
+    assert!(matches!(
+        dispatch_for_effect(&compact[0]),
+        RpcDispatch::Command(Command::Compact {
+            custom_instructions: Some(ref text),
+        }) if text == "Keep build errors visible"
+    ));
+    let refresh = response(
+        &mut state,
+        RuntimeRequest::Compact {
+            custom_instructions: Some("Keep build errors visible".to_owned()),
+        },
+        Ok(NormalizedResponse::Compacted {
+            summary: "summary".to_owned(),
+        }),
+    );
+    assert!(matches!(
+        state.compaction,
+        CompactionState::Completed {
+            reason: CompactionKind::Manual,
+            ..
+        }
+    ));
+    assert!(state.context_awaiting_fresh_usage);
+    assert!(matches!(
+        refresh[0].effect,
+        EffectKind::Request(RuntimeRequest::GetEntries { .. })
+    ));
+
+    let auto = apply(
+        &mut state,
+        RuntimeInput::Intent(RuntimeIntent::SetAutoRetry { enabled: false }),
+    );
+    assert!(matches!(
+        dispatch_for_effect(&auto[0]),
+        RpcDispatch::Command(Command::SetAutoRetry { enabled: false })
+    ));
+    response(
+        &mut state,
+        RuntimeRequest::SetAutoRetry { enabled: false },
+        Ok(NormalizedResponse::Accepted),
+    );
+    assert_eq!(state.auto_retry_enabled, Some(false));
+}
+
+#[test]
+fn cancellation_scopes_do_not_cross_target_operations() {
+    let (mut state, _) = connected_state("s1");
+    state.lifecycle = RuntimeLifecycle::Running;
+    state.retry = RetryState::Waiting {
+        attempt: 2,
+        max_attempts: 3,
+        delay_ms: 1_000,
+    };
+    state.bash_executions.push(BashExecution {
+        request: RequestId::from("bash-scope"),
+        command: "sleep 30".to_owned(),
+        exclude_from_context: false,
+        output: String::new(),
+        exit_code: None,
+        cancelled: false,
+        truncated: false,
+        full_output_path: None,
+        status: BashStatus::Running,
+        started_at: Instant::now(),
+        finished_at: None,
+        reconciled: false,
+        baseline: Default::default(),
+        error: None,
+    });
+
+    let retry_abort = apply(&mut state, RuntimeInput::Intent(RuntimeIntent::AbortRetry));
+    assert!(matches!(
+        retry_abort[0].effect,
+        EffectKind::Request(RuntimeRequest::AbortRetry)
+    ));
+    assert_eq!(state.retry, RetryState::Cancelling);
+    assert_eq!(state.bash_executions[0].status, BashStatus::Running);
+
+    let bash_abort = apply(&mut state, RuntimeInput::Intent(RuntimeIntent::AbortBash));
+    assert!(matches!(
+        bash_abort[0].effect,
+        EffectKind::Request(RuntimeRequest::AbortBash)
+    ));
+    assert_eq!(state.bash_executions[0].status, BashStatus::Cancelling);
+}
+
+#[test]
+fn close_during_tool_marks_live_tool_uncertain_without_erasing_transcript() {
+    let (mut state, _) = connected_state("s1");
+    state.messages.ready(vec![message("durable", "kept", true)]);
+    let tool_id = ToolCallId::from("live-tool");
+    apply(
+        &mut state,
+        RuntimeInput::Event(NormalizedEvent::ToolStart {
+            id: tool_id.clone(),
+            name: "read".to_owned(),
+            arguments: json!({"path": "src/lib.rs"}),
+        }),
+    );
+    apply(
+        &mut state,
+        RuntimeInput::Disconnected {
+            error: SafeError::new(ErrorKind::Process, "Pi exited unexpectedly"),
+        },
+    );
+    assert_eq!(state.lifecycle, RuntimeLifecycle::Disconnected);
+    assert_eq!(state.messages.data.as_ref().map(Vec::len), Some(1));
+    assert_eq!(state.tools[&tool_id].status, ToolStatus::Uncertain);
+
+    apply(
+        &mut state,
+        RuntimeInput::Event(NormalizedEvent::ToolEnd {
+            id: tool_id.clone(),
+            name: "read".to_owned(),
+            result: json!({"text": "late authoritative"}),
+            is_error: false,
+            cancelled: false,
+        }),
+    );
+    assert_eq!(state.tools[&tool_id].status, ToolStatus::Succeeded);
+}
+
+#[test]
+fn crash_after_acceptance_preserves_last_durable_transcript_read_only() {
+    let (mut state, _) = connected_state("s1");
+    state.messages.ready(vec![message("durable", "kept", true)]);
+    let request = RequestId::from("accepted-before-crash");
+    let submit = RuntimeRequest::Submit {
+        request: request.clone(),
+        text: "May not be durable yet".to_owned(),
+        kind: SubmissionKind::Prompt,
+    };
+    apply(
+        &mut state,
+        RuntimeInput::Intent(RuntimeIntent::Submit {
+            request: request.clone(),
+            text: "May not be durable yet".to_owned(),
+            kind: SubmissionKind::Prompt,
+        }),
+    );
+    response(&mut state, submit, Ok(NormalizedResponse::Accepted));
+    apply(
+        &mut state,
+        RuntimeInput::Disconnected {
+            error: SafeError::new(ErrorKind::Process, "Pi exited unexpectedly"),
+        },
+    );
+    assert_eq!(state.lifecycle, RuntimeLifecycle::Disconnected);
+    assert_eq!(state.messages.data.as_ref().map(Vec::len), Some(1));
+    assert!(
+        state
+            .optimistic_user_inputs
+            .iter()
+            .any(|input| input.request == request)
+    );
+}
+
+#[test]
+fn crash_during_switch_invalidates_dialogs_and_requires_explicit_reconnect() {
+    let (mut state, _) = connected_state("s1");
+    state.dialogs.insert(
+        RequestId::from("switch-dialog"),
+        DialogRequest::Confirm {
+            title: "Continue".to_owned(),
+            message: "Switch?".to_owned(),
+        },
+    );
+    apply(
+        &mut state,
+        RuntimeInput::Intent(RuntimeIntent::ReplaceSession(SessionMutation::Switch {
+            session_path: "other.jsonl".to_owned(),
+        })),
+    );
+    assert!(state.dialogs.is_empty());
+    assert!(state.replacement_awaiting_state);
+
+    let effects = apply(
+        &mut state,
+        RuntimeInput::Disconnected {
+            error: SafeError::new(ErrorKind::Process, "Pi exited during session switch"),
+        },
+    );
+    assert!(effects.is_empty());
+    assert_eq!(state.lifecycle, RuntimeLifecycle::Disconnected);
+    assert!(!state.replacement_awaiting_state);
+}
+
+#[test]
+fn stale_generation_cannot_complete_run_control_operation() {
+    let (mut state, _) = connected_state("s1");
+    let ignored_before = state.stale_inputs_ignored;
+    let epoch = state.epoch;
+    let effects = reduce(
+        &mut state,
+        StampedInput {
+            generation: ConnectionGeneration::default(),
+            epoch,
+            observed_at: Instant::now(),
+            input: RuntimeInput::Intent(RuntimeIntent::SetAutoCompaction { enabled: false }),
+        },
+    );
+    assert!(effects.is_empty());
+    assert_eq!(state.stale_inputs_ignored, ignored_before + 1);
+    assert!(state.pending_operation.is_none());
+}

@@ -370,6 +370,7 @@ fn tool_card(
             ToolStatus::Succeeded => CardStatus::Success,
             ToolStatus::Failed => CardStatus::Error,
             ToolStatus::Cancelled => CardStatus::Cancelled,
+            ToolStatus::Uncertain => CardStatus::Uncertain,
         },
     );
     let payload = live

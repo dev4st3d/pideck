@@ -12,9 +12,9 @@ use crate::services::runtime_worker::{
 };
 use crate::state::reducer::reduce;
 use crate::state::runtime::{
-    BashExecution, BashStatus, CompactionState, FacetStatus, PromptDelivery, RetryState,
-    RuntimeInput, RuntimeIntent, RuntimeLifecycle, RuntimeMessage, RuntimeState, SafeError,
-    StampedInput, SubmissionKind, ToolExecution,
+    BashExecution, BashStatus, CompactionState, FacetStatus, PromptDelivery, QueueContents,
+    QueueDeliveryMode, RetryState, RuntimeInput, RuntimeIntent, RuntimeLifecycle, RuntimeMessage,
+    RuntimeOperation, RuntimeState, SafeError, StampedInput, SubmissionKind, ToolExecution,
 };
 use crate::state::{ControllerStatus, ShellProjection};
 
@@ -57,6 +57,13 @@ pub struct ConversationProjection {
     pub accepted_user_inputs: Vec<AcceptedUserInput>,
     pub tools: HashMap<crate::services::rpc::ToolCallId, ToolExecution>,
     pub bash_executions: Vec<BashExecution>,
+    pub queue: QueueContents,
+    pub steering_mode: Option<QueueDeliveryMode>,
+    pub follow_up_mode: Option<QueueDeliveryMode>,
+    pub auto_compaction_enabled: Option<bool>,
+    pub auto_retry_enabled: Option<bool>,
+    pub pending_operation: Option<RuntimeOperation>,
+    pub context_awaiting_fresh_usage: bool,
     pub retry: RetryState,
     pub compaction: CompactionState,
     pub error: Option<SafeError>,
@@ -317,6 +324,12 @@ impl ControllerCore {
                 .optimistic_user_inputs
                 .iter()
                 .filter(|_| !self.runtime.replacement_awaiting_state)
+                .filter(|_| {
+                    !matches!(
+                        self.runtime.lifecycle,
+                        RuntimeLifecycle::Disconnected | RuntimeLifecycle::Failed
+                    )
+                })
                 .filter(|input| input.accepted && !input.authoritative_seen)
                 .map(|input| AcceptedUserInput {
                     request: input.request.clone(),
@@ -334,6 +347,28 @@ impl ControllerCore {
             } else {
                 self.runtime.bash_executions.clone()
             },
+            queue: self.runtime.queue.clone(),
+            steering_mode: self
+                .runtime
+                .session
+                .data
+                .as_ref()
+                .map(|session| session.steering_mode),
+            follow_up_mode: self
+                .runtime
+                .session
+                .data
+                .as_ref()
+                .map(|session| session.follow_up_mode),
+            auto_compaction_enabled: self
+                .runtime
+                .session
+                .data
+                .as_ref()
+                .map(|session| session.auto_compaction_enabled),
+            auto_retry_enabled: self.runtime.auto_retry_enabled,
+            pending_operation: self.runtime.pending_operation.clone(),
+            context_awaiting_fresh_usage: self.runtime.context_awaiting_fresh_usage,
             retry: self.runtime.retry.clone(),
             compaction: self.runtime.compaction.clone(),
             error,
@@ -464,6 +499,51 @@ impl ControllerCore {
         if self.composer_projection().runtime != ComposerRuntime::BashRunning {
             return Vec::new();
         }
+        self.intent(RuntimeIntent::AbortBash)
+    }
+
+    pub fn abort_retry(&mut self) -> Vec<crate::state::runtime::RuntimeEffect> {
+        if !matches!(self.runtime.retry, RetryState::Waiting { .. }) {
+            return Vec::new();
+        }
+        self.intent(RuntimeIntent::AbortRetry)
+    }
+
+    pub fn set_steering_mode(
+        &mut self,
+        mode: QueueDeliveryMode,
+    ) -> Vec<crate::state::runtime::RuntimeEffect> {
+        self.intent(RuntimeIntent::SetSteeringMode(mode))
+    }
+
+    pub fn set_follow_up_mode(
+        &mut self,
+        mode: QueueDeliveryMode,
+    ) -> Vec<crate::state::runtime::RuntimeEffect> {
+        self.intent(RuntimeIntent::SetFollowUpMode(mode))
+    }
+
+    pub fn compact(
+        &mut self,
+        custom_instructions: Option<String>,
+    ) -> Vec<crate::state::runtime::RuntimeEffect> {
+        self.intent(RuntimeIntent::Compact {
+            custom_instructions,
+        })
+    }
+
+    pub fn set_auto_compaction(
+        &mut self,
+        enabled: bool,
+    ) -> Vec<crate::state::runtime::RuntimeEffect> {
+        self.intent(RuntimeIntent::SetAutoCompaction { enabled })
+    }
+
+    pub fn set_auto_retry(&mut self, enabled: bool) -> Vec<crate::state::runtime::RuntimeEffect> {
+        self.intent(RuntimeIntent::SetAutoRetry { enabled })
+    }
+
+    fn intent(&mut self, intent: RuntimeIntent) -> Vec<crate::state::runtime::RuntimeEffect> {
         let epoch = self.runtime.epoch;
         reduce(
             &mut self.runtime,
@@ -471,7 +551,7 @@ impl ControllerCore {
                 generation: self.generation,
                 epoch,
                 observed_at: Instant::now(),
-                input: RuntimeInput::Intent(RuntimeIntent::AbortBash),
+                input: RuntimeInput::Intent(intent),
             },
         )
     }
@@ -568,6 +648,30 @@ impl RuntimeController {
         true
     }
 
+    pub fn abort_retry(&mut self, cx: &mut Context<Self>) -> bool {
+        self.send_core_effects(|core| core.abort_retry(), cx)
+    }
+
+    pub fn set_steering_mode(&mut self, mode: QueueDeliveryMode, cx: &mut Context<Self>) -> bool {
+        self.send_core_effects(|core| core.set_steering_mode(mode), cx)
+    }
+
+    pub fn set_follow_up_mode(&mut self, mode: QueueDeliveryMode, cx: &mut Context<Self>) -> bool {
+        self.send_core_effects(|core| core.set_follow_up_mode(mode), cx)
+    }
+
+    pub fn compact(&mut self, custom_instructions: Option<String>, cx: &mut Context<Self>) -> bool {
+        self.send_core_effects(|core| core.compact(custom_instructions), cx)
+    }
+
+    pub fn set_auto_compaction(&mut self, enabled: bool, cx: &mut Context<Self>) -> bool {
+        self.send_core_effects(|core| core.set_auto_compaction(enabled), cx)
+    }
+
+    pub fn set_auto_retry(&mut self, enabled: bool, cx: &mut Context<Self>) -> bool {
+        self.send_core_effects(|core| core.set_auto_retry(enabled), cx)
+    }
+
     pub fn connect(&mut self, cx: &mut Context<Self>) {
         if !matches!(
             self.core.projection().action,
@@ -604,6 +708,20 @@ impl RuntimeController {
     fn receive(&mut self, result: WorkerResult) {
         let effects = self.core.apply_worker_result(result);
         self.send_effects(effects);
+    }
+
+    fn send_core_effects(
+        &mut self,
+        operation: impl FnOnce(&mut ControllerCore) -> Vec<crate::state::runtime::RuntimeEffect>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let effects = operation(&mut self.core);
+        if effects.is_empty() {
+            return false;
+        }
+        self.send_effects(effects);
+        cx.notify();
+        true
     }
 
     fn send_effects(&self, effects: Vec<crate::state::runtime::RuntimeEffect>) {
@@ -917,6 +1035,44 @@ mod tests {
         let projection = core.conversation_projection();
         assert_eq!(projection.messages.len(), 1);
         assert_eq!(projection.messages[0].key, MessageKey("visible".to_owned()));
+    }
+
+    #[test]
+    fn disconnected_projection_hides_accepted_optimistic_input() {
+        let mut core = ready_core();
+        let (submission, effects) = core
+            .submit(
+                "May not be durable".to_owned(),
+                SubmissionPreference::Default,
+            )
+            .expect("prompt");
+        let crate::state::runtime::EffectKind::Request(request) = effects[0].effect.clone() else {
+            panic!("expected request");
+        };
+        complete_submission(&mut core, request);
+        assert_eq!(core.conversation_projection().accepted_user_inputs.len(), 1);
+
+        let epoch = core.runtime.epoch;
+        reduce(
+            &mut core.runtime,
+            StampedInput {
+                generation: core.generation,
+                epoch,
+                observed_at: Instant::now(),
+                input: RuntimeInput::Disconnected {
+                    error: crate::state::runtime::SafeError::new(
+                        crate::state::runtime::ErrorKind::Disconnected,
+                        "Connection closed",
+                    ),
+                },
+            },
+        );
+        assert_eq!(submission.request.as_str(), "composer-1-0-1");
+        assert!(
+            core.conversation_projection()
+                .accepted_user_inputs
+                .is_empty()
+        );
     }
 
     #[test]
