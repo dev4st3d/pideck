@@ -24,6 +24,16 @@ use crate::actions::{
 use crate::state::runtime::SubmissionKind;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ComposerChrome {
+    /// Full multiline desk composer with status + hints.
+    Full,
+    /// Secondary multiline panel input (compaction focus, etc.).
+    Panel,
+    /// Single-line sidebar field with inline submit.
+    Field,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ComposerAvailability {
     Unavailable,
     Idle,
@@ -55,6 +65,7 @@ pub enum ComposerEvent {
 pub struct Composer {
     id_prefix: SharedString,
     action_label: SharedString,
+    chrome: ComposerChrome,
     pub(super) focus_handle: FocusHandle,
     buffer: TextBuffer,
     placeholder: SharedString,
@@ -73,6 +84,7 @@ impl Composer {
         Self {
             id_prefix: "composer".into(),
             action_label: "Send".into(),
+            chrome: ComposerChrome::Full,
             focus_handle: cx.focus_handle(),
             buffer: TextBuffer::default(),
             placeholder: "Message Pi…  @ file  / command  ! shell".into(),
@@ -93,17 +105,57 @@ impl Composer {
         action_label: impl Into<SharedString>,
         cx: &mut Context<Self>,
     ) -> Self {
+        Self::with_chrome(id, placeholder, action_label, ComposerChrome::Panel, cx)
+    }
+
+    pub fn field(
+        id: impl Into<SharedString>,
+        placeholder: impl Into<SharedString>,
+        action_label: impl Into<SharedString>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self::with_chrome(id, placeholder, action_label, ComposerChrome::Field, cx)
+    }
+
+    fn with_chrome(
+        id: impl Into<SharedString>,
+        placeholder: impl Into<SharedString>,
+        action_label: impl Into<SharedString>,
+        chrome: ComposerChrome,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let mut composer = Self::new(cx);
         composer.id_prefix = id.into();
         composer.placeholder = placeholder.into();
         composer.action_label = action_label.into();
+        composer.chrome = chrome;
         composer.availability = ComposerAvailability::Idle;
         composer.update_disabled();
         composer
     }
 
+    pub fn chrome(&self) -> ComposerChrome {
+        self.chrome
+    }
+
+    fn sanitize_input(&self, text: &str) -> String {
+        if self.chrome == ComposerChrome::Field {
+            text.replace(['\r', '\n'], " ")
+        } else {
+            text.to_owned()
+        }
+    }
+
     pub fn draft(&self) -> &str {
         self.buffer.text()
+    }
+
+    pub fn set_draft(&mut self, text: &str, cx: &mut Context<Self>) {
+        let length = self.buffer.text().len();
+        self.buffer.set_selection(0..length, false);
+        if self.buffer.replace_selection(text) {
+            self.after_edit(cx);
+        }
     }
 
     pub fn availability(&self) -> ComposerAvailability {
@@ -308,10 +360,11 @@ impl Composer {
         if self.disabled {
             return;
         }
-        if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text())
-            && self.buffer.replace_selection(&text)
-        {
-            self.after_edit(cx);
+        if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
+            let text = self.sanitize_input(&text);
+            if self.buffer.replace_selection(&text) {
+                self.after_edit(cx);
+            }
         }
     }
 
@@ -328,7 +381,14 @@ impl Composer {
     }
 
     fn insert_newline(&mut self, _: &InsertNewline, _: &mut Window, cx: &mut Context<Self>) {
-        if !self.disabled && self.buffer.replace_selection("\n") {
+        if self.disabled {
+            return;
+        }
+        if self.chrome == ComposerChrome::Field {
+            self.emit_accept(false, cx);
+            return;
+        }
+        if self.buffer.replace_selection("\n") {
             self.after_edit(cx);
         }
     }
@@ -338,6 +398,10 @@ impl Composer {
     }
 
     fn follow_up(&mut self, _: &QueueFollowUp, _: &mut Window, cx: &mut Context<Self>) {
+        if self.chrome == ComposerChrome::Field {
+            self.emit_accept(false, cx);
+            return;
+        }
         self.emit_accept(true, cx);
     }
 
@@ -357,8 +421,15 @@ impl Composer {
         if self.disabled {
             return;
         }
+        // Live filter fields have no submit action; Enter is a no-op.
+        if self.chrome == ComposerChrome::Field && self.action_label.is_empty() {
+            return;
+        }
         if self.buffer.text().trim().is_empty() {
-            self.feedback = ComposerFeedback::Rejected("Write a prompt first.".to_owned());
+            self.feedback = ComposerFeedback::Rejected(match self.chrome {
+                ComposerChrome::Full => "Write a prompt first.".to_owned(),
+                ComposerChrome::Panel | ComposerChrome::Field => "Enter a value first.".to_owned(),
+            });
             cx.notify();
             return;
         }
@@ -496,12 +567,18 @@ impl Composer {
 
     fn status_text(&self) -> String {
         match &self.feedback {
-            ComposerFeedback::Pending(SubmissionKind::Prompt) => "Sending to Pi…".to_owned(),
+            ComposerFeedback::Pending(SubmissionKind::Prompt) => match self.chrome {
+                ComposerChrome::Full => "Sending to Pi…".to_owned(),
+                ComposerChrome::Panel | ComposerChrome::Field => "Working…".to_owned(),
+            },
             ComposerFeedback::Pending(SubmissionKind::Steer) => {
                 "Sending steering input…".to_owned()
             }
             ComposerFeedback::Pending(SubmissionKind::FollowUp) => "Queueing follow-up…".to_owned(),
-            ComposerFeedback::Accepted(SubmissionKind::Prompt) => "Prompt accepted.".to_owned(),
+            ComposerFeedback::Accepted(SubmissionKind::Prompt) => match self.chrome {
+                ComposerChrome::Full => "Prompt accepted.".to_owned(),
+                ComposerChrome::Panel | ComposerChrome::Field => "Done.".to_owned(),
+            },
             ComposerFeedback::Accepted(SubmissionKind::Steer) => {
                 "Steering input accepted.".to_owned()
             }
@@ -517,15 +594,24 @@ impl Composer {
             ComposerFeedback::Uncertain => {
                 "Delivery is uncertain. The draft was kept; reconnect before retrying.".to_owned()
             }
-            ComposerFeedback::Ready => match self.availability {
-                ComposerAvailability::Unavailable => "Connect Pi to start composing.".to_owned(),
-                ComposerAvailability::Idle => "Ready to send.".to_owned(),
-                ComposerAvailability::Running => {
+            ComposerFeedback::Ready => match (self.chrome, self.availability) {
+                (ComposerChrome::Field | ComposerChrome::Panel, ComposerAvailability::Idle) => {
+                    String::new()
+                }
+                (
+                    ComposerChrome::Field | ComposerChrome::Panel,
+                    ComposerAvailability::Unavailable,
+                ) => "Unavailable".to_owned(),
+                (_, ComposerAvailability::Unavailable) => {
+                    "Connect Pi to start composing.".to_owned()
+                }
+                (_, ComposerAvailability::Idle) => "Ready to send.".to_owned(),
+                (_, ComposerAvailability::Running) => {
                     "Pi is running. Steer or queue a follow-up.".to_owned()
                 }
-                ComposerAvailability::Cancelling => "Waiting for Pi to settle…".to_owned(),
-                ComposerAvailability::BashRunning => "Bash is running.".to_owned(),
-                ComposerAvailability::BashCancelling => "Cancelling Bash…".to_owned(),
+                (_, ComposerAvailability::Cancelling) => "Waiting for Pi to settle…".to_owned(),
+                (_, ComposerAvailability::BashRunning) => "Bash is running.".to_owned(),
+                (_, ComposerAvailability::BashCancelling) => "Cancelling Bash…".to_owned(),
             },
         }
     }
@@ -600,7 +686,8 @@ impl EntityInputHandler for Composer {
         cx: &mut Context<Self>,
     ) {
         if !self.disabled {
-            self.buffer.replace_text_utf16(range_utf16, text);
+            let text = self.sanitize_input(text);
+            self.buffer.replace_text_utf16(range_utf16, &text);
             self.after_edit(cx);
         }
     }
@@ -614,8 +701,9 @@ impl EntityInputHandler for Composer {
         cx: &mut Context<Self>,
     ) {
         if !self.disabled {
+            let new_text = self.sanitize_input(new_text);
             self.buffer
-                .replace_and_mark_text_utf16(range_utf16, new_text, selected_utf16);
+                .replace_and_mark_text_utf16(range_utf16, &new_text, selected_utf16);
             self.after_edit(cx);
         }
     }

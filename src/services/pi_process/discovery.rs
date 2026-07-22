@@ -91,6 +91,13 @@ pub struct PiInstallation {
     pub capabilities: PiCapabilities,
 }
 
+impl PiInstallation {
+    pub fn sdk_package_root(&self) -> Option<PathBuf> {
+        let cli = self.launcher_arguments.first().map(PathBuf::from)?;
+        cli.parent()?.parent().map(Path::to_path_buf)
+    }
+}
+
 #[derive(Debug)]
 pub enum DiscoveryError {
     MissingExplicit(PathBuf),

@@ -1,0 +1,636 @@
+//! Versioned stdio JSONL client for the narrow Pi SDK session bridge.
+
+use std::collections::HashMap;
+use std::fmt;
+use std::io::{BufRead, BufReader, Write};
+use std::path::PathBuf;
+use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, mpsc};
+use std::thread;
+use std::time::Duration;
+
+use async_channel::{Receiver, Sender};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+const PROTOCOL_VERSION: u64 = 1;
+const MAX_RECORD_BYTES: usize = 1024 * 1024;
+const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
+
+#[derive(Debug, Clone)]
+pub struct SdkBridgeConfig {
+    pub node: PathBuf,
+    pub sdk_root: PathBuf,
+    pub script: PathBuf,
+    pub working_directory: PathBuf,
+}
+
+impl SdkBridgeConfig {
+    pub fn from_installation(
+        installation: &crate::services::pi_process::PiInstallation,
+        working_directory: PathBuf,
+    ) -> Option<Self> {
+        Some(Self {
+            node: installation.executable.clone(),
+            sdk_root: installation.sdk_package_root()?,
+            script: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("bridge/pi-bridge.mjs"),
+            working_directory,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BridgeCapabilities {
+    pub navigate_tree: bool,
+    pub branch_summary: bool,
+    pub labels: bool,
+    pub jsonl_import: bool,
+    pub jsonl_export: bool,
+    pub session_list: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BridgeHello {
+    pub protocol_version: u64,
+    pub sdk_version: String,
+    pub capabilities: BridgeCapabilities,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BridgeErrorKind {
+    Unavailable,
+    Protocol,
+    Rejected,
+    Timeout,
+    Disconnected,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BridgeError {
+    pub kind: BridgeErrorKind,
+    pub summary: String,
+}
+
+impl BridgeError {
+    fn new(kind: BridgeErrorKind, summary: impl Into<String>) -> Self {
+        Self {
+            kind,
+            summary: summary.into(),
+        }
+    }
+}
+
+impl fmt::Display for BridgeError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.summary.fmt(formatter)
+    }
+}
+
+impl std::error::Error for BridgeError {}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "command", rename_all = "snake_case")]
+pub enum BridgeCommand {
+    Hello,
+    NavigateTree {
+        #[serde(rename = "sessionPath")]
+        session_path: String,
+        cwd: String,
+        #[serde(rename = "targetId")]
+        target_id: String,
+        summarize: bool,
+        #[serde(rename = "customInstructions", skip_serializing_if = "Option::is_none")]
+        custom_instructions: Option<String>,
+        #[serde(rename = "replaceInstructions")]
+        replace_instructions: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        label: Option<String>,
+    },
+    SetLabel {
+        #[serde(rename = "sessionPath")]
+        session_path: String,
+        cwd: String,
+        #[serde(rename = "targetId")]
+        target_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        label: Option<String>,
+    },
+    ExportJsonl {
+        #[serde(rename = "sessionPath")]
+        session_path: String,
+        cwd: String,
+        #[serde(rename = "outputPath", skip_serializing_if = "Option::is_none")]
+        output_path: Option<String>,
+    },
+    ImportJsonl {
+        #[serde(rename = "inputPath")]
+        input_path: String,
+        cwd: String,
+        #[serde(rename = "sessionDir")]
+        session_dir: String,
+    },
+}
+
+#[derive(Serialize)]
+struct RequestRecord<'a> {
+    version: u64,
+    #[serde(rename = "type")]
+    record_type: &'static str,
+    id: &'a str,
+    command: &'a str,
+    params: Value,
+}
+
+#[derive(Serialize)]
+struct CancelRecord<'a> {
+    version: u64,
+    #[serde(rename = "type")]
+    record_type: &'static str,
+    id: &'a str,
+    #[serde(rename = "targetId")]
+    target_id: &'a str,
+}
+
+#[derive(Deserialize)]
+struct ResponseRecord {
+    version: u64,
+    #[serde(rename = "type")]
+    record_type: String,
+    id: String,
+    ok: bool,
+    result: Option<Value>,
+    error: Option<BridgeWireError>,
+}
+
+#[derive(Deserialize)]
+struct BridgeWireError {
+    message: String,
+}
+
+struct BridgeInner {
+    child: Mutex<Option<Child>>,
+    stdin: Mutex<Option<ChildStdin>>,
+    pending: Mutex<HashMap<String, mpsc::Sender<Result<Value, BridgeError>>>>,
+    next_id: AtomicU64,
+    stopped: AtomicBool,
+}
+
+#[derive(Clone)]
+pub struct SdkBridgeClient {
+    inner: Arc<BridgeInner>,
+    hello: BridgeHello,
+}
+
+impl SdkBridgeClient {
+    pub fn start(config: SdkBridgeConfig) -> Result<Self, BridgeError> {
+        if !config.script.is_file() || !config.sdk_root.is_dir() {
+            return Err(BridgeError::new(
+                BridgeErrorKind::Unavailable,
+                "The compatible Pi SDK bridge is unavailable.",
+            ));
+        }
+        let mut child = Command::new(&config.node)
+            .arg(&config.script)
+            .arg(&config.sdk_root)
+            .current_dir(&config.working_directory)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|_| {
+                BridgeError::new(
+                    BridgeErrorKind::Unavailable,
+                    "The Pi SDK bridge could not start.",
+                )
+            })?;
+        let stdin = child.stdin.take().ok_or_else(|| {
+            BridgeError::new(
+                BridgeErrorKind::Unavailable,
+                "The bridge has no input pipe.",
+            )
+        })?;
+        let stdout = child.stdout.take().ok_or_else(|| {
+            BridgeError::new(
+                BridgeErrorKind::Unavailable,
+                "The bridge has no output pipe.",
+            )
+        })?;
+        if let Some(stderr) = child.stderr.take() {
+            thread::spawn(move || {
+                let mut reader = BufReader::new(stderr);
+                let mut buffer = Vec::new();
+                while reader.read_until(b'\n', &mut buffer).unwrap_or(0) > 0 {
+                    buffer.clear();
+                }
+            });
+        }
+        let inner = Arc::new(BridgeInner {
+            child: Mutex::new(Some(child)),
+            stdin: Mutex::new(Some(stdin)),
+            pending: Mutex::new(HashMap::new()),
+            next_id: AtomicU64::new(1),
+            stopped: AtomicBool::new(false),
+        });
+        spawn_reader(stdout, Arc::clone(&inner));
+        let provisional = Self {
+            inner,
+            hello: BridgeHello {
+                protocol_version: 0,
+                sdk_version: String::new(),
+                capabilities: BridgeCapabilities::default(),
+            },
+        };
+        let hello: BridgeHello = serde_json::from_value(
+            provisional.call(BridgeCommand::Hello, Duration::from_secs(10))?,
+        )
+        .map_err(|_| {
+            BridgeError::new(BridgeErrorKind::Protocol, "The bridge hello was invalid.")
+        })?;
+        if hello.protocol_version != PROTOCOL_VERSION {
+            provisional.stop();
+            return Err(BridgeError::new(
+                BridgeErrorKind::Protocol,
+                "The Pi SDK bridge protocol is incompatible.",
+            ));
+        }
+        Ok(Self {
+            inner: provisional.inner,
+            hello,
+        })
+    }
+
+    pub fn hello(&self) -> &BridgeHello {
+        &self.hello
+    }
+
+    pub fn call_default(&self, command: BridgeCommand) -> Result<Value, BridgeError> {
+        self.call(command, DEFAULT_TIMEOUT)
+    }
+
+    pub fn call(&self, command: BridgeCommand, timeout: Duration) -> Result<Value, BridgeError> {
+        let id = format!(
+            "bridge-{}",
+            self.inner.next_id.fetch_add(1, Ordering::Relaxed)
+        );
+        self.call_with_id(command, id, timeout)
+    }
+
+    pub fn call_with_id(
+        &self,
+        command: BridgeCommand,
+        id: String,
+        timeout: Duration,
+    ) -> Result<Value, BridgeError> {
+        let value = serde_json::to_value(&command).map_err(|_| {
+            BridgeError::new(BridgeErrorKind::Protocol, "Bridge request encoding failed.")
+        })?;
+        let command_name = value
+            .get("command")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        let params = value
+            .as_object()
+            .map(|object| {
+                let mut object = object.clone();
+                object.remove("command");
+                Value::Object(object)
+            })
+            .unwrap_or(Value::Null);
+        let record = RequestRecord {
+            version: PROTOCOL_VERSION,
+            record_type: "request",
+            id: &id,
+            command: command_name,
+            params,
+        };
+        let (sender, receiver) = mpsc::channel();
+        self.inner
+            .pending
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(id.clone(), sender);
+        if let Err(error) = write_record(&self.inner, &record) {
+            self.inner
+                .pending
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .remove(&id);
+            return Err(error);
+        }
+        match receiver.recv_timeout(timeout) {
+            Ok(result) => result,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                self.inner
+                    .pending
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .remove(&id);
+                let _ = self.cancel(&id);
+                Err(BridgeError::new(
+                    BridgeErrorKind::Timeout,
+                    "The bridge operation is still cancelling.",
+                ))
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => Err(BridgeError::new(
+                BridgeErrorKind::Disconnected,
+                "The Pi SDK bridge disconnected.",
+            )),
+        }
+    }
+
+    pub fn cancel(&self, target_id: &str) -> Result<(), BridgeError> {
+        let id = format!(
+            "bridge-cancel-{}",
+            self.inner.next_id.fetch_add(1, Ordering::Relaxed)
+        );
+        write_record(
+            &self.inner,
+            &CancelRecord {
+                version: PROTOCOL_VERSION,
+                record_type: "cancel",
+                id: &id,
+                target_id,
+            },
+        )
+    }
+
+    pub fn stop(&self) {
+        if self.inner.stopped.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        self.inner
+            .stdin
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
+        if let Some(mut child) = self
+            .inner
+            .child
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take()
+        {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        fail_pending(&self.inner, "The Pi SDK bridge stopped.");
+    }
+}
+
+impl Drop for BridgeInner {
+    fn drop(&mut self) {
+        if let Some(mut child) = self
+            .child
+            .get_mut()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take()
+        {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
+fn write_record<T: Serialize>(inner: &BridgeInner, record: &T) -> Result<(), BridgeError> {
+    let mut bytes = serde_json::to_vec(record).map_err(|_| {
+        BridgeError::new(BridgeErrorKind::Protocol, "Bridge request encoding failed.")
+    })?;
+    bytes.push(b'\n');
+    let mut guard = inner
+        .stdin
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let stdin = guard.as_mut().ok_or_else(|| {
+        BridgeError::new(BridgeErrorKind::Disconnected, "The bridge input is closed.")
+    })?;
+    stdin
+        .write_all(&bytes)
+        .and_then(|_| stdin.flush())
+        .map_err(|_| BridgeError::new(BridgeErrorKind::Disconnected, "The bridge input failed."))
+}
+
+fn spawn_reader(stdout: impl std::io::Read + Send + 'static, inner: Arc<BridgeInner>) {
+    thread::spawn(move || {
+        let mut reader = BufReader::new(stdout);
+        let mut buffer = Vec::new();
+        loop {
+            buffer.clear();
+            match reader.read_until(b'\n', &mut buffer) {
+                Ok(0) | Err(_) => break,
+                Ok(_) if buffer.len() > MAX_RECORD_BYTES => continue,
+                Ok(_) => {}
+            }
+            let Ok(response) = serde_json::from_slice::<ResponseRecord>(&buffer) else {
+                continue;
+            };
+            if response.version != PROTOCOL_VERSION || response.record_type != "response" {
+                continue;
+            }
+            let sender = inner
+                .pending
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .remove(&response.id);
+            let Some(sender) = sender else { continue };
+            let result = if response.ok {
+                Ok(response.result.unwrap_or(Value::Null))
+            } else {
+                Err(BridgeError::new(
+                    BridgeErrorKind::Rejected,
+                    response
+                        .error
+                        .map(|error| error.message)
+                        .unwrap_or_else(|| "The bridge operation was rejected.".to_owned()),
+                ))
+            };
+            let _ = sender.send(result);
+        }
+        fail_pending(&inner, "The Pi SDK bridge disconnected.");
+    });
+}
+
+fn fail_pending(inner: &BridgeInner, summary: &str) {
+    let pending = std::mem::take(
+        &mut *inner
+            .pending
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()),
+    );
+    for sender in pending.into_values() {
+        let _ = sender.send(Err(BridgeError::new(
+            BridgeErrorKind::Disconnected,
+            summary,
+        )));
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum BridgeWorkerResult {
+    Capabilities(Result<BridgeHello, BridgeError>),
+    Completed {
+        id: u64,
+        command: BridgeCommand,
+        result: Result<Value, BridgeError>,
+    },
+}
+
+enum BridgeWorkerCommand {
+    Execute { id: u64, command: BridgeCommand },
+    Cancel { id: u64 },
+    Restart,
+    Shutdown,
+}
+
+pub struct SdkBridgeWorker {
+    commands: mpsc::Sender<BridgeWorkerCommand>,
+    results: Receiver<BridgeWorkerResult>,
+}
+
+impl SdkBridgeWorker {
+    pub fn spawn(working_directory: PathBuf) -> Self {
+        let (commands, command_receiver) = mpsc::channel();
+        let (result_sender, results) = async_channel::unbounded();
+        thread::spawn(move || bridge_worker(working_directory, command_receiver, result_sender));
+        Self { commands, results }
+    }
+
+    pub fn results(&self) -> Receiver<BridgeWorkerResult> {
+        self.results.clone()
+    }
+
+    pub fn execute(&self, id: u64, command: BridgeCommand) -> bool {
+        self.commands
+            .send(BridgeWorkerCommand::Execute { id, command })
+            .is_ok()
+    }
+
+    pub fn cancel(&self, id: u64) -> bool {
+        self.commands
+            .send(BridgeWorkerCommand::Cancel { id })
+            .is_ok()
+    }
+
+    pub fn restart(&self) -> bool {
+        self.commands.send(BridgeWorkerCommand::Restart).is_ok()
+    }
+}
+
+impl Drop for SdkBridgeWorker {
+    fn drop(&mut self) {
+        let _ = self.commands.send(BridgeWorkerCommand::Shutdown);
+    }
+}
+
+fn bridge_worker(
+    working_directory: PathBuf,
+    commands: mpsc::Receiver<BridgeWorkerCommand>,
+    results: Sender<BridgeWorkerResult>,
+) {
+    let (internal_sender, internal_receiver) = mpsc::channel();
+    let mut client = start_discovered_bridge(&working_directory);
+    let _ = results.send_blocking(BridgeWorkerResult::Capabilities(
+        client
+            .as_ref()
+            .map(|client| client.hello().clone())
+            .map_err(Clone::clone),
+    ));
+    loop {
+        while let Ok(result) = internal_receiver.try_recv() {
+            let _ = results.send_blocking(result);
+        }
+        let command = match commands.recv_timeout(Duration::from_millis(10)) {
+            Ok(command) => command,
+            Err(mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(mpsc::RecvTimeoutError::Disconnected) => BridgeWorkerCommand::Shutdown,
+        };
+        match command {
+            BridgeWorkerCommand::Execute { id, command } => {
+                if client.is_err() {
+                    client = start_discovered_bridge(&working_directory);
+                    let _ = results.send_blocking(BridgeWorkerResult::Capabilities(
+                        client
+                            .as_ref()
+                            .map(|client| client.hello().clone())
+                            .map_err(Clone::clone),
+                    ));
+                }
+                let Err(unavailable) = client.as_ref() else {
+                    let active = client
+                        .as_ref()
+                        .expect("matched successful bridge client")
+                        .clone();
+                    let internal = internal_sender.clone();
+                    thread::spawn(move || {
+                        let result = active.call_with_id(
+                            command.clone(),
+                            format!("operation-{id}"),
+                            Duration::from_secs(300),
+                        );
+                        let _ = internal.send(BridgeWorkerResult::Completed {
+                            id,
+                            command,
+                            result,
+                        });
+                    });
+                    continue;
+                };
+                {
+                    let _ = results.send_blocking(BridgeWorkerResult::Completed {
+                        id,
+                        command,
+                        result: Err(unavailable.clone()),
+                    });
+                    continue;
+                }
+            }
+            BridgeWorkerCommand::Cancel { id } => {
+                if let Ok(active) = &client {
+                    let _ = active.cancel(&format!("operation-{id}"));
+                }
+            }
+            BridgeWorkerCommand::Restart => {
+                if let Ok(active) = &client {
+                    active.stop();
+                }
+                client = start_discovered_bridge(&working_directory);
+                let _ = results.send_blocking(BridgeWorkerResult::Capabilities(
+                    client
+                        .as_ref()
+                        .map(|client| client.hello().clone())
+                        .map_err(Clone::clone),
+                ));
+            }
+            BridgeWorkerCommand::Shutdown => {
+                if let Ok(active) = &client {
+                    active.stop();
+                }
+                break;
+            }
+        }
+    }
+}
+
+fn start_discovered_bridge(
+    working_directory: &std::path::Path,
+) -> Result<SdkBridgeClient, BridgeError> {
+    let installation =
+        crate::services::pi_process::discover_and_probe(None, Duration::from_secs(5)).map_err(
+            |_| {
+                BridgeError::new(
+                    BridgeErrorKind::Unavailable,
+                    "The compatible Pi SDK bridge is unavailable.",
+                )
+            },
+        )?;
+    let config = SdkBridgeConfig::from_installation(&installation, working_directory.to_path_buf())
+        .ok_or_else(|| {
+            BridgeError::new(
+                BridgeErrorKind::Unavailable,
+                "This Pi installation does not expose the SDK bridge.",
+            )
+        })?;
+    SdkBridgeClient::start(config)
+}

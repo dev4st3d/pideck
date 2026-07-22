@@ -1,5 +1,6 @@
 //! UI-independent application projections and Pi runtime state.
 
+pub mod history;
 pub mod reducer;
 pub mod runtime;
 

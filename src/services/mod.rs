@@ -2,4 +2,5 @@ pub mod path_actions;
 pub mod pi_process;
 pub mod rpc;
 pub mod runtime_worker;
+pub mod sdk_bridge;
 pub mod session_catalog;

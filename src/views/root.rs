@@ -8,11 +8,16 @@ use gpui::{
     Subscription, Task, Window, div, prelude::*, px,
 };
 
-use crate::actions::{AbortRun, ActivateRecovery, Connect, FocusNext, FocusPrevious, Retry, Stop};
-use crate::controller::{
-    AcceptedSubmission, AcceptedSubmissionKind, CatalogProjection, CatalogStatus, ComposerRuntime,
-    ConversationProjection, RuntimeController, SubmissionPreference,
+use crate::actions::{
+    AbortRun, ActivateRecovery, Connect, FocusNext, FocusPrevious, HistoryActivate, HistoryFirst,
+    HistoryFold, HistoryLast, HistoryNext, HistoryPrevious, HistoryUnfold, Retry, Stop,
 };
+use crate::controller::{
+    AcceptedSubmission, AcceptedSubmissionKind, BridgeProjection, CatalogProjection, CatalogStatus,
+    ComposerRuntime, ConversationProjection, HistoryProjection, RuntimeController,
+    SubmissionPreference,
+};
+use crate::state::history::{HistoryBrowser, HistoryFilter};
 use crate::state::runtime::{
     BashStatus, CompactionState, PromptDelivery, QueueContents, QueueDeliveryMode, RetryState,
     RuntimeLifecycle, RuntimeOperation, SubmissionKind,
@@ -29,11 +34,26 @@ struct PendingDraft {
     text: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum HistoryConfirmation {
+    Navigate(crate::services::rpc::EntryId),
+    Fork(crate::services::rpc::EntryId),
+    Clone,
+}
+
 pub struct RootView {
     controller: Entity<RuntimeController>,
     composer: Entity<Composer>,
     compaction_composer: Entity<Composer>,
     session_name_composer: Entity<Composer>,
+    history_search_composer: Entity<Composer>,
+    history_label_composer: Entity<Composer>,
+    import_path_composer: Entity<Composer>,
+    history: HistoryBrowser,
+    history_focus: FocusHandle,
+    history_open: bool,
+    history_confirmation: Option<HistoryConfirmation>,
+    summarize_navigation: bool,
     conversation: ConversationProjection,
     conversation_scroll: ScrollHandle,
     scroll_pinning: ScrollPinning,
@@ -49,6 +69,9 @@ pub struct RootView {
     _composer_subscription: Subscription,
     _compaction_subscription: Subscription,
     _session_name_subscription: Subscription,
+    _history_search_observation: Subscription,
+    _history_label_subscription: Subscription,
+    _import_path_subscription: Subscription,
 }
 
 impl RootView {
@@ -68,7 +91,14 @@ impl RootView {
             )
         });
         let session_name_composer =
-            cx.new(|cx| Composer::scoped("session-name", "New session name…", "Rename", cx));
+            cx.new(|cx| Composer::field("session-name", "Rename session…", "Rename", cx));
+        let history_search_composer =
+            cx.new(|cx| Composer::field("history-search", "Search history…", "", cx));
+        let history_label_composer =
+            cx.new(|cx| Composer::field("history-label", "Label selected entry…", "Set", cx));
+        let import_path_composer =
+            cx.new(|cx| Composer::field("import-jsonl", "JSONL path to import…", "Import", cx));
+        let history_focus = cx.focus_handle();
         let conversation = controller.read(cx).conversation_projection();
         let transcript_texts = conversation::text_fragments(&conversation)
             .into_iter()
@@ -99,11 +129,33 @@ impl RootView {
             cx.subscribe_in(&session_name_composer, window, |view, _, event, _, cx| {
                 view.on_session_name_event(event, cx)
             });
+        let history_search_observation =
+            cx.observe_in(&history_search_composer, window, |view, _, _, cx| {
+                let query = view.history_search_composer.read(cx).draft().to_owned();
+                view.history.set_query(query);
+                cx.notify();
+            });
+        let history_label_subscription =
+            cx.subscribe_in(&history_label_composer, window, |view, _, event, _, cx| {
+                view.on_history_label_event(event, cx)
+            });
+        let import_path_subscription =
+            cx.subscribe_in(&import_path_composer, window, |view, _, event, _, cx| {
+                view.on_import_path_event(event, cx)
+            });
         Self {
             controller,
             composer,
             compaction_composer,
             session_name_composer,
+            history_search_composer,
+            history_label_composer,
+            import_path_composer,
+            history: HistoryBrowser::default(),
+            history_focus,
+            history_open: false,
+            history_confirmation: None,
+            summarize_navigation: false,
             conversation,
             conversation_scroll: ScrollHandle::new(),
             scroll_pinning: ScrollPinning::default(),
@@ -119,6 +171,9 @@ impl RootView {
             _composer_subscription: composer_subscription,
             _compaction_subscription: compaction_subscription,
             _session_name_subscription: session_name_subscription,
+            _history_search_observation: history_search_observation,
+            _history_label_subscription: history_label_subscription,
+            _import_path_subscription: import_path_subscription,
         }
     }
 
@@ -307,6 +362,212 @@ impl RootView {
         }
     }
 
+    fn on_history_label_event(&mut self, event: &ComposerEvent, cx: &mut Context<Self>) {
+        let ComposerEvent::Accept { text } = event else {
+            return;
+        };
+        let Some(entry) = self.history.selected().cloned() else {
+            return;
+        };
+        let label = text.trim().to_owned();
+        if label.is_empty() {
+            return;
+        }
+        self.controller.update(cx, |controller, cx| {
+            controller.set_tree_label(entry, Some(label), cx);
+        });
+    }
+
+    fn on_import_path_event(&mut self, event: &ComposerEvent, cx: &mut Context<Self>) {
+        let ComposerEvent::Accept { text } = event else {
+            return;
+        };
+        let path = text.trim().to_owned();
+        if path.is_empty() {
+            return;
+        }
+        self.controller.update(cx, |controller, cx| {
+            controller.import_jsonl(path, cx);
+        });
+    }
+
+    fn history_projection(&self, cx: &Context<Self>) -> HistoryProjection {
+        self.controller.read(cx).history_projection()
+    }
+
+    fn select_history(
+        &mut self,
+        entry: crate::services::rpc::EntryId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let projection = self.history_projection(cx);
+        if self.history.select(entry, &projection.tree) {
+            window.focus(&self.history_focus);
+            self.history_confirmation = None;
+            cx.notify();
+        }
+    }
+
+    fn set_history_filter(&mut self, filter: HistoryFilter, cx: &mut Context<Self>) {
+        self.history.set_filter(filter);
+        self.history_confirmation = None;
+        cx.notify();
+    }
+
+    fn on_history_next(&mut self, _: &HistoryNext, _: &mut Window, cx: &mut Context<Self>) {
+        let projection = self.history_projection(cx);
+        let rows = self
+            .history
+            .rows(&projection.tree, projection.leaf_id.as_ref());
+        if self.history.move_next(&rows) {
+            cx.notify();
+        }
+    }
+
+    fn on_history_previous(&mut self, _: &HistoryPrevious, _: &mut Window, cx: &mut Context<Self>) {
+        let projection = self.history_projection(cx);
+        let rows = self
+            .history
+            .rows(&projection.tree, projection.leaf_id.as_ref());
+        if self.history.move_previous(&rows) {
+            cx.notify();
+        }
+    }
+
+    fn on_history_first(&mut self, _: &HistoryFirst, _: &mut Window, cx: &mut Context<Self>) {
+        let projection = self.history_projection(cx);
+        let rows = self
+            .history
+            .rows(&projection.tree, projection.leaf_id.as_ref());
+        if self.history.move_first(&rows) {
+            cx.notify();
+        }
+    }
+
+    fn on_history_last(&mut self, _: &HistoryLast, _: &mut Window, cx: &mut Context<Self>) {
+        let projection = self.history_projection(cx);
+        let rows = self
+            .history
+            .rows(&projection.tree, projection.leaf_id.as_ref());
+        if self.history.move_last(&rows) {
+            cx.notify();
+        }
+    }
+
+    fn on_history_fold(&mut self, _: &HistoryFold, _: &mut Window, cx: &mut Context<Self>) {
+        let projection = self.history_projection(cx);
+        if self.history.fold_or_parent(&projection.tree) {
+            cx.notify();
+        }
+    }
+
+    fn on_history_unfold(&mut self, _: &HistoryUnfold, _: &mut Window, cx: &mut Context<Self>) {
+        let projection = self.history_projection(cx);
+        if self.history.unfold_or_child(&projection.tree) {
+            cx.notify();
+        }
+    }
+
+    fn on_history_activate(&mut self, _: &HistoryActivate, _: &mut Window, cx: &mut Context<Self>) {
+        let Some(entry) = self.history.selected().cloned() else {
+            return;
+        };
+        if self.history_confirmation == Some(HistoryConfirmation::Navigate(entry.clone())) {
+            self.confirm_history_operation(cx);
+        } else {
+            self.history_confirmation = Some(HistoryConfirmation::Navigate(entry));
+            cx.notify();
+        }
+    }
+
+    fn request_fork(&mut self, cx: &mut Context<Self>) {
+        let Some(entry) = self.history.selected().cloned() else {
+            return;
+        };
+        self.history_confirmation = Some(HistoryConfirmation::Fork(entry));
+        cx.notify();
+    }
+
+    fn request_clone(&mut self, cx: &mut Context<Self>) {
+        self.history_confirmation = Some(HistoryConfirmation::Clone);
+        cx.notify();
+    }
+
+    fn request_navigation(&mut self, cx: &mut Context<Self>) {
+        let Some(entry) = self.history.selected().cloned() else {
+            return;
+        };
+        self.history_confirmation = Some(HistoryConfirmation::Navigate(entry));
+        cx.notify();
+    }
+
+    fn cancel_history_confirmation(&mut self, cx: &mut Context<Self>) {
+        self.history_confirmation = None;
+        cx.notify();
+    }
+
+    fn confirm_history_operation(&mut self, cx: &mut Context<Self>) {
+        let Some(confirmation) = self.history_confirmation.take() else {
+            return;
+        };
+        self.controller
+            .update(cx, |controller, cx| match confirmation {
+                HistoryConfirmation::Navigate(entry) => {
+                    controller.navigate_tree(entry, self.summarize_navigation, None, None, cx);
+                }
+                HistoryConfirmation::Fork(entry) => {
+                    controller.fork_before(entry, cx);
+                }
+                HistoryConfirmation::Clone => {
+                    controller.clone_current_path(cx);
+                }
+            });
+        cx.notify();
+    }
+
+    fn clear_selected_label(&mut self, cx: &mut Context<Self>) {
+        let Some(entry) = self.history.selected().cloned() else {
+            return;
+        };
+        self.controller.update(cx, |controller, cx| {
+            controller.set_tree_label(entry, None, cx);
+        });
+    }
+
+    fn toggle_navigation_summary(&mut self, cx: &mut Context<Self>) {
+        self.summarize_navigation = !self.summarize_navigation;
+        cx.notify();
+    }
+
+    fn export_jsonl(&mut self, cx: &mut Context<Self>) {
+        self.controller.update(cx, |controller, cx| {
+            controller.export_jsonl(None, cx);
+        });
+    }
+
+    fn cancel_bridge(&mut self, cx: &mut Context<Self>) {
+        self.controller.update(cx, |controller, cx| {
+            controller.cancel_bridge_operation(cx);
+        });
+    }
+
+    fn restart_bridge(&mut self, cx: &mut Context<Self>) {
+        self.controller.update(cx, |controller, cx| {
+            controller.restart_bridge(cx);
+        });
+    }
+
+    fn toggle_history(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.history_open = !self.history_open;
+        if self.history_open {
+            window.focus(&self.history_focus);
+        } else {
+            window.focus(&self.composer.read(cx).focus_handle(cx));
+        }
+        cx.notify();
+    }
+
     fn new_session(&mut self, cx: &mut Context<Self>) {
         self.controller.update(cx, |controller, cx| {
             controller.new_session(cx);
@@ -337,6 +598,18 @@ impl RootView {
         if epoch_changed {
             self.transcript_texts.clear();
             self.tool_cards.clear();
+        }
+        let history = self.controller.read(cx).history_projection();
+        self.history
+            .synchronize(&history.tree, history.leaf_id.as_ref());
+        if epoch_changed {
+            let restored = self
+                .controller
+                .update(cx, |controller, _| controller.take_requested_editor_text());
+            if let Some(text) = restored {
+                self.composer
+                    .update(cx, |composer, cx| composer.set_draft(&text, cx));
+            }
         }
         let fragments = conversation::text_fragments(&conversation);
         let active = fragments
@@ -384,11 +657,45 @@ impl RootView {
             )
         });
         let catalog = self.controller.read(cx).catalog_projection();
+        let bridge = self.controller.read(cx).bridge_projection();
         let rename_available =
             compact_available && catalog.current_session_file.is_some() && !catalog.switching;
         self.session_name_composer.update(cx, |composer, cx| {
             composer.set_availability(
                 if rename_available {
+                    ComposerAvailability::Idle
+                } else {
+                    ComposerAvailability::Unavailable
+                },
+                cx,
+            )
+        });
+        let bridge_input_available =
+            compact_available && !catalog.switching && bridge.pending.is_none();
+        let label_available = bridge_input_available
+            && bridge
+                .capabilities
+                .as_ref()
+                .is_some_and(|capabilities| capabilities.labels);
+        self.history_label_composer.update(cx, |composer, cx| {
+            composer.set_availability(
+                if label_available {
+                    ComposerAvailability::Idle
+                } else {
+                    ComposerAvailability::Unavailable
+                },
+                cx,
+            )
+        });
+        let import_available = bridge_input_available
+            && catalog.root.is_some()
+            && bridge
+                .capabilities
+                .as_ref()
+                .is_some_and(|capabilities| capabilities.jsonl_import);
+        self.import_path_composer.update(cx, |composer, cx| {
+            composer.set_availability(
+                if import_available {
                     ComposerAvailability::Idle
                 } else {
                     ComposerAvailability::Unavailable
@@ -613,6 +920,8 @@ impl Render for RootView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let projection = self.controller.read(cx).projection();
         let catalog = self.controller.read(cx).catalog_projection();
+        let history = self.controller.read(cx).history_projection();
+        let bridge = self.controller.read(cx).bridge_projection();
         let selection_active = self
             .transcript_texts
             .values()
@@ -637,6 +946,13 @@ impl Render for RootView {
             .on_action(cx.listener(Self::on_activate_recovery))
             .on_action(cx.listener(Self::on_focus_next))
             .on_action(cx.listener(Self::on_focus_previous))
+            .on_action(cx.listener(Self::on_history_next))
+            .on_action(cx.listener(Self::on_history_previous))
+            .on_action(cx.listener(Self::on_history_first))
+            .on_action(cx.listener(Self::on_history_last))
+            .on_action(cx.listener(Self::on_history_fold))
+            .on_action(cx.listener(Self::on_history_unfold))
+            .on_action(cx.listener(Self::on_history_activate))
             .size_full()
             .flex()
             .flex_col()
@@ -651,12 +967,31 @@ impl Render for RootView {
                     .flex()
                     .flex_row()
                     .child(sessions_panel(
-                        &catalog,
-                        &projection,
-                        &self.conversation,
-                        &self.session_name_composer,
+                        SessionsPanelParams {
+                            catalog: &catalog,
+                            projection: &projection,
+                            conversation: &self.conversation,
+                            name_composer: &self.session_name_composer,
+                            history_open: self.history_open,
+                        },
                         cx,
                     ))
+                    .when(self.history_open, |layout| {
+                        layout.child(history_panel(
+                            HistoryPanelParams {
+                                projection: &history,
+                                bridge: &bridge,
+                                browser: &self.history,
+                                focus: &self.history_focus,
+                                search: &self.history_search_composer,
+                                label: &self.history_label_composer,
+                                import_path: &self.import_path_composer,
+                                confirmation: self.history_confirmation.as_ref(),
+                                summarize: self.summarize_navigation,
+                            },
+                            cx,
+                        ))
+                    })
                     .child(conversation_area(
                         &projection,
                         &self.conversation,
@@ -671,7 +1006,7 @@ impl Render for RootView {
                         cx,
                     )),
             )
-            .child(composer_bar(&self.composer))
+            .child(composer_bar(&self.composer, self.history_open))
     }
 }
 
@@ -767,13 +1102,22 @@ fn titlebar(projection: &ShellProjection, cx: &mut Context<RootView>) -> impl In
         )
 }
 
-fn sessions_panel(
-    catalog: &CatalogProjection,
-    projection: &ShellProjection,
-    conversation: &ConversationProjection,
-    name_composer: &Entity<Composer>,
-    cx: &mut Context<RootView>,
-) -> impl IntoElement {
+struct SessionsPanelParams<'a> {
+    catalog: &'a CatalogProjection,
+    projection: &'a ShellProjection,
+    conversation: &'a ConversationProjection,
+    name_composer: &'a Entity<Composer>,
+    history_open: bool,
+}
+
+fn sessions_panel(params: SessionsPanelParams<'_>, cx: &mut Context<RootView>) -> impl IntoElement {
+    let SessionsPanelParams {
+        catalog,
+        projection,
+        conversation,
+        name_composer,
+        history_open,
+    } = params;
     let session_actions_enabled = matches!(
         conversation.lifecycle,
         RuntimeLifecycle::Ready | RuntimeLifecycle::Settled
@@ -819,29 +1163,42 @@ fn sessions_panel(
         )
         .child(
             div()
-                .px(px(8.0))
-                .pb(px(10.0))
+                .px(px(10.0))
+                .pb(px(8.0))
                 .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(2.0))
-                .child(controls::quiet_button(
-                    "new-session",
-                    "New",
-                    session_actions_enabled,
-                    Box::new(cx.listener(|view, _, _, cx| view.new_session(cx))),
-                ))
-                .child(controls::quiet_button(
-                    "refresh-sessions",
-                    "Refresh",
-                    catalog.status != CatalogStatus::Loading,
-                    Box::new(cx.listener(|view, _, _, cx| view.refresh_sessions(cx))),
-                ))
-                .child(controls::quiet_button(
-                    "export-session",
-                    "Export",
-                    session_actions_enabled && catalog.current_session_file.is_some(),
-                    Box::new(cx.listener(|view, _, _, cx| view.export_session(cx))),
+                .flex_col()
+                .gap(px(6.0))
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(4.0))
+                        .child(controls::quiet_button(
+                            "new-session",
+                            "New",
+                            session_actions_enabled,
+                            Box::new(cx.listener(|view, _, _, cx| view.new_session(cx))),
+                        ))
+                        .child(controls::quiet_button(
+                            "refresh-sessions",
+                            "Refresh",
+                            catalog.status != CatalogStatus::Loading,
+                            Box::new(cx.listener(|view, _, _, cx| view.refresh_sessions(cx))),
+                        ))
+                        .child(controls::quiet_button(
+                            "export-session",
+                            "Export",
+                            session_actions_enabled && catalog.current_session_file.is_some(),
+                            Box::new(cx.listener(|view, _, _, cx| view.export_session(cx))),
+                        )),
+                )
+                .child(controls::chip_button(
+                    "toggle-history",
+                    "History",
+                    history_open,
+                    true,
+                    Box::new(cx.listener(|view, _, window, cx| view.toggle_history(window, cx))),
                 )),
         )
         .when(
@@ -896,7 +1253,7 @@ fn sessions_panel(
             )
         })
         .when(catalog.current_session_file.is_some(), |panel| {
-            panel.child(div().px(px(12.0)).pb(px(10.0)).child(name_composer.clone()))
+            panel.child(div().px(px(10.0)).pb(px(8.0)).child(name_composer.clone()))
         })
         .child(
             div()
@@ -961,6 +1318,448 @@ fn sessions_panel(
         )
 }
 
+struct HistoryPanelParams<'a> {
+    projection: &'a HistoryProjection,
+    bridge: &'a BridgeProjection,
+    browser: &'a HistoryBrowser,
+    focus: &'a FocusHandle,
+    search: &'a Entity<Composer>,
+    label: &'a Entity<Composer>,
+    import_path: &'a Entity<Composer>,
+    confirmation: Option<&'a HistoryConfirmation>,
+    summarize: bool,
+}
+
+fn history_panel(params: HistoryPanelParams<'_>, cx: &mut Context<RootView>) -> impl IntoElement {
+    let HistoryPanelParams {
+        projection,
+        bridge,
+        browser,
+        focus,
+        search,
+        label,
+        import_path,
+        confirmation,
+        summarize,
+    } = params;
+    let rows = browser.rows(&projection.tree, projection.leaf_id.as_ref());
+    let details = browser.details(&projection.tree, projection.leaf_id.as_ref());
+    let selected = browser.selected().cloned();
+    let selected_is_forkable = selected.as_ref().is_some_and(|selected| {
+        projection
+            .fork_messages
+            .iter()
+            .any(|message| &message.entry_id == selected)
+    });
+    let ready = matches!(
+        projection.lifecycle,
+        RuntimeLifecycle::Ready | RuntimeLifecycle::Settled
+    ) && !projection.switching
+        && bridge.pending.is_none();
+    let capabilities = bridge.capabilities.as_ref();
+    let navigation_available = capabilities.is_some_and(|capabilities| capabilities.navigate_tree);
+    let labels_available = capabilities.is_some_and(|capabilities| capabilities.labels);
+    let export_available = capabilities.is_some_and(|capabilities| capabilities.jsonl_export);
+    let import_available = capabilities.is_some_and(|capabilities| capabilities.jsonl_import);
+    let summary_available = capabilities.is_some_and(|capabilities| capabilities.branch_summary);
+    let filter = browser.filter();
+
+    div()
+        .id("history-tree")
+        .track_focus(focus)
+        .tab_index(0)
+        .key_context("HistoryTree")
+        .w(px(theme::HISTORY_W))
+        .flex_shrink_0()
+        .h_full()
+        .min_h_0()
+        .flex()
+        .flex_col()
+        .bg(theme::floor())
+        .border_r_1()
+        .border_color(theme::edge_hard())
+        .focus(|panel| panel.border_color(theme::focus()))
+        .child(
+            div()
+                .px(px(12.0))
+                .pt(px(12.0))
+                .pb(px(8.0))
+                .flex()
+                .items_baseline()
+                .justify_between()
+                .child(controls::section_label("History"))
+                .child(
+                    div()
+                        .font_family(theme::MONO)
+                        .text_size(px(theme::T_TINY))
+                        .text_color(theme::smoke())
+                        .child(format!("{}", rows.len())),
+                ),
+        )
+        .child(div().px(px(10.0)).pb(px(6.0)).child(search.clone()))
+        .child(
+            div()
+                .px(px(10.0))
+                .pb(px(8.0))
+                .flex()
+                .flex_row()
+                .flex_wrap()
+                .gap(px(4.0))
+                .child(controls::chip_button(
+                    "history-all",
+                    "All",
+                    filter == HistoryFilter::All,
+                    true,
+                    Box::new(cx.listener(|view, _, _, cx| {
+                        view.set_history_filter(HistoryFilter::All, cx)
+                    })),
+                ))
+                .child(controls::chip_button(
+                    "history-messages",
+                    "Messages",
+                    filter == HistoryFilter::Messages,
+                    true,
+                    Box::new(cx.listener(|view, _, _, cx| {
+                        view.set_history_filter(HistoryFilter::Messages, cx)
+                    })),
+                ))
+                .child(controls::chip_button(
+                    "history-summaries",
+                    "Summaries",
+                    filter == HistoryFilter::Summaries,
+                    true,
+                    Box::new(cx.listener(|view, _, _, cx| {
+                        view.set_history_filter(HistoryFilter::Summaries, cx)
+                    })),
+                ))
+                .child(controls::chip_button(
+                    "history-labels",
+                    "Labels",
+                    filter == HistoryFilter::Labels,
+                    true,
+                    Box::new(cx.listener(|view, _, _, cx| {
+                        view.set_history_filter(HistoryFilter::Labels, cx)
+                    })),
+                )),
+        )
+        .child(
+            div()
+                .id("history-scroll")
+                .flex_1()
+                .min_h_0()
+                .overflow_y_scroll()
+                .scrollbar_width(px(theme::SCROLLBAR))
+                .when(rows.is_empty(), |list| {
+                    list.child(controls::empty_list_note(match projection.status {
+                        crate::state::runtime::FacetStatus::Loading => "Loading history…",
+                        crate::state::runtime::FacetStatus::Failed(_) => "History unavailable.",
+                        crate::state::runtime::FacetStatus::Ready => "No matching entries.",
+                    }))
+                })
+                .children(rows.into_iter().map(|row| {
+                    let entry = row.id.clone();
+                    let selected = browser.selected() == Some(&row.id);
+                    let marker = if row.active_leaf {
+                        "●"
+                    } else if row.active_path {
+                        "│"
+                    } else if row.has_children && row.folded {
+                        "▸"
+                    } else if row.has_children {
+                        "▾"
+                    } else {
+                        "·"
+                    };
+                    let label_copy = row
+                        .label
+                        .as_deref()
+                        .map(|label| format!(" · {label}"))
+                        .unwrap_or_default();
+                    controls::interactive_list_row(
+                        gpui::SharedString::from(format!("history-{}", row.id)),
+                        true,
+                        Box::new(cx.listener(move |view, _, window, cx| {
+                            view.select_history(entry.clone(), window, cx)
+                        })),
+                        div()
+                            .w_full()
+                            .pl(px(6.0 + row.depth as f32 * 10.0))
+                            .py(px(5.0))
+                            .flex()
+                            .gap(px(6.0))
+                            .when(selected, |row| row.bg(theme::panel()))
+                            .child(
+                                div()
+                                    .w(px(10.0))
+                                    .font_family(theme::MONO)
+                                    .text_size(px(theme::T_TINY))
+                                    .text_color(if row.active_path {
+                                        theme::signal_hot()
+                                    } else {
+                                        theme::smoke()
+                                    })
+                                    .child(marker),
+                            )
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .flex_1()
+                                    .child(
+                                        div()
+                                            .text_size(px(theme::T_TINY))
+                                            .font_weight(FontWeight::BOLD)
+                                            .text_color(if row.contextual {
+                                                theme::smoke()
+                                            } else {
+                                                theme::bone()
+                                            })
+                                            .child(format!("{}{}", row.title, label_copy)),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_size(px(theme::T_TINY))
+                                            .text_color(theme::bone_dim())
+                                            .overflow_hidden()
+                                            .text_ellipsis()
+                                            .whitespace_nowrap()
+                                            .child(row.detail),
+                                    ),
+                            ),
+                    )
+                })),
+        )
+        .when_some(details, |panel, details| {
+            let body = details.body.chars().take(160).collect::<String>();
+            panel.child(
+                div()
+                    .px(px(12.0))
+                    .py(px(10.0))
+                    .border_t_1()
+                    .border_color(theme::edge_soft())
+                    .flex()
+                    .flex_col()
+                    .gap(px(4.0))
+                    .child(
+                        div()
+                            .font_family(theme::MONO)
+                            .text_size(px(theme::T_TINY))
+                            .text_color(theme::data())
+                            .child(format!(
+                                "{} · {} child{} · {}",
+                                details.kind,
+                                details.child_count,
+                                if details.child_count == 1 { "" } else { "ren" },
+                                details.timestamp
+                            )),
+                    )
+                    .when(!body.is_empty(), |block| {
+                        block.child(
+                            div()
+                                .text_size(px(theme::T_TINY))
+                                .line_height(gpui::relative(1.4))
+                                .text_color(theme::bone_dim())
+                                .child(body),
+                        )
+                    }),
+            )
+        })
+        .child(
+            div()
+                .px(px(10.0))
+                .py(px(8.0))
+                .border_t_1()
+                .border_color(theme::edge_soft())
+                .flex()
+                .flex_col()
+                .gap(px(6.0))
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .flex_wrap()
+                        .gap(px(4.0))
+                        .child(controls::quiet_button(
+                            "history-fork",
+                            "Fork",
+                            ready && selected_is_forkable,
+                            Box::new(cx.listener(|view, _, _, cx| view.request_fork(cx))),
+                        ))
+                        .child(controls::quiet_button(
+                            "history-clone",
+                            "Clone",
+                            ready && projection.leaf_id.is_some(),
+                            Box::new(cx.listener(|view, _, _, cx| view.request_clone(cx))),
+                        ))
+                        .when(navigation_available, |actions| {
+                            actions.child(controls::quiet_button(
+                                "history-navigate",
+                                "Navigate",
+                                ready
+                                    && selected.is_some()
+                                    && selected.as_ref() != projection.leaf_id.as_ref(),
+                                Box::new(cx.listener(|view, _, _, cx| view.request_navigation(cx))),
+                            ))
+                        })
+                        .when(export_available, |actions| {
+                            actions.child(controls::quiet_button(
+                                "history-export-jsonl",
+                                "Export",
+                                ready,
+                                Box::new(cx.listener(|view, _, _, cx| view.export_jsonl(cx))),
+                            ))
+                        })
+                        .when(bridge.pending.is_some(), |actions| {
+                            actions.child(controls::quiet_button(
+                                "history-cancel-bridge",
+                                "Cancel",
+                                true,
+                                Box::new(cx.listener(|view, _, _, cx| view.cancel_bridge(cx))),
+                            ))
+                        }),
+                )
+                .when(navigation_available && summary_available, |block| {
+                    block.child(controls::chip_button(
+                        "history-summary",
+                        "Branch summary",
+                        summarize,
+                        ready,
+                        Box::new(cx.listener(|view, _, _, cx| view.toggle_navigation_summary(cx))),
+                    ))
+                }),
+        )
+        .when(labels_available && selected.is_some(), |panel| {
+            panel.child(
+                div()
+                    .px(px(10.0))
+                    .pb(px(8.0))
+                    .flex()
+                    .flex_col()
+                    .gap(px(4.0))
+                    .child(controls::section_label("Label"))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_start()
+                            .gap(px(6.0))
+                            .child(div().flex_1().min_w_0().child(label.clone()))
+                            .child(controls::quiet_button(
+                                "history-clear-label",
+                                "Clear",
+                                ready,
+                                Box::new(
+                                    cx.listener(|view, _, _, cx| view.clear_selected_label(cx)),
+                                ),
+                            )),
+                    ),
+            )
+        })
+        .when(import_available, |panel| {
+            panel.child(
+                div()
+                    .px(px(10.0))
+                    .pb(px(8.0))
+                    .flex()
+                    .flex_col()
+                    .gap(px(4.0))
+                    .child(controls::section_label("Import JSONL"))
+                    .child(import_path.clone()),
+            )
+        })
+        .when_some(confirmation.cloned(), |panel, confirmation| {
+            let (title, copy) = match confirmation {
+                HistoryConfirmation::Navigate(_) => (
+                    "Navigate here?",
+                    "Same file keeps every branch. Only the active leaf changes.",
+                ),
+                HistoryConfirmation::Fork(_) => (
+                    "Fork before message?",
+                    "Creates a new session file. Message text returns to the composer.",
+                ),
+                HistoryConfirmation::Clone => (
+                    "Clone current path?",
+                    "New file gets this path. Abandoned branches stay in the original.",
+                ),
+            };
+            panel.child(
+                div()
+                    .mx(px(10.0))
+                    .mb(px(8.0))
+                    .px(px(10.0))
+                    .py(px(10.0))
+                    .rounded(px(theme::RADIUS_SM))
+                    .bg(theme::data_wash())
+                    .border_1()
+                    .border_color(theme::data())
+                    .flex()
+                    .flex_col()
+                    .gap(px(8.0))
+                    .child(
+                        div()
+                            .font_family(theme::SANS)
+                            .text_size(px(theme::T_UI_SM))
+                            .font_weight(FontWeight::BOLD)
+                            .text_color(theme::bone())
+                            .child(title),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(theme::T_TINY))
+                            .line_height(gpui::relative(1.4))
+                            .text_color(theme::bone_dim())
+                            .child(copy),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .gap(px(4.0))
+                            .child(controls::quiet_button(
+                                "history-confirm",
+                                "Confirm",
+                                ready,
+                                Box::new(
+                                    cx.listener(|view, _, _, cx| {
+                                        view.confirm_history_operation(cx)
+                                    }),
+                                ),
+                            ))
+                            .child(controls::quiet_button(
+                                "history-confirm-cancel",
+                                "Cancel",
+                                true,
+                                Box::new(cx.listener(|view, _, _, cx| {
+                                    view.cancel_history_confirmation(cx)
+                                })),
+                            )),
+                    ),
+            )
+        })
+        .when_some(bridge.feedback.clone(), |panel, feedback| {
+            panel.child(controls::panel_footer_status(feedback))
+        })
+        .when_some(bridge.unavailable.clone(), |panel, unavailable| {
+            panel.child(
+                div()
+                    .px(px(10.0))
+                    .pb(px(10.0))
+                    .flex()
+                    .flex_col()
+                    .gap(px(6.0))
+                    .child(controls::panel_note(
+                        unavailable,
+                        controls::ControlTone::Normal,
+                    ))
+                    .child(controls::quiet_button(
+                        "history-restart-bridge",
+                        "Restart bridge",
+                        bridge.pending.is_none(),
+                        Box::new(cx.listener(|view, _, _, cx| view.restart_bridge(cx))),
+                    )),
+            )
+        })
+}
+
 fn conversation_area(
     projection: &ShellProjection,
     conversation_projection: &ConversationProjection,
@@ -1008,8 +1807,9 @@ fn conversation_area(
         )
 }
 
-fn composer_bar(composer: &Entity<Composer>) -> impl IntoElement {
-    let inset_left = theme::SIDE_W + theme::STREAM_PAD_X;
+fn composer_bar(composer: &Entity<Composer>, history_open: bool) -> impl IntoElement {
+    let inset_left =
+        theme::SIDE_W + if history_open { theme::HISTORY_W } else { 0.0 } + theme::STREAM_PAD_X;
     let inset_right = theme::INSPECT_W + theme::STREAM_PAD_X;
 
     div()

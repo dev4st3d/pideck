@@ -4,7 +4,7 @@ Native Windows-first desktop shell for Pi, built with Rust and GPUI 0.2.2.
 
 ## Current maturity
 
-Phases 9 and 10 complete run-control recovery UX and replace the session fixture concept with Pi's persisted session lifecycle. Startup, discovery, correlated readiness, hydration, prompt acceptance, message streaming, tools, retries, compaction, session catalog scanning, direct Bash, and shutdown all run behind dedicated workers. The GPUI-owned controller observes normalized state and never performs I/O from `render`.
+Phases 9 through 11 complete run-control recovery UX and Pi's persisted session lifecycle, including native branch history. Startup, discovery, correlated readiness, hydration, prompt acceptance, message streaming, tools, retries, compaction, session catalog scanning, direct Bash, SDK session operations, and shutdown all run behind dedicated workers. The GPUI-owned controller observes normalized state and never performs I/O from `render`.
 
 The visible shell now shows only live or explicitly Loading, Awaiting, Unknown, stale, stopped, and error values:
 
@@ -20,10 +20,12 @@ The visible shell now shows only live or explicitly Loading, Awaiting, Unknown, 
 - complete steering/follow-up queue visibility and delivery modes, scoped abort controls, retry countdown/attempt/final-error state, manual compaction with optional focus instructions, and auto-compaction/auto-retry controls;
 - a real workspace-filtered v1-v3 JSONL session catalog with loading, empty, inaccessible, corrupt, refreshing/stale, and active-switch states;
 - atomic new/switch/rename/export operations that retain the old transcript read-only until Pi confirms a replacement and never replay an uncertain prompt.
+- a searchable, foldable, filterable session tree with the authoritative active leaf, keyboard navigation, entry details, stock fork-before-message and clone-path actions, and explicit same-file/new-file confirmations;
+- a negotiated Pi SDK 0.80.10 stdio JSONL bridge for same-file navigation, optional branch summaries, labels, active-path JSONL export, and safe import into a new session file. Unsupported bridge actions stay hidden.
 
 Accepted idle input uses `prompt`. While Pi is running, the primary action uses `steer` and follow-ups use `follow_up`. A composer line beginning with `!` executes the remaining text through Pi's direct `bash` RPC; `!!` does the same with `excludeFromContext=true`. Direct Bash is recorded locally until the authoritative session message reconciles it. Escape and the visible abort action route to `abort_bash` while direct Bash is active, independently from agent `abort`. Empty and rapid duplicate submissions are rejected. Prompt drafts clear only after the matching accepted response; Bash drafts clear when the local execution is recorded. Rejection and uncertain disconnect never trigger replay.
 
-There is no model switching, auth UI, rich Markdown/link rendering, task/subagent view, resource browser, JSONL import/share/branch navigation, or concurrent session process UI. Queue items are authoritative and read-only because stock Pi RPC has no remove/restore operation. Reversible trash stays unavailable until both catalog ownership and a platform trash provider are proven.
+There is no model switching, auth UI, rich Markdown/link rendering, task/subagent view, resource browser, share, or concurrent session process UI. Queue items are authoritative and read-only because stock Pi RPC has no remove/restore operation. Reversible trash stays unavailable until both catalog ownership and a platform trash provider are proven.
 
 ## Prerequisite and launch
 
@@ -77,6 +79,7 @@ The interface preserves the warm-charcoal Switzer/Tanker identity, with Cascadia
 - `src/controller.rs` - GPUI-owned controller plus pure attempt/generation gate
 - `src/services/runtime_worker.rs` - injectable GPUI-independent service boundary and responsive worker coordinator
 - `src/services/session_catalog.rs` - strict streaming v1-v3 JSONL metadata scanner, directory precedence, canonical workspace filtering, corruption reporting, and stale-scan worker
+- `src/services/sdk_bridge.rs` and `bridge/pi-bridge.mjs` - negotiated, versioned, cancellable stdio JSONL SDK bridge for the Phase 11 session gaps
 - `src/services/rpc/` - Pi 0.80.10 wire contract, strict JSONL framing, correlated client, and runtime adapter
 - `src/services/pi_process/` - executable discovery, capability probing, launch policy, and process-tree supervision
 - `src/state/runtime.rs` - normalized owned runtime/transcript state, safe message metadata, stamped inputs, requests, and effects
@@ -90,4 +93,4 @@ The interface preserves the warm-charcoal Switzer/Tanker identity, with Cascadia
 
 The worker uses a controller attempt generation in addition to `ConnectionGeneration` and `SessionEpoch`. A retry starts a fresh process and generation; prior-attempt startup/results cannot overwrite it, and a late obsolete client is stopped immediately. Recovery hydrates state and never resends a prompt.
 
-Initial, recovery, and session-replacement hydration request `get_state` first, then messages, durable entries, session statistics, commands, available models, and tree state. Opening a saved session starts a fresh supervised connection directly on that file and retires the prior generation off the UI thread, preventing an in-process session handoff from leaving the shell disconnected. Recovery resumes the persisted session and requests entries after the last durable cursor; an invalid cursor falls back to one full rebuild. Optional facet failures preserve prior valid values and do not make an otherwise ready connection unusable. Window/controller release requests shutdown without waiting for `RpcClient::stop` on the GPUI event loop.
+Initial, recovery, and session-replacement hydration request `get_state` first, then messages, durable entries, session statistics, commands, available models, and fork candidates. Tree state is rebuilt from the flat durable entries instead of requesting Pi's recursively nested tree response, so long sessions cannot exceed the JSON decoder's recursion limit. Opening a saved session starts a fresh supervised connection directly on that file and retires the prior generation off the UI thread, preventing an in-process session handoff from leaving the shell disconnected. Fork, clone, import, and same-file navigation advance the session epoch before rebuilding every session-bound surface. Recovery resumes the persisted session and requests entries after the last durable cursor; an invalid cursor falls back to one full rebuild. Optional facet failures preserve prior valid values and do not make an otherwise ready connection unusable. Window/controller release requests shutdown without waiting on the GPUI event loop.

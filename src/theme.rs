@@ -8,6 +8,7 @@ pub const MONO: &str = "Cascadia Mono";
 
 // Layout
 pub const SIDE_W: f32 = 236.0;
+pub const HISTORY_W: f32 = 360.0;
 pub const INSPECT_W: f32 = 304.0;
 pub const TITLE_H: f32 = 50.0;
 pub const RADIUS: f32 = 4.0;

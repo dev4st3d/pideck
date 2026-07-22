@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
 use super::runtime::{
@@ -370,12 +370,11 @@ fn reduce_response(
                 since,
                 base_revision,
             },
-            Ok(NormalizedResponse::Entries {
-                entries,
-                leaf_id: _,
-            }),
+            Ok(NormalizedResponse::Entries { entries, leaf_id }),
         ) => {
+            state.entries_leaf_id = leaf_id;
             apply_entries(state, since, entries, base_revision);
+            rebuild_tree_from_entries(state);
             Vec::new()
         }
         (RuntimeRequest::GetStats, Ok(NormalizedResponse::Stats(stats))) => {
@@ -397,13 +396,18 @@ fn reduce_response(
         }
         (
             RuntimeRequest::GetTree { base_revision },
-            Ok(NormalizedResponse::Tree { tree, leaf_id: _ }),
+            Ok(NormalizedResponse::Tree { tree, leaf_id }),
         ) => {
+            state.tree_leaf_id = leaf_id;
             if state.revision == base_revision || state.tree.data.is_none() {
                 state.tree.ready(tree);
             } else {
                 state.tree.status = FacetStatus::Ready;
             }
+            Vec::new()
+        }
+        (RuntimeRequest::GetForkMessages, Ok(NormalizedResponse::ForkMessages(messages))) => {
+            state.fork_messages.ready(messages);
             Vec::new()
         }
         (RuntimeRequest::Submit { request, kind, .. }, Ok(NormalizedResponse::Accepted)) => {
@@ -616,8 +620,14 @@ fn reduce_response(
         }
         (
             RuntimeRequest::SessionMutation(_),
-            Ok(NormalizedResponse::SessionMutation { cancelled }),
+            Ok(NormalizedResponse::SessionMutation {
+                cancelled,
+                editor_text,
+            }),
         ) => {
+            if !cancelled && editor_text.is_some() {
+                state.requested_editor_text = editor_text;
+            }
             state.hydration_mode = if cancelled {
                 state.replacement_awaiting_state = false;
                 HydrationMode::Resync
@@ -699,6 +709,7 @@ fn apply_state_hydration(
     state: &mut RuntimeState,
     snapshot: super::runtime::NormalizedSessionState,
 ) -> Vec<RuntimeEffect> {
+    let replacement_editor_text = state.requested_editor_text.clone();
     let previous_id = state.session_id().cloned();
     let session_changed = previous_id
         .as_ref()
@@ -710,6 +721,7 @@ fn apply_state_hydration(
     }
     if session_changed || replacing_session {
         clear_session_scoped_state(state);
+        state.requested_editor_text = replacement_editor_text;
         state.display_epoch = state.epoch;
     }
     state.replacement_awaiting_state = false;
@@ -761,12 +773,7 @@ fn apply_state_hydration(
         effect(state, RuntimeRequest::GetStats),
         effect(state, RuntimeRequest::GetCommands),
         effect(state, RuntimeRequest::GetModels),
-        effect(
-            state,
-            RuntimeRequest::GetTree {
-                base_revision: revision,
-            },
-        ),
+        effect(state, RuntimeRequest::GetForkMessages),
     ]
 }
 
@@ -1053,6 +1060,9 @@ fn clear_session_scoped_state(state: &mut RuntimeState) {
     state.entries.data = None;
     state.stats.data = None;
     state.tree.data = None;
+    state.tree_leaf_id = None;
+    state.entries_leaf_id = None;
+    state.fork_messages.data = None;
     state.tools.clear();
     state.bash_executions.clear();
     state.queue = QueueContents::default();
@@ -1153,8 +1163,70 @@ fn append_entry(state: &mut RuntimeState, entry: super::runtime::RuntimeEntry) {
         state.durable_cursor = Some(id);
         state.cursor_session_id = state.session_id().cloned();
         state.entries.status = FacetStatus::Ready;
+        rebuild_tree_from_entries(state);
         state.bump_revision();
     }
+}
+
+fn rebuild_tree_from_entries(state: &mut RuntimeState) {
+    let Some(entries) = state.entries.data.as_ref() else {
+        return;
+    };
+    let indices = entries
+        .iter()
+        .enumerate()
+        .map(|(index, entry)| (entry.id.clone(), index))
+        .collect::<HashMap<_, _>>();
+    let mut labels = HashMap::new();
+    for entry in entries {
+        if let super::runtime::EntryKind::Label { target, label } = &entry.kind {
+            labels.insert(target.clone(), label.clone());
+        }
+    }
+
+    let mut children = vec![Vec::new(); entries.len()];
+    let mut roots = Vec::new();
+    for (index, entry) in entries.iter().enumerate() {
+        let parent = entry
+            .parent_id
+            .as_ref()
+            .filter(|parent| *parent != &entry.id)
+            .and_then(|parent| indices.get(parent).copied());
+        if let Some(parent) = parent {
+            children[parent].push(index);
+        } else {
+            roots.push(index);
+        }
+    }
+    for siblings in &mut children {
+        siblings.sort_by(|left, right| entries[*left].timestamp.cmp(&entries[*right].timestamp));
+    }
+
+    fn build_node(
+        index: usize,
+        entries: &[super::runtime::RuntimeEntry],
+        children: &[Vec<usize>],
+        labels: &HashMap<crate::services::rpc::EntryId, Option<String>>,
+    ) -> super::runtime::RuntimeTreeNode {
+        let entry = entries[index].clone();
+        let label = labels.get(&entry.id).cloned().flatten();
+        super::runtime::RuntimeTreeNode {
+            entry,
+            children: children[index]
+                .iter()
+                .map(|child| build_node(*child, entries, children, labels))
+                .collect(),
+            label,
+        }
+    }
+
+    state.tree_leaf_id = state.entries_leaf_id.clone();
+    state.tree.ready(
+        roots
+            .into_iter()
+            .map(|root| build_node(root, entries, &children, &labels))
+            .collect(),
+    );
 }
 
 fn dedup_entries(entries: Vec<super::runtime::RuntimeEntry>) -> Vec<super::runtime::RuntimeEntry> {
@@ -1319,6 +1391,7 @@ fn fail_hydration_facet(state: &mut RuntimeState, request: &RuntimeRequest, erro
         RuntimeRequest::GetCommands => state.commands.failed(error),
         RuntimeRequest::GetModels => state.models.failed(error),
         RuntimeRequest::GetTree { .. } => state.tree.failed(error),
+        RuntimeRequest::GetForkMessages => state.fork_messages.failed(error),
         _ => state.bounded_error(error),
     }
 }
@@ -1333,6 +1406,7 @@ fn is_hydration_request(request: &RuntimeRequest) -> bool {
             | RuntimeRequest::GetCommands
             | RuntimeRequest::GetModels
             | RuntimeRequest::GetTree { .. }
+            | RuntimeRequest::GetForkMessages
     )
 }
 
@@ -1345,6 +1419,7 @@ fn request_name(request: &RuntimeRequest) -> &'static str {
         RuntimeRequest::GetCommands => "get_commands",
         RuntimeRequest::GetModels => "get_available_models",
         RuntimeRequest::GetTree { .. } => "get_tree",
+        RuntimeRequest::GetForkMessages => "get_fork_messages",
         RuntimeRequest::Submit { kind, .. } => match kind {
             SubmissionKind::Prompt => "prompt",
             SubmissionKind::Steer => "steer",

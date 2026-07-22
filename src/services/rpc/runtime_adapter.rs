@@ -16,9 +16,9 @@ use crate::state::runtime::{
     ExtensionWidget, MessageBlock, MessageKey, MessageRole, MessageStopReason, MessageUsage,
     ModelSummary, NormalizedEvent, NormalizedResponse, NormalizedSessionState, NotificationKind,
     QueueDeliveryMode, RequestFailure, RequestFailureKind, RuntimeCommand, RuntimeEffect,
-    RuntimeEntry, RuntimeInput, RuntimeMessage, RuntimeNotification, RuntimeRequest, RuntimeStats,
-    RuntimeThinkingLevel, RuntimeTreeNode, SafeError, SessionMutation, SessionSnapshot,
-    StampedInput, SubmissionKind, ToolImage, WidgetPlacement,
+    RuntimeEntry, RuntimeForkMessage, RuntimeInput, RuntimeMessage, RuntimeNotification,
+    RuntimeRequest, RuntimeStats, RuntimeThinkingLevel, RuntimeTreeNode, SafeError,
+    SessionMutation, SessionSnapshot, StampedInput, SubmissionKind, ToolImage, WidgetPlacement,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -112,6 +112,7 @@ fn command_for_request(request: &RuntimeRequest) -> Command {
         RuntimeRequest::GetCommands => Command::GetCommands,
         RuntimeRequest::GetModels => Command::GetAvailableModels,
         RuntimeRequest::GetTree { .. } => Command::GetTree,
+        RuntimeRequest::GetForkMessages => Command::GetForkMessages,
         RuntimeRequest::Submit { text, kind, .. } => match kind {
             SubmissionKind::Prompt => Command::Prompt {
                 message: text.clone(),
@@ -257,6 +258,17 @@ fn normalize_response(
                 leaf_id: data.leaf_id,
             }
         }
+        (RuntimeRequest::GetForkMessages, ResponseResult::GetForkMessages(data)) => {
+            NormalizedResponse::ForkMessages(
+                data.messages
+                    .into_iter()
+                    .map(|message| RuntimeForkMessage {
+                        entry_id: message.entry_id,
+                        text: message.text,
+                    })
+                    .collect(),
+            )
+        }
         (
             RuntimeRequest::Submit {
                 kind: SubmissionKind::Prompt,
@@ -316,6 +328,7 @@ fn normalize_response(
         | (RuntimeRequest::SessionMutation(SessionMutation::Clone), ResponseResult::Clone(data)) => {
             NormalizedResponse::SessionMutation {
                 cancelled: data.cancelled,
+                editor_text: None,
             }
         }
         (
@@ -323,6 +336,7 @@ fn normalize_response(
             ResponseResult::Fork(data),
         ) => NormalizedResponse::SessionMutation {
             cancelled: data.cancelled,
+            editor_text: (!data.cancelled).then_some(data.text),
         },
         _ => {
             return Err(RequestFailure {
@@ -1072,6 +1086,7 @@ fn operation_name(request: &RuntimeRequest) -> &'static str {
         RuntimeRequest::GetCommands => "command hydration",
         RuntimeRequest::GetModels => "model hydration",
         RuntimeRequest::GetTree { .. } => "tree hydration",
+        RuntimeRequest::GetForkMessages => "fork-message hydration",
         RuntimeRequest::Submit { kind, .. } => match kind {
             SubmissionKind::Prompt => "prompt delivery",
             SubmissionKind::Steer => "steering delivery",

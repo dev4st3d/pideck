@@ -163,7 +163,12 @@ fn happy_path_hydrates_in_required_order_and_settles() {
     assert!(matches!(requests[2], RuntimeRequest::GetStats));
     assert!(matches!(requests[3], RuntimeRequest::GetCommands));
     assert!(matches!(requests[4], RuntimeRequest::GetModels));
-    assert!(matches!(requests[5], RuntimeRequest::GetTree { .. }));
+    assert!(matches!(requests[5], RuntimeRequest::GetForkMessages));
+    assert!(
+        requests
+            .iter()
+            .all(|request| !matches!(request, RuntimeRequest::GetTree { .. }))
+    );
     assert_eq!(state.lifecycle, RuntimeLifecycle::Running);
     assert_eq!(state.queue, QueueContents::Unknown { pending_count: 3 });
 
@@ -186,6 +191,48 @@ fn happy_path_hydrates_in_required_order_and_settles() {
         }
     );
     assert_eq!(state.lifecycle, RuntimeLifecycle::Settled);
+}
+
+#[test]
+fn flat_entries_build_deep_history_without_requesting_nested_tree_json() {
+    let (mut state, hydration) = connected_state("deep");
+    assert!(hydration.iter().all(|effect| {
+        !matches!(
+            effect.effect,
+            EffectKind::Request(RuntimeRequest::GetTree { .. })
+        )
+    }));
+
+    let entries = (0..246)
+        .map(|index| RuntimeEntry {
+            id: EntryId::new(format!("entry-{index}")),
+            parent_id: (index > 0).then(|| EntryId::new(format!("entry-{}", index - 1))),
+            timestamp: format!("2026-07-22T12:{:02}:{:02}Z", index / 60, index % 60),
+            kind: EntryKind::SessionInfo { name: None },
+        })
+        .collect();
+    let revision = state.revision;
+    response(
+        &mut state,
+        RuntimeRequest::GetEntries {
+            since: None,
+            base_revision: revision,
+        },
+        Ok(NormalizedResponse::Entries {
+            entries,
+            leaf_id: Some(EntryId::from("entry-245")),
+        }),
+    );
+
+    assert_eq!(state.tree_leaf_id, Some(EntryId::from("entry-245")));
+    let mut node = state.tree.data.as_ref().unwrap().first().unwrap();
+    let mut depth = 1;
+    while let Some(child) = node.children.first() {
+        assert_eq!(node.children.len(), 1);
+        node = child;
+        depth += 1;
+    }
+    assert_eq!(depth, 246);
 }
 
 #[test]
@@ -1122,13 +1169,51 @@ fn all_session_replacements_increment_epoch_before_emission_and_rehydrate() {
         let hydration = response(
             &mut state,
             RuntimeRequest::SessionMutation(mutation),
-            Ok(NormalizedResponse::SessionMutation { cancelled: false }),
+            Ok(NormalizedResponse::SessionMutation {
+                cancelled: false,
+                editor_text: None,
+            }),
         );
         assert!(matches!(
             hydration[0].effect,
             EffectKind::Request(RuntimeRequest::GetState)
         ));
     }
+}
+
+#[test]
+fn fork_restores_selected_user_text_after_authoritative_session_rehydration() {
+    let (mut state, _) = connected_state("original");
+    let entry_id = EntryId::from("fork-user");
+    let mutation = SessionMutation::Fork {
+        entry_id: entry_id.clone(),
+    };
+    let effects = apply(
+        &mut state,
+        RuntimeInput::Intent(RuntimeIntent::ReplaceSession(mutation.clone())),
+    );
+    assert!(matches!(
+        effects[0].effect,
+        EffectKind::Request(RuntimeRequest::SessionMutation(SessionMutation::Fork { ref entry_id }))
+            if entry_id == &EntryId::from("fork-user")
+    ));
+    response(
+        &mut state,
+        RuntimeRequest::SessionMutation(mutation),
+        Ok(NormalizedResponse::SessionMutation {
+            cancelled: false,
+            editor_text: Some("edit this prompt".to_owned()),
+        }),
+    );
+    response(
+        &mut state,
+        RuntimeRequest::GetState,
+        Ok(NormalizedResponse::State(session_state("forked", false, 0))),
+    );
+    assert_eq!(
+        state.requested_editor_text.as_deref(),
+        Some("edit this prompt")
+    );
 }
 
 #[test]
@@ -1146,7 +1231,10 @@ fn cancelled_or_rejected_session_replacement_resyncs_new_epoch() {
     let effects = response(
         &mut state,
         RuntimeRequest::SessionMutation(mutation.clone()),
-        Ok(NormalizedResponse::SessionMutation { cancelled: true }),
+        Ok(NormalizedResponse::SessionMutation {
+            cancelled: true,
+            editor_text: None,
+        }),
     );
     assert!(matches!(
         effects[0].effect,
@@ -1158,10 +1246,18 @@ fn cancelled_or_rejected_session_replacement_resyncs_new_epoch() {
         MessageKey("old".to_owned())
     );
 
+    let (mut state, _) = connected_state("s1");
+    let mutation = SessionMutation::Fork {
+        entry_id: EntryId::from("fork-point"),
+    };
+    apply(
+        &mut state,
+        RuntimeInput::Intent(RuntimeIntent::ReplaceSession(mutation.clone())),
+    );
     let effects = response(
         &mut state,
         RuntimeRequest::SessionMutation(mutation),
-        Err(failure(RequestFailureKind::Rejected, "cancelled")),
+        Err(failure(RequestFailureKind::Rejected, "fork rejected")),
     );
     assert!(matches!(
         effects[0].effect,
@@ -1271,7 +1367,10 @@ fn session_replacement_suppresses_old_events_and_rebuilds_even_with_same_session
     response(
         &mut state,
         RuntimeRequest::SessionMutation(mutation),
-        Ok(NormalizedResponse::SessionMutation { cancelled: false }),
+        Ok(NormalizedResponse::SessionMutation {
+            cancelled: false,
+            editor_text: None,
+        }),
     );
     response(
         &mut state,

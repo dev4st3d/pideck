@@ -197,8 +197,6 @@ pub fn chip_button(
         .justify_center()
         .bg(if selected {
             theme::panel_lift()
-        } else if enabled {
-            clear()
         } else {
             clear()
         })
@@ -215,11 +213,17 @@ pub fn chip_button(
         } else {
             theme::smoke()
         })
-        .when(enabled && !selected, |button| {
+        .when(enabled, |button| {
             button
                 .tab_index(0)
                 .cursor_pointer()
-                .hover(|button| button.bg(theme::panel()).text_color(theme::bone()))
+                .hover(|button| {
+                    if selected {
+                        button.bg(theme::panel_hover()).text_color(theme::bone())
+                    } else {
+                        button.bg(theme::panel()).text_color(theme::bone())
+                    }
+                })
                 .active(|button| button.bg(theme::panel_lift()))
                 .focus(|button| button.border_color(theme::focus()))
                 .on_click(move |event, window, cx| on_click(event, window, cx))
@@ -235,6 +239,38 @@ pub fn chip_button(
                 })
                 .child(label.into()),
         )
+}
+
+pub fn panel_note(text: impl Into<SharedString>, tone: ControlTone) -> impl IntoElement {
+    let (border, color) = match tone {
+        ControlTone::Danger => (theme::error(), theme::error()),
+        ControlTone::Normal => (theme::edge_soft(), theme::bone_dim()),
+    };
+    div()
+        .px(px(10.0))
+        .py(px(8.0))
+        .rounded(px(theme::RADIUS_SM))
+        .bg(theme::panel())
+        .border_1()
+        .border_color(border)
+        .font_family(theme::SANS)
+        .text_size(px(theme::T_TINY))
+        .line_height(relative(1.4))
+        .text_color(color)
+        .child(text.into())
+}
+
+pub fn panel_footer_status(text: impl Into<SharedString>) -> impl IntoElement {
+    div()
+        .px(px(12.0))
+        .py(px(8.0))
+        .border_t_1()
+        .border_color(theme::edge_soft())
+        .font_family(theme::MONO)
+        .text_size(px(theme::T_TINY))
+        .line_height(relative(1.35))
+        .text_color(theme::smoke())
+        .child(text.into())
 }
 
 pub fn action_row(

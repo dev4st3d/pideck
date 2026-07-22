@@ -364,6 +364,12 @@ pub struct RuntimeTreeNode {
     pub label: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeForkMessage {
+    pub entry_id: EntryId,
+    pub text: String,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum QueueContents {
     Unknown {
@@ -663,6 +669,9 @@ pub struct RuntimeState {
     pub commands: Facet<Vec<RuntimeCommand>>,
     pub models: Facet<Vec<ModelSummary>>,
     pub tree: Facet<Vec<RuntimeTreeNode>>,
+    pub tree_leaf_id: Option<EntryId>,
+    pub entries_leaf_id: Option<EntryId>,
+    pub fork_messages: Facet<Vec<RuntimeForkMessage>>,
     pub tools: HashMap<ToolCallId, ToolExecution>,
     pub bash_executions: Vec<BashExecution>,
     pub queue: QueueContents,
@@ -710,6 +719,9 @@ impl RuntimeState {
             commands: Facet::default(),
             models: Facet::default(),
             tree: Facet::default(),
+            tree_leaf_id: None,
+            entries_leaf_id: None,
+            fork_messages: Facet::default(),
             tools: HashMap::new(),
             bash_executions: Vec::new(),
             queue: QueueContents::default(),
@@ -756,6 +768,7 @@ impl RuntimeState {
         self.commands.loading();
         self.models.loading();
         self.tree.loading();
+        self.fork_messages.loading();
     }
 
     pub(crate) fn bounded_error(&mut self, error: SafeError) {
@@ -867,6 +880,7 @@ pub enum RuntimeRequest {
     GetTree {
         base_revision: u64,
     },
+    GetForkMessages,
     Submit {
         request: RequestId,
         text: String,
@@ -919,6 +933,7 @@ pub enum NormalizedResponse {
         tree: Vec<RuntimeTreeNode>,
         leaf_id: Option<EntryId>,
     },
+    ForkMessages(Vec<RuntimeForkMessage>),
     Accepted,
     Bash(DirectBashResult),
     Compacted {
@@ -929,6 +944,7 @@ pub enum NormalizedResponse {
     },
     SessionMutation {
         cancelled: bool,
+        editor_text: Option<String>,
     },
 }
 

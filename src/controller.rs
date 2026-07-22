@@ -11,6 +11,9 @@ use crate::services::rpc::{ConnectionGeneration, RequestId, SessionEpoch};
 use crate::services::runtime_worker::{
     AttemptGeneration, RuntimeService, RuntimeWorkerHandle, WorkerResult,
 };
+use crate::services::sdk_bridge::{
+    BridgeCapabilities, BridgeCommand, BridgeErrorKind, BridgeWorkerResult, SdkBridgeWorker,
+};
 use crate::services::session_catalog::{
     CatalogWorkerResult, CorruptSession, SessionCatalogConfig, SessionCatalogWorker, SessionRoot,
     SessionSummary,
@@ -18,8 +21,9 @@ use crate::services::session_catalog::{
 use crate::state::reducer::reduce;
 use crate::state::runtime::{
     BashExecution, BashStatus, CompactionState, FacetStatus, PromptDelivery, QueueContents,
-    QueueDeliveryMode, RetryState, RuntimeInput, RuntimeIntent, RuntimeLifecycle, RuntimeMessage,
-    RuntimeOperation, RuntimeState, SafeError, StampedInput, SubmissionKind, ToolExecution,
+    QueueDeliveryMode, RetryState, RuntimeForkMessage, RuntimeInput, RuntimeIntent,
+    RuntimeLifecycle, RuntimeMessage, RuntimeOperation, RuntimeState, RuntimeTreeNode, SafeError,
+    StampedInput, SubmissionKind, ToolExecution,
 };
 use crate::state::{ControllerStatus, ShellProjection};
 
@@ -87,6 +91,16 @@ pub struct ConversationProjection {
     pub error: Option<SafeError>,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct HistoryProjection {
+    pub status: FacetStatus,
+    pub tree: Vec<RuntimeTreeNode>,
+    pub leaf_id: Option<crate::services::rpc::EntryId>,
+    pub fork_messages: Vec<RuntimeForkMessage>,
+    pub lifecycle: RuntimeLifecycle,
+    pub switching: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CatalogStatus {
     Loading,
@@ -107,6 +121,22 @@ pub struct CatalogProjection {
     pub current_session_name: Option<String>,
     pub current_session_file: Option<PathBuf>,
     pub switching: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BridgeOperationKind {
+    Navigate,
+    SetLabel,
+    ExportJsonl,
+    ImportJsonl,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BridgeProjection {
+    pub capabilities: Option<BridgeCapabilities>,
+    pub unavailable: Option<String>,
+    pub pending: Option<(u64, BridgeOperationKind)>,
+    pub feedback: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -404,6 +434,17 @@ impl ControllerCore {
         }
     }
 
+    pub fn history_projection(&self) -> HistoryProjection {
+        HistoryProjection {
+            status: self.runtime.tree.status.clone(),
+            tree: self.runtime.tree.data.clone().unwrap_or_default(),
+            leaf_id: self.runtime.tree_leaf_id.clone(),
+            fork_messages: self.runtime.fork_messages.data.clone().unwrap_or_default(),
+            lifecycle: self.runtime.lifecycle,
+            switching: self.runtime.replacement_awaiting_state,
+        }
+    }
+
     pub fn submit(
         &mut self,
         text: String,
@@ -580,6 +621,41 @@ impl ControllerCore {
         ))
     }
 
+    pub fn fork_before(
+        &mut self,
+        entry_id: crate::services::rpc::EntryId,
+    ) -> Vec<crate::state::runtime::RuntimeEffect> {
+        self.intent(RuntimeIntent::ReplaceSession(
+            crate::state::runtime::SessionMutation::Fork { entry_id },
+        ))
+    }
+
+    pub fn clone_current_path(&mut self) -> Vec<crate::state::runtime::RuntimeEffect> {
+        self.intent(RuntimeIntent::ReplaceSession(
+            crate::state::runtime::SessionMutation::Clone,
+        ))
+    }
+
+    pub fn reload_current_session(
+        &mut self,
+        editor_text: Option<String>,
+    ) -> Vec<crate::state::runtime::RuntimeEffect> {
+        let Some(session_path) = self
+            .runtime
+            .session
+            .data
+            .as_ref()
+            .and_then(|session| session.file.clone())
+        else {
+            return Vec::new();
+        };
+        let effects = self.intent(RuntimeIntent::ReplaceSession(
+            crate::state::runtime::SessionMutation::Switch { session_path },
+        ));
+        self.runtime.requested_editor_text = editor_text;
+        effects
+    }
+
     pub fn switch_session(
         &mut self,
         session_path: String,
@@ -652,8 +728,15 @@ pub struct RuntimeController {
     catalog_corrupt: Vec<CorruptSession>,
     catalog_root: Option<SessionRoot>,
     catalog_error: Option<String>,
+    bridge_worker: SdkBridgeWorker,
+    bridge_capabilities: Option<BridgeCapabilities>,
+    bridge_unavailable: Option<String>,
+    bridge_pending: Option<(u64, BridgeOperationKind)>,
+    bridge_feedback: Option<String>,
+    next_bridge_operation: u64,
     _event_task: Task<()>,
     _catalog_task: Task<()>,
+    _bridge_task: Task<()>,
 }
 
 impl RuntimeController {
@@ -664,6 +747,19 @@ impl RuntimeController {
         cx: &mut Context<Self>,
     ) -> Self {
         let workspace = workspace.into();
+        let bridge_worker = SdkBridgeWorker::spawn(PathBuf::from(&workspace));
+        let bridge_results = bridge_worker.results();
+        let bridge_task = cx.spawn(async move |controller, cx| {
+            while let Ok(result) = bridge_results.recv().await {
+                let updated = controller.update(cx, |controller, cx| {
+                    controller.receive_bridge(result);
+                    cx.notify();
+                });
+                if updated.is_err() {
+                    break;
+                }
+            }
+        });
         let worker = RuntimeWorkerHandle::spawn(Arc::clone(&service));
         let results = worker.results();
         let event_task = cx.spawn(async move |controller, cx| {
@@ -704,8 +800,15 @@ impl RuntimeController {
             catalog_corrupt: Vec::new(),
             catalog_root: None,
             catalog_error: None,
+            bridge_worker,
+            bridge_capabilities: None,
+            bridge_unavailable: None,
+            bridge_pending: None,
+            bridge_feedback: None,
+            next_bridge_operation: 1,
             _event_task: event_task,
             _catalog_task: catalog_task,
+            _bridge_task: bridge_task,
         }
     }
 
@@ -719,6 +822,14 @@ impl RuntimeController {
 
     pub fn conversation_projection(&self) -> ConversationProjection {
         self.core.conversation_projection()
+    }
+
+    pub fn history_projection(&self) -> HistoryProjection {
+        self.core.history_projection()
+    }
+
+    pub fn take_requested_editor_text(&mut self) -> Option<String> {
+        self.core.runtime.requested_editor_text.take()
     }
 
     pub fn catalog_projection(&self) -> CatalogProjection {
@@ -735,6 +846,15 @@ impl RuntimeController {
                 .and_then(|session| session.file.as_deref())
                 .map(PathBuf::from),
             switching: self.core.runtime.replacement_awaiting_state,
+        }
+    }
+
+    pub fn bridge_projection(&self) -> BridgeProjection {
+        BridgeProjection {
+            capabilities: self.bridge_capabilities.clone(),
+            unavailable: self.bridge_unavailable.clone(),
+            pending: self.bridge_pending,
+            feedback: self.bridge_feedback.clone(),
         }
     }
 
@@ -796,6 +916,148 @@ impl RuntimeController {
 
     pub fn new_session(&mut self, cx: &mut Context<Self>) -> bool {
         self.send_core_effects(ControllerCore::new_session, cx)
+    }
+
+    pub fn fork_before(
+        &mut self,
+        entry_id: crate::services::rpc::EntryId,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        self.send_core_effects(|core| core.fork_before(entry_id), cx)
+    }
+
+    pub fn clone_current_path(&mut self, cx: &mut Context<Self>) -> bool {
+        self.send_core_effects(ControllerCore::clone_current_path, cx)
+    }
+
+    pub fn navigate_tree(
+        &mut self,
+        target_id: crate::services::rpc::EntryId,
+        summarize: bool,
+        custom_instructions: Option<String>,
+        label: Option<String>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some((session_path, cwd)) = self.bridge_session_context() else {
+            return false;
+        };
+        if !self
+            .bridge_capabilities
+            .as_ref()
+            .is_some_and(|capabilities| capabilities.navigate_tree)
+            || self.bridge_pending.is_some()
+        {
+            return false;
+        }
+        self.start_bridge_operation(
+            BridgeOperationKind::Navigate,
+            BridgeCommand::NavigateTree {
+                session_path,
+                cwd,
+                target_id: target_id.to_string(),
+                summarize,
+                custom_instructions,
+                replace_instructions: false,
+                label,
+            },
+            cx,
+        )
+    }
+
+    pub fn set_tree_label(
+        &mut self,
+        target_id: crate::services::rpc::EntryId,
+        label: Option<String>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some((session_path, cwd)) = self.bridge_session_context() else {
+            return false;
+        };
+        if !self
+            .bridge_capabilities
+            .as_ref()
+            .is_some_and(|capabilities| capabilities.labels)
+            || self.bridge_pending.is_some()
+        {
+            return false;
+        }
+        self.start_bridge_operation(
+            BridgeOperationKind::SetLabel,
+            BridgeCommand::SetLabel {
+                session_path,
+                cwd,
+                target_id: target_id.to_string(),
+                label,
+            },
+            cx,
+        )
+    }
+
+    pub fn export_jsonl(&mut self, output_path: Option<String>, cx: &mut Context<Self>) -> bool {
+        let Some((session_path, cwd)) = self.bridge_session_context() else {
+            return false;
+        };
+        if !self
+            .bridge_capabilities
+            .as_ref()
+            .is_some_and(|capabilities| capabilities.jsonl_export)
+            || self.bridge_pending.is_some()
+        {
+            return false;
+        }
+        self.start_bridge_operation(
+            BridgeOperationKind::ExportJsonl,
+            BridgeCommand::ExportJsonl {
+                session_path,
+                cwd,
+                output_path,
+            },
+            cx,
+        )
+    }
+
+    pub fn import_jsonl(&mut self, input_path: String, cx: &mut Context<Self>) -> bool {
+        let Some(root) = self.catalog_root.as_ref() else {
+            return false;
+        };
+        if !self
+            .bridge_capabilities
+            .as_ref()
+            .is_some_and(|capabilities| capabilities.jsonl_import)
+            || self.bridge_pending.is_some()
+        {
+            return false;
+        }
+        self.start_bridge_operation(
+            BridgeOperationKind::ImportJsonl,
+            BridgeCommand::ImportJsonl {
+                input_path,
+                cwd: self.core.workspace.clone(),
+                session_dir: root.path.to_string_lossy().into_owned(),
+            },
+            cx,
+        )
+    }
+
+    pub fn cancel_bridge_operation(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some((id, _)) = self.bridge_pending else {
+            return false;
+        };
+        let accepted = self.bridge_worker.cancel(id);
+        if accepted {
+            self.bridge_feedback = Some("Cancelling session operation…".to_owned());
+            cx.notify();
+        }
+        accepted
+    }
+
+    pub fn restart_bridge(&mut self, cx: &mut Context<Self>) -> bool {
+        self.bridge_capabilities = None;
+        self.bridge_unavailable = None;
+        self.bridge_feedback = Some("Restarting session bridge…".to_owned());
+        let accepted = self.bridge_worker.restart();
+        cx.notify();
+        accepted
     }
 
     pub fn switch_session(&mut self, path: PathBuf, cx: &mut Context<Self>) -> bool {
@@ -932,6 +1194,147 @@ impl RuntimeController {
                 self.catalog_error = Some(error.summary);
             }
         }
+    }
+
+    fn receive_bridge(&mut self, result: BridgeWorkerResult) {
+        match result {
+            BridgeWorkerResult::Capabilities(Ok(hello)) => {
+                self.bridge_capabilities = Some(hello.capabilities);
+                self.bridge_unavailable = None;
+                self.bridge_feedback =
+                    Some(format!("Session bridge ready · SDK {}", hello.sdk_version));
+            }
+            BridgeWorkerResult::Capabilities(Err(error)) => {
+                self.bridge_capabilities = None;
+                self.bridge_unavailable = Some(error.summary);
+            }
+            BridgeWorkerResult::Completed {
+                id,
+                command,
+                result,
+            } => {
+                let Some((pending_id, kind)) = self.bridge_pending else {
+                    return;
+                };
+                if pending_id != id {
+                    return;
+                }
+                self.bridge_pending = None;
+                match result {
+                    Ok(value)
+                        if value.get("cancelled").and_then(serde_json::Value::as_bool)
+                            == Some(true) =>
+                    {
+                        self.bridge_feedback =
+                            Some("Session operation cancelled. History is unchanged.".to_owned());
+                    }
+                    Ok(value) => match kind {
+                        BridgeOperationKind::Navigate => {
+                            let editor_text = value
+                                .get("editorText")
+                                .and_then(serde_json::Value::as_str)
+                                .map(ToOwned::to_owned);
+                            let effects = self.core.reload_current_session(editor_text);
+                            self.send_effects(effects);
+                            self.bridge_feedback = Some(
+                                "Navigated in the same file. Existing branches remain intact."
+                                    .to_owned(),
+                            );
+                            self.start_catalog_refresh();
+                        }
+                        BridgeOperationKind::SetLabel => {
+                            let effects = self.core.reload_current_session(None);
+                            self.send_effects(effects);
+                            self.bridge_feedback = Some("Entry label updated.".to_owned());
+                            self.start_catalog_refresh();
+                        }
+                        BridgeOperationKind::ExportJsonl => {
+                            let path = value
+                                .get("path")
+                                .and_then(serde_json::Value::as_str)
+                                .unwrap_or("the selected path");
+                            self.bridge_feedback = Some(format!(
+                                "Exported the active path to {path}. Other branches were not copied."
+                            ));
+                        }
+                        BridgeOperationKind::ImportJsonl => {
+                            let Some(path) = value
+                                .get("path")
+                                .and_then(serde_json::Value::as_str)
+                                .map(ToOwned::to_owned)
+                            else {
+                                self.bridge_feedback =
+                                    Some("Import completed without a session path.".to_owned());
+                                return;
+                            };
+                            let effects = self.core.switch_session(path);
+                            self.send_effects(effects);
+                            self.bridge_feedback = Some(
+                                "Imported into a new session file and switched to it.".to_owned(),
+                            );
+                            self.start_catalog_refresh();
+                        }
+                    },
+                    Err(error) => {
+                        if matches!(error.kind, BridgeErrorKind::Disconnected) {
+                            self.bridge_capabilities = None;
+                            self.bridge_unavailable = Some(
+                                "The session bridge disconnected. Restart it to use SDK actions."
+                                    .to_owned(),
+                            );
+                        }
+                        self.bridge_feedback = Some(format!(
+                            "{} failed. The current session remains unchanged. {}",
+                            match command {
+                                BridgeCommand::Hello => "Bridge negotiation",
+                                BridgeCommand::NavigateTree { .. } => "Navigation",
+                                BridgeCommand::SetLabel { .. } => "Label update",
+                                BridgeCommand::ExportJsonl { .. } => "JSONL export",
+                                BridgeCommand::ImportJsonl { .. } => "JSONL import",
+                            },
+                            error.summary
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    fn bridge_session_context(&self) -> Option<(String, String)> {
+        if !matches!(
+            self.core.runtime.lifecycle,
+            RuntimeLifecycle::Ready | RuntimeLifecycle::Settled
+        ) || self.core.runtime.replacement_awaiting_state
+        {
+            return None;
+        }
+        let path = self.core.runtime.session.data.as_ref()?.file.clone()?;
+        Some((path, self.core.workspace.clone()))
+    }
+
+    fn start_bridge_operation(
+        &mut self,
+        kind: BridgeOperationKind,
+        command: BridgeCommand,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let id = self.next_bridge_operation;
+        self.next_bridge_operation = self.next_bridge_operation.saturating_add(1);
+        if !self.bridge_worker.execute(id, command) {
+            return false;
+        }
+        self.bridge_pending = Some((id, kind));
+        self.bridge_feedback = Some(
+            match kind {
+                BridgeOperationKind::Navigate => "Navigating within the current session file…",
+                BridgeOperationKind::SetLabel => "Updating entry label…",
+                BridgeOperationKind::ExportJsonl => "Exporting the active path…",
+                BridgeOperationKind::ImportJsonl => "Importing into a new session file…",
+            }
+            .to_owned(),
+        );
+        cx.notify();
+        true
     }
 
     fn start_catalog_refresh(&mut self) {
@@ -1302,6 +1705,29 @@ mod tests {
         let projection = core.conversation_projection();
         assert_eq!(projection.messages.len(), 1);
         assert_eq!(projection.messages[0].key, MessageKey("visible".to_owned()));
+    }
+
+    #[test]
+    fn same_file_navigation_reload_advances_epoch_and_preserves_editor_text() {
+        use crate::state::runtime::{EffectKind, RuntimeRequest, SessionMutation};
+
+        let mut core = ready_core();
+        core.runtime.session.data.as_mut().unwrap().file = Some("session.jsonl".to_owned());
+        let prior_epoch = core.runtime.epoch;
+        let effects = core.reload_current_session(Some("restored prompt".to_owned()));
+
+        assert_eq!(core.runtime.epoch, prior_epoch.next());
+        assert!(core.runtime.replacement_awaiting_state);
+        assert_eq!(
+            core.runtime.requested_editor_text.as_deref(),
+            Some("restored prompt")
+        );
+        assert!(matches!(
+            effects[0].effect,
+            EffectKind::Request(RuntimeRequest::SessionMutation(SessionMutation::Switch {
+                ref session_path
+            })) if session_path == "session.jsonl"
+        ));
     }
 
     #[test]

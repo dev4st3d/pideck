@@ -38,7 +38,14 @@ actions!(
         QueueFollowUp,
         AbortRun,
         TranscriptCopy,
-        TranscriptSelectAll
+        TranscriptSelectAll,
+        HistoryNext,
+        HistoryPrevious,
+        HistoryFirst,
+        HistoryLast,
+        HistoryFold,
+        HistoryUnfold,
+        HistoryActivate
     ]
 );
 
@@ -47,6 +54,20 @@ pub(crate) fn transcript_key_bindings() -> Vec<KeyBinding> {
     vec![
         KeyBinding::new("ctrl-c", TranscriptCopy, context),
         KeyBinding::new("ctrl-a", TranscriptSelectAll, context),
+    ]
+}
+
+pub(crate) fn history_key_bindings() -> Vec<KeyBinding> {
+    let context = Some("HistoryTree");
+    vec![
+        KeyBinding::new("down", HistoryNext, context),
+        KeyBinding::new("up", HistoryPrevious, context),
+        KeyBinding::new("home", HistoryFirst, context),
+        KeyBinding::new("end", HistoryLast, context),
+        KeyBinding::new("left", HistoryFold, context),
+        KeyBinding::new("right", HistoryUnfold, context),
+        KeyBinding::new("enter", HistoryActivate, context),
+        KeyBinding::new("space", HistoryActivate, context),
     ]
 }
 
