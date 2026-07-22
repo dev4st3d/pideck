@@ -643,7 +643,7 @@ impl Render for RootView {
             .bg(theme::canvas())
             .font_family(theme::SANS)
             .text_color(theme::bone())
-            .child(titlebar(&projection))
+            .child(titlebar(&projection, cx))
             .child(
                 div()
                     .flex_1()
@@ -652,6 +652,7 @@ impl Render for RootView {
                     .flex_row()
                     .child(sessions_panel(
                         &catalog,
+                        &projection,
                         &self.conversation,
                         &self.session_name_composer,
                         cx,
@@ -662,8 +663,6 @@ impl Render for RootView {
                         &self.conversation_scroll,
                         &self.transcript_texts,
                         &self.tool_cards,
-                        &self.composer,
-                        cx,
                     ))
                     .child(inspector(
                         &projection,
@@ -672,10 +671,12 @@ impl Render for RootView {
                         cx,
                     )),
             )
+            .child(composer_bar(&self.composer))
     }
 }
 
-fn titlebar(projection: &ShellProjection) -> impl IntoElement {
+fn titlebar(projection: &ShellProjection, cx: &mut Context<RootView>) -> impl IntoElement {
+    let action = projection.action;
     div()
         .h(px(theme::TITLE_H))
         .px(px(theme::PAD_X))
@@ -683,7 +684,7 @@ fn titlebar(projection: &ShellProjection) -> impl IntoElement {
         .flex_row()
         .items_center()
         .justify_between()
-        .gap(px(20.0))
+        .gap(px(16.0))
         .bg(theme::floor())
         .border_b_1()
         .border_color(theme::edge_hard())
@@ -700,6 +701,7 @@ fn titlebar(projection: &ShellProjection) -> impl IntoElement {
                         .font_family(theme::DISPLAY)
                         .text_size(px(theme::T_WORDMARK))
                         .font_weight(FontWeight::NORMAL)
+                        .text_color(theme::bone())
                         .flex_shrink_0()
                         .child("pi"),
                 )
@@ -716,141 +718,43 @@ fn titlebar(projection: &ShellProjection) -> impl IntoElement {
                         .font_family(theme::SANS)
                         .text_size(px(theme::T_TITLE))
                         .font_weight(FontWeight::BOLD)
+                        .text_color(theme::bone())
                         .overflow_hidden()
                         .text_ellipsis()
                         .whitespace_nowrap()
                         .child(projection.session.label()),
-                ),
-        )
-        .child(
-            div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(12.0))
-                .min_w_0()
-                .child(meta(projection.model.label()))
-                .child(meta(projection.thinking.label()))
-                .child(meta(projection.cost.label()))
-                .child(
-                    div()
-                        .font_family(theme::SANS)
-                        .text_size(px(theme::T_UI_SM))
-                        .font_weight(FontWeight::BOLD)
-                        .text_color(lifecycle_color(projection))
-                        .child(projection.lifecycle.clone()),
-                ),
-        )
-}
-
-fn meta(value: String) -> impl IntoElement {
-    div()
-        .font_family(theme::MONO)
-        .text_size(px(theme::T_MONO_SM))
-        .font_weight(FontWeight::MEDIUM)
-        .text_color(theme::ash())
-        .max_w(px(190.0))
-        .overflow_hidden()
-        .text_ellipsis()
-        .whitespace_nowrap()
-        .child(value)
-}
-
-fn runtime_error_notice(projection: &ShellProjection) -> impl IntoElement {
-    div()
-        .mx(px(theme::STREAM_PAD_X))
-        .mt(px(14.0))
-        .p(px(12.0))
-        .rounded(px(theme::RADIUS_SM))
-        .bg(theme::panel())
-        .border_1()
-        .border_color(theme::error())
-        .flex()
-        .flex_col()
-        .gap(px(4.0))
-        .child(
-            div()
-                .font_family(theme::SANS)
-                .text_size(px(theme::T_UI))
-                .font_weight(FontWeight::BOLD)
-                .text_color(theme::error())
-                .child(projection.headline.clone()),
-        )
-        .child(
-            div()
-                .font_family(theme::SANS)
-                .text_size(px(theme::T_UI_SM))
-                .line_height(gpui::relative(1.4))
-                .text_color(theme::bone_dim())
-                .child(projection.detail.clone()),
-        )
-}
-
-fn conversation_area(
-    projection: &ShellProjection,
-    conversation_projection: &ConversationProjection,
-    scroll: &ScrollHandle,
-    transcript_texts: &HashMap<String, Entity<TranscriptText>>,
-    tool_cards: &HashMap<String, Entity<ToolCard>>,
-    composer: &Entity<Composer>,
-    cx: &mut Context<RootView>,
-) -> impl IntoElement {
-    let action = projection.action;
-    let scroll = scroll.clone();
-
-    div()
-        .flex_1()
-        .min_w_0()
-        .h_full()
-        .flex()
-        .flex_col()
-        .bg(theme::canvas())
-        .child(
-            div()
-                .min_h(px(62.0))
-                .px(px(theme::STREAM_PAD_X))
-                .py(px(10.0))
-                .flex()
-                .flex_row()
-                .items_center()
-                .justify_between()
-                .gap(px(18.0))
-                .bg(theme::floor())
-                .border_b_1()
-                .border_color(theme::edge_soft())
-                .child(
-                    div()
-                        .min_w_0()
-                        .flex()
-                        .flex_col()
-                        .gap(px(3.0))
-                        .child(
-                            div()
-                                .font_family(theme::SANS)
-                                .text_size(px(theme::T_LABEL))
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(theme::ash())
-                                .child(if projection.has_stale_values {
-                                    "Workspace · showing last valid values"
-                                } else {
-                                    "Workspace"
-                                }),
-                        )
-                        .child(
-                            div()
-                                .max_w(px(560.0))
-                                .overflow_hidden()
-                                .text_ellipsis()
-                                .whitespace_nowrap()
-                                .font_family(theme::MONO)
-                                .text_size(px(theme::T_MONO))
-                                .font_weight(FontWeight::MEDIUM)
-                                .text_color(theme::data())
-                                .child(projection.workspace.clone()),
-                        ),
                 )
-                .when_some(action, |header, action| {
-                    header.child(controls::recovery_button(
+                .when(projection.has_stale_values, |row| {
+                    row.child(
+                        div()
+                            .font_family(theme::MONO)
+                            .text_size(px(theme::T_TINY))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(theme::smoke())
+                            .flex_shrink_0()
+                            .child("stale"),
+                    )
+                }),
+        )
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(10.0))
+                .flex_shrink_0()
+                .child(controls::meta_text(projection.model.label()))
+                .child(controls::meta_sep())
+                .child(controls::meta_text(projection.thinking.label()))
+                .child(controls::meta_sep())
+                .child(controls::meta_text(projection.cost.label()))
+                .child(controls::meta_sep())
+                .child(controls::status_pill(
+                    projection.lifecycle.clone(),
+                    lifecycle_color(projection),
+                ))
+                .when_some(action, |row, action| {
+                    row.child(controls::recovery_button(
                         action_id(action),
                         action.label().to_owned(),
                         action.shortcut(),
@@ -861,6 +765,218 @@ fn conversation_area(
                     ))
                 }),
         )
+}
+
+fn sessions_panel(
+    catalog: &CatalogProjection,
+    projection: &ShellProjection,
+    conversation: &ConversationProjection,
+    name_composer: &Entity<Composer>,
+    cx: &mut Context<RootView>,
+) -> impl IntoElement {
+    let session_actions_enabled = matches!(
+        conversation.lifecycle,
+        RuntimeLifecycle::Ready | RuntimeLifecycle::Settled
+    ) && conversation.pending_operation.is_none()
+        && !catalog.switching;
+    let current_path = catalog.current_session_file.as_ref();
+    let state_copy = match catalog.status {
+        CatalogStatus::Loading if catalog.sessions.is_empty() => "Scanning…".to_owned(),
+        CatalogStatus::Loading => "Refreshing".to_owned(),
+        CatalogStatus::Ready => format!("{}", catalog.sessions.len()),
+        CatalogStatus::Empty => "0".to_owned(),
+        CatalogStatus::Inaccessible => "Error".to_owned(),
+        CatalogStatus::Stale => "Stale".to_owned(),
+    };
+    let folder = short_path(&projection.workspace);
+
+    div()
+        .w(px(theme::SIDE_W))
+        .flex_shrink_0()
+        .h_full()
+        .flex()
+        .flex_col()
+        .bg(theme::floor())
+        .border_r_1()
+        .border_color(theme::edge_hard())
+        .child(
+            div()
+                .px(px(14.0))
+                .pt(px(14.0))
+                .pb(px(10.0))
+                .flex()
+                .flex_row()
+                .items_baseline()
+                .justify_between()
+                .child(controls::section_label("Sessions"))
+                .child(
+                    div()
+                        .font_family(theme::MONO)
+                        .text_size(px(theme::T_TINY))
+                        .text_color(theme::smoke())
+                        .child(state_copy),
+                ),
+        )
+        .child(
+            div()
+                .px(px(8.0))
+                .pb(px(10.0))
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(2.0))
+                .child(controls::quiet_button(
+                    "new-session",
+                    "New",
+                    session_actions_enabled,
+                    Box::new(cx.listener(|view, _, _, cx| view.new_session(cx))),
+                ))
+                .child(controls::quiet_button(
+                    "refresh-sessions",
+                    "Refresh",
+                    catalog.status != CatalogStatus::Loading,
+                    Box::new(cx.listener(|view, _, _, cx| view.refresh_sessions(cx))),
+                ))
+                .child(controls::quiet_button(
+                    "export-session",
+                    "Export",
+                    session_actions_enabled && catalog.current_session_file.is_some(),
+                    Box::new(cx.listener(|view, _, _, cx| view.export_session(cx))),
+                )),
+        )
+        .when(
+            matches!(
+                catalog.status,
+                CatalogStatus::Inaccessible | CatalogStatus::Stale
+            ),
+            |panel| {
+                panel.child(
+                    div()
+                        .mx(px(12.0))
+                        .mb(px(8.0))
+                        .px(px(10.0))
+                        .py(px(8.0))
+                        .rounded(px(theme::RADIUS_SM))
+                        .bg(theme::panel())
+                        .border_1()
+                        .border_color(theme::edge_soft())
+                        .font_family(theme::SANS)
+                        .text_size(px(theme::T_TINY))
+                        .line_height(gpui::relative(1.4))
+                        .text_color(theme::bone_dim())
+                        .child(
+                            catalog
+                                .error
+                                .clone()
+                                .unwrap_or_else(|| "Session catalog needs attention.".to_owned()),
+                        ),
+                )
+            },
+        )
+        .when(!catalog.corrupt.is_empty(), |panel| {
+            panel.child(
+                div()
+                    .mx(px(12.0))
+                    .mb(px(8.0))
+                    .px(px(10.0))
+                    .py(px(8.0))
+                    .rounded(px(theme::RADIUS_SM))
+                    .bg(theme::panel())
+                    .border_1()
+                    .border_color(theme::error())
+                    .font_family(theme::SANS)
+                    .text_size(px(theme::T_TINY))
+                    .line_height(gpui::relative(1.4))
+                    .text_color(theme::bone_dim())
+                    .child(format!(
+                        "{} corrupt file{} skipped.",
+                        catalog.corrupt.len(),
+                        if catalog.corrupt.len() == 1 { "" } else { "s" }
+                    )),
+            )
+        })
+        .when(catalog.current_session_file.is_some(), |panel| {
+            panel.child(div().px(px(12.0)).pb(px(10.0)).child(name_composer.clone()))
+        })
+        .child(
+            div()
+                .id("sessions-scroll")
+                .flex_1()
+                .min_h_0()
+                .overflow_y_scroll()
+                .scrollbar_width(px(theme::SCROLLBAR))
+                .child(
+                    div()
+                        .w_full()
+                        .flex()
+                        .flex_col()
+                        .when(catalog.sessions.is_empty(), |list| {
+                            list.child(controls::empty_list_note(match catalog.status {
+                                CatalogStatus::Loading => "Scanning sessions…",
+                                CatalogStatus::Empty => "No saved sessions yet.",
+                                CatalogStatus::Inaccessible => "Catalog unavailable.",
+                                _ => "No sessions to show.",
+                            }))
+                        })
+                        .children(catalog.sessions.iter().map(|session| {
+                            let selected = current_path.is_some_and(|path| path == &session.path);
+                            let path = session.path.clone();
+                            let title = session
+                                .name
+                                .clone()
+                                .or_else(|| session.first_user_summary.clone())
+                                .unwrap_or_else(|| "Untitled session".to_owned());
+                            let detail = format!(
+                                "{} msg · v{} · {}",
+                                session.counts.messages, session.version, session.updated_at
+                            );
+                            controls::interactive_list_row(
+                                gpui::SharedString::from(format!("session-{}", session.id)),
+                                session_actions_enabled && !selected,
+                                Box::new(cx.listener(move |view, _, _, cx| {
+                                    view.switch_session(path.clone(), cx)
+                                })),
+                                controls::session_row(title, detail, selected),
+                            )
+                        })),
+                ),
+        )
+        .child(
+            div()
+                .px(px(14.0))
+                .py(px(12.0))
+                .border_t_1()
+                .border_color(theme::edge_soft())
+                .child(controls::section_label("Folder"))
+                .child(
+                    div()
+                        .mt(px(5.0))
+                        .font_family(theme::MONO)
+                        .text_size(px(theme::T_TINY))
+                        .line_height(gpui::relative(1.4))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(theme::data())
+                        .child(folder),
+                ),
+        )
+}
+
+fn conversation_area(
+    projection: &ShellProjection,
+    conversation_projection: &ConversationProjection,
+    scroll: &ScrollHandle,
+    transcript_texts: &HashMap<String, Entity<TranscriptText>>,
+    tool_cards: &HashMap<String, Entity<ToolCard>>,
+) -> impl IntoElement {
+    let scroll = scroll.clone();
+
+    div()
+        .flex_1()
+        .min_w_0()
+        .h_full()
+        .flex()
+        .flex_col()
+        .bg(theme::canvas())
         .when(
             matches!(
                 projection.lifecycle.as_str(),
@@ -890,190 +1006,21 @@ fn conversation_area(
                         )),
                 ),
         )
-        .child(
-            div()
-                .flex_shrink_0()
-                .px(px(theme::STREAM_PAD_X))
-                .pt(px(12.0))
-                .pb(px(10.0))
-                .bg(theme::floor())
-                .border_t_1()
-                .border_color(theme::edge_hard())
-                .child(composer.clone()),
-        )
 }
 
-fn sessions_panel(
-    catalog: &CatalogProjection,
-    conversation: &ConversationProjection,
-    name_composer: &Entity<Composer>,
-    cx: &mut Context<RootView>,
-) -> impl IntoElement {
-    let session_actions_enabled = matches!(
-        conversation.lifecycle,
-        RuntimeLifecycle::Ready | RuntimeLifecycle::Settled
-    ) && conversation.pending_operation.is_none()
-        && !catalog.switching;
-    let current_path = catalog.current_session_file.as_ref();
-    let state_copy = match catalog.status {
-        CatalogStatus::Loading if catalog.sessions.is_empty() => "Scanning sessions…".to_owned(),
-        CatalogStatus::Loading => "Refreshing; existing results may be stale.".to_owned(),
-        CatalogStatus::Ready => format!("{} sessions", catalog.sessions.len()),
-        CatalogStatus::Empty => "No saved sessions for this workspace.".to_owned(),
-        CatalogStatus::Inaccessible => catalog
-            .error
-            .clone()
-            .unwrap_or_else(|| "Session directory is inaccessible.".to_owned()),
-        CatalogStatus::Stale => catalog
-            .error
-            .clone()
-            .unwrap_or_else(|| "Refresh failed; showing stale sessions.".to_owned()),
-    };
+fn composer_bar(composer: &Entity<Composer>) -> impl IntoElement {
+    let inset_left = theme::SIDE_W + theme::STREAM_PAD_X;
+    let inset_right = theme::INSPECT_W + theme::STREAM_PAD_X;
 
     div()
-        .w(px(286.0))
-        .flex_shrink_0()
-        .h_full()
-        .p(px(14.0))
-        .flex()
-        .flex_col()
-        .gap(px(10.0))
         .bg(theme::floor())
-        .border_r_1()
+        .border_t_1()
         .border_color(theme::edge_hard())
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .justify_between()
-                .child(section_label("Sessions"))
-                .child(
-                    div()
-                        .font_family(theme::MONO)
-                        .text_size(px(theme::T_TINY))
-                        .text_color(theme::ash())
-                        .child(state_copy),
-                ),
-        )
-        .child(
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(8.0))
-                .child(controls::operation_button(
-                    "new-session",
-                    "New session",
-                    if session_actions_enabled {
-                        "Create and switch atomically"
-                    } else {
-                        "Wait for the current operation"
-                    },
-                    session_actions_enabled,
-                    controls::ControlTone::Normal,
-                    Box::new(cx.listener(|view, _, _, cx| view.new_session(cx))),
-                ))
-                .child(controls::operation_button(
-                    "refresh-sessions",
-                    "Refresh catalog",
-                    "Read session metadata again",
-                    catalog.status != CatalogStatus::Loading,
-                    controls::ControlTone::Normal,
-                    Box::new(cx.listener(|view, _, _, cx| view.refresh_sessions(cx))),
-                )),
-        )
-        .when_some(catalog.current_session_id.as_ref(), |panel, id| {
-            panel.child(
-                div()
-                    .p(px(10.0))
-                    .rounded(px(theme::RADIUS_SM))
-                    .bg(theme::panel())
-                    .border_1()
-                    .border_color(theme::edge_soft())
-                    .flex()
-                    .flex_col()
-                    .gap(px(5.0))
-                    .child(status_line(
-                        "Current",
-                        catalog
-                            .current_session_name
-                            .clone()
-                            .unwrap_or_else(|| id.clone()),
-                    ))
-                    .child(status_line(
-                        "ID",
-                        id.clone(),
-                    )),
-            )
-        })
-        .when(catalog.current_session_file.is_some(), |panel| {
-            panel
-                .child(name_composer.clone())
-                .child(controls::operation_button(
-                    "export-session",
-                    "Export HTML",
-                    "Pi chooses the default output path",
-                    session_actions_enabled,
-                    controls::ControlTone::Normal,
-                    Box::new(cx.listener(|view, _, _, cx| view.export_session(cx))),
-                ))
-        })
-        .when(!catalog.corrupt.is_empty(), |panel| {
-            panel.child(
-                div()
-                    .p(px(9.0))
-                    .rounded(px(theme::RADIUS_SM))
-                    .bg(theme::panel())
-                    .border_1()
-                    .border_color(theme::error())
-                    .font_family(theme::SANS)
-                    .text_size(px(theme::T_TINY))
-                    .text_color(theme::bone_dim())
-                    .child(format!(
-                        "{} corrupt session file{} excluded. The current session was not changed.",
-                        catalog.corrupt.len(),
-                        if catalog.corrupt.len() == 1 { "" } else { "s" }
-                    )),
-            )
-        })
-        .child(
-            div()
-                .id("sessions-scroll")
-                .flex_1()
-                .min_h_0()
-                .overflow_y_scroll()
-                .flex()
-                .flex_col()
-                .gap(px(8.0))
-                .children(catalog.sessions.iter().map(|session| {
-                    let selected = current_path.is_some_and(|path| path == &session.path);
-                    let path = session.path.clone();
-                    let title = session
-                        .name
-                        .clone()
-                        .or_else(|| session.first_user_summary.clone())
-                        .unwrap_or_else(|| "Untitled session".to_owned());
-                    controls::operation_button(
-                        format!("session-{}", session.id),
-                        title,
-                        format!(
-                            "{} messages · v{} · {}",
-                            session.counts.messages, session.version, session.updated_at
-                        ),
-                        session_actions_enabled && !selected,
-                        controls::ControlTone::Normal,
-                        Box::new(cx.listener(move |view, _, _, cx| {
-                            view.switch_session(path.clone(), cx)
-                        })),
-                    )
-                })),
-        )
-        .child(
-            div()
-                .font_family(theme::SANS)
-                .text_size(px(theme::T_TINY))
-                .text_color(theme::smoke())
-                .child("Trash is unavailable until file ownership and a reversible platform provider are proven."),
-        )
+        .pl(px(inset_left))
+        .pr(px(inset_right))
+        .pt(px(12.0))
+        .pb(px(14.0))
+        .child(composer.clone())
 }
 
 fn inspector(
@@ -1083,42 +1030,70 @@ fn inspector(
     cx: &mut Context<RootView>,
 ) -> impl IntoElement {
     div()
-        .id("inspector-scroll")
         .w(px(theme::INSPECT_W))
         .flex_shrink_0()
         .h_full()
-        .px(px(18.0))
-        .py(px(18.0))
         .flex()
         .flex_col()
-        .overflow_y_scroll()
         .bg(theme::floor())
         .border_l_1()
         .border_color(theme::edge_hard())
         .child(
             div()
-                .pb(px(10.0))
-                .font_family(theme::SANS)
-                .text_size(px(theme::T_UI_SM))
-                .font_weight(FontWeight::BOLD)
-                .text_color(theme::bone_dim())
-                .child("Runtime inspector"),
+                .px(px(16.0))
+                .h(px(theme::TITLE_H))
+                .flex()
+                .items_center()
+                .border_b_1()
+                .border_color(theme::edge_soft())
+                .child(
+                    div()
+                        .font_family(theme::SANS)
+                        .text_size(px(theme::T_UI_SM))
+                        .font_weight(FontWeight::BOLD)
+                        .text_color(theme::bone_dim())
+                        .child("Inspector"),
+                ),
         )
-        .child(controls::metric("Context", projection.context.label()))
-        .child(controls::metric(
-            "Input tokens",
-            projection.input_tokens.label(),
-        ))
-        .child(controls::metric(
-            "Output tokens",
-            projection.output_tokens.label(),
-        ))
-        .child(controls::metric("Cache", projection.cache.label()))
-        .child(controls::metric("Cost", projection.cost.label()))
-        .child(controls::metric("Model", projection.model.label()))
-        .child(controls::metric("Thinking", projection.thinking.label()))
-        .child(run_controls(conversation, compaction_composer, cx))
-        .child(queue_panel(conversation))
+        .child(
+            div()
+                .id("inspector-scroll")
+                .flex_1()
+                .min_h_0()
+                .overflow_y_scroll()
+                .scrollbar_width(px(theme::SCROLLBAR))
+                .child(
+                    div()
+                        .w_full()
+                        .px(px(14.0))
+                        .pt(px(14.0))
+                        .pb(px(22.0))
+                        .flex()
+                        .flex_col()
+                        .gap(px(18.0))
+                        .child(controls::context_block(
+                            "Context",
+                            projection.context.label(),
+                            context_pct(&projection.context.label()),
+                            projection.input_tokens.label(),
+                            projection.output_tokens.label(),
+                            projection.cache.label(),
+                        ))
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .child(controls::metric_row("Model", projection.model.label()))
+                                .child(controls::metric_row(
+                                    "Thinking",
+                                    projection.thinking.label(),
+                                ))
+                                .child(controls::metric_row("Cost", projection.cost.label())),
+                        )
+                        .child(run_controls(conversation, compaction_composer, cx))
+                        .child(queue_panel(conversation)),
+                ),
+        )
 }
 
 fn run_controls(
@@ -1141,26 +1116,29 @@ fn run_controls(
         .any(|execution| execution.status == BashStatus::Running);
 
     div()
-        .mt(px(14.0))
         .flex()
         .flex_col()
         .gap(px(8.0))
-        .child(section_label("Run controls"))
-        .when_some(
-            conversation.pending_operation.as_ref(),
-            |panel, operation| {
-                panel.child(status_line(
-                    "Pending",
-                    operation_label(operation).to_owned(),
-                ))
-            },
-        )
         .child(
             div()
                 .flex()
-                .flex_col()
-                .gap(px(8.0))
-                .child(controls::operation_button(
+                .flex_row()
+                .items_baseline()
+                .justify_between()
+                .child(controls::section_label("Run"))
+                .when_some(conversation.pending_operation.as_ref(), |row, operation| {
+                    row.child(
+                        div()
+                            .font_family(theme::MONO)
+                            .text_size(px(theme::T_TINY))
+                            .text_color(theme::data())
+                            .child(operation_label(operation)),
+                    )
+                }),
+        )
+        .child(
+            controls::divider_list()
+                .child(controls::action_row(
                     "abort-run",
                     "Abort run",
                     if abort_enabled {
@@ -1172,7 +1150,7 @@ fn run_controls(
                     controls::ControlTone::Danger,
                     Box::new(cx.listener(|view, _, _, cx| view.abort(cx))),
                 ))
-                .child(controls::operation_button(
+                .child(controls::action_row(
                     "abort-bash",
                     "Abort Bash",
                     if bash_running {
@@ -1184,7 +1162,7 @@ fn run_controls(
                     controls::ControlTone::Danger,
                     Box::new(cx.listener(|view, _, _, cx| view.abort_bash(cx))),
                 ))
-                .child(controls::operation_button(
+                .child(controls::action_row(
                     "abort-retry",
                     "Abort retry",
                     if abort_retry_enabled {
@@ -1196,7 +1174,7 @@ fn run_controls(
                     controls::ControlTone::Danger,
                     Box::new(cx.listener(|view, _, _, cx| view.abort_retry(cx))),
                 ))
-                .child(controls::operation_button(
+                .child(controls::action_row(
                     "compact-now",
                     "Compact",
                     if compact_enabled {
@@ -1212,7 +1190,7 @@ fn run_controls(
         .child(compaction_composer.clone())
         .child(mode_controls(
             "steering",
-            "Steering mode",
+            "Steering",
             conversation.steering_mode,
             locked || !can_run_controls,
             |view, mode, cx| view.set_steering_mode(mode, cx),
@@ -1220,7 +1198,7 @@ fn run_controls(
         ))
         .child(mode_controls(
             "follow-up",
-            "Follow-up mode",
+            "Follow-up",
             conversation.follow_up_mode,
             locked || !can_run_controls,
             |view, mode, cx| view.set_follow_up_mode(mode, cx),
@@ -1257,52 +1235,45 @@ fn mode_controls(
         .flex()
         .flex_col()
         .gap(px(6.0))
-        .child(status_line(title, current_label.to_owned()))
         .child(
             div()
                 .flex()
-                .flex_col()
-                .gap(px(8.0))
-                .child(mode_button(
+                .flex_row()
+                .items_baseline()
+                .justify_between()
+                .child(controls::section_label(title))
+                .child(
+                    div()
+                        .font_family(theme::MONO)
+                        .text_size(px(theme::T_TINY))
+                        .text_color(theme::smoke())
+                        .child(current_label),
+                ),
+        )
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .gap(px(6.0))
+                .child(controls::chip_button(
                     format!("{prefix}-all"),
                     "All",
-                    QueueDeliveryMode::All,
-                    current,
-                    locked,
-                    apply,
-                    cx,
+                    current == Some(QueueDeliveryMode::All),
+                    current.is_some() && !locked && current != Some(QueueDeliveryMode::All),
+                    Box::new(
+                        cx.listener(move |view, _, _, cx| apply(view, QueueDeliveryMode::All, cx)),
+                    ),
                 ))
-                .child(mode_button(
+                .child(controls::chip_button(
                     format!("{prefix}-one"),
                     "One at a time",
-                    QueueDeliveryMode::OneAtATime,
-                    current,
-                    locked,
-                    apply,
-                    cx,
+                    current == Some(QueueDeliveryMode::OneAtATime),
+                    current.is_some() && !locked && current != Some(QueueDeliveryMode::OneAtATime),
+                    Box::new(cx.listener(move |view, _, _, cx| {
+                        apply(view, QueueDeliveryMode::OneAtATime, cx)
+                    })),
                 )),
         )
-}
-
-fn mode_button(
-    id: String,
-    label: &'static str,
-    mode: QueueDeliveryMode,
-    current: Option<QueueDeliveryMode>,
-    locked: bool,
-    apply: fn(&mut RootView, QueueDeliveryMode, &mut Context<RootView>),
-    cx: &mut Context<RootView>,
-) -> impl IntoElement {
-    let selected = current == Some(mode);
-    let detail = if selected { "Selected" } else { "Switch mode" };
-    controls::operation_button(
-        id,
-        label,
-        detail,
-        current.is_some() && !locked && !selected,
-        controls::ControlTone::Normal,
-        Box::new(cx.listener(move |view, _, _, cx| apply(view, mode, cx))),
-    )
 }
 
 fn toggle_row(
@@ -1317,138 +1288,157 @@ fn toggle_row(
     let target = !current.unwrap_or(true);
     div()
         .flex()
-        .flex_col()
-        .gap(px(6.0))
-        .child(status_line(title, current_label.to_owned()))
-        .child(controls::operation_button(
+        .flex_row()
+        .items_center()
+        .justify_between()
+        .gap(px(8.0))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(2.0))
+                .child(controls::section_label(title))
+                .child(
+                    div()
+                        .font_family(theme::MONO)
+                        .text_size(px(theme::T_TINY))
+                        .text_color(theme::smoke())
+                        .child(current_label),
+                ),
+        )
+        .child(controls::chip_button(
             format!("{prefix}-toggle"),
             if target { "Enable" } else { "Disable" },
-            "Protocol toggle",
+            false,
             current.is_some() && !locked,
-            controls::ControlTone::Normal,
             Box::new(cx.listener(move |view, _, _, cx| apply(view, target, cx))),
         ))
 }
 
 fn queue_panel(conversation: &ConversationProjection) -> impl IntoElement {
     div()
-        .mt(px(14.0))
         .flex()
         .flex_col()
         .gap(px(8.0))
-        .child(section_label("Queued input"))
-        .when(conversation.context_awaiting_fresh_usage, |panel| {
-            panel.child(status_line(
-                "Context",
-                "Awaiting fresh usage after compaction".to_owned(),
-            ))
-        })
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_baseline()
+                .justify_between()
+                .child(controls::section_label("Queue"))
+                .when(conversation.context_awaiting_fresh_usage, |row| {
+                    row.child(
+                        div()
+                            .font_family(theme::MONO)
+                            .text_size(px(theme::T_TINY))
+                            .text_color(theme::data())
+                            .child("awaiting usage"),
+                    )
+                }),
+        )
         .child(match &conversation.queue {
-            QueueContents::Unknown { pending_count } => status_line(
-                "Pending",
-                format!(
+            QueueContents::Unknown { pending_count } => controls::divider_list()
+                .child(controls::empty_list_note(format!(
                     "Pi reports {pending_count} queued item{}",
                     plural(*pending_count)
-                ),
-            )
-            .into_any_element(),
+                )))
+                .into_any_element(),
             QueueContents::Known {
                 steering,
                 follow_up,
-            } => div()
-                .flex()
-                .flex_col()
-                .gap(px(8.0))
-                .child(queue_group("Steering", steering))
-                .child(queue_group("Follow-up", follow_up))
+            } => controls::divider_list()
+                .when(steering.is_empty() && follow_up.is_empty(), |list| {
+                    list.child(controls::empty_list_note("Nothing queued."))
+                })
+                .children(steering.iter().enumerate().map(|(index, item)| {
+                    div()
+                        .when(index + 1 < steering.len() || !follow_up.is_empty(), |row| {
+                            row.border_b_1().border_color(theme::edge_soft())
+                        })
+                        .child(controls::queue_row(
+                            format!("STEER {:02}", index + 1),
+                            item.clone(),
+                        ))
+                }))
+                .children(follow_up.iter().enumerate().map(|(index, item)| {
+                    div()
+                        .when(index + 1 < follow_up.len(), |row| {
+                            row.border_b_1().border_color(theme::edge_soft())
+                        })
+                        .child(controls::queue_row(
+                            format!("FOLLOW {:02}", index + 1),
+                            item.clone(),
+                        ))
+                }))
                 .into_any_element(),
         })
 }
 
-fn queue_group(title: &'static str, items: &[String]) -> impl IntoElement {
+fn runtime_error_notice(projection: &ShellProjection) -> impl IntoElement {
     div()
+        .mx(px(theme::STREAM_PAD_X))
+        .mt(px(14.0))
+        .p(px(12.0))
+        .rounded(px(theme::RADIUS_SM))
+        .bg(theme::panel())
+        .border_1()
+        .border_color(theme::error())
         .flex()
         .flex_col()
-        .gap(px(5.0))
-        .child(status_line(
-            title,
-            format!("{} item{}", items.len(), plural(items.len() as u64)),
-        ))
-        .when(items.is_empty(), |group| {
-            group.child(
-                div()
-                    .px(px(10.0))
-                    .py(px(8.0))
-                    .rounded(px(theme::RADIUS_SM))
-                    .bg(theme::canvas())
-                    .font_family(theme::SANS)
-                    .text_size(px(theme::T_UI_SM))
-                    .text_color(theme::smoke())
-                    .child("Empty"),
-            )
-        })
-        .children(items.iter().enumerate().map(|(index, item)| {
-            div()
-                .px(px(10.0))
-                .py(px(8.0))
-                .rounded(px(theme::RADIUS_SM))
-                .bg(theme::canvas())
-                .border_1()
-                .border_color(theme::edge_soft())
-                .flex()
-                .flex_col()
-                .gap(px(4.0))
-                .child(
-                    div()
-                        .font_family(theme::MONO)
-                        .text_size(px(theme::T_TINY))
-                        .text_color(theme::data())
-                        .child(format!("{} #{:02}", title, index + 1)),
-                )
-                .child(
-                    div()
-                        .font_family(theme::SANS)
-                        .text_size(px(theme::T_UI_SM))
-                        .line_height(gpui::relative(1.35))
-                        .text_color(theme::bone_dim())
-                        .child(item.clone()),
-                )
-        }))
-}
-
-fn section_label(text: &'static str) -> impl IntoElement {
-    div()
-        .font_family(theme::SANS)
-        .text_size(px(theme::T_UI_SM))
-        .font_weight(FontWeight::BOLD)
-        .text_color(theme::bone_dim())
-        .child(text)
-}
-
-fn status_line(label: &'static str, value: String) -> impl IntoElement {
-    div()
-        .flex()
-        .flex_row()
-        .items_baseline()
-        .justify_between()
-        .gap(px(10.0))
+        .gap(px(4.0))
         .child(
             div()
                 .font_family(theme::SANS)
-                .text_size(px(theme::T_TINY))
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(theme::ash())
-                .child(label),
+                .text_size(px(theme::T_UI))
+                .font_weight(FontWeight::BOLD)
+                .text_color(theme::error())
+                .child(projection.headline.clone()),
         )
         .child(
             div()
-                .min_w_0()
-                .font_family(theme::MONO)
-                .text_size(px(theme::T_TINY))
+                .font_family(theme::SANS)
+                .text_size(px(theme::T_UI_SM))
+                .line_height(gpui::relative(1.4))
                 .text_color(theme::bone_dim())
-                .text_right()
-                .child(value),
+                .child(projection.detail.clone()),
         )
+}
+
+fn short_path(path: &str) -> String {
+    let mut parts = path.rsplit(['\\', '/']).filter(|part| !part.is_empty());
+    let Some(name) = parts.next() else {
+        return path.to_owned();
+    };
+    let Some(parent) = parts.next() else {
+        return path.to_owned();
+    };
+    if parts.next().is_none() {
+        path.to_owned()
+    } else {
+        format!("…\\{parent}\\{name}")
+    }
+}
+
+fn context_pct(label: &str) -> Option<f32> {
+    let cleaned = label
+        .split('·')
+        .next()
+        .unwrap_or(label)
+        .trim()
+        .replace(',', "");
+    if let Some((used, total)) = cleaned.split_once('/') {
+        let used = used.trim().parse::<f32>().ok()?;
+        let total = total.trim().parse::<f32>().ok()?;
+        if total > 0.0 {
+            return Some((used / total).clamp(0.0, 1.0));
+        }
+    }
+    cleaned
+        .trim_end_matches('%')
+        .parse::<f32>()
+        .ok()
+        .map(|value| (value / 100.0).clamp(0.0, 1.0))
 }
 
 fn operation_label(operation: &RuntimeOperation) -> &'static str {
@@ -1493,5 +1483,28 @@ fn lifecycle_color(projection: &ShellProjection) -> gpui::Rgba {
         "Connection error" | "No model" => theme::error(),
         "Not connected" | "Stopped" => theme::ash(),
         _ => theme::bone_dim(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::short_path;
+
+    #[test]
+    fn short_path_preserves_short_values_and_truncates_deep_values() {
+        assert_eq!(short_path(r"C:\workspace"), r"C:\workspace");
+        assert_eq!(short_path(r"C:\workspace\pi-gui"), r"…\workspace\pi-gui");
+        assert_eq!(short_path("/work/pi-gui/src"), r"…\pi-gui\src");
+    }
+
+    #[test]
+    fn context_pct_parses_token_ratios_and_percentages() {
+        assert_eq!(
+            super::context_pct("12,345 / 200,000"),
+            Some(12345.0 / 200_000.0)
+        );
+        assert_eq!(super::context_pct("42%"), Some(0.42));
+        assert_eq!(super::context_pct("Awaiting"), None);
+        assert_eq!(super::context_pct("1,000 / 2,000 · stale"), Some(0.5));
     }
 }

@@ -13,8 +13,8 @@ use crate::services::runtime_worker::{RpcRuntimeService, RuntimeService};
 use crate::services::session_catalog::{SessionCatalogConfig, without_windows_verbatim_prefix};
 use crate::{fonts, views::RootView};
 
-const WINDOW_WIDTH: f32 = 1380.0;
-const WINDOW_HEIGHT: f32 = 680.0;
+const WINDOW_WIDTH: f32 = 1440.0;
+const WINDOW_HEIGHT: f32 = 860.0;
 
 pub fn run() {
     let working_directory = std::env::current_dir()
@@ -49,7 +49,7 @@ pub fn run() {
         cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
-                window_min_size: Some(size(px(820.0), px(520.0))),
+                window_min_size: Some(size(px(1080.0), px(640.0))),
                 ..Default::default()
             },
             move |window, cx| {

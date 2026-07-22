@@ -10,6 +10,7 @@ use crate::state::runtime::{
     sanitize_untrusted_text,
 };
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub(super) fn format_json(value: &Value) -> String {
     let value = sanitized_json_value(value);
     serde_json::to_string_pretty(&value).unwrap_or_else(|_| "Unrenderable JSON".to_owned())
@@ -29,6 +30,7 @@ fn sanitized_json_value(value: &Value) -> Value {
     }
 }
 
+#[allow(dead_code)]
 pub(super) fn payload_copy_text(payload: &ToolPayload, error: Option<&str>) -> String {
     let mut parts = Vec::new();
     if !payload.text.is_empty() {
@@ -43,11 +45,12 @@ pub(super) fn payload_copy_text(payload: &ToolPayload, error: Option<&str>) -> S
     parts.join("\n")
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub(super) fn bounded_preview(text: &str, limit: usize) -> (String, usize) {
     let max_lines = if limit <= COLLAPSED_PREVIEW_BYTES {
-        400
+        28
     } else {
-        1_200
+        400
     };
     let mut end = text.len().min(limit);
     while !text.is_char_boundary(end) {
@@ -464,6 +467,350 @@ pub(crate) fn tool_key(id: &ToolCallId) -> String {
     format!("tool:{}", id.as_str())
 }
 
+/// One path/command row under a compact tool header.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolTreeRow {
+    pub label: String,
+    pub detail: Option<String>,
+}
+
+/// Compact, non-interactive tool presentation for the conversation spine.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolPresentation {
+    pub name: String,
+    pub status: CardStatus,
+    pub rows: Vec<ToolTreeRow>,
+}
+
+impl ToolPresentation {
+    pub fn from_card(data: &ToolCardData) -> Self {
+        presentation(
+            &data.name,
+            data.arguments.as_ref(),
+            &data.payload,
+            data.status,
+        )
+    }
+
+    pub fn groupable(&self) -> bool {
+        matches!(
+            self.name.as_str(),
+            "read" | "edit" | "write" | "grep" | "find" | "ls"
+        )
+    }
+
+    pub fn title(&self, group_count: usize) -> String {
+        let name = sanitize_untrusted_text(&self.name);
+        if group_count <= 1 {
+            return name;
+        }
+        match name.as_str() {
+            "read" => format!("read({group_count} files)"),
+            "edit" => format!("edit({group_count} files)"),
+            "write" => format!("write({group_count} files)"),
+            "grep" => format!("grep({group_count})"),
+            "find" => format!("find({group_count})"),
+            "ls" => format!("ls({group_count})"),
+            other => format!("{other}({group_count})"),
+        }
+    }
+}
+
+pub(crate) fn presentation_for_tool_call(
+    projection: &ConversationProjection,
+    id: &ToolCallId,
+    name: &str,
+    arguments: &Value,
+) -> ToolPresentation {
+    let live = projection.tools.get(id);
+    let status = live.map_or(CardStatus::Pending, |tool| match tool.status {
+        ToolStatus::Pending => CardStatus::Pending,
+        ToolStatus::Running => CardStatus::Running,
+        ToolStatus::Succeeded => CardStatus::Success,
+        ToolStatus::Failed => CardStatus::Error,
+        ToolStatus::Cancelled => CardStatus::Cancelled,
+        ToolStatus::Uncertain => CardStatus::Uncertain,
+    });
+    let payload = live
+        .and_then(|tool| tool.result.as_ref())
+        .map(payload_from_value)
+        .or_else(|| persisted_result_payload(projection, id))
+        .unwrap_or_default();
+    presentation(name, Some(arguments), &payload, status)
+}
+
+pub(crate) fn presentation_for_standalone_result(
+    name: &str,
+    content: &str,
+    images: &[ToolImage],
+    details: Option<&Value>,
+    is_error: bool,
+) -> ToolPresentation {
+    let payload = payload_from_persisted(content, images, details);
+    presentation(
+        name,
+        None,
+        &payload,
+        if is_error {
+            CardStatus::Error
+        } else {
+            CardStatus::Success
+        },
+    )
+}
+
+pub(crate) fn presentation_for_bash_block(
+    command: &str,
+    output: &str,
+    cancelled: bool,
+    exit_code: Option<i32>,
+) -> ToolPresentation {
+    let status = if cancelled {
+        CardStatus::Cancelled
+    } else if exit_code.is_some_and(|code| code != 0) {
+        CardStatus::Error
+    } else {
+        CardStatus::Success
+    };
+    let payload = ToolPayload {
+        text: bash_body(command, output),
+        ..ToolPayload::default()
+    };
+    presentation(
+        "bash",
+        Some(&serde_json::json!({ "command": command })),
+        &payload,
+        status,
+    )
+}
+
+pub(crate) fn presentation_for_local_bash(execution: &BashExecution) -> ToolPresentation {
+    let status = match execution.status {
+        BashStatus::Running => CardStatus::Running,
+        BashStatus::Cancelling => CardStatus::Cancelling,
+        BashStatus::Succeeded => CardStatus::Success,
+        BashStatus::Failed => CardStatus::Error,
+        BashStatus::Cancelled => CardStatus::Cancelled,
+        BashStatus::Uncertain => CardStatus::Uncertain,
+    };
+    let payload = ToolPayload {
+        text: bash_body(&execution.command, &execution.output),
+        truncated: execution.truncated,
+        full_output_path: execution.full_output_path.clone(),
+        ..ToolPayload::default()
+    };
+    presentation(
+        "bash",
+        Some(&serde_json::json!({ "command": execution.command })),
+        &payload,
+        status,
+    )
+}
+
+fn persisted_result_payload(
+    projection: &ConversationProjection,
+    id: &ToolCallId,
+) -> Option<ToolPayload> {
+    projection.messages.iter().find_map(|message| {
+        message.content.iter().find_map(|block| match block {
+            MessageBlock::ToolResult {
+                id: result_id,
+                content,
+                images,
+                details,
+                ..
+            } if result_id == id => Some(payload_from_persisted(content, images, details.as_ref())),
+            _ => None,
+        })
+    })
+}
+
+fn presentation(
+    name: &str,
+    arguments: Option<&Value>,
+    payload: &ToolPayload,
+    status: CardStatus,
+) -> ToolPresentation {
+    let name = name.trim();
+    let rows = match name {
+        "bash" => bash_rows(arguments, payload),
+        "read" | "edit" | "write" => path_rows(arguments, payload, name),
+        "grep" => grep_rows(arguments),
+        "find" | "ls" => path_or_pattern_rows(arguments),
+        _ => generic_rows(arguments, payload),
+    };
+    ToolPresentation {
+        name: name.to_owned(),
+        status,
+        rows,
+    }
+}
+
+fn bash_rows(arguments: Option<&Value>, payload: &ToolPayload) -> Vec<ToolTreeRow> {
+    if let Some(command) = string_arg(arguments, &["command"]) {
+        return vec![ToolTreeRow {
+            label: sanitize_untrusted_text(&format!("$ {command}")),
+            detail: None,
+        }];
+    }
+    payload
+        .text
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(|line| {
+            vec![ToolTreeRow {
+                label: sanitize_untrusted_text(line),
+                detail: None,
+            }]
+        })
+        .unwrap_or_default()
+}
+
+fn path_rows(arguments: Option<&Value>, payload: &ToolPayload, name: &str) -> Vec<ToolTreeRow> {
+    let path = string_arg(arguments, &["path", "file", "filePath", "file_path"])
+        .map(|path| display_path(&path))
+        .unwrap_or_else(|| name.to_owned());
+    let detail = match name {
+        "read" => read_line_detail(payload, arguments),
+        "edit" | "write" => payload
+            .diff
+            .as_deref()
+            .and_then(diff_stat)
+            .or_else(|| read_line_detail(payload, arguments)),
+        _ => None,
+    };
+    vec![ToolTreeRow {
+        label: path,
+        detail,
+    }]
+}
+
+fn grep_rows(arguments: Option<&Value>) -> Vec<ToolTreeRow> {
+    let pattern = string_arg(arguments, &["pattern", "query", "regex"]).unwrap_or_default();
+    let path = string_arg(arguments, &["path", "glob", "include", "cwd"]);
+    let label = match (pattern.is_empty(), path.as_deref()) {
+        (false, Some(path)) => format!("{pattern} · {}", display_path(path)),
+        (false, None) => pattern,
+        (true, Some(path)) => display_path(path),
+        (true, None) => "grep".to_owned(),
+    };
+    vec![ToolTreeRow {
+        label: sanitize_untrusted_text(&label),
+        detail: None,
+    }]
+}
+
+fn path_or_pattern_rows(arguments: Option<&Value>) -> Vec<ToolTreeRow> {
+    let label = string_arg(arguments, &["path", "pattern", "glob", "query", "cwd"])
+        .map(|value| display_path(&value))
+        .unwrap_or_else(|| "…".to_owned());
+    vec![ToolTreeRow {
+        label: sanitize_untrusted_text(&label),
+        detail: None,
+    }]
+}
+
+fn generic_rows(arguments: Option<&Value>, payload: &ToolPayload) -> Vec<ToolTreeRow> {
+    if let Some(path) = string_arg(arguments, &["path", "file", "filePath", "file_path"]) {
+        return vec![ToolTreeRow {
+            label: display_path(&path),
+            detail: read_line_detail(payload, arguments),
+        }];
+    }
+    if let Some(command) = string_arg(arguments, &["command"]) {
+        return vec![ToolTreeRow {
+            label: sanitize_untrusted_text(&format!("$ {command}")),
+            detail: None,
+        }];
+    }
+    payload
+        .text
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(|line| {
+            let mut label = sanitize_untrusted_text(line);
+            if label.len() > 120 {
+                let mut end = 120;
+                while !label.is_char_boundary(end) {
+                    end = end.saturating_sub(1);
+                }
+                label.truncate(end);
+                label.push('…');
+            }
+            vec![ToolTreeRow {
+                label,
+                detail: None,
+            }]
+        })
+        .unwrap_or_default()
+}
+
+fn read_line_detail(payload: &ToolPayload, arguments: Option<&Value>) -> Option<String> {
+    let lines = payload.text.lines().filter(|line| !line.is_empty()).count();
+    if lines > 0 {
+        return Some(lines.to_string());
+    }
+    let offset = arguments
+        .and_then(|value| value.get("offset"))
+        .and_then(Value::as_u64);
+    let limit = arguments
+        .and_then(|value| value.get("limit"))
+        .and_then(Value::as_u64);
+    match (offset, limit) {
+        (Some(offset), Some(limit)) => Some(format!("{offset}-{}", offset.saturating_add(limit))),
+        (Some(offset), None) => Some(format!("{offset}+")),
+        (None, Some(limit)) => Some(format!("{limit} lines")),
+        (None, None) => None,
+    }
+}
+
+fn diff_stat(diff: &str) -> Option<String> {
+    let mut plus = 0u32;
+    let mut minus = 0u32;
+    for line in diff.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with('+') && !trimmed.starts_with("+++") {
+            plus = plus.saturating_add(1);
+        } else if trimmed.starts_with('-') && !trimmed.starts_with("---") {
+            minus = minus.saturating_add(1);
+        }
+    }
+    if plus == 0 && minus == 0 {
+        None
+    } else {
+        Some(format!("+{plus} -{minus}"))
+    }
+}
+
+fn string_arg(arguments: Option<&Value>, keys: &[&str]) -> Option<String> {
+    let object = arguments?.as_object()?;
+    keys.iter().find_map(|key| {
+        object
+            .get(*key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned)
+    })
+}
+
+fn display_path(path: &str) -> String {
+    let normalized = path.replace('\\', "/");
+    let trimmed = normalized.trim();
+    let parts = trimmed
+        .split('/')
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>();
+    let label = if parts.len() <= 3 {
+        parts.join("/")
+    } else {
+        format!("…/{}/{}", parts[parts.len() - 2], parts[parts.len() - 1])
+    };
+    sanitize_untrusted_text(&label)
+}
+
 pub(crate) fn standalone_result_key(message_key: &str, id: &ToolCallId) -> String {
     format!("tool-result:{message_key}:{}", id.as_str())
 }
@@ -514,6 +861,30 @@ pub(crate) fn has_tool_call(projection: &ConversationProjection, id: &ToolCallId
     })
 }
 
+pub(crate) fn tail_presentations(projection: &ConversationProjection) -> Vec<ToolPresentation> {
+    let keys = tail_card_keys(projection);
+    let mut out = Vec::new();
+    for tool in projection.tools.values() {
+        let key = tool_key(&tool.id);
+        if keys.iter().any(|candidate| candidate == &key) {
+            out.push(presentation_for_tool_call(
+                projection,
+                &tool.id,
+                &tool.name,
+                &tool.arguments,
+            ));
+        }
+    }
+    out.extend(
+        projection
+            .bash_executions
+            .iter()
+            .filter(|execution| !execution.reconciled)
+            .map(presentation_for_local_bash),
+    );
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -558,6 +929,35 @@ mod tests {
             format_json(&Value::String("{not-json}\u{7}".to_owned())),
             "\"{not-json}�\""
         );
+    }
+
+    #[test]
+    fn read_presentation_builds_tree_rows_and_group_titles() {
+        let payload = ToolPayload {
+            text: "line1\nline2\nline3\n".to_owned(),
+            ..ToolPayload::default()
+        };
+        let one = presentation(
+            "read",
+            Some(&serde_json::json!({"path": "src/views/tool_card.rs"})),
+            &payload,
+            CardStatus::Success,
+        );
+        assert_eq!(one.title(1), "read");
+        assert_eq!(one.title(2), "read(2 files)");
+        assert_eq!(one.rows.len(), 1);
+        assert_eq!(one.rows[0].label, "src/views/tool_card.rs");
+        assert_eq!(one.rows[0].detail.as_deref(), Some("3"));
+
+        let bash = presentation(
+            "bash",
+            Some(&serde_json::json!({"command": "cargo test"})),
+            &ToolPayload::default(),
+            CardStatus::Running,
+        );
+        assert_eq!(bash.rows[0].label, "$ cargo test");
+        assert!(!bash.groupable());
+        assert!(one.groupable());
     }
 
     #[test]

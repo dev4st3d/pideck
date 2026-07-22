@@ -18,7 +18,9 @@ use crate::state::runtime::{
 };
 use crate::theme;
 use crate::views::tool_card::{
-    ToolCard, bash_message_key, has_tool_call, standalone_result_key, tail_card_keys, tool_key,
+    ToolCard, ToolPresentation, has_tool_call, presentation_for_bash_block,
+    presentation_for_standalone_result, presentation_for_tool_call, render_tool_presentation,
+    status_color, tail_presentations,
 };
 
 const FOLLOW_THRESHOLD: Pixels = px(72.0);
@@ -346,17 +348,9 @@ pub(super) fn stream(
                     .into_any_element()
                 }),
         )
-        .children(tail_card_keys(projection).into_iter().filter_map(|key| {
-            tool_cards.get(&key).cloned().map(|card| {
-                div()
-                    .w_full()
-                    .px(px(18.0))
-                    .py(px(8.0))
-                    .bg(theme::floor())
-                    .child(card)
-                    .into_any_element()
-            })
-        }))
+        .when_some(tail_activity(projection, tool_cards), |stream, tail| {
+            stream.child(tail)
+        })
         .children(notices(projection))
         .when(
             projection.messages.is_empty()
@@ -411,6 +405,7 @@ fn turn_card(
     texts: &HashMap<String, Entity<TranscriptText>>,
     tool_cards: &HashMap<String, Entity<ToolCard>>,
 ) -> impl IntoElement {
+    let (activity, reply) = split_turn(messages, projection);
     div()
         .id(SharedString::from(format!("turn-{}", user.key.0)))
         .w_full()
@@ -421,20 +416,19 @@ fn turn_card(
         .bg(theme::floor())
         .border_1()
         .border_color(theme::edge_soft())
-        .child(user_prompt(
-            index, user, projection, texts, tool_cards, false,
-        ))
-        .children(messages.iter().map(|message| match message.role {
-            MessageRole::Assistant => assistant_message(message, projection, texts, tool_cards),
-            MessageRole::ToolResult | MessageRole::BashExecution => {
-                work_message(message, projection, texts, tool_cards)
-            }
-            MessageRole::Custom
-            | MessageRole::BranchSummary
-            | MessageRole::CompactionSummary
-            | MessageRole::Unknown => activity_message(message, projection, texts, tool_cards),
-            MessageRole::User => div().into_any_element(),
-        }))
+        .child(user_prompt(index, user, texts))
+        .when(!activity.is_empty(), |turn| {
+            turn.child(activity_band(
+                &activity,
+                reply.is_some(),
+                projection,
+                texts,
+                tool_cards,
+            ))
+        })
+        .when_some(reply, |turn, message| {
+            turn.child(assistant_reply(message, texts))
+        })
 }
 
 fn optimistic_turn(
@@ -482,15 +476,13 @@ fn optimistic_turn(
 fn user_prompt(
     index: usize,
     message: &RuntimeMessage,
-    projection: &ConversationProjection,
     texts: &HashMap<String, Entity<TranscriptText>>,
-    tool_cards: &HashMap<String, Entity<ToolCard>>,
-    optimistic: bool,
 ) -> impl IntoElement {
     div()
         .w_full()
         .px(px(18.0))
-        .py(px(14.0))
+        .pt(px(14.0))
+        .pb(px(14.0))
         .bg(theme::panel())
         .border_b_1()
         .border_color(theme::edge_soft())
@@ -500,22 +492,22 @@ fn user_prompt(
         .child(prompt_header(
             index,
             "You",
-            if optimistic {
-                "Accepted".to_owned()
-            } else {
-                format_timestamp(message.timestamp)
-            },
+            format_timestamp(message.timestamp),
             theme::signal(),
         ))
-        .children(message.content.iter().map(|block| {
-            message_block(
-                message,
-                block,
-                projection,
+        .children(message.content.iter().filter_map(|block| match block {
+            MessageBlock::Text { .. } => Some(selectable(
+                &fragment_key(message, block),
                 texts,
-                tool_cards,
-                BlockPlacement::Prompt,
-            )
+                theme::SANS,
+                theme::T_BODY,
+                theme::bone(),
+                FontWeight::MEDIUM,
+            )),
+            MessageBlock::Image { mime_type, .. } => {
+                Some(compact_label(format!("Image · {mime_type}")))
+            }
+            _ => None,
         }))
 }
 
@@ -564,12 +556,405 @@ fn prompt_header(
         )
 }
 
-fn assistant_message(
-    message: &RuntimeMessage,
+/// One spine step inside a turn's activity band.
+enum ActivityStep<'a> {
+    Thinking { key: String, redacted: bool },
+    Text { key: String },
+    Image { mime_type: &'a str },
+    Tool { presentation: ToolPresentation },
+    Summary { label: &'static str, key: String },
+    Custom { kind: &'a str, key: String },
+    Unsupported { kind: &'a str },
+    Notice { text: String, error: bool },
+}
+
+fn split_turn<'a>(
+    messages: &[&'a RuntimeMessage],
+    projection: &ConversationProjection,
+) -> (Vec<ActivityStep<'a>>, Option<&'a RuntimeMessage>) {
+    let reply_index = messages.iter().rposition(|message| {
+        message.role == MessageRole::Assistant
+            && has_reply_text(message)
+            && !is_tool_only_assistant(message)
+    });
+
+    let mut activity = Vec::new();
+    for (index, message) in messages.iter().enumerate() {
+        let is_reply = reply_index == Some(index);
+        push_message_activity(&mut activity, message, projection, is_reply);
+    }
+    let reply = reply_index.map(|index| messages[index]);
+    (activity, reply)
+}
+
+fn has_reply_text(message: &RuntimeMessage) -> bool {
+    message
+        .content
+        .iter()
+        .any(|block| matches!(block, MessageBlock::Text { text, .. } if !text.trim().is_empty()))
+}
+
+fn is_tool_only_assistant(message: &RuntimeMessage) -> bool {
+    message.role == MessageRole::Assistant
+        && message.stop_reason == Some(MessageStopReason::ToolUse)
+        && !message.content.iter().any(
+            |block| matches!(block, MessageBlock::Text { text, .. } if !text.trim().is_empty()),
+        )
+}
+
+fn push_message_activity<'a>(
+    activity: &mut Vec<ActivityStep<'a>>,
+    message: &'a RuntimeMessage,
+    projection: &ConversationProjection,
+    is_reply: bool,
+) {
+    for block in &message.content {
+        match block {
+            MessageBlock::Text { .. } if is_reply => {}
+            MessageBlock::Text { .. } => activity.push(ActivityStep::Text {
+                key: fragment_key(message, block),
+            }),
+            MessageBlock::Thinking { redacted, .. } => activity.push(ActivityStep::Thinking {
+                key: fragment_key(message, block),
+                redacted: *redacted,
+            }),
+            MessageBlock::Image { mime_type, .. } => activity.push(ActivityStep::Image {
+                mime_type: mime_type.as_str(),
+            }),
+            MessageBlock::ToolCall {
+                id,
+                name,
+                arguments,
+                ..
+            } => activity.push(ActivityStep::Tool {
+                presentation: presentation_for_tool_call(projection, id, name, arguments),
+            }),
+            MessageBlock::ToolResult {
+                id,
+                name,
+                content,
+                images,
+                details,
+                is_error,
+                ..
+            } => {
+                if !has_tool_call(projection, id) {
+                    activity.push(ActivityStep::Tool {
+                        presentation: presentation_for_standalone_result(
+                            name,
+                            content,
+                            images,
+                            details.as_ref(),
+                            *is_error,
+                        ),
+                    });
+                }
+            }
+            MessageBlock::Bash {
+                command,
+                output,
+                cancelled,
+                exit_code,
+                ..
+            } => activity.push(ActivityStep::Tool {
+                presentation: presentation_for_bash_block(command, output, *cancelled, *exit_code),
+            }),
+            MessageBlock::Summary { .. } => activity.push(ActivityStep::Summary {
+                label: match message.role {
+                    MessageRole::BranchSummary => "Branch summary",
+                    MessageRole::CompactionSummary => "Compaction summary",
+                    _ => "Summary",
+                },
+                key: fragment_key(message, block),
+            }),
+            MessageBlock::Custom { kind, .. } => activity.push(ActivityStep::Custom {
+                kind: kind.as_str(),
+                key: fragment_key(message, block),
+            }),
+            MessageBlock::Unsupported { kind, .. } => activity.push(ActivityStep::Unsupported {
+                kind: kind.as_str(),
+            }),
+        }
+    }
+    if let Some(error) = message.error.as_ref()
+        && !is_reply
+    {
+        activity.push(ActivityStep::Notice {
+            text: error.clone(),
+            error: true,
+        });
+    }
+}
+
+fn activity_band(
+    steps: &[ActivityStep<'_>],
+    has_reply: bool,
     projection: &ConversationProjection,
     texts: &HashMap<String, Entity<TranscriptText>>,
     tool_cards: &HashMap<String, Entity<ToolCard>>,
+) -> impl IntoElement {
+    let mut children = Vec::new();
+    let mut index = 0;
+    while index < steps.len() {
+        if let ActivityStep::Tool { presentation } = &steps[index]
+            && presentation.groupable()
+        {
+            let mut group = vec![presentation.clone()];
+            let mut end = index + 1;
+            while end < steps.len() {
+                let ActivityStep::Tool { presentation: next } = &steps[end] else {
+                    break;
+                };
+                if next.name != presentation.name || !next.groupable() {
+                    break;
+                }
+                group.push(next.clone());
+                end += 1;
+            }
+            let is_last = end == steps.len();
+            children.push(render_tool_group(&group, is_last));
+            index = end;
+            continue;
+        }
+
+        let is_last = index + 1 == steps.len();
+        children.push(render_activity_step(
+            &steps[index],
+            is_last,
+            projection,
+            texts,
+            tool_cards,
+        ));
+        index += 1;
+    }
+
+    div()
+        .w_full()
+        .px(px(18.0))
+        .pt(px(12.0))
+        .pb(if has_reply { px(4.0) } else { px(14.0) })
+        .bg(theme::floor())
+        .flex()
+        .flex_col()
+        .children(children)
+}
+
+fn render_tool_group(items: &[ToolPresentation], is_last: bool) -> AnyElement {
+    let marker = items
+        .iter()
+        .map(|item| status_color(item.status))
+        .reduce(|left, right| {
+            // Prefer error/running over success for the rail marker.
+            if left == theme::error() || right == theme::error() {
+                theme::error()
+            } else if left == theme::data() || right == theme::data() {
+                theme::data()
+            } else if left == theme::signal() || right == theme::signal() {
+                theme::signal()
+            } else {
+                theme::live()
+            }
+        })
+        .unwrap_or_else(theme::live);
+    step_shell(
+        is_last,
+        marker,
+        render_tool_presentation(items, None, false, None),
+    )
+    .into_any_element()
+}
+
+fn render_activity_step(
+    step: &ActivityStep<'_>,
+    is_last: bool,
+    _projection: &ConversationProjection,
+    texts: &HashMap<String, Entity<TranscriptText>>,
+    _tool_cards: &HashMap<String, Entity<ToolCard>>,
 ) -> AnyElement {
+    match step {
+        ActivityStep::Thinking {
+            key: _,
+            redacted: true,
+        } => step_shell(
+            is_last,
+            theme::smoke(),
+            div()
+                .font_family(theme::SANS)
+                .text_size(px(theme::T_UI_SM))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(theme::smoke())
+                .child("Thinking was redacted by the provider."),
+        )
+        .into_any_element(),
+        ActivityStep::Thinking {
+            key,
+            redacted: false,
+        } => step_shell(
+            is_last,
+            theme::smoke(),
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(4.0))
+                .child(
+                    div()
+                        .font_family(theme::MONO)
+                        .text_size(px(theme::T_TINY))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(theme::smoke())
+                        .child("thinking"),
+                )
+                .child(selectable(
+                    key,
+                    texts,
+                    theme::SANS,
+                    theme::T_UI,
+                    theme::bone_dim(),
+                    FontWeight::NORMAL,
+                )),
+        )
+        .into_any_element(),
+        ActivityStep::Text { key } => step_shell(
+            is_last,
+            theme::ash(),
+            selectable(
+                key,
+                texts,
+                theme::SANS,
+                theme::T_UI,
+                theme::bone_dim(),
+                FontWeight::NORMAL,
+            ),
+        )
+        .into_any_element(),
+        ActivityStep::Image { mime_type } => step_shell(
+            is_last,
+            theme::ash(),
+            compact_label(format!("Image · {mime_type}")),
+        )
+        .into_any_element(),
+        ActivityStep::Tool { presentation } => step_shell(
+            is_last,
+            status_color(presentation.status),
+            render_tool_presentation(std::slice::from_ref(presentation), None, false, None),
+        )
+        .into_any_element(),
+        ActivityStep::Summary { label, key } => step_shell(
+            is_last,
+            theme::data(),
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(4.0))
+                .child(
+                    div()
+                        .font_family(theme::SANS)
+                        .text_size(px(theme::T_UI_SM))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(theme::bone_dim())
+                        .child(*label),
+                )
+                .child(selectable(
+                    key,
+                    texts,
+                    theme::SANS,
+                    theme::T_UI,
+                    theme::bone_dim(),
+                    FontWeight::NORMAL,
+                )),
+        )
+        .into_any_element(),
+        ActivityStep::Custom { kind, key } => step_shell(
+            is_last,
+            theme::smoke(),
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(4.0))
+                .child(compact_label(format!("Extension · {kind}")))
+                .child(selectable(
+                    key,
+                    texts,
+                    theme::SANS,
+                    theme::T_UI,
+                    theme::bone_dim(),
+                    FontWeight::NORMAL,
+                )),
+        )
+        .into_any_element(),
+        ActivityStep::Unsupported { kind } => step_shell(
+            is_last,
+            theme::smoke(),
+            compact_label(format!("Unsupported · {kind}")),
+        )
+        .into_any_element(),
+        ActivityStep::Notice { text, error } => step_shell(
+            is_last,
+            if *error {
+                theme::error()
+            } else {
+                theme::smoke()
+            },
+            div()
+                .font_family(theme::SANS)
+                .text_size(px(theme::T_UI_SM))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(if *error {
+                    theme::error()
+                } else {
+                    theme::smoke()
+                })
+                .child(text.clone()),
+        )
+        .into_any_element(),
+    }
+}
+
+fn step_shell(is_last: bool, marker: gpui::Rgba, body: impl IntoElement) -> impl IntoElement {
+    div()
+        .flex()
+        .flex_row()
+        .gap(px(11.0))
+        .child(
+            div()
+                .w(px(10.0))
+                .flex_shrink_0()
+                .flex()
+                .flex_col()
+                .items_center()
+                .child(
+                    div()
+                        .mt(px(6.0))
+                        .w(px(5.0))
+                        .h(px(5.0))
+                        .rounded_full()
+                        .bg(marker)
+                        .flex_shrink_0(),
+                )
+                .when(!is_last, |rail| {
+                    rail.child(
+                        div()
+                            .flex_1()
+                            .w(px(1.0))
+                            .min_h(px(8.0))
+                            .mt(px(3.0))
+                            .bg(theme::edge()),
+                    )
+                }),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .pb(if is_last { px(6.0) } else { px(12.0) })
+                .child(body),
+        )
+}
+
+fn assistant_reply(
+    message: &RuntimeMessage,
+    texts: &HashMap<String, Entity<TranscriptText>>,
+) -> impl IntoElement {
     let metadata = assistant_metadata(message);
     div()
         .id(SharedString::from(format!("message-{}", message.key.0)))
@@ -610,15 +995,19 @@ fn assistant_message(
                         .child(metadata),
                 ),
         )
-        .children(message.content.iter().map(|block| {
-            message_block(
-                message,
-                block,
-                projection,
+        .children(message.content.iter().filter_map(|block| match block {
+            MessageBlock::Text { .. } => Some(selectable(
+                &fragment_key(message, block),
                 texts,
-                tool_cards,
-                BlockPlacement::Reply,
-            )
+                theme::SANS,
+                theme::T_BODY_SM,
+                theme::bone(),
+                FontWeight::NORMAL,
+            )),
+            MessageBlock::Image { mime_type, .. } => {
+                Some(compact_label(format!("Image · {mime_type}")))
+            }
+            _ => None,
         }))
         .when_some(message.error.clone(), |reply, error| {
             reply.child(error_text(error))
@@ -633,68 +1022,6 @@ fn assistant_message(
                     .child(stop),
             )
         })
-        .into_any_element()
-}
-
-fn work_message(
-    message: &RuntimeMessage,
-    projection: &ConversationProjection,
-    texts: &HashMap<String, Entity<TranscriptText>>,
-    tool_cards: &HashMap<String, Entity<ToolCard>>,
-) -> AnyElement {
-    if !message.content.is_empty()
-        && message.content.iter().all(|block| {
-            matches!(block, MessageBlock::ToolResult { id, .. } if has_tool_call(projection, id))
-        })
-    {
-        return div().into_any_element();
-    }
-    div()
-        .id(SharedString::from(format!("message-{}", message.key.0)))
-        .w_full()
-        .px(px(18.0))
-        .py(px(12.0))
-        .bg(theme::floor())
-        .border_t_1()
-        .border_color(theme::edge_soft())
-        .children(message.content.iter().map(|block| {
-            message_block(
-                message,
-                block,
-                projection,
-                texts,
-                tool_cards,
-                BlockPlacement::Work,
-            )
-        }))
-        .into_any_element()
-}
-
-fn activity_message(
-    message: &RuntimeMessage,
-    projection: &ConversationProjection,
-    texts: &HashMap<String, Entity<TranscriptText>>,
-    tool_cards: &HashMap<String, Entity<ToolCard>>,
-) -> AnyElement {
-    div()
-        .id(SharedString::from(format!("message-{}", message.key.0)))
-        .w_full()
-        .px(px(18.0))
-        .py(px(12.0))
-        .bg(theme::floor())
-        .border_t_1()
-        .border_color(theme::edge_soft())
-        .children(message.content.iter().map(|block| {
-            message_block(
-                message,
-                block,
-                projection,
-                texts,
-                tool_cards,
-                BlockPlacement::Activity,
-            )
-        }))
-        .into_any_element()
 }
 
 fn preamble(
@@ -704,140 +1031,79 @@ fn preamble(
     tool_cards: &HashMap<String, Entity<ToolCard>>,
 ) -> AnyElement {
     match message.role {
-        MessageRole::Assistant => assistant_message(message, projection, texts, tool_cards),
-        MessageRole::ToolResult | MessageRole::BashExecution => {
-            work_message(message, projection, texts, tool_cards)
+        MessageRole::Assistant if has_reply_text(message) && !is_tool_only_assistant(message) => {
+            let (activity, _) = split_turn(&[message], projection);
+            if activity.is_empty() {
+                assistant_reply(message, texts).into_any_element()
+            } else {
+                div()
+                    .w_full()
+                    .flex()
+                    .flex_col()
+                    .rounded(px(theme::RADIUS))
+                    .overflow_hidden()
+                    .bg(theme::floor())
+                    .border_1()
+                    .border_color(theme::edge_soft())
+                    .child(activity_band(
+                        &activity, true, projection, texts, tool_cards,
+                    ))
+                    .child(assistant_reply(message, texts))
+                    .into_any_element()
+            }
         }
-        MessageRole::Custom
+        MessageRole::Assistant
+        | MessageRole::ToolResult
+        | MessageRole::BashExecution
+        | MessageRole::Custom
         | MessageRole::BranchSummary
         | MessageRole::CompactionSummary
-        | MessageRole::Unknown => activity_message(message, projection, texts, tool_cards),
+        | MessageRole::Unknown => {
+            let (activity, _) = split_turn(&[message], projection);
+            if activity.is_empty() {
+                return div().into_any_element();
+            }
+            div()
+                .w_full()
+                .px(px(2.0))
+                .child(activity_band(
+                    &activity, false, projection, texts, tool_cards,
+                ))
+                .into_any_element()
+        }
         MessageRole::User => div().into_any_element(),
     }
 }
 
-#[derive(Clone, Copy)]
-enum BlockPlacement {
-    Prompt,
-    Reply,
-    Work,
-    Activity,
-}
-
-fn message_block(
-    message: &RuntimeMessage,
-    block: &MessageBlock,
+fn tail_activity(
     projection: &ConversationProjection,
-    texts: &HashMap<String, Entity<TranscriptText>>,
     tool_cards: &HashMap<String, Entity<ToolCard>>,
-    placement: BlockPlacement,
-) -> AnyElement {
-    let key = fragment_key(message, block);
-    match block {
-        MessageBlock::Text { .. } => selectable(
-            &key,
-            texts,
-            theme::SANS,
-            match placement {
-                BlockPlacement::Prompt => theme::T_BODY,
-                BlockPlacement::Reply | BlockPlacement::Work | BlockPlacement::Activity => {
-                    theme::T_BODY_SM
-                }
-            },
-            theme::bone(),
-            match placement {
-                BlockPlacement::Prompt => FontWeight::MEDIUM,
-                BlockPlacement::Reply | BlockPlacement::Work | BlockPlacement::Activity => {
-                    FontWeight::NORMAL
-                }
-            },
-        ),
-        MessageBlock::Thinking { redacted: true, .. } => div()
-            .font_family(theme::SANS)
-            .text_size(px(theme::T_UI_SM))
-            .font_weight(FontWeight::MEDIUM)
-            .text_color(theme::smoke())
-            .child("Thinking was redacted by the provider.")
-            .into_any_element(),
-        MessageBlock::Thinking { .. } => div()
-            .flex()
-            .flex_col()
-            .gap(px(5.0))
-            .child(
-                div()
-                    .font_family(theme::MONO)
-                    .text_size(px(theme::T_TINY))
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(theme::smoke())
-                    .child("thinking"),
-            )
-            .child(selectable(
-                &key,
-                texts,
-                theme::SANS,
-                theme::T_UI,
-                theme::bone_dim(),
-                FontWeight::NORMAL,
-            ))
-            .into_any_element(),
-        MessageBlock::Image { mime_type, .. } => compact_label(format!("Image · {mime_type}")),
-        MessageBlock::ToolCall { id, .. } => tool_cards
-            .get(&tool_key(id))
-            .cloned()
-            .map(IntoElement::into_any_element)
-            .unwrap_or_else(|| compact_label("Tool call unavailable".to_owned())),
-        MessageBlock::ToolResult { id, .. } => {
-            if has_tool_call(projection, id) {
-                div().into_any_element()
-            } else {
-                tool_cards
-                    .get(&standalone_result_key(&message.key.0, id))
-                    .cloned()
-                    .map(IntoElement::into_any_element)
-                    .unwrap_or_else(|| compact_label("Tool result unavailable".to_owned()))
-            }
-        }
-        MessageBlock::Bash { .. } => tool_cards
-            .get(&bash_message_key(&message.key.0))
-            .cloned()
-            .map(IntoElement::into_any_element)
-            .unwrap_or_else(|| compact_label("Bash result unavailable".to_owned())),
-        MessageBlock::Summary { .. } => div()
-            .flex()
-            .flex_col()
-            .gap(px(6.0))
-            .child(compact_label(match message.role {
-                MessageRole::BranchSummary => "Branch summary".to_owned(),
-                MessageRole::CompactionSummary => "Compaction summary".to_owned(),
-                _ => "Summary".to_owned(),
-            }))
-            .child(selectable(
-                &key,
-                texts,
-                theme::SANS,
-                theme::T_UI,
-                theme::bone_dim(),
-                FontWeight::NORMAL,
-            ))
-            .into_any_element(),
-        MessageBlock::Custom { kind, .. } => div()
-            .flex()
-            .flex_col()
-            .gap(px(6.0))
-            .child(compact_label(format!("Extension message · {kind}")))
-            .child(selectable(
-                &key,
-                texts,
-                theme::SANS,
-                theme::T_UI,
-                theme::bone_dim(),
-                FontWeight::NORMAL,
-            ))
-            .into_any_element(),
-        MessageBlock::Unsupported { kind, .. } => {
-            compact_label(format!("Unsupported message · {kind}"))
-        }
+) -> Option<AnyElement> {
+    let activity = tail_presentations(projection)
+        .into_iter()
+        .map(|presentation| ActivityStep::Tool { presentation })
+        .collect::<Vec<_>>();
+    if activity.is_empty() {
+        return None;
     }
+
+    Some(
+        div()
+            .w_full()
+            .rounded(px(theme::RADIUS))
+            .overflow_hidden()
+            .bg(theme::floor())
+            .border_1()
+            .border_color(theme::edge_soft())
+            .child(activity_band(
+                &activity,
+                false,
+                projection,
+                &HashMap::new(),
+                tool_cards,
+            ))
+            .into_any_element(),
+    )
 }
 
 fn selectable(
@@ -1116,17 +1382,18 @@ fn empty_state(projection: &ConversationProjection) -> impl IntoElement {
     };
     div()
         .w_full()
-        .min_h(px(180.0))
+        .min_h(px(220.0))
         .flex()
         .flex_col()
         .items_center()
         .justify_center()
-        .gap(px(6.0))
+        .gap(px(8.0))
         .child(
             div()
-                .font_family(theme::DISPLAY)
-                .text_size(px(24.0))
-                .text_color(theme::bone())
+                .font_family(theme::SANS)
+                .text_size(px(theme::T_TITLE))
+                .font_weight(FontWeight::BOLD)
+                .text_color(theme::bone_dim())
                 .child(title),
         )
         .child(
@@ -1233,5 +1500,80 @@ mod tests {
         assert!(policy.should_follow(SessionEpoch::new(1), 1, px(0.0), px(0.0), false));
         policy.should_follow(SessionEpoch::new(1), 1, px(0.0), px(500.0), false);
         assert!(policy.should_follow(SessionEpoch::new(2), 1, px(0.0), px(0.0), false));
+    }
+
+    #[test]
+    fn split_turn_puts_tools_and_thinking_on_spine_before_reply() {
+        use crate::services::rpc::ToolCallId;
+        use crate::state::runtime::{
+            BlockKey, MessageBlock, MessageKey, MessageRole, RuntimeMessage,
+        };
+
+        let assistant_tools = RuntimeMessage {
+            key: MessageKey("a1".into()),
+            role: MessageRole::Assistant,
+            timestamp: 1,
+            content: vec![
+                MessageBlock::Thinking {
+                    key: BlockKey("th".into()),
+                    text: "plan".into(),
+                    redacted: false,
+                },
+                MessageBlock::ToolCall {
+                    key: BlockKey("tc".into()),
+                    id: ToolCallId::new("call-1"),
+                    name: "read".into(),
+                    arguments: serde_json::json!({}),
+                },
+            ],
+            visible: true,
+            terminal: true,
+            stop_reason: Some(MessageStopReason::ToolUse),
+            error: None,
+            assistant: None,
+        };
+        let assistant_reply = RuntimeMessage {
+            key: MessageKey("a2".into()),
+            role: MessageRole::Assistant,
+            timestamp: 2,
+            content: vec![MessageBlock::Text {
+                key: BlockKey("a2t".into()),
+                text: "done".into(),
+            }],
+            visible: true,
+            terminal: true,
+            stop_reason: Some(MessageStopReason::Stop),
+            error: None,
+            assistant: None,
+        };
+        let projection = ConversationProjection {
+            epoch: SessionEpoch::new(1),
+            revision: 1,
+            lifecycle: RuntimeLifecycle::Settled,
+            status: FacetStatus::Ready,
+            messages: vec![assistant_tools.clone(), assistant_reply.clone()],
+            accepted_user_inputs: Vec::new(),
+            tools: Default::default(),
+            bash_executions: Vec::new(),
+            queue: crate::state::runtime::QueueContents::Known {
+                steering: Vec::new(),
+                follow_up: Vec::new(),
+            },
+            steering_mode: None,
+            follow_up_mode: None,
+            auto_compaction_enabled: None,
+            auto_retry_enabled: None,
+            pending_operation: None,
+            context_awaiting_fresh_usage: false,
+            retry: RetryState::Idle,
+            compaction: CompactionState::Idle,
+            error: None,
+        };
+        let messages = vec![&assistant_tools, &assistant_reply];
+        let (activity, reply) = split_turn(&messages, &projection);
+        assert_eq!(activity.len(), 2);
+        assert!(matches!(activity[0], ActivityStep::Thinking { .. }));
+        assert!(matches!(activity[1], ActivityStep::Tool { .. }));
+        assert_eq!(reply.map(|m| m.key.0.as_str()), Some("a2"));
     }
 }

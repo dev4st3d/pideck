@@ -1,7 +1,7 @@
 //! GPUI-owned runtime controller and its pure generation gate.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -22,6 +22,19 @@ use crate::state::runtime::{
     RuntimeOperation, RuntimeState, SafeError, StampedInput, SubmissionKind, ToolExecution,
 };
 use crate::state::{ControllerStatus, ShellProjection};
+
+fn session_paths_equal(left: &Path, right: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        left.to_string_lossy()
+            .replace('\\', "/")
+            .eq_ignore_ascii_case(&right.to_string_lossy().replace('\\', "/"))
+    }
+    #[cfg(not(windows))]
+    {
+        left == right
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SubmissionPreference {
@@ -631,6 +644,7 @@ pub struct RuntimeController {
     core: ControllerCore,
     service: Arc<dyn RuntimeService>,
     worker: RuntimeWorkerHandle,
+    preferred_session_file: Option<PathBuf>,
     catalog_worker: SessionCatalogWorker,
     catalog_generation: u64,
     catalog_status: CatalogStatus,
@@ -682,6 +696,7 @@ impl RuntimeController {
             core: ControllerCore::new(workspace),
             service,
             worker,
+            preferred_session_file: None,
             catalog_worker,
             catalog_generation,
             catalog_status: CatalogStatus::Loading,
@@ -784,8 +799,29 @@ impl RuntimeController {
     }
 
     pub fn switch_session(&mut self, path: PathBuf, cx: &mut Context<Self>) -> bool {
-        let path = path.to_string_lossy().into_owned();
-        self.send_core_effects(|core| core.switch_session(path), cx)
+        if self.core.status() != ControllerStatus::Active
+            || self.core.runtime.replacement_awaiting_state
+            || self.core.runtime.pending_operation.is_some()
+        {
+            return false;
+        }
+        let path = crate::services::session_catalog::without_windows_verbatim_prefix(&path);
+        let already_active = self
+            .core
+            .runtime
+            .session
+            .data
+            .as_ref()
+            .and_then(|session| session.file.as_deref())
+            .map(Path::new)
+            .map(crate::services::session_catalog::without_windows_verbatim_prefix)
+            .is_some_and(|current| session_paths_equal(&current, &path));
+        if already_active {
+            return false;
+        }
+
+        self.preferred_session_file = Some(path.clone());
+        self.start_connection(Some(path), cx)
     }
 
     pub fn set_session_name(&mut self, name: String, cx: &mut Context<Self>) -> bool {
@@ -808,17 +844,27 @@ impl RuntimeController {
         ) {
             return;
         }
-        let (attempt, generation) = self.core.begin_connect();
-        let resume_session = self
-            .core
-            .runtime
-            .session
-            .data
-            .as_ref()
-            .and_then(|session| session.file.as_deref())
-            .map(PathBuf::from);
+        let resume_session = self.preferred_session_file.clone().or_else(|| {
+            self.core
+                .runtime
+                .session
+                .data
+                .as_ref()
+                .and_then(|session| session.file.as_deref())
+                .map(PathBuf::from)
+        });
+        self.start_connection(resume_session, cx);
+    }
+
+    fn start_connection(
+        &mut self,
+        resume_session: Option<PathBuf>,
+        cx: &mut Context<Self>,
+    ) -> bool {
         self.service.set_resume_session(resume_session);
-        if !self.worker.connect(attempt, generation) {
+        let (attempt, generation) = self.core.begin_connect();
+        let accepted = self.worker.connect(attempt, generation);
+        if !accepted {
             self.core
                 .apply_worker_result(WorkerResult::ConnectionFailed {
                     attempt,
@@ -830,6 +876,7 @@ impl RuntimeController {
                 });
         }
         cx.notify();
+        accepted
     }
 
     pub fn stop(&mut self, cx: &mut Context<Self>) {
@@ -848,6 +895,14 @@ impl RuntimeController {
         let effects = self.core.apply_worker_result(result);
         self.send_effects(effects);
         if before != self.catalog_refresh_identity() {
+            self.preferred_session_file = self
+                .core
+                .runtime
+                .session
+                .data
+                .as_ref()
+                .and_then(|session| session.file.as_deref())
+                .map(PathBuf::from);
             self.start_catalog_refresh();
         }
     }
@@ -937,6 +992,23 @@ impl Drop for RuntimeController {
 mod tests {
     use super::*;
     use crate::services::runtime_worker::{RuntimeStartFailure, RuntimeStartFailureKind};
+
+    #[test]
+    fn identical_session_paths_are_not_reopened() {
+        assert!(session_paths_equal(
+            Path::new("sessions/thread.jsonl"),
+            Path::new("sessions/thread.jsonl")
+        ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_session_path_comparison_ignores_case_and_separator_style() {
+        assert!(session_paths_equal(
+            Path::new(r"C:\Sessions\Thread.jsonl"),
+            Path::new("c:/sessions/thread.jsonl")
+        ));
+    }
 
     #[test]
     fn newer_attempt_rejects_late_prior_attempt_results() {

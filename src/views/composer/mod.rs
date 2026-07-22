@@ -75,7 +75,7 @@ impl Composer {
             action_label: "Send".into(),
             focus_handle: cx.focus_handle(),
             buffer: TextBuffer::default(),
-            placeholder: "Describe what Pi should do…".into(),
+            placeholder: "Message Pi…  @ file  / command  ! shell".into(),
             disabled: true,
             availability: ComposerAvailability::Unavailable,
             feedback: ComposerFeedback::Ready,
