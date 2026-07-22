@@ -58,7 +58,7 @@ fn connect(
         HydrationMode::Initial
     };
     state.incremental_fallback_used = false;
-    mark_hydration_loading(state);
+    state.mark_hydration_loading();
     vec![effect(state, RuntimeRequest::GetState)]
 }
 
@@ -107,7 +107,7 @@ fn begin_session_replacement(
     state.lifecycle = RuntimeLifecycle::Loading;
     state.hydration_mode = HydrationMode::SessionReplacement;
     invalidate_extension_ui(state);
-    mark_hydration_loading(state);
+    state.mark_hydration_loading();
     vec![effect(state, RuntimeRequest::SessionMutation(mutation))]
 }
 
@@ -561,16 +561,6 @@ fn settle(state: &mut RuntimeState) {
     }
 }
 
-fn mark_hydration_loading(state: &mut RuntimeState) {
-    state.session.loading();
-    state.messages.loading();
-    state.entries.loading();
-    state.stats.loading();
-    state.commands.loading();
-    state.models.loading();
-    state.tree.loading();
-}
-
 fn clear_session_scoped_state(state: &mut RuntimeState) {
     state.messages.data = None;
     state.entries.data = None;
@@ -671,20 +661,10 @@ fn merge_entries(
     existing
 }
 
-fn upsert_messages(state: &mut RuntimeState, mut messages: Vec<RuntimeMessage>, terminal: bool) {
+fn upsert_messages(state: &mut RuntimeState, messages: Vec<RuntimeMessage>, terminal: bool) {
     let transcript = state.messages.data.get_or_insert_with(Vec::new);
-    for message in &mut messages {
-        message.terminal |= terminal;
-        if let Some(existing) = transcript
-            .iter_mut()
-            .find(|existing| existing.key == message.key)
-        {
-            if !existing.terminal || message.terminal {
-                *existing = message.clone();
-            }
-        } else {
-            transcript.push(message.clone());
-        }
+    for message in messages {
+        upsert_message(transcript, message, terminal);
     }
     state.messages.status = FacetStatus::Ready;
     state.bump_revision();
@@ -699,18 +679,23 @@ fn merge_messages(
     second: Vec<RuntimeMessage>,
 ) -> Vec<RuntimeMessage> {
     for message in second {
-        if let Some(existing) = first
-            .iter_mut()
-            .find(|existing| existing.key == message.key)
-        {
-            if !existing.terminal || message.terminal {
-                *existing = message;
-            }
-        } else {
-            first.push(message);
-        }
+        upsert_message(&mut first, message, false);
     }
     first
+}
+
+fn upsert_message(messages: &mut Vec<RuntimeMessage>, mut message: RuntimeMessage, terminal: bool) {
+    message.terminal |= terminal;
+    if let Some(existing) = messages
+        .iter_mut()
+        .find(|existing| existing.key == message.key)
+    {
+        if !existing.terminal || message.terminal {
+            *existing = message;
+        }
+    } else {
+        messages.push(message);
+    }
 }
 
 fn fail_hydration_facet(state: &mut RuntimeState, request: &RuntimeRequest, error: SafeError) {
@@ -759,14 +744,7 @@ fn request_name(request: &RuntimeRequest) -> &'static str {
 }
 
 fn effect(state: &mut RuntimeState, request: RuntimeRequest) -> RuntimeEffect {
-    let sequence = state.next_request;
-    state.next_request = state.next_request.saturating_add(1);
-    RuntimeEffect {
-        generation: state.generation,
-        epoch: state.epoch,
-        sequence,
-        effect: EffectKind::Request(request),
-    }
+    emit_effect(state, EffectKind::Request(request))
 }
 
 fn extension_response(
@@ -774,12 +752,16 @@ fn extension_response(
     request: RequestId,
     answer: super::runtime::DialogAnswer,
 ) -> RuntimeEffect {
+    emit_effect(state, EffectKind::ExtensionUiResponse { request, answer })
+}
+
+fn emit_effect(state: &mut RuntimeState, effect: EffectKind) -> RuntimeEffect {
     let sequence = state.next_request;
     state.next_request = state.next_request.saturating_add(1);
     RuntimeEffect {
         generation: state.generation,
         epoch: state.epoch,
         sequence,
-        effect: EffectKind::ExtensionUiResponse { request, answer },
+        effect,
     }
 }

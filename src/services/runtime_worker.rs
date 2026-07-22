@@ -158,7 +158,7 @@ impl RuntimeConnection for RpcRuntimeConnection {
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => RuntimePoll::Closed,
             Err(mpsc::RecvTimeoutError::Timeout) => {
-                let kind = match self.client.diagnostics().status {
+                let kind = match self.client.status() {
                     ConnectionStatus::Faulted(kind) => Some(kind),
                     ConnectionStatus::Stopped => Some(RpcClientErrorKind::Stopped),
                     ConnectionStatus::Starting | ConnectionStatus::Ready => None,

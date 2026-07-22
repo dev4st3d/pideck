@@ -517,6 +517,16 @@ impl RuntimeState {
         self.session.data.as_ref().map(|session| &session.id)
     }
 
+    pub(crate) fn mark_hydration_loading(&mut self) {
+        self.session.loading();
+        self.messages.loading();
+        self.entries.loading();
+        self.stats.loading();
+        self.commands.loading();
+        self.models.loading();
+        self.tree.loading();
+    }
+
     pub(crate) fn bounded_error(&mut self, error: SafeError) {
         push_bounded(&mut self.errors, error, MAX_RUNTIME_ERRORS);
     }

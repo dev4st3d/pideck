@@ -61,13 +61,7 @@ impl ControllerCore {
         self.status = ControllerStatus::Connecting;
         self.connection_error = None;
         self.runtime.lifecycle = crate::state::runtime::RuntimeLifecycle::Loading;
-        self.runtime.session.loading();
-        self.runtime.messages.loading();
-        self.runtime.entries.loading();
-        self.runtime.stats.loading();
-        self.runtime.commands.loading();
-        self.runtime.models.loading();
-        self.runtime.tree.loading();
+        self.runtime.mark_hydration_loading();
         (self.attempt, self.generation)
     }
 

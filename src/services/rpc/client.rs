@@ -13,6 +13,16 @@ use crate::services::pi_process::{
     PiLaunchConfig, PiSupervisor, ProcessFailureKind, ShutdownReport, StartError, SupervisorState,
 };
 
+trait RecoverPoison<T> {
+    fn recover_poison(self) -> T;
+}
+
+impl<T> RecoverPoison<T> for std::sync::LockResult<T> {
+    fn recover_poison(self) -> T {
+        self.unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct RpcDeadlines {
     pub readiness: Duration,
@@ -260,11 +270,7 @@ impl RpcClient {
     }
 
     pub fn initial_state(&self) -> Option<SessionState> {
-        self.inner
-            .ready_state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone()
+        self.inner.ready_state.lock().recover_poison().clone()
     }
 
     pub fn request(&self, command: Command) -> RpcCall {
@@ -311,7 +317,7 @@ impl RpcClient {
                 .inner
                 .notifications
                 .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .recover_poison()
                 .recv_timeout(remaining)?;
             if record.generation == self.generation() {
                 return Ok(record);
@@ -323,41 +329,25 @@ impl RpcClient {
     }
 
     pub fn retry_fresh(&self) -> Result<ConnectionGeneration, RpcClientStartError> {
-        let _lifecycle = self
-            .inner
-            .lifecycle
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if let Some(connection) = self
-            .inner
-            .active
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .take()
-        {
+        let _lifecycle = self.inner.lifecycle.lock().recover_poison();
+        if let Some(connection) = self.inner.active.lock().recover_poison().take() {
             connection.stop();
         }
-        self.inner
-            .ready_state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .take();
+        self.inner.ready_state.lock().recover_poison().take();
         self.inner.start_fresh_generation()
     }
 
     pub fn stop(&self) -> Option<ShutdownReport> {
-        let _lifecycle = self
-            .inner
-            .lifecycle
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let connection = self
-            .inner
-            .active
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .take()?;
+        let _lifecycle = self.inner.lifecycle.lock().recover_poison();
+        let connection = self.inner.active.lock().recover_poison().take()?;
         Some(connection.stop())
+    }
+
+    pub(crate) fn status(&self) -> ConnectionStatus {
+        let Some(connection) = self.inner.active_connection() else {
+            return ConnectionStatus::Stopped;
+        };
+        *connection.status.lock().recover_poison()
     }
 
     pub fn diagnostics(&self) -> RpcDiagnostics {
@@ -392,10 +382,7 @@ struct RpcClientInner {
 
 impl RpcClientInner {
     fn active_connection(&self) -> Option<Arc<Connection>> {
-        self.active
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone()
+        self.active.lock().recover_poison().clone()
     }
 
     fn start_fresh_generation(&self) -> Result<ConnectionGeneration, RpcClientStartError> {
@@ -420,10 +407,7 @@ impl RpcClientInner {
             self.deadlines.clone(),
             self.notification_sender.clone(),
         );
-        *self
-            .active
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Arc::clone(&connection));
+        *self.active.lock().recover_poison() = Some(Arc::clone(&connection));
 
         let readiness = connection
             .dispatch_direct(Command::GetState, self.deadlines.readiness, false)
@@ -431,10 +415,7 @@ impl RpcClientInner {
         match readiness {
             Ok(response) => match response.result {
                 ResponseResult::GetState(state) => {
-                    *self
-                        .ready_state
-                        .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(state);
+                    *self.ready_state.lock().recover_poison() = Some(state);
                     connection.mark_ready();
                     Ok(generation)
                 }
@@ -460,19 +441,12 @@ impl RpcClientInner {
     }
 
     fn clear_failed_connection(&self, connection: &Arc<Connection>) {
-        let current = self
-            .active
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .take();
+        let current = self.active.lock().recover_poison().take();
         if let Some(current) = current {
             if Arc::ptr_eq(&current, connection) {
                 current.stop();
             } else {
-                *self
-                    .active
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(current);
+                *self.active.lock().recover_poison() = Some(current);
             }
         }
     }
@@ -480,12 +454,7 @@ impl RpcClientInner {
 
 impl Drop for RpcClientInner {
     fn drop(&mut self) {
-        if let Some(connection) = self
-            .active
-            .get_mut()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .take()
-        {
+        if let Some(connection) = self.active.get_mut().recover_poison().take() {
             connection.stop();
         }
     }
@@ -611,10 +580,7 @@ impl Connection {
             workers: Mutex::new(Vec::new()),
         });
 
-        let mut workers = connection
-            .workers
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut workers = connection.workers.lock().recover_poison();
         let weak = Arc::downgrade(&connection);
         workers.push(thread::spawn(move || reader_loop(weak, stdout)));
         let weak = Arc::downgrade(&connection);
@@ -628,10 +594,7 @@ impl Connection {
     }
 
     fn mark_ready(&self) {
-        let mut status = self
-            .status
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut status = self.status.lock().recover_poison();
         if *status == ConnectionStatus::Starting {
             *status = ConnectionStatus::Ready;
         }
@@ -728,25 +691,21 @@ impl Connection {
                 return;
             }
         };
-        self.pending
-            .entries
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .insert(
-                id,
-                PendingRequest {
-                    operation,
-                    deadline: Instant::now() + deadline,
-                    mutation,
-                    result,
-                },
-            );
+        self.pending.entries.lock().recover_poison().insert(
+            id,
+            PendingRequest {
+                operation,
+                deadline: Instant::now() + deadline,
+                mutation,
+                result,
+            },
+        );
         self.pending.changed.notify_all();
 
         let write_result = self
             .supervisor
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .recover_poison()
             .as_ref()
             .map_or(Err(()), |supervisor| {
                 supervisor.write_record(bytes).map_err(|_| ())
@@ -782,7 +741,7 @@ impl Connection {
         let result = self
             .supervisor
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .recover_poison()
             .as_ref()
             .ok_or_else(|| {
                 RpcClientError::new(
@@ -819,19 +778,10 @@ impl Connection {
             self.protocol_fault();
             return;
         };
-        let pending = self
-            .pending
-            .entries
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .remove(&id);
+        let pending = self.pending.entries.lock().recover_poison().remove(&id);
         self.pending.changed.notify_all();
         let Some(pending) = pending else {
-            let was_abandoned = self
-                .abandoned_reads
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .remove(&id);
+            let was_abandoned = self.abandoned_reads.lock().recover_poison().remove(&id);
             if !was_abandoned {
                 self.protocol_fault();
             }
@@ -861,16 +811,9 @@ impl Connection {
         if self.closed.swap(true, Ordering::AcqRel) {
             return;
         }
-        *self
-            .status
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = status;
+        *self.status.lock().recover_poison() = status;
         let pending = {
-            let mut entries = self
-                .pending
-                .entries
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let mut entries = self.pending.entries.lock().recover_poison();
             entries
                 .drain()
                 .map(|(_, pending)| pending)
@@ -884,13 +827,7 @@ impl Connection {
                 Some(pending.operation),
             )));
         }
-        if terminate
-            && let Some(supervisor) = self
-                .supervisor
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .as_ref()
-        {
+        if terminate && let Some(supervisor) = self.supervisor.lock().recover_poison().as_ref() {
             supervisor.terminate_due_to_rpc_fault();
         }
     }
@@ -904,7 +841,7 @@ impl Connection {
         let report = self
             .supervisor
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .recover_poison()
             .as_mut()
             .map(PiSupervisor::shutdown)
             .unwrap_or(ShutdownReport {
@@ -917,10 +854,7 @@ impl Connection {
 
     fn join_workers(&self) {
         let current = thread::current().id();
-        let mut workers = self
-            .workers
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut workers = self.workers.lock().recover_poison();
         for worker in workers.drain(..) {
             if worker.thread().id() != current {
                 let _ = worker.join();
@@ -929,22 +863,11 @@ impl Connection {
     }
 
     fn diagnostics(&self, stale_records_ignored: u64) -> RpcDiagnostics {
-        let supervisor = self
-            .supervisor
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let supervisor = self.supervisor.lock().recover_poison();
         RpcDiagnostics {
             generation: self.generation,
-            status: *self
-                .status
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner()),
-            pending_requests: self
-                .pending
-                .entries
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .len(),
+            status: *self.status.lock().recover_poison(),
+            pending_requests: self.pending.entries.lock().recover_poison().len(),
             timed_out_requests: self.timed_out_requests.load(Ordering::Relaxed),
             stale_records_ignored,
             supervisor_state: supervisor.as_ref().map(PiSupervisor::state),
@@ -1008,7 +931,7 @@ fn reader_loop(
                 let terminal_state = connection
                     .supervisor
                     .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .recover_poison()
                     .as_ref()
                     .map(|supervisor| supervisor.wait_for_terminal(Duration::from_millis(250)));
                 let kind = match terminal_state {
@@ -1050,17 +973,9 @@ fn deadline_loop(connection: Weak<Connection>) {
         let Some(connection) = connection.upgrade() else {
             return;
         };
-        let mut entries = connection
-            .pending
-            .entries
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut entries = connection.pending.entries.lock().recover_poison();
         while entries.is_empty() && !connection.closed.load(Ordering::Acquire) {
-            entries = connection
-                .pending
-                .changed
-                .wait(entries)
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            entries = connection.pending.changed.wait(entries).recover_poison();
         }
         if connection.closed.load(Ordering::Acquire) {
             return;
@@ -1076,7 +991,7 @@ fn deadline_loop(connection: Weak<Connection>) {
                 .pending
                 .changed
                 .wait_timeout(entries, next_deadline - now)
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+                .recover_poison();
             entries = next_entries;
             if !wait.timed_out() {
                 drop(entries);
@@ -1094,10 +1009,7 @@ fn deadline_loop(connection: Weak<Connection>) {
             .collect::<Vec<_>>();
         let mutation_timed_out = expired.iter().any(|(_, pending)| pending.mutation);
         if !mutation_timed_out {
-            let mut abandoned = connection
-                .abandoned_reads
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let mut abandoned = connection.abandoned_reads.lock().recover_poison();
             abandoned.extend(expired.iter().map(|(id, _)| id.clone()));
         }
         drop(entries);
