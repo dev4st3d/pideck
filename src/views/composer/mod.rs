@@ -1,0 +1,597 @@
+mod buffer;
+mod element;
+mod render;
+#[cfg(test)]
+mod tests;
+
+use std::ops::Range;
+
+use gpui::{
+    ClipboardItem, Context, EntityInputHandler, EventEmitter, FocusHandle, Focusable, IntoElement,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Render, ScrollWheelEvent, SharedString,
+    UTF16Selection, Window, px,
+};
+
+use self::buffer::TextBuffer;
+use self::element::EditorLayout;
+use crate::actions::{
+    AbortRun, AcceptInput, ComposerBackspace, ComposerCopy, ComposerCut, ComposerDelete,
+    ComposerDown, ComposerLeft, ComposerLineEnd, ComposerLineStart, ComposerPaste, ComposerRedo,
+    ComposerRight, ComposerSelectAll, ComposerSelectDown, ComposerSelectLeft,
+    ComposerSelectLineEnd, ComposerSelectLineStart, ComposerSelectRight, ComposerSelectUp,
+    ComposerUndo, ComposerUp, InsertNewline, QueueFollowUp,
+};
+use crate::state::runtime::SubmissionKind;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ComposerAvailability {
+    Unavailable,
+    Idle,
+    Running,
+    Cancelling,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ComposerFeedback {
+    Ready,
+    Pending(SubmissionKind),
+    Accepted(SubmissionKind),
+    Rejected(String),
+    Uncertain,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ComposerEvent {
+    Accept { text: String },
+    FollowUp { text: String },
+    Abort,
+}
+
+pub struct Composer {
+    pub(super) focus_handle: FocusHandle,
+    buffer: TextBuffer,
+    placeholder: SharedString,
+    disabled: bool,
+    availability: ComposerAvailability,
+    feedback: ComposerFeedback,
+    is_selecting: bool,
+    preferred_x: Option<Pixels>,
+    scroll_y: Pixels,
+    reveal_cursor: bool,
+    last_layout: Option<EditorLayout>,
+}
+
+impl Composer {
+    pub fn new(cx: &mut Context<Self>) -> Self {
+        Self {
+            focus_handle: cx.focus_handle(),
+            buffer: TextBuffer::default(),
+            placeholder: "Describe what Pi should do…".into(),
+            disabled: true,
+            availability: ComposerAvailability::Unavailable,
+            feedback: ComposerFeedback::Ready,
+            is_selecting: false,
+            preferred_x: None,
+            scroll_y: Pixels::ZERO,
+            reveal_cursor: true,
+            last_layout: None,
+        }
+    }
+
+    pub fn draft(&self) -> &str {
+        self.buffer.text()
+    }
+
+    pub fn availability(&self) -> ComposerAvailability {
+        self.availability
+    }
+
+    pub fn set_availability(&mut self, availability: ComposerAvailability, cx: &mut Context<Self>) {
+        if self.availability == availability {
+            return;
+        }
+        self.availability = availability;
+        self.update_disabled();
+        cx.notify();
+    }
+
+    pub fn set_feedback(&mut self, feedback: ComposerFeedback, cx: &mut Context<Self>) {
+        if self.feedback == feedback {
+            return;
+        }
+        self.feedback = feedback;
+        self.update_disabled();
+        cx.notify();
+    }
+
+    pub fn clear_accepted(
+        &mut self,
+        expected_draft: &str,
+        kind: SubmissionKind,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let cleared = self.buffer.clear_if_matches(expected_draft);
+        self.feedback = ComposerFeedback::Accepted(kind);
+        self.update_disabled();
+        if cleared {
+            self.after_edit(cx);
+        } else {
+            cx.notify();
+        }
+        cleared
+    }
+
+    fn update_disabled(&mut self) {
+        self.disabled = matches!(
+            self.availability,
+            ComposerAvailability::Unavailable | ComposerAvailability::Cancelling
+        ) || matches!(self.feedback, ComposerFeedback::Pending(_));
+    }
+
+    fn backspace(&mut self, _: &ComposerBackspace, window: &mut Window, cx: &mut Context<Self>) {
+        if self.disabled {
+            return;
+        }
+        if self.buffer.delete_backward() {
+            self.after_edit(cx);
+            window.refresh();
+        }
+    }
+
+    fn delete(&mut self, _: &ComposerDelete, window: &mut Window, cx: &mut Context<Self>) {
+        if self.disabled {
+            return;
+        }
+        if self.buffer.delete_forward() {
+            self.after_edit(cx);
+            window.refresh();
+        }
+    }
+
+    fn left(&mut self, _: &ComposerLeft, _: &mut Window, cx: &mut Context<Self>) {
+        if self.disabled {
+            return;
+        }
+        let target = if self.buffer.selection().is_empty() {
+            self.buffer.previous_boundary(self.buffer.cursor())
+        } else {
+            self.buffer.selection().start
+        };
+        self.move_to(target, cx);
+    }
+
+    fn right(&mut self, _: &ComposerRight, _: &mut Window, cx: &mut Context<Self>) {
+        if self.disabled {
+            return;
+        }
+        let target = if self.buffer.selection().is_empty() {
+            self.buffer.next_boundary(self.buffer.cursor())
+        } else {
+            self.buffer.selection().end
+        };
+        self.move_to(target, cx);
+    }
+
+    fn select_left(&mut self, _: &ComposerSelectLeft, _: &mut Window, cx: &mut Context<Self>) {
+        if !self.disabled {
+            let target = self.buffer.previous_boundary(self.buffer.cursor());
+            self.select_to(target, cx);
+        }
+    }
+
+    fn select_right(&mut self, _: &ComposerSelectRight, _: &mut Window, cx: &mut Context<Self>) {
+        if !self.disabled {
+            let target = self.buffer.next_boundary(self.buffer.cursor());
+            self.select_to(target, cx);
+        }
+    }
+
+    fn up(&mut self, _: &ComposerUp, _: &mut Window, cx: &mut Context<Self>) {
+        self.move_vertical(-1, false, cx);
+    }
+
+    fn down(&mut self, _: &ComposerDown, _: &mut Window, cx: &mut Context<Self>) {
+        self.move_vertical(1, false, cx);
+    }
+
+    fn select_up(&mut self, _: &ComposerSelectUp, _: &mut Window, cx: &mut Context<Self>) {
+        self.move_vertical(-1, true, cx);
+    }
+
+    fn select_down(&mut self, _: &ComposerSelectDown, _: &mut Window, cx: &mut Context<Self>) {
+        self.move_vertical(1, true, cx);
+    }
+
+    fn line_start(&mut self, _: &ComposerLineStart, _: &mut Window, cx: &mut Context<Self>) {
+        let target = self.visual_line_range().start;
+        self.move_to(target, cx);
+    }
+
+    fn line_end(&mut self, _: &ComposerLineEnd, _: &mut Window, cx: &mut Context<Self>) {
+        let target = self.visual_line_range().end;
+        self.move_to(target, cx);
+    }
+
+    fn select_line_start(
+        &mut self,
+        _: &ComposerSelectLineStart,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let target = self.visual_line_range().start;
+        self.select_to(target, cx);
+    }
+
+    fn select_line_end(
+        &mut self,
+        _: &ComposerSelectLineEnd,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let target = self.visual_line_range().end;
+        self.select_to(target, cx);
+    }
+
+    fn select_all(&mut self, _: &ComposerSelectAll, _: &mut Window, cx: &mut Context<Self>) {
+        if !self.disabled {
+            self.buffer.select_all();
+            self.selection_changed(cx);
+        }
+    }
+
+    fn copy(&mut self, _: &ComposerCopy, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(text) = self.buffer.selected_text() {
+            cx.write_to_clipboard(ClipboardItem::new_string(text.to_owned()));
+        }
+    }
+
+    fn cut(&mut self, _: &ComposerCut, window: &mut Window, cx: &mut Context<Self>) {
+        if self.disabled {
+            return;
+        }
+        self.copy(&ComposerCopy, window, cx);
+        if !self.buffer.selection().is_empty() && self.buffer.replace_selection("") {
+            self.after_edit(cx);
+        }
+    }
+
+    fn paste(&mut self, _: &ComposerPaste, _: &mut Window, cx: &mut Context<Self>) {
+        if self.disabled {
+            return;
+        }
+        if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text())
+            && self.buffer.replace_selection(&text)
+        {
+            self.after_edit(cx);
+        }
+    }
+
+    fn undo(&mut self, _: &ComposerUndo, _: &mut Window, cx: &mut Context<Self>) {
+        if !self.disabled && self.buffer.undo() {
+            self.after_edit(cx);
+        }
+    }
+
+    fn redo(&mut self, _: &ComposerRedo, _: &mut Window, cx: &mut Context<Self>) {
+        if !self.disabled && self.buffer.redo() {
+            self.after_edit(cx);
+        }
+    }
+
+    fn insert_newline(&mut self, _: &InsertNewline, _: &mut Window, cx: &mut Context<Self>) {
+        if !self.disabled && self.buffer.replace_selection("\n") {
+            self.after_edit(cx);
+        }
+    }
+
+    fn accept(&mut self, _: &AcceptInput, _: &mut Window, cx: &mut Context<Self>) {
+        self.emit_accept(false, cx);
+    }
+
+    fn follow_up(&mut self, _: &QueueFollowUp, _: &mut Window, cx: &mut Context<Self>) {
+        self.emit_accept(true, cx);
+    }
+
+    fn abort(&mut self, _: &AbortRun, _: &mut Window, cx: &mut Context<Self>) {
+        if matches!(
+            self.availability,
+            ComposerAvailability::Running | ComposerAvailability::Cancelling
+        ) {
+            cx.emit(ComposerEvent::Abort);
+        }
+    }
+
+    fn emit_accept(&mut self, follow_up: bool, cx: &mut Context<Self>) {
+        if self.disabled {
+            return;
+        }
+        if self.buffer.text().trim().is_empty() {
+            self.feedback = ComposerFeedback::Rejected("Write a prompt first.".to_owned());
+            cx.notify();
+            return;
+        }
+        let text = self.buffer.text().to_owned();
+        if follow_up {
+            if self.availability != ComposerAvailability::Running {
+                self.feedback = ComposerFeedback::Rejected(
+                    "Follow-ups can be queued while Pi is running.".to_owned(),
+                );
+                cx.notify();
+                return;
+            }
+            cx.emit(ComposerEvent::FollowUp { text });
+        } else {
+            cx.emit(ComposerEvent::Accept { text });
+        }
+    }
+
+    fn on_mouse_down(
+        &mut self,
+        event: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.disabled {
+            return;
+        }
+        window.focus(&self.focus_handle);
+        self.is_selecting = true;
+        let offset = self.index_for_position(event.position);
+        if event.modifiers.shift {
+            self.buffer.select_to(offset);
+        } else {
+            self.buffer.move_to(offset);
+        }
+        self.selection_changed(cx);
+    }
+
+    fn on_mouse_up(&mut self, _: &MouseUpEvent, _: &mut Window, _: &mut Context<Self>) {
+        self.is_selecting = false;
+    }
+
+    fn on_mouse_move(&mut self, event: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
+        if self.is_selecting && !self.disabled {
+            let offset = self.index_for_position(event.position);
+            self.buffer.select_to(offset);
+            self.selection_changed(cx);
+        }
+    }
+
+    fn on_scroll_wheel(
+        &mut self,
+        event: &ScrollWheelEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(layout) = self.last_layout.as_ref() else {
+            return;
+        };
+        let max_scroll = (layout.content_height - layout.bounds.size.height).max(Pixels::ZERO);
+        let delta = event.delta.pixel_delta(window.line_height()).y;
+        let next = (self.scroll_y - delta).clamp(Pixels::ZERO, max_scroll);
+        if next != self.scroll_y {
+            self.scroll_y = next;
+            self.reveal_cursor = false;
+            cx.notify();
+        }
+    }
+
+    fn move_to(&mut self, offset: usize, cx: &mut Context<Self>) {
+        if self.disabled {
+            return;
+        }
+        self.buffer.move_to(offset);
+        self.selection_changed(cx);
+    }
+
+    fn select_to(&mut self, offset: usize, cx: &mut Context<Self>) {
+        if self.disabled {
+            return;
+        }
+        self.buffer.select_to(offset);
+        self.selection_changed(cx);
+    }
+
+    fn move_vertical(&mut self, direction: isize, select: bool, cx: &mut Context<Self>) {
+        if self.disabled {
+            return;
+        }
+        let Some(layout) = self.last_layout.as_ref() else {
+            return;
+        };
+        let cursor = self.buffer.cursor();
+        let position = layout.position_for_offset(cursor);
+        let preferred_x = self
+            .preferred_x
+            .get_or_insert(position.x - layout.bounds.left());
+        let target = layout.offset_for_vertical_move(cursor, *preferred_x, direction);
+        if select {
+            self.buffer.select_to(target);
+        } else {
+            self.buffer.move_to(target);
+        }
+        self.reveal_cursor = true;
+        cx.notify();
+    }
+
+    fn visual_line_range(&self) -> Range<usize> {
+        self.last_layout.as_ref().map_or_else(
+            || {
+                self.buffer.hard_line_start(self.buffer.cursor())
+                    ..self.buffer.hard_line_end(self.buffer.cursor())
+            },
+            |layout| layout.visual_line_range(self.buffer.cursor()),
+        )
+    }
+
+    fn index_for_position(&self, position: gpui::Point<Pixels>) -> usize {
+        self.last_layout
+            .as_ref()
+            .map_or(0, |layout| layout.index_for_position(position))
+    }
+
+    fn after_edit(&mut self, cx: &mut Context<Self>) {
+        self.preferred_x = None;
+        self.reveal_cursor = true;
+        cx.notify();
+    }
+
+    fn selection_changed(&mut self, cx: &mut Context<Self>) {
+        self.preferred_x = None;
+        self.reveal_cursor = true;
+        cx.notify();
+    }
+
+    fn status_text(&self) -> String {
+        match &self.feedback {
+            ComposerFeedback::Pending(SubmissionKind::Prompt) => "Sending to Pi…".to_owned(),
+            ComposerFeedback::Pending(SubmissionKind::Steer) => {
+                "Sending steering input…".to_owned()
+            }
+            ComposerFeedback::Pending(SubmissionKind::FollowUp) => "Queueing follow-up…".to_owned(),
+            ComposerFeedback::Accepted(SubmissionKind::Prompt) => "Prompt accepted.".to_owned(),
+            ComposerFeedback::Accepted(SubmissionKind::Steer) => {
+                "Steering input accepted.".to_owned()
+            }
+            ComposerFeedback::Accepted(SubmissionKind::FollowUp) => "Follow-up queued.".to_owned(),
+            ComposerFeedback::Rejected(summary) => summary.clone(),
+            ComposerFeedback::Uncertain => {
+                "Delivery is uncertain. The draft was kept; reconnect before retrying.".to_owned()
+            }
+            ComposerFeedback::Ready => match self.availability {
+                ComposerAvailability::Unavailable => "Connect Pi to start composing.".to_owned(),
+                ComposerAvailability::Idle => "Ready to send.".to_owned(),
+                ComposerAvailability::Running => {
+                    "Pi is running. Steer or queue a follow-up.".to_owned()
+                }
+                ComposerAvailability::Cancelling => "Waiting for Pi to settle…".to_owned(),
+            },
+        }
+    }
+
+    fn hint_text(&self) -> &'static str {
+        match self.availability {
+            ComposerAvailability::Running => {
+                "Enter steer · Alt+Enter follow up · Shift+Enter newline · Esc abort"
+            }
+            ComposerAvailability::Idle => "Enter send · Shift+Enter newline",
+            ComposerAvailability::Unavailable | ComposerAvailability::Cancelling => {
+                "Draft stays on this device"
+            }
+        }
+    }
+}
+
+impl EventEmitter<ComposerEvent> for Composer {}
+
+impl Focusable for Composer {
+    fn focus_handle(&self, _: &gpui::App) -> FocusHandle {
+        self.focus_handle.clone()
+    }
+}
+
+impl EntityInputHandler for Composer {
+    fn text_for_range(
+        &mut self,
+        range_utf16: Range<usize>,
+        actual_range: &mut Option<Range<usize>>,
+        _: &mut Window,
+        _: &mut Context<Self>,
+    ) -> Option<String> {
+        let (text, adjusted) = self.buffer.text_for_utf16_range(&range_utf16);
+        actual_range.replace(adjusted);
+        Some(text)
+    }
+
+    fn selected_text_range(
+        &mut self,
+        ignore_disabled_input: bool,
+        _: &mut Window,
+        _: &mut Context<Self>,
+    ) -> Option<UTF16Selection> {
+        if self.disabled && !ignore_disabled_input {
+            return None;
+        }
+        Some(UTF16Selection {
+            range: self.buffer.range_to_utf16(self.buffer.selection()),
+            reversed: self.buffer.selection_reversed(),
+        })
+    }
+
+    fn marked_text_range(&self, _: &mut Window, _: &mut Context<Self>) -> Option<Range<usize>> {
+        self.buffer
+            .marked_range()
+            .map(|range| self.buffer.range_to_utf16(range))
+    }
+
+    fn unmark_text(&mut self, _: &mut Window, cx: &mut Context<Self>) {
+        self.buffer.unmark_text();
+        cx.notify();
+    }
+
+    fn replace_text_in_range(
+        &mut self,
+        range_utf16: Option<Range<usize>>,
+        text: &str,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.disabled {
+            self.buffer.replace_text_utf16(range_utf16, text);
+            self.after_edit(cx);
+        }
+    }
+
+    fn replace_and_mark_text_in_range(
+        &mut self,
+        range_utf16: Option<Range<usize>>,
+        new_text: &str,
+        selected_utf16: Option<Range<usize>>,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.disabled {
+            self.buffer
+                .replace_and_mark_text_utf16(range_utf16, new_text, selected_utf16);
+            self.after_edit(cx);
+        }
+    }
+
+    fn bounds_for_range(
+        &mut self,
+        range_utf16: Range<usize>,
+        _: gpui::Bounds<Pixels>,
+        _: &mut Window,
+        _: &mut Context<Self>,
+    ) -> Option<gpui::Bounds<Pixels>> {
+        let layout = self.last_layout.as_ref()?;
+        let range = self.buffer.range_from_utf16(&range_utf16);
+        let start = layout.position_for_offset(range.start);
+        let end = layout.position_for_offset(range.end);
+        let right = if start.y == end.y {
+            end.x.max(start.x + px(2.0))
+        } else {
+            start.x + px(2.0)
+        };
+        Some(gpui::Bounds::from_corners(
+            start,
+            gpui::point(right, start.y + layout.line_height),
+        ))
+    }
+
+    fn character_index_for_point(
+        &mut self,
+        point: gpui::Point<Pixels>,
+        _: &mut Window,
+        _: &mut Context<Self>,
+    ) -> Option<usize> {
+        let byte = self.buffer.nearest_boundary(self.index_for_position(point));
+        Some(self.buffer.offset_to_utf16(byte))
+    }
+}
+
+impl Render for Composer {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.render_view(cx)
+    }
+}

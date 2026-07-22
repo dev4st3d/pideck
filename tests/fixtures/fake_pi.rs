@@ -213,6 +213,9 @@ fn rpc_script(cwd: &Path, mode: &str) {
                 write_record(&mut output, &response_for(&record_type, &id));
             }
             "rpc-timeout" if record_type == "set_auto_compaction" => {}
+            "rpc-prompt-disconnect" if record_type == "prompt" => {
+                std::process::exit(42);
+            }
             "rpc-read-timeout" if record_type == "get_messages" => {}
             "rpc-late-read" if record_type == "get_messages" => {
                 thread::sleep(Duration::from_millis(350));
@@ -275,11 +278,16 @@ fn rpc_script(cwd: &Path, mode: &str) {
 fn response_for(command: &str, id: &str) -> String {
     let data = match command {
         "get_state" => Some(
-            "{\"model\":null,\"thinkingLevel\":\"medium\",\"isStreaming\":false,\"isCompacting\":false,\"steeringMode\":\"all\",\"followUpMode\":\"one-at-a-time\",\"sessionId\":\"fake-session\",\"autoCompactionEnabled\":true,\"messageCount\":0,\"pendingMessageCount\":0}",
+            "{\"model\":{\"id\":\"fake-model\",\"name\":\"Fake Model\",\"api\":\"fake-api\",\"provider\":\"fake-provider\",\"baseUrl\":\"https://invalid.example\",\"reasoning\":false,\"input\":[\"text\"],\"cost\":{\"input\":0.0,\"output\":0.0,\"cacheRead\":0.0,\"cacheWrite\":0.0},\"contextWindow\":100000,\"maxTokens\":4096},\"thinkingLevel\":\"medium\",\"isStreaming\":false,\"isCompacting\":false,\"steeringMode\":\"all\",\"followUpMode\":\"one-at-a-time\",\"sessionId\":\"fake-session\",\"autoCompactionEnabled\":true,\"messageCount\":0,\"pendingMessageCount\":0}",
         ),
         "get_messages" => Some("{\"messages\":[]}"),
         "get_commands" => Some("{\"commands\":[]}"),
-        "get_available_models" => Some("{\"models\":[]}"),
+        "get_available_models" => Some(
+            "{\"models\":[{\"id\":\"fake-model\",\"name\":\"Fake Model\",\"api\":\"fake-api\",\"provider\":\"fake-provider\",\"baseUrl\":\"https://invalid.example\",\"reasoning\":false,\"input\":[\"text\"],\"cost\":{\"input\":0.0,\"output\":0.0,\"cacheRead\":0.0,\"cacheWrite\":0.0},\"contextWindow\":100000,\"maxTokens\":4096}]}",
+        ),
+        "get_session_stats" => Some(
+            "{\"sessionId\":\"fake-session\",\"userMessages\":0,\"assistantMessages\":0,\"toolCalls\":0,\"toolResults\":0,\"totalMessages\":0,\"tokens\":{\"input\":0,\"output\":0,\"cacheRead\":0,\"cacheWrite\":0,\"total\":0},\"cost\":0.0,\"contextUsage\":{\"tokens\":0,\"contextWindow\":100000,\"percent\":0.0}}",
+        ),
         "get_entries" => Some("{\"entries\":[],\"leafId\":null}"),
         "get_tree" => Some("{\"tree\":[],\"leafId\":null}"),
         "get_last_assistant_text" => Some("{\"text\":null}"),

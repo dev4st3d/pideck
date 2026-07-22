@@ -1,20 +1,32 @@
 //! Minimal live shell for the supervised Pi runtime.
 
 use gpui::{
-    Context, Entity, FocusHandle, FontWeight, IntoElement, Render, Subscription, Window, div,
-    prelude::*, px, relative,
+    Context, Entity, FocusHandle, Focusable, FontWeight, IntoElement, Render, Subscription, Window,
+    div, prelude::*, px, relative,
 };
 
-use crate::actions::{ActivateRecovery, Connect, FocusNext, FocusPrevious, Retry, Stop};
-use crate::controller::RuntimeController;
+use crate::actions::{AbortRun, ActivateRecovery, Connect, FocusNext, FocusPrevious, Retry, Stop};
+use crate::controller::{
+    AcceptedSubmission, ComposerRuntime, RuntimeController, SubmissionPreference,
+};
+use crate::state::runtime::PromptDelivery;
 use crate::state::{RecoveryAction, ShellProjection};
 use crate::theme;
+use crate::views::composer::{Composer, ComposerAvailability, ComposerEvent, ComposerFeedback};
 use crate::views::controls;
+
+struct PendingDraft {
+    request: crate::services::rpc::RequestId,
+    text: String,
+}
 
 pub struct RootView {
     controller: Entity<RuntimeController>,
+    composer: Entity<Composer>,
+    pending_draft: Option<PendingDraft>,
     focus_handle: FocusHandle,
     _controller_observation: Subscription,
+    _composer_subscription: Subscription,
 }
 
 impl RootView {
@@ -24,12 +36,21 @@ impl RootView {
         cx: &mut Context<Self>,
     ) -> Self {
         let focus_handle = cx.focus_handle();
-        window.focus(&focus_handle);
-        let controller_observation = cx.observe(&controller, |_, _, cx| cx.notify());
+        let composer = cx.new(Composer::new);
+        window.focus(&composer.read(cx).focus_handle(cx));
+        let controller_observation = cx.observe_in(&controller, window, |view, _, window, cx| {
+            view.sync_composer(window, cx)
+        });
+        let composer_subscription = cx.subscribe_in(&composer, window, |view, _, event, _, cx| {
+            view.on_composer_event(event, cx)
+        });
         Self {
             controller,
+            composer,
+            pending_draft: None,
             focus_handle,
             _controller_observation: controller_observation,
+            _composer_subscription: composer_subscription,
         }
     }
 
@@ -60,6 +81,133 @@ impl RootView {
 
     fn on_stop(&mut self, _: &Stop, _: &mut Window, cx: &mut Context<Self>) {
         self.stop(cx);
+    }
+
+    fn on_abort_run(&mut self, _: &AbortRun, _: &mut Window, cx: &mut Context<Self>) {
+        self.abort(cx);
+    }
+
+    fn on_composer_event(&mut self, event: &ComposerEvent, cx: &mut Context<Self>) {
+        match event {
+            ComposerEvent::Accept { text } => {
+                self.submit(text.clone(), SubmissionPreference::Default, cx)
+            }
+            ComposerEvent::FollowUp { text } => {
+                self.submit(text.clone(), SubmissionPreference::FollowUp, cx)
+            }
+            ComposerEvent::Abort => self.abort(cx),
+        }
+    }
+
+    fn submit(&mut self, text: String, preference: SubmissionPreference, cx: &mut Context<Self>) {
+        if self.pending_draft.is_some() {
+            self.composer.update(cx, |composer, cx| {
+                composer.set_feedback(
+                    ComposerFeedback::Rejected(
+                        "The previous acceptance is still pending.".to_owned(),
+                    ),
+                    cx,
+                );
+            });
+            return;
+        }
+
+        let result = self.controller.update(cx, |controller, cx| {
+            controller.submit(text.clone(), preference, cx)
+        });
+        match result {
+            Ok(AcceptedSubmission { request, kind }) => {
+                self.pending_draft = Some(PendingDraft { request, text });
+                self.composer.update(cx, |composer, cx| {
+                    composer.set_feedback(ComposerFeedback::Pending(kind), cx)
+                });
+            }
+            Err(rejection) => {
+                self.composer.update(cx, |composer, cx| {
+                    composer.set_feedback(
+                        ComposerFeedback::Rejected(rejection.message().to_owned()),
+                        cx,
+                    )
+                });
+            }
+        }
+    }
+
+    fn abort(&mut self, cx: &mut Context<Self>) {
+        self.controller.update(cx, |controller, cx| {
+            controller.abort(cx);
+        });
+    }
+
+    fn sync_composer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let projection = self.controller.read(cx).composer_projection();
+        let availability = match projection.runtime {
+            ComposerRuntime::Unavailable => ComposerAvailability::Unavailable,
+            ComposerRuntime::Idle => ComposerAvailability::Idle,
+            ComposerRuntime::Running => ComposerAvailability::Running,
+            ComposerRuntime::Cancelling => ComposerAvailability::Cancelling,
+        };
+        let was_available = matches!(
+            self.composer.read(cx).availability(),
+            ComposerAvailability::Idle | ComposerAvailability::Running
+        );
+        self.composer.update(cx, |composer, cx| {
+            composer.set_availability(availability, cx)
+        });
+        if !was_available
+            && matches!(
+                availability,
+                ComposerAvailability::Idle | ComposerAvailability::Running
+            )
+        {
+            window.focus(&self.composer.read(cx).focus_handle(cx));
+        }
+
+        let Some(pending) = self.pending_draft.as_ref() else {
+            if matches!(projection.delivery, PromptDelivery::Uncertain { .. }) {
+                self.composer.update(cx, |composer, cx| {
+                    composer.set_feedback(ComposerFeedback::Uncertain, cx)
+                });
+            }
+            cx.notify();
+            return;
+        };
+        let request_matches = match &projection.delivery {
+            PromptDelivery::Pending { request, .. }
+            | PromptDelivery::Accepted { request, .. }
+            | PromptDelivery::Rejected { request, .. }
+            | PromptDelivery::Uncertain { request, .. } => request == &pending.request,
+            PromptDelivery::None => false,
+        };
+        if !request_matches {
+            cx.notify();
+            return;
+        }
+
+        match projection.delivery {
+            PromptDelivery::Pending { .. } => {}
+            PromptDelivery::Accepted { kind, .. } => {
+                let expected = pending.text.clone();
+                self.composer.update(cx, |composer, cx| {
+                    composer.clear_accepted(&expected, kind, cx);
+                });
+                self.pending_draft = None;
+            }
+            PromptDelivery::Rejected { summary, .. } => {
+                self.composer.update(cx, |composer, cx| {
+                    composer.set_feedback(ComposerFeedback::Rejected(summary), cx)
+                });
+                self.pending_draft = None;
+            }
+            PromptDelivery::Uncertain { .. } => {
+                self.composer.update(cx, |composer, cx| {
+                    composer.set_feedback(ComposerFeedback::Uncertain, cx)
+                });
+                self.pending_draft = None;
+            }
+            PromptDelivery::None => {}
+        }
+        cx.notify();
     }
 
     fn on_activate_recovery(
@@ -93,6 +241,7 @@ impl Render for RootView {
             .on_action(cx.listener(Self::on_connect))
             .on_action(cx.listener(Self::on_retry))
             .on_action(cx.listener(Self::on_stop))
+            .on_action(cx.listener(Self::on_abort_run))
             .on_action(cx.listener(Self::on_activate_recovery))
             .on_action(cx.listener(Self::on_focus_next))
             .on_action(cx.listener(Self::on_focus_previous))
@@ -109,7 +258,7 @@ impl Render for RootView {
                     .min_h_0()
                     .flex()
                     .flex_row()
-                    .child(runtime_status(&projection, cx))
+                    .child(runtime_status(&projection, &self.composer, cx))
                     .child(inspector(&projection)),
             )
     }
@@ -196,20 +345,26 @@ fn meta(value: String) -> impl IntoElement {
         .child(value)
 }
 
-fn runtime_status(projection: &ShellProjection, cx: &mut Context<RootView>) -> impl IntoElement {
+fn runtime_status(
+    projection: &ShellProjection,
+    composer: &Entity<Composer>,
+    cx: &mut Context<RootView>,
+) -> impl IntoElement {
     let action = projection.action;
     div()
         .flex_1()
         .min_w_0()
         .h_full()
         .px(px(48.0))
-        .py(px(36.0))
+        .py(px(28.0))
         .flex()
         .flex_col()
         .justify_between()
         .child(
             div()
                 .max_w(px(620.0))
+                .flex_1()
+                .min_h_0()
                 .flex()
                 .flex_col()
                 .gap(px(14.0))
@@ -246,45 +401,55 @@ fn runtime_status(projection: &ShellProjection, cx: &mut Context<RootView>) -> i
                     )
                 })
                 .when_some(action, |content, action| {
-                    content.child(div().mt(px(8.0)).child(controls::recovery_button(
-                        action_id(action),
-                        action.label().to_owned(),
-                        action.shortcut(),
-                        true,
-                        Box::new(cx.listener(move |view, _, _, cx| {
-                            view.activate_recovery(action, cx);
-                        })),
-                    )))
+                    content.child(div().mt(px(8.0)).flex().flex_row().child(
+                        controls::recovery_button(
+                            action_id(action),
+                            action.label().to_owned(),
+                            action.shortcut(),
+                            true,
+                            Box::new(cx.listener(move |view, _, _, cx| {
+                                view.activate_recovery(action, cx);
+                            })),
+                        ),
+                    ))
                 }),
         )
         .child(
             div()
-                .pt(px(24.0))
-                .border_t_1()
-                .border_color(theme::edge_soft())
+                .flex_shrink_0()
                 .flex()
                 .flex_col()
-                .gap(px(7.0))
+                .gap(px(16.0))
                 .child(
                     div()
-                        .font_family(theme::SANS)
-                        .text_size(px(theme::T_LABEL))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(theme::ash())
-                        .child("Workspace"),
+                        .pt(px(14.0))
+                        .border_t_1()
+                        .border_color(theme::edge_soft())
+                        .flex()
+                        .flex_col()
+                        .gap(px(5.0))
+                        .child(
+                            div()
+                                .font_family(theme::SANS)
+                                .text_size(px(theme::T_LABEL))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(theme::ash())
+                                .child("Workspace"),
+                        )
+                        .child(
+                            div()
+                                .font_family(theme::MONO)
+                                .text_size(px(theme::T_MONO))
+                                .line_height(relative(1.35))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(theme::data())
+                                .overflow_hidden()
+                                .text_ellipsis()
+                                .whitespace_nowrap()
+                                .child(projection.workspace.clone()),
+                        ),
                 )
-                .child(
-                    div()
-                        .font_family(theme::MONO)
-                        .text_size(px(theme::T_MONO))
-                        .line_height(relative(1.35))
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(theme::data())
-                        .overflow_hidden()
-                        .text_ellipsis()
-                        .whitespace_nowrap()
-                        .child(projection.workspace.clone()),
-                ),
+                .child(div().h(px(154.0)).flex_shrink_0().child(composer.clone())),
         )
 }
 

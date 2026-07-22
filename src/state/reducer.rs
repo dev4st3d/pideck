@@ -5,7 +5,7 @@ use super::runtime::{
     MAX_UNKNOWN_RECORDS, NormalizedEvent, NormalizedResponse, PromptDelivery, QueueContents,
     RequestFailureKind, RetryState, RuntimeEffect, RuntimeInput, RuntimeIntent, RuntimeLifecycle,
     RuntimeMessage, RuntimeRequest, RuntimeState, SafeError, SessionMutation, StampedInput,
-    ToolExecution, ToolStatus, UnknownRecord, push_bounded,
+    SubmissionKind, ToolExecution, ToolStatus, UnknownRecord, push_bounded,
 };
 use crate::services::rpc::{EntryId, RequestId};
 
@@ -74,11 +74,48 @@ fn disconnect(state: &mut RuntimeState, error: SafeError) -> Vec<RuntimeEffect> 
 
 fn reduce_intent(state: &mut RuntimeState, intent: RuntimeIntent) -> Vec<RuntimeEffect> {
     match intent {
-        RuntimeIntent::Prompt { request, text } => {
+        RuntimeIntent::Submit {
+            request,
+            text,
+            kind,
+        } => {
+            if matches!(state.prompt_delivery, PromptDelivery::Pending { .. }) {
+                return Vec::new();
+            }
+            let rejection = if text.trim().is_empty() {
+                Some("Write a prompt first.".to_owned())
+            } else if !submission_allowed(state.lifecycle, kind) {
+                Some(match kind {
+                    SubmissionKind::Prompt => "Pi is not idle yet.".to_owned(),
+                    SubmissionKind::Steer | SubmissionKind::FollowUp => {
+                        "Pi must be running for queued input.".to_owned()
+                    }
+                })
+            } else {
+                None
+            };
+            if let Some(summary) = rejection {
+                state.prompt_delivery = PromptDelivery::Rejected {
+                    request,
+                    kind,
+                    summary,
+                };
+                return Vec::new();
+            }
+
+            state.pending_prompt_settled = false;
             state.prompt_delivery = PromptDelivery::Pending {
                 request: request.clone(),
+                kind,
             };
-            vec![effect(state, RuntimeRequest::Prompt { request, text })]
+            vec![effect(
+                state,
+                RuntimeRequest::Submit {
+                    request,
+                    text,
+                    kind,
+                },
+            )]
         }
         RuntimeIntent::Abort => {
             state.lifecycle = RuntimeLifecycle::Cancelling;
@@ -172,25 +209,33 @@ fn reduce_response(
             }
             Vec::new()
         }
-        (RuntimeRequest::Prompt { request, .. }, Ok(NormalizedResponse::Accepted)) => {
+        (RuntimeRequest::Submit { request, kind, .. }, Ok(NormalizedResponse::Accepted)) => {
             if prompt_request_matches(&state.prompt_delivery, &request) {
-                state.prompt_delivery = PromptDelivery::Accepted { request };
+                state.prompt_delivery = PromptDelivery::Accepted { request, kind };
+                if kind == SubmissionKind::Prompt && !state.pending_prompt_settled {
+                    state.lifecycle = RuntimeLifecycle::Running;
+                }
+                state.pending_prompt_settled = false;
             }
             Vec::new()
         }
-        (RuntimeRequest::Prompt { request, .. }, Err(failure)) => {
+        (RuntimeRequest::Submit { request, kind, .. }, Err(failure)) => {
             if prompt_request_matches(&state.prompt_delivery, &request) {
                 state.prompt_delivery = if matches!(
                     failure.kind,
                     RequestFailureKind::UnknownOutcome | RequestFailureKind::Disconnected
                 ) {
-                    PromptDelivery::Uncertain { request }
+                    PromptDelivery::Uncertain { request, kind }
                 } else {
                     PromptDelivery::Rejected {
                         request,
+                        kind,
                         summary: failure.error.summary.clone(),
                     }
                 };
+            }
+            if kind == SubmissionKind::Prompt {
+                state.pending_prompt_settled = false;
             }
             state.bounded_error(failure.error);
             Vec::new()
@@ -333,6 +378,7 @@ fn reduce_event(state: &mut RuntimeState, event: NormalizedEvent) {
     match event {
         NormalizedEvent::AgentStart | NormalizedEvent::TurnStart => {
             state.lifecycle = RuntimeLifecycle::Running;
+            state.pending_prompt_settled = false;
             state.low_level_agent_end_seen = false;
         }
         NormalizedEvent::AgentEnd { messages, .. } => {
@@ -549,6 +595,13 @@ fn reduce_event(state: &mut RuntimeState, event: NormalizedEvent) {
 }
 
 fn settle(state: &mut RuntimeState) {
+    state.pending_prompt_settled = matches!(
+        state.prompt_delivery,
+        PromptDelivery::Pending {
+            kind: SubmissionKind::Prompt,
+            ..
+        }
+    );
     state.lifecycle = RuntimeLifecycle::Settled;
     state.low_level_agent_end_seen = false;
     if matches!(state.retry, RetryState::Cancelling) {
@@ -584,15 +637,29 @@ fn invalidate_extension_ui(state: &mut RuntimeState) {
 }
 
 fn mark_prompt_uncertain(state: &mut RuntimeState) {
-    if let PromptDelivery::Pending { request } = &state.prompt_delivery {
+    state.pending_prompt_settled = false;
+    if let PromptDelivery::Pending { request, kind } = &state.prompt_delivery {
         state.prompt_delivery = PromptDelivery::Uncertain {
             request: request.clone(),
+            kind: *kind,
         };
     }
 }
 
 fn prompt_request_matches(delivery: &PromptDelivery, request: &RequestId) -> bool {
-    matches!(delivery, PromptDelivery::Pending { request: pending } if pending == request)
+    matches!(delivery, PromptDelivery::Pending { request: pending, .. } if pending == request)
+}
+
+fn submission_allowed(lifecycle: RuntimeLifecycle, kind: SubmissionKind) -> bool {
+    match kind {
+        SubmissionKind::Prompt => {
+            matches!(
+                lifecycle,
+                RuntimeLifecycle::Ready | RuntimeLifecycle::Settled
+            )
+        }
+        SubmissionKind::Steer | SubmissionKind::FollowUp => lifecycle == RuntimeLifecycle::Running,
+    }
 }
 
 fn apply_entries(
@@ -736,7 +803,11 @@ fn request_name(request: &RuntimeRequest) -> &'static str {
         RuntimeRequest::GetCommands => "get_commands",
         RuntimeRequest::GetModels => "get_available_models",
         RuntimeRequest::GetTree { .. } => "get_tree",
-        RuntimeRequest::Prompt { .. } => "prompt",
+        RuntimeRequest::Submit { kind, .. } => match kind {
+            SubmissionKind::Prompt => "prompt",
+            SubmissionKind::Steer => "steer",
+            SubmissionKind::FollowUp => "follow_up",
+        },
         RuntimeRequest::Abort => "abort",
         RuntimeRequest::AbortRetry => "abort_retry",
         RuntimeRequest::SessionMutation(_) => "session mutation",

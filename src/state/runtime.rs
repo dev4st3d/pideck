@@ -353,13 +353,33 @@ pub enum CompactionKind {
     Overflow,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubmissionKind {
+    Prompt,
+    Steer,
+    FollowUp,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PromptDelivery {
     None,
-    Pending { request: RequestId },
-    Accepted { request: RequestId },
-    Rejected { request: RequestId, summary: String },
-    Uncertain { request: RequestId },
+    Pending {
+        request: RequestId,
+        kind: SubmissionKind,
+    },
+    Accepted {
+        request: RequestId,
+        kind: SubmissionKind,
+    },
+    Rejected {
+        request: RequestId,
+        kind: SubmissionKind,
+        summary: String,
+    },
+    Uncertain {
+        request: RequestId,
+        kind: SubmissionKind,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -467,6 +487,7 @@ pub struct RuntimeState {
     pub durable_cursor: Option<EntryId>,
     pub cursor_session_id: Option<SessionId>,
     pub prompt_delivery: PromptDelivery,
+    pub pending_prompt_settled: bool,
     pub low_level_agent_end_seen: bool,
     pub stale_inputs_ignored: u64,
     pub hydration_mode: HydrationMode,
@@ -504,6 +525,7 @@ impl RuntimeState {
             durable_cursor: None,
             cursor_session_id: None,
             prompt_delivery: PromptDelivery::None,
+            pending_prompt_settled: false,
             low_level_agent_end_seen: false,
             stale_inputs_ignored: 0,
             hydration_mode: HydrationMode::Initial,
@@ -574,9 +596,10 @@ pub enum RuntimeInput {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum RuntimeIntent {
-    Prompt {
+    Submit {
         request: RequestId,
         text: String,
+        kind: SubmissionKind,
     },
     Abort,
     AbortRetry,
@@ -611,9 +634,10 @@ pub enum RuntimeRequest {
     GetTree {
         base_revision: u64,
     },
-    Prompt {
+    Submit {
         request: RequestId,
         text: String,
+        kind: SubmissionKind,
     },
     Abort,
     AbortRetry,

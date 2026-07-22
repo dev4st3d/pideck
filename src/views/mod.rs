@@ -1,3 +1,4 @@
+pub mod composer;
 mod controls;
 mod root;
 

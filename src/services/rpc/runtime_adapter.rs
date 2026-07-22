@@ -15,7 +15,7 @@ use crate::state::runtime::{
     NotificationKind, QueueDeliveryMode, RequestFailure, RequestFailureKind, RuntimeCommand,
     RuntimeEffect, RuntimeEntry, RuntimeInput, RuntimeMessage, RuntimeNotification, RuntimeRequest,
     RuntimeStats, RuntimeThinkingLevel, RuntimeTreeNode, SafeError, SessionMutation,
-    SessionSnapshot, StampedInput, WidgetPlacement,
+    SessionSnapshot, StampedInput, SubmissionKind, WidgetPlacement,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -106,10 +106,20 @@ fn command_for_request(request: &RuntimeRequest) -> Command {
         RuntimeRequest::GetCommands => Command::GetCommands,
         RuntimeRequest::GetModels => Command::GetAvailableModels,
         RuntimeRequest::GetTree { .. } => Command::GetTree,
-        RuntimeRequest::Prompt { text, .. } => Command::Prompt {
-            message: text.clone(),
-            images: None,
-            streaming_behavior: None,
+        RuntimeRequest::Submit { text, kind, .. } => match kind {
+            SubmissionKind::Prompt => Command::Prompt {
+                message: text.clone(),
+                images: None,
+                streaming_behavior: None,
+            },
+            SubmissionKind::Steer => Command::Steer {
+                message: text.clone(),
+                images: None,
+            },
+            SubmissionKind::FollowUp => Command::FollowUp {
+                message: text.clone(),
+                images: None,
+            },
         },
         RuntimeRequest::Abort => Command::Abort,
         RuntimeRequest::AbortRetry => Command::AbortRetry,
@@ -213,7 +223,27 @@ fn normalize_response(
                 leaf_id: data.leaf_id,
             }
         }
-        (RuntimeRequest::Prompt { .. }, ResponseResult::Prompt)
+        (
+            RuntimeRequest::Submit {
+                kind: SubmissionKind::Prompt,
+                ..
+            },
+            ResponseResult::Prompt,
+        )
+        | (
+            RuntimeRequest::Submit {
+                kind: SubmissionKind::Steer,
+                ..
+            },
+            ResponseResult::Steer,
+        )
+        | (
+            RuntimeRequest::Submit {
+                kind: SubmissionKind::FollowUp,
+                ..
+            },
+            ResponseResult::FollowUp,
+        )
         | (RuntimeRequest::Abort, ResponseResult::Abort)
         | (RuntimeRequest::AbortRetry, ResponseResult::AbortRetry) => NormalizedResponse::Accepted,
         (
@@ -835,7 +865,11 @@ fn operation_name(request: &RuntimeRequest) -> &'static str {
         RuntimeRequest::GetCommands => "command hydration",
         RuntimeRequest::GetModels => "model hydration",
         RuntimeRequest::GetTree { .. } => "tree hydration",
-        RuntimeRequest::Prompt { .. } => "prompt delivery",
+        RuntimeRequest::Submit { kind, .. } => match kind {
+            SubmissionKind::Prompt => "prompt delivery",
+            SubmissionKind::Steer => "steering delivery",
+            SubmissionKind::FollowUp => "follow-up delivery",
+        },
         RuntimeRequest::Abort => "abort",
         RuntimeRequest::AbortRetry => "retry cancellation",
         RuntimeRequest::SessionMutation(_) => "session replacement",

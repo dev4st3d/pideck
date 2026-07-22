@@ -4,7 +4,9 @@ use gpui::{
     App, Application, Bounds, KeyBinding, WindowBounds, WindowOptions, prelude::*, px, size,
 };
 
-use crate::actions::{ActivateRecovery, Connect, FocusNext, FocusPrevious, Retry, Stop};
+use crate::actions::{
+    ActivateRecovery, Connect, FocusNext, FocusPrevious, Retry, Stop, composer_key_bindings,
+};
 use crate::controller::RuntimeController;
 use crate::services::runtime_worker::{RpcRuntimeService, RuntimeService};
 use crate::{fonts, views::RootView};
@@ -32,6 +34,7 @@ pub fn run() {
             KeyBinding::new("tab", FocusNext, None),
             KeyBinding::new("shift-tab", FocusPrevious, None),
         ]);
+        cx.bind_keys(composer_key_bindings());
 
         let bounds = Bounds::centered(None, size(px(WINDOW_WIDTH), px(WINDOW_HEIGHT)), cx);
         let workspace = workspace.clone();

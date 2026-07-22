@@ -512,43 +512,55 @@ fn prompt_delivery_tracks_acceptance_rejection_and_unknown_outcome() {
     let accepted = RequestId::from("accepted");
     apply(
         &mut state,
-        RuntimeInput::Intent(RuntimeIntent::Prompt {
+        RuntimeInput::Intent(RuntimeIntent::Submit {
             request: accepted.clone(),
             text: "Accepted".to_owned(),
+            kind: SubmissionKind::Prompt,
         }),
     );
     assert_eq!(
         state.prompt_delivery,
         PromptDelivery::Pending {
-            request: accepted.clone()
+            request: accepted.clone(),
+            kind: SubmissionKind::Prompt,
         }
     );
     response(
         &mut state,
-        RuntimeRequest::Prompt {
+        RuntimeRequest::Submit {
             request: accepted.clone(),
             text: "Accepted".to_owned(),
+            kind: SubmissionKind::Prompt,
         },
         Ok(NormalizedResponse::Accepted),
     );
     assert_eq!(
         state.prompt_delivery,
-        PromptDelivery::Accepted { request: accepted }
+        PromptDelivery::Accepted {
+            request: accepted,
+            kind: SubmissionKind::Prompt,
+        }
     );
 
+    apply(
+        &mut state,
+        RuntimeInput::Event(NormalizedEvent::AgentSettled),
+    );
     let rejected = RequestId::from("rejected");
     apply(
         &mut state,
-        RuntimeInput::Intent(RuntimeIntent::Prompt {
+        RuntimeInput::Intent(RuntimeIntent::Submit {
             request: rejected.clone(),
             text: "Rejected".to_owned(),
+            kind: SubmissionKind::Prompt,
         }),
     );
     let effects = response(
         &mut state,
-        RuntimeRequest::Prompt {
+        RuntimeRequest::Submit {
             request: rejected.clone(),
             text: "Rejected".to_owned(),
+            kind: SubmissionKind::Prompt,
         },
         Err(failure(RequestFailureKind::Rejected, "Prompt rejected")),
     );
@@ -556,6 +568,42 @@ fn prompt_delivery_tracks_acceptance_rejection_and_unknown_outcome() {
     assert!(matches!(
         state.prompt_delivery,
         PromptDelivery::Rejected { request, .. } if request == rejected
+    ));
+}
+
+#[test]
+fn prompt_acceptance_respects_event_before_response_ordering() {
+    let (mut state, _) = connected_state("s1");
+    let request = RequestId::from("fast-prompt");
+    apply(
+        &mut state,
+        RuntimeInput::Intent(RuntimeIntent::Submit {
+            request: request.clone(),
+            text: "Fast".to_owned(),
+            kind: SubmissionKind::Prompt,
+        }),
+    );
+    apply(&mut state, RuntimeInput::Event(NormalizedEvent::AgentStart));
+    apply(
+        &mut state,
+        RuntimeInput::Event(NormalizedEvent::AgentSettled),
+    );
+    response(
+        &mut state,
+        RuntimeRequest::Submit {
+            request,
+            text: "Fast".to_owned(),
+            kind: SubmissionKind::Prompt,
+        },
+        Ok(NormalizedResponse::Accepted),
+    );
+    assert_eq!(state.lifecycle, RuntimeLifecycle::Settled);
+    assert!(matches!(
+        state.prompt_delivery,
+        PromptDelivery::Accepted {
+            kind: SubmissionKind::Prompt,
+            ..
+        }
     ));
 }
 
@@ -829,9 +877,10 @@ fn uncertain_prompt_is_never_resent_on_reconnect() {
     let request = RequestId::from("prompt-1");
     apply(
         &mut state,
-        RuntimeInput::Intent(RuntimeIntent::Prompt {
+        RuntimeInput::Intent(RuntimeIntent::Submit {
             request: request.clone(),
             text: "Synthetic prompt".to_owned(),
+            kind: SubmissionKind::Prompt,
         }),
     );
     apply(
@@ -840,7 +889,13 @@ fn uncertain_prompt_is_never_resent_on_reconnect() {
             error: SafeError::new(ErrorKind::Disconnected, "Connection closed"),
         },
     );
-    assert_eq!(state.prompt_delivery, PromptDelivery::Uncertain { request });
+    assert_eq!(
+        state.prompt_delivery,
+        PromptDelivery::Uncertain {
+            request,
+            kind: SubmissionKind::Prompt,
+        }
+    );
 
     let epoch = state.epoch;
     let effects = reduce(
@@ -911,9 +966,10 @@ fn service_adapter_maps_effects_errors_and_safe_extension_records() {
     let request = RequestId::from("prompt-adapter");
     let effects = apply(
         &mut state,
-        RuntimeInput::Intent(RuntimeIntent::Prompt {
+        RuntimeInput::Intent(RuntimeIntent::Submit {
             request: request.clone(),
             text: "Synthetic prompt".to_owned(),
+            kind: SubmissionKind::Prompt,
         }),
     );
     assert!(matches!(
@@ -931,7 +987,13 @@ fn service_adapter_maps_effects_errors_and_safe_extension_records() {
     )
     .expect("request result");
     reduce(&mut state, normalized);
-    assert_eq!(state.prompt_delivery, PromptDelivery::Uncertain { request });
+    assert_eq!(
+        state.prompt_delivery,
+        PromptDelivery::Uncertain {
+            request,
+            kind: SubmissionKind::Prompt,
+        }
+    );
 
     let record = TaggedIncomingRecord {
         generation: state.generation,
@@ -975,4 +1037,111 @@ fn entries_deduplicate_hydration_incrementals_and_live_appends() {
     );
     assert_eq!(state.entries.data.as_ref().map(Vec::len), Some(3));
     assert_eq!(state.durable_cursor, Some(EntryId::from("c")));
+}
+
+#[test]
+fn empty_and_rapid_duplicate_submissions_never_emit_side_effects() {
+    let (mut state, _) = connected_state("s1");
+    let empty = RequestId::from("empty");
+    let effects = apply(
+        &mut state,
+        RuntimeInput::Intent(RuntimeIntent::Submit {
+            request: empty.clone(),
+            text: " \n ".to_owned(),
+            kind: SubmissionKind::Prompt,
+        }),
+    );
+    assert!(effects.is_empty());
+    assert!(matches!(
+        state.prompt_delivery,
+        PromptDelivery::Rejected { ref request, .. } if request == &empty
+    ));
+
+    let first = RequestId::from("first");
+    assert_eq!(
+        apply(
+            &mut state,
+            RuntimeInput::Intent(RuntimeIntent::Submit {
+                request: first.clone(),
+                text: "Run once".to_owned(),
+                kind: SubmissionKind::Prompt,
+            }),
+        )
+        .len(),
+        1
+    );
+    let duplicate = RequestId::from("duplicate");
+    assert!(
+        apply(
+            &mut state,
+            RuntimeInput::Intent(RuntimeIntent::Submit {
+                request: duplicate,
+                text: "Run twice".to_owned(),
+                kind: SubmissionKind::Prompt,
+            }),
+        )
+        .is_empty()
+    );
+    assert_eq!(
+        state.prompt_delivery,
+        PromptDelivery::Pending {
+            request: first,
+            kind: SubmissionKind::Prompt,
+        }
+    );
+}
+
+#[test]
+fn steer_and_follow_up_use_distinct_rpc_commands_and_disconnect_safely() {
+    let (mut state, _) = connected_state("s1");
+    state.lifecycle = RuntimeLifecycle::Running;
+    let steer = RequestId::from("steer");
+    let effects = apply(
+        &mut state,
+        RuntimeInput::Intent(RuntimeIntent::Submit {
+            request: steer.clone(),
+            text: "Change course".to_owned(),
+            kind: SubmissionKind::Steer,
+        }),
+    );
+    assert!(matches!(
+        dispatch_for_effect(&effects[0]),
+        RpcDispatch::Command(Command::Steer { .. })
+    ));
+    response(
+        &mut state,
+        RuntimeRequest::Submit {
+            request: steer,
+            text: "Change course".to_owned(),
+            kind: SubmissionKind::Steer,
+        },
+        Ok(NormalizedResponse::Accepted),
+    );
+
+    let follow_up = RequestId::from("follow-up");
+    let effects = apply(
+        &mut state,
+        RuntimeInput::Intent(RuntimeIntent::Submit {
+            request: follow_up.clone(),
+            text: "Then summarize".to_owned(),
+            kind: SubmissionKind::FollowUp,
+        }),
+    );
+    assert!(matches!(
+        dispatch_for_effect(&effects[0]),
+        RpcDispatch::Command(Command::FollowUp { .. })
+    ));
+    apply(
+        &mut state,
+        RuntimeInput::Disconnected {
+            error: SafeError::new(ErrorKind::Disconnected, "Connection closed"),
+        },
+    );
+    assert_eq!(
+        state.prompt_delivery,
+        PromptDelivery::Uncertain {
+            request: follow_up,
+            kind: SubmissionKind::FollowUp,
+        }
+    );
 }

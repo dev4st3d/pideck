@@ -1,6 +1,6 @@
 //! Logical runtime and keyboard-focus actions.
 
-use gpui::actions;
+use gpui::{KeyBinding, actions};
 
 actions!(
     pi_gui,
@@ -10,6 +10,61 @@ actions!(
         Stop,
         ActivateRecovery,
         FocusNext,
-        FocusPrevious
+        FocusPrevious,
+        ComposerBackspace,
+        ComposerDelete,
+        ComposerLeft,
+        ComposerRight,
+        ComposerUp,
+        ComposerDown,
+        ComposerSelectLeft,
+        ComposerSelectRight,
+        ComposerSelectUp,
+        ComposerSelectDown,
+        ComposerLineStart,
+        ComposerLineEnd,
+        ComposerSelectLineStart,
+        ComposerSelectLineEnd,
+        ComposerSelectAll,
+        ComposerCopy,
+        ComposerCut,
+        ComposerPaste,
+        ComposerUndo,
+        ComposerRedo,
+        InsertNewline,
+        AcceptInput,
+        QueueFollowUp,
+        AbortRun
     ]
 );
+
+pub(crate) fn composer_key_bindings() -> Vec<KeyBinding> {
+    let context = Some("Composer");
+    vec![
+        KeyBinding::new("backspace", ComposerBackspace, context),
+        KeyBinding::new("delete", ComposerDelete, context),
+        KeyBinding::new("left", ComposerLeft, context),
+        KeyBinding::new("right", ComposerRight, context),
+        KeyBinding::new("up", ComposerUp, context),
+        KeyBinding::new("down", ComposerDown, context),
+        KeyBinding::new("shift-left", ComposerSelectLeft, context),
+        KeyBinding::new("shift-right", ComposerSelectRight, context),
+        KeyBinding::new("shift-up", ComposerSelectUp, context),
+        KeyBinding::new("shift-down", ComposerSelectDown, context),
+        KeyBinding::new("home", ComposerLineStart, context),
+        KeyBinding::new("end", ComposerLineEnd, context),
+        KeyBinding::new("shift-home", ComposerSelectLineStart, context),
+        KeyBinding::new("shift-end", ComposerSelectLineEnd, context),
+        KeyBinding::new("ctrl-a", ComposerSelectAll, context),
+        KeyBinding::new("ctrl-c", ComposerCopy, context),
+        KeyBinding::new("ctrl-x", ComposerCut, context),
+        KeyBinding::new("ctrl-v", ComposerPaste, context),
+        KeyBinding::new("ctrl-z", ComposerUndo, context),
+        KeyBinding::new("ctrl-y", ComposerRedo, context),
+        KeyBinding::new("ctrl-shift-z", ComposerRedo, context),
+        KeyBinding::new("shift-enter", InsertNewline, context),
+        KeyBinding::new("enter", AcceptInput, context),
+        KeyBinding::new("alt-enter", QueueFollowUp, context),
+        KeyBinding::new("escape", AbortRun, None),
+    ]
+}

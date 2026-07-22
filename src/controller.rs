@@ -4,13 +4,61 @@ use std::sync::Arc;
 
 use gpui::{Context, Task};
 
-use crate::services::rpc::ConnectionGeneration;
+use crate::services::rpc::{ConnectionGeneration, RequestId};
 use crate::services::runtime_worker::{
     AttemptGeneration, RuntimeService, RuntimeWorkerHandle, WorkerResult,
 };
 use crate::state::reducer::reduce;
-use crate::state::runtime::{RuntimeInput, RuntimeState, StampedInput};
+use crate::state::runtime::{
+    PromptDelivery, RuntimeInput, RuntimeIntent, RuntimeLifecycle, RuntimeState, StampedInput,
+    SubmissionKind,
+};
 use crate::state::{ControllerStatus, ShellProjection};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubmissionPreference {
+    Default,
+    FollowUp,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ComposerRuntime {
+    Unavailable,
+    Idle,
+    Running,
+    Cancelling,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ComposerProjection {
+    pub runtime: ComposerRuntime,
+    pub delivery: PromptDelivery,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AcceptedSubmission {
+    pub request: RequestId,
+    pub kind: SubmissionKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubmissionRejection {
+    Empty,
+    Pending,
+    Unavailable,
+    NotRunning,
+}
+
+impl SubmissionRejection {
+    pub fn message(self) -> &'static str {
+        match self {
+            Self::Empty => "Write a prompt first.",
+            Self::Pending => "The previous acceptance is still pending.",
+            Self::Unavailable => "Pi is not ready. The draft was kept.",
+            Self::NotRunning => "Follow-ups can be queued while Pi is running.",
+        }
+    }
+}
 
 pub struct ControllerCore {
     status: ControllerStatus,
@@ -20,6 +68,7 @@ pub struct ControllerCore {
     workspace: String,
     connection_error: Option<String>,
     stale_attempts_ignored: u64,
+    next_submission: u64,
 }
 
 impl ControllerCore {
@@ -32,6 +81,7 @@ impl ControllerCore {
             workspace: workspace.into(),
             connection_error: None,
             stale_attempts_ignored: 0,
+            next_submission: 1,
         }
     }
 
@@ -151,6 +201,98 @@ impl ControllerCore {
             self.connection_error.as_deref(),
         )
     }
+
+    pub fn composer_projection(&self) -> ComposerProjection {
+        let has_model = self
+            .runtime
+            .session
+            .data
+            .as_ref()
+            .and_then(|session| session.model.as_ref())
+            .is_some();
+        let runtime = if self.status != ControllerStatus::Active || !has_model {
+            ComposerRuntime::Unavailable
+        } else {
+            match self.runtime.lifecycle {
+                RuntimeLifecycle::Ready | RuntimeLifecycle::Settled => ComposerRuntime::Idle,
+                RuntimeLifecycle::Running => ComposerRuntime::Running,
+                RuntimeLifecycle::Cancelling => ComposerRuntime::Cancelling,
+                RuntimeLifecycle::Loading
+                | RuntimeLifecycle::Disconnected
+                | RuntimeLifecycle::Failed => ComposerRuntime::Unavailable,
+            }
+        };
+        ComposerProjection {
+            runtime,
+            delivery: self.runtime.prompt_delivery.clone(),
+        }
+    }
+
+    pub fn submit(
+        &mut self,
+        text: String,
+        preference: SubmissionPreference,
+    ) -> Result<
+        (
+            AcceptedSubmission,
+            Vec<crate::state::runtime::RuntimeEffect>,
+        ),
+        SubmissionRejection,
+    > {
+        if text.trim().is_empty() {
+            return Err(SubmissionRejection::Empty);
+        }
+        if matches!(self.runtime.prompt_delivery, PromptDelivery::Pending { .. }) {
+            return Err(SubmissionRejection::Pending);
+        }
+
+        let kind = match (self.composer_projection().runtime, preference) {
+            (ComposerRuntime::Idle, SubmissionPreference::Default) => SubmissionKind::Prompt,
+            (ComposerRuntime::Running, SubmissionPreference::Default) => SubmissionKind::Steer,
+            (ComposerRuntime::Running, SubmissionPreference::FollowUp) => SubmissionKind::FollowUp,
+            (_, SubmissionPreference::FollowUp) => return Err(SubmissionRejection::NotRunning),
+            _ => return Err(SubmissionRejection::Unavailable),
+        };
+        let request = RequestId::new(format!(
+            "composer-{}-{}-{}",
+            self.generation.value(),
+            self.runtime.epoch.value(),
+            self.next_submission
+        ));
+        self.next_submission = self.next_submission.saturating_add(1);
+        let epoch = self.runtime.epoch;
+        let effects = reduce(
+            &mut self.runtime,
+            StampedInput {
+                generation: self.generation,
+                epoch,
+                input: RuntimeInput::Intent(RuntimeIntent::Submit {
+                    request: request.clone(),
+                    text,
+                    kind,
+                }),
+            },
+        );
+        if effects.is_empty() {
+            return Err(SubmissionRejection::Unavailable);
+        }
+        Ok((AcceptedSubmission { request, kind }, effects))
+    }
+
+    pub fn abort(&mut self) -> Vec<crate::state::runtime::RuntimeEffect> {
+        if self.composer_projection().runtime != ComposerRuntime::Running {
+            return Vec::new();
+        }
+        let epoch = self.runtime.epoch;
+        reduce(
+            &mut self.runtime,
+            StampedInput {
+                generation: self.generation,
+                epoch,
+                input: RuntimeInput::Intent(RuntimeIntent::Abort),
+            },
+        )
+    }
 }
 
 pub struct RuntimeController {
@@ -189,6 +331,32 @@ impl RuntimeController {
         self.core.projection()
     }
 
+    pub fn composer_projection(&self) -> ComposerProjection {
+        self.core.composer_projection()
+    }
+
+    pub fn submit(
+        &mut self,
+        text: String,
+        preference: SubmissionPreference,
+        cx: &mut Context<Self>,
+    ) -> Result<AcceptedSubmission, SubmissionRejection> {
+        let (submission, effects) = self.core.submit(text, preference)?;
+        self.send_effects(effects);
+        cx.notify();
+        Ok(submission)
+    }
+
+    pub fn abort(&mut self, cx: &mut Context<Self>) -> bool {
+        let effects = self.core.abort();
+        if effects.is_empty() {
+            return false;
+        }
+        self.send_effects(effects);
+        cx.notify();
+        true
+    }
+
     pub fn connect(&mut self, cx: &mut Context<Self>) {
         if !matches!(
             self.core.projection().action,
@@ -223,8 +391,12 @@ impl RuntimeController {
     }
 
     fn receive(&mut self, result: WorkerResult) {
-        let attempt = self.core.attempt();
         let effects = self.core.apply_worker_result(result);
+        self.send_effects(effects);
+    }
+
+    fn send_effects(&self, effects: Vec<crate::state::runtime::RuntimeEffect>) {
+        let attempt = self.core.attempt();
         for effect in effects {
             let _ = self.worker.execute(attempt, effect);
         }
@@ -331,6 +503,138 @@ mod tests {
         assert_eq!(
             core.runtime().lifecycle,
             crate::state::runtime::RuntimeLifecycle::Loading
+        );
+    }
+
+    fn ready_core() -> ControllerCore {
+        use crate::services::rpc::SessionId;
+        use crate::state::runtime::{
+            ModelSummary, QueueDeliveryMode, RuntimeThinkingLevel, SessionSnapshot,
+        };
+
+        let mut core = ControllerCore::new("workspace");
+        core.status = ControllerStatus::Active;
+        core.generation = ConnectionGeneration::new(1);
+        core.runtime = RuntimeState::new(core.generation);
+        core.runtime.lifecycle = RuntimeLifecycle::Ready;
+        core.runtime.session.ready(SessionSnapshot {
+            id: SessionId::from("session"),
+            file: None,
+            name: None,
+            model: Some(ModelSummary {
+                provider: "test".to_owned(),
+                id: "model".to_owned(),
+                name: "Model".to_owned(),
+                reasoning: false,
+                context_window: 100_000,
+                max_tokens: 4_096,
+                supports_images: false,
+            }),
+            thinking_level: RuntimeThinkingLevel::Off,
+            steering_mode: QueueDeliveryMode::All,
+            follow_up_mode: QueueDeliveryMode::All,
+            auto_compaction_enabled: true,
+            message_count: 0,
+        });
+        core
+    }
+
+    fn complete_submission(
+        core: &mut ControllerCore,
+        request: crate::state::runtime::RuntimeRequest,
+    ) {
+        let epoch = core.runtime.epoch;
+        reduce(
+            &mut core.runtime,
+            StampedInput {
+                generation: core.generation,
+                epoch,
+                input: RuntimeInput::Response {
+                    request,
+                    result: Ok(crate::state::runtime::NormalizedResponse::Accepted),
+                },
+            },
+        );
+    }
+
+    #[test]
+    fn controller_routes_prompt_steer_follow_up_and_suppresses_rapid_submit() {
+        use crate::state::runtime::{EffectKind, RuntimeRequest};
+
+        let mut core = ready_core();
+        let (prompt, effects) = core
+            .submit("First".to_owned(), SubmissionPreference::Default)
+            .expect("prompt");
+        assert_eq!(prompt.kind, SubmissionKind::Prompt);
+        let EffectKind::Request(prompt_request) = effects[0].effect.clone() else {
+            panic!("expected request");
+        };
+        assert!(matches!(
+            prompt_request,
+            RuntimeRequest::Submit {
+                kind: SubmissionKind::Prompt,
+                ..
+            }
+        ));
+        assert_eq!(
+            core.submit("Duplicate".to_owned(), SubmissionPreference::Default),
+            Err(SubmissionRejection::Pending)
+        );
+
+        complete_submission(&mut core, prompt_request);
+        assert_eq!(core.runtime.lifecycle, RuntimeLifecycle::Running);
+        let (steer, effects) = core
+            .submit("Adjust".to_owned(), SubmissionPreference::Default)
+            .expect("steer");
+        assert_eq!(steer.kind, SubmissionKind::Steer);
+        let EffectKind::Request(steer_request) = effects[0].effect.clone() else {
+            panic!("expected request");
+        };
+        complete_submission(&mut core, steer_request);
+
+        let (follow_up, effects) = core
+            .submit("Then verify".to_owned(), SubmissionPreference::FollowUp)
+            .expect("follow-up");
+        assert_eq!(follow_up.kind, SubmissionKind::FollowUp);
+        assert!(matches!(
+            effects[0].effect,
+            EffectKind::Request(RuntimeRequest::Submit {
+                kind: SubmissionKind::FollowUp,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn controller_rejects_empty_and_preserves_uncertain_submission_identity() {
+        let mut core = ready_core();
+        assert_eq!(
+            core.submit("  \n".to_owned(), SubmissionPreference::Default),
+            Err(SubmissionRejection::Empty)
+        );
+        let (submission, _) = core
+            .submit("Keep this draft".to_owned(), SubmissionPreference::Default)
+            .expect("prompt");
+        let epoch = core.runtime.epoch;
+        reduce(
+            &mut core.runtime,
+            StampedInput {
+                generation: core.generation,
+                epoch,
+                input: RuntimeInput::Disconnected {
+                    error: crate::state::runtime::SafeError::new(
+                        crate::state::runtime::ErrorKind::Disconnected,
+                        "Connection closed",
+                    ),
+                },
+            },
+        );
+        assert_eq!(
+            core.runtime.prompt_delivery,
+            PromptDelivery::Uncertain {
+                request: submission.request,
+                kind: SubmissionKind::Prompt,
+            }
         );
     }
 }

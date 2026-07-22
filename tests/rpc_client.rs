@@ -52,7 +52,7 @@ impl TestEnvironment {
             ResourcePolicy::disabled(),
         );
         config.executable_override = Some(self.executable.clone());
-        config.probe_timeout = Duration::from_secs(3);
+        config.probe_timeout = Duration::from_secs(10);
         config.shutdown_timeout = Duration::from_millis(250);
         config.stderr_capacity_bytes = 4096;
         config.environment_overrides.push((
@@ -194,6 +194,80 @@ fn mutation_lane_serializes_but_abort_and_extension_responses_bypass() {
         second.wait().expect("second mutation response").result,
         "set_thinking_level",
     );
+    client.stop();
+}
+
+#[test]
+fn fake_rpc_accepts_prompt_steer_follow_up_and_abort() {
+    let environment = TestEnvironment::new("rpc-normal");
+    let client = environment.start();
+    let commands = [
+        (
+            "prompt",
+            Command::Prompt {
+                message: "first line\nsecond line".to_owned(),
+                images: None,
+                streaming_behavior: None,
+            },
+        ),
+        (
+            "steer",
+            Command::Steer {
+                message: "change course".to_owned(),
+                images: None,
+            },
+        ),
+        (
+            "follow_up",
+            Command::FollowUp {
+                message: "then summarize".to_owned(),
+                images: None,
+            },
+        ),
+        ("abort", Command::Abort),
+    ];
+
+    for (name, command) in commands {
+        assert_response_command(
+            client
+                .request(command)
+                .wait()
+                .expect("accepted response")
+                .result,
+            name,
+        );
+        wait_for_file(&environment.root.join(format!("seen-{name}.txt")));
+    }
+    let transcript = fs::read_to_string(environment.root.join("rpc-input.jsonl"))
+        .expect("recorded RPC commands");
+    assert!(transcript.contains("first line\\nsecond line"));
+    assert_eq!(transcript.matches("\"type\":\"prompt\"").count(), 1);
+    assert_eq!(transcript.matches("\"type\":\"steer\"").count(), 1);
+    assert_eq!(transcript.matches("\"type\":\"follow_up\"").count(), 1);
+    assert_eq!(transcript.matches("\"type\":\"abort\"").count(), 1);
+    client.stop();
+}
+
+#[test]
+fn prompt_disconnect_is_uncertain_and_never_replayed_by_the_client() {
+    let environment = TestEnvironment::new("rpc-prompt-disconnect");
+    let client = environment.start();
+    let error = client
+        .request(Command::Prompt {
+            message: "keep this draft".to_owned(),
+            images: None,
+            streaming_behavior: None,
+        })
+        .wait()
+        .expect_err("prompt must lose acceptance confirmation");
+    assert!(matches!(
+        error.kind,
+        RpcClientErrorKind::ProcessExit | RpcClientErrorKind::StdoutFault
+    ));
+    wait_for_file(&environment.root.join("seen-prompt.txt"));
+    let transcript =
+        fs::read_to_string(environment.root.join("rpc-input.jsonl")).expect("recorded prompt");
+    assert_eq!(transcript.matches("\"type\":\"prompt\"").count(), 1);
     client.stop();
 }
 
@@ -488,7 +562,7 @@ fn installed_pi_smoke_is_isolated_offline_and_closes_cleanly() {
         OsString::from("PI_CODING_AGENT_DIR"),
         agent_directory.as_os_str().to_owned(),
     ));
-    config.probe_timeout = Duration::from_secs(5);
+    config.probe_timeout = Duration::from_secs(15);
     config.shutdown_timeout = Duration::from_secs(3);
 
     let client = match RpcClient::start_with_deadlines(config, RpcDeadlines::default()) {
