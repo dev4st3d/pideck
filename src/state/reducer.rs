@@ -1,12 +1,13 @@
 use std::collections::HashSet;
+use std::time::Instant;
 
 use super::runtime::{
-    CompactionState, EffectKind, ErrorKind, FacetStatus, HydrationMode, MAX_NOTIFICATIONS,
-    MAX_UNKNOWN_RECORDS, MessageBlock, MessageRole, NormalizedEvent, NormalizedResponse,
-    OptimisticUserInput, PromptDelivery, QueueContents, RequestFailureKind, RetryState,
-    RuntimeEffect, RuntimeInput, RuntimeIntent, RuntimeLifecycle, RuntimeMessage, RuntimeRequest,
-    RuntimeState, SafeError, SessionMutation, StampedInput, SubmissionKind, ToolExecution,
-    ToolStatus, UnknownRecord, push_bounded,
+    BashExecution, BashStatus, CompactionState, EffectKind, ErrorKind, FacetStatus, HydrationMode,
+    MAX_NOTIFICATIONS, MAX_UNKNOWN_RECORDS, MessageBlock, MessageRole, NormalizedEvent,
+    NormalizedResponse, OptimisticUserInput, PromptDelivery, QueueContents, RequestFailureKind,
+    RetryState, RuntimeEffect, RuntimeInput, RuntimeIntent, RuntimeLifecycle, RuntimeMessage,
+    RuntimeRequest, RuntimeState, SafeError, SessionMutation, StampedInput, SubmissionKind,
+    ToolExecution, ToolStatus, UnknownRecord, push_bounded,
 };
 use crate::services::rpc::{EntryId, RequestId};
 
@@ -22,14 +23,16 @@ pub fn reduce(state: &mut RuntimeState, stamped: StampedInput) -> Vec<RuntimeEff
 
     match stamped.input {
         RuntimeInput::Connected { .. } => Vec::new(),
-        RuntimeInput::Disconnected { error } => disconnect(state, error),
-        RuntimeInput::Intent(intent) => reduce_intent(state, intent),
-        RuntimeInput::Response { request, result } => reduce_response(state, request, result),
+        RuntimeInput::Disconnected { error } => disconnect(state, error, stamped.observed_at),
+        RuntimeInput::Intent(intent) => reduce_intent(state, intent, stamped.observed_at),
+        RuntimeInput::Response { request, result } => {
+            reduce_response(state, request, result, stamped.observed_at)
+        }
         RuntimeInput::Event(event) => {
             if state.replacement_awaiting_state {
                 state.stale_inputs_ignored = state.stale_inputs_ignored.saturating_add(1);
             } else {
-                reduce_event(state, event);
+                reduce_event(state, event, stamped.observed_at);
             }
             Vec::new()
         }
@@ -69,9 +72,20 @@ fn connect(
     vec![effect(state, RuntimeRequest::GetState)]
 }
 
-fn disconnect(state: &mut RuntimeState, error: SafeError) -> Vec<RuntimeEffect> {
+fn disconnect(
+    state: &mut RuntimeState,
+    error: SafeError,
+    observed_at: Instant,
+) -> Vec<RuntimeEffect> {
     if matches!(state.prompt_delivery, PromptDelivery::Pending { .. }) {
         mark_prompt_uncertain(state);
+    }
+    for execution in &mut state.bash_executions {
+        if execution.status.is_active() {
+            execution.status = BashStatus::Uncertain;
+            execution.finished_at = Some(observed_at);
+            execution.error = Some("Pi disconnected during Bash execution".to_owned());
+        }
     }
     state.lifecycle = RuntimeLifecycle::Disconnected;
     invalidate_extension_ui(state);
@@ -80,7 +94,11 @@ fn disconnect(state: &mut RuntimeState, error: SafeError) -> Vec<RuntimeEffect> 
     Vec::new()
 }
 
-fn reduce_intent(state: &mut RuntimeState, intent: RuntimeIntent) -> Vec<RuntimeEffect> {
+fn reduce_intent(
+    state: &mut RuntimeState,
+    intent: RuntimeIntent,
+    observed_at: Instant,
+) -> Vec<RuntimeEffect> {
     match intent {
         RuntimeIntent::Submit {
             request,
@@ -141,9 +159,69 @@ fn reduce_intent(state: &mut RuntimeState, intent: RuntimeIntent) -> Vec<Runtime
                 },
             )]
         }
+        RuntimeIntent::ExecuteBash {
+            request,
+            command,
+            exclude_from_context,
+        } => {
+            if command.trim().is_empty()
+                || state
+                    .bash_executions
+                    .iter()
+                    .any(|execution| execution.status.is_active())
+            {
+                return Vec::new();
+            }
+            let baseline = state
+                .messages
+                .data
+                .as_ref()
+                .into_iter()
+                .flatten()
+                .map(|message| message.key.clone())
+                .collect();
+            state.bash_executions.push(BashExecution {
+                request: request.clone(),
+                command: command.clone(),
+                exclude_from_context,
+                output: String::new(),
+                exit_code: None,
+                cancelled: false,
+                truncated: false,
+                full_output_path: None,
+                status: BashStatus::Running,
+                started_at: observed_at,
+                finished_at: None,
+                reconciled: false,
+                baseline,
+                error: None,
+            });
+            state.bump_revision();
+            vec![effect(
+                state,
+                RuntimeRequest::ExecuteBash {
+                    request,
+                    command,
+                    exclude_from_context,
+                },
+            )]
+        }
         RuntimeIntent::Abort => {
             state.lifecycle = RuntimeLifecycle::Cancelling;
             vec![effect(state, RuntimeRequest::Abort)]
+        }
+        RuntimeIntent::AbortBash => {
+            let Some(execution) = state
+                .bash_executions
+                .iter_mut()
+                .rev()
+                .find(|execution| execution.status == BashStatus::Running)
+            else {
+                return Vec::new();
+            };
+            execution.status = BashStatus::Cancelling;
+            state.bump_revision();
+            vec![effect(state, RuntimeRequest::AbortBash)]
         }
         RuntimeIntent::AbortRetry => {
             state.lifecycle = RuntimeLifecycle::Cancelling;
@@ -177,6 +255,7 @@ fn reduce_response(
     state: &mut RuntimeState,
     request: RuntimeRequest,
     result: Result<NormalizedResponse, super::runtime::RequestFailure>,
+    observed_at: Instant,
 ) -> Vec<RuntimeEffect> {
     match (request, result) {
         (RuntimeRequest::GetState, Ok(NormalizedResponse::State(snapshot))) => {
@@ -197,6 +276,7 @@ fn reduce_response(
             state.messages.ready(merge_messages(messages, live));
             state.live_message_keys.clear();
             reconcile_optimistic_user_inputs(state);
+            reconcile_bash_executions(state);
             state.bump_revision();
             Vec::new()
         }
@@ -289,9 +369,73 @@ fn reduce_response(
             state.bounded_error(failure.error);
             Vec::new()
         }
+        (RuntimeRequest::ExecuteBash { request, .. }, Ok(NormalizedResponse::Bash(result))) => {
+            if let Some(execution) = state
+                .bash_executions
+                .iter_mut()
+                .find(|execution| execution.request == request)
+            {
+                execution.output = result.output;
+                execution.exit_code = result.exit_code;
+                execution.cancelled = result.cancelled;
+                execution.truncated = result.truncated;
+                execution.full_output_path = result.full_output_path;
+                execution.status = if result.cancelled {
+                    BashStatus::Cancelled
+                } else if result.exit_code.is_some_and(|code| code != 0) {
+                    BashStatus::Failed
+                } else {
+                    BashStatus::Succeeded
+                };
+                execution.finished_at = Some(observed_at);
+                state.bump_revision();
+            }
+            vec![effect(
+                state,
+                RuntimeRequest::GetMessages {
+                    base_revision: state.revision,
+                },
+            )]
+        }
+        (RuntimeRequest::ExecuteBash { request, .. }, Err(failure)) => {
+            if let Some(execution) = state
+                .bash_executions
+                .iter_mut()
+                .find(|execution| execution.request == request)
+            {
+                execution.status = if matches!(
+                    failure.kind,
+                    RequestFailureKind::UnknownOutcome | RequestFailureKind::Disconnected
+                ) {
+                    BashStatus::Uncertain
+                } else {
+                    BashStatus::Failed
+                };
+                execution.error = Some(failure.error.summary.clone());
+                execution.finished_at = Some(observed_at);
+                state.bump_revision();
+            }
+            state.bounded_error(failure.error);
+            Vec::new()
+        }
         (RuntimeRequest::Abort | RuntimeRequest::AbortRetry, Ok(NormalizedResponse::Accepted)) => {
             // Acknowledgement is not settlement. Pi may still be unwinding tools or retry work.
             state.lifecycle = RuntimeLifecycle::Cancelling;
+            Vec::new()
+        }
+        (RuntimeRequest::AbortBash, Ok(NormalizedResponse::Accepted)) => Vec::new(),
+        (RuntimeRequest::AbortBash, Err(failure)) => {
+            if let Some(execution) = state
+                .bash_executions
+                .iter_mut()
+                .rev()
+                .find(|execution| execution.status == BashStatus::Cancelling)
+            {
+                execution.status = BashStatus::Running;
+                execution.error = Some(failure.error.summary.clone());
+                state.bump_revision();
+            }
+            state.bounded_error(failure.error);
             Vec::new()
         }
         (
@@ -428,7 +572,7 @@ fn apply_state_hydration(
     ]
 }
 
-fn reduce_event(state: &mut RuntimeState, event: NormalizedEvent) {
+fn reduce_event(state: &mut RuntimeState, event: NormalizedEvent, observed_at: Instant) {
     match event {
         NormalizedEvent::AgentStart | NormalizedEvent::TurnStart => {
             state.lifecycle = RuntimeLifecycle::Running;
@@ -462,25 +606,7 @@ fn reduce_event(state: &mut RuntimeState, event: NormalizedEvent) {
             name,
             arguments,
         } => {
-            state.tools.insert(
-                id.clone(),
-                ToolExecution {
-                    id,
-                    name,
-                    arguments,
-                    result: None,
-                    status: ToolStatus::Running,
-                },
-            );
-            state.lifecycle = RuntimeLifecycle::Running;
-            state.bump_revision();
-        }
-        NormalizedEvent::ToolUpdate {
-            id,
-            name,
-            arguments,
-            accumulated,
-        } => {
+            let sequence = state.next_tool_sequence;
             let tool = state
                 .tools
                 .entry(id.clone())
@@ -490,17 +616,50 @@ fn reduce_event(state: &mut RuntimeState, event: NormalizedEvent) {
                     arguments: arguments.clone(),
                     result: None,
                     status: ToolStatus::Pending,
+                    authoritative_end: false,
+                    sequence,
+                    started_at: observed_at,
+                    finished_at: None,
                 });
-            if !matches!(
-                tool.status,
-                ToolStatus::Succeeded | ToolStatus::Failed | ToolStatus::Cancelled
-            ) {
+            if !tool.status.is_terminal() {
                 tool.name = name;
                 tool.arguments = arguments;
+                tool.status = ToolStatus::Running;
+                state.next_tool_sequence = state.next_tool_sequence.saturating_add(1);
+                state.lifecycle = RuntimeLifecycle::Running;
+                state.bump_revision();
+            }
+        }
+        NormalizedEvent::ToolUpdate {
+            id,
+            name,
+            arguments,
+            accumulated,
+        } => {
+            let sequence = state.next_tool_sequence;
+            let tool = state
+                .tools
+                .entry(id.clone())
+                .or_insert_with(|| ToolExecution {
+                    id,
+                    name: name.clone(),
+                    arguments: arguments.clone(),
+                    result: None,
+                    status: ToolStatus::Pending,
+                    authoritative_end: false,
+                    sequence,
+                    started_at: observed_at,
+                    finished_at: None,
+                });
+            if !tool.status.is_terminal() {
+                tool.name = name;
+                tool.arguments = arguments;
+                // Pi sends the full accumulated partial result, not an append-only delta.
                 tool.result = Some(accumulated);
                 tool.status = ToolStatus::Running;
+                state.next_tool_sequence = state.next_tool_sequence.saturating_add(1);
+                state.bump_revision();
             }
-            state.bump_revision();
         }
         NormalizedEvent::ToolEnd {
             id,
@@ -509,6 +668,7 @@ fn reduce_event(state: &mut RuntimeState, event: NormalizedEvent) {
             is_error,
             cancelled,
         } => {
+            let sequence = state.next_tool_sequence;
             let tool = state
                 .tools
                 .entry(id.clone())
@@ -518,11 +678,14 @@ fn reduce_event(state: &mut RuntimeState, event: NormalizedEvent) {
                     arguments: serde_json::Value::Null,
                     result: None,
                     status: ToolStatus::Pending,
+                    authoritative_end: false,
+                    sequence,
+                    started_at: observed_at,
+                    finished_at: None,
                 });
-            if !matches!(
-                tool.status,
-                ToolStatus::Succeeded | ToolStatus::Failed | ToolStatus::Cancelled
-            ) {
+            if !tool.status.is_terminal()
+                || (tool.status == ToolStatus::Cancelled && !tool.authoritative_end)
+            {
                 tool.name = name;
                 tool.result = Some(result);
                 tool.status = if cancelled {
@@ -532,6 +695,9 @@ fn reduce_event(state: &mut RuntimeState, event: NormalizedEvent) {
                 } else {
                     ToolStatus::Succeeded
                 };
+                tool.authoritative_end = true;
+                tool.finished_at = Some(observed_at);
+                state.next_tool_sequence = state.next_tool_sequence.saturating_add(1);
                 state.bump_revision();
             }
         }
@@ -685,6 +851,7 @@ fn clear_session_scoped_state(state: &mut RuntimeState) {
     state.stats.data = None;
     state.tree.data = None;
     state.tools.clear();
+    state.bash_executions.clear();
     state.queue = QueueContents::default();
     state.retry = RetryState::Idle;
     state.compaction = CompactionState::Idle;
@@ -817,6 +984,7 @@ fn upsert_messages(state: &mut RuntimeState, messages: Vec<RuntimeMessage>, phas
     }
     state.messages.status = FacetStatus::Ready;
     reconcile_optimistic_user_inputs(state);
+    reconcile_bash_executions(state);
     if changed {
         state.bump_revision();
     }
@@ -878,6 +1046,33 @@ fn reconcile_optimistic_user_inputs(state: &mut RuntimeState) {
     state
         .optimistic_user_inputs
         .retain(|input| !(input.accepted && input.authoritative_seen));
+}
+
+fn reconcile_bash_executions(state: &mut RuntimeState) {
+    let messages = state.messages.data.as_deref().unwrap_or_default();
+    for execution in &mut state.bash_executions {
+        if execution.reconciled || execution.status.is_active() {
+            continue;
+        }
+        execution.reconciled = messages.iter().any(|message| {
+            !execution.baseline.contains(&message.key)
+                && message.content.iter().any(|block| match block {
+                    MessageBlock::Bash {
+                        command,
+                        output,
+                        cancelled,
+                        exclude_from_context,
+                        ..
+                    } => {
+                        command == &execution.command
+                            && output == &execution.output
+                            && cancelled == &execution.cancelled
+                            && exclude_from_context == &execution.exclude_from_context
+                    }
+                    _ => false,
+                })
+        });
+    }
 }
 
 fn message_text(message: &RuntimeMessage) -> String {
@@ -942,7 +1137,9 @@ fn request_name(request: &RuntimeRequest) -> &'static str {
             SubmissionKind::Steer => "steer",
             SubmissionKind::FollowUp => "follow_up",
         },
+        RuntimeRequest::ExecuteBash { .. } => "bash",
         RuntimeRequest::Abort => "abort",
+        RuntimeRequest::AbortBash => "abort_bash",
         RuntimeRequest::AbortRetry => "abort_retry",
         RuntimeRequest::SessionMutation(_) => "session mutation",
     }

@@ -1,3 +1,5 @@
+use std::time::Instant;
+
 use pi_gui::services::rpc::{
     Command, ConnectionGeneration, EntryId, ExtensionError, ExtensionErrorRecordType,
     IncomingRecord, RequestId, RpcClientError, RpcClientErrorKind, RpcDispatch, SessionId,
@@ -13,6 +15,7 @@ fn stamp(state: &RuntimeState, input: RuntimeInput) -> StampedInput {
     StampedInput {
         generation: state.generation,
         epoch: state.epoch,
+        observed_at: Instant::now(),
         input,
     }
 }
@@ -414,6 +417,198 @@ fn parallel_tools_interleave_and_updates_replace_accumulated_results() {
         }),
     );
     assert_eq!(state.tools[&c].status, ToolStatus::Failed);
+}
+
+#[test]
+fn late_tool_starts_and_updates_cannot_erase_newer_or_terminal_state() {
+    let (mut state, _) = connected_state("s1");
+    let id = ToolCallId::from("ordered");
+    apply(
+        &mut state,
+        RuntimeInput::Event(NormalizedEvent::ToolUpdate {
+            id: id.clone(),
+            name: "custom".to_owned(),
+            arguments: json!("{malformed-json"),
+            accumulated: json!({"text": "accumulated"}),
+        }),
+    );
+    apply(
+        &mut state,
+        RuntimeInput::Event(NormalizedEvent::ToolStart {
+            id: id.clone(),
+            name: "custom".to_owned(),
+            arguments: json!("{malformed-json"),
+        }),
+    );
+    assert_eq!(
+        state.tools[&id].result,
+        Some(json!({"text": "accumulated"}))
+    );
+
+    apply(
+        &mut state,
+        RuntimeInput::Event(NormalizedEvent::ToolEnd {
+            id: id.clone(),
+            name: "custom".to_owned(),
+            result: json!({"text": "final"}),
+            is_error: false,
+            cancelled: false,
+        }),
+    );
+    let terminal = state.tools[&id].clone();
+    apply(
+        &mut state,
+        RuntimeInput::Event(NormalizedEvent::ToolStart {
+            id: id.clone(),
+            name: "late".to_owned(),
+            arguments: json!({"late": true}),
+        }),
+    );
+    apply(
+        &mut state,
+        RuntimeInput::Event(NormalizedEvent::ToolUpdate {
+            id: id.clone(),
+            name: "late".to_owned(),
+            arguments: json!({"late": true}),
+            accumulated: json!({"text": "stale"}),
+        }),
+    );
+    assert_eq!(state.tools[&id], terminal);
+}
+
+#[test]
+fn authoritative_tool_end_can_reconcile_a_settlement_cancellation() {
+    let (mut state, _) = connected_state("s1");
+    let id = ToolCallId::from("settled-before-end");
+    apply(
+        &mut state,
+        RuntimeInput::Event(NormalizedEvent::ToolStart {
+            id: id.clone(),
+            name: "read".to_owned(),
+            arguments: json!({"path": "fixture"}),
+        }),
+    );
+    apply(
+        &mut state,
+        RuntimeInput::Event(NormalizedEvent::AgentSettled),
+    );
+    assert_eq!(state.tools[&id].status, ToolStatus::Cancelled);
+    assert!(!state.tools[&id].authoritative_end);
+
+    apply(
+        &mut state,
+        RuntimeInput::Event(NormalizedEvent::ToolEnd {
+            id: id.clone(),
+            name: "read".to_owned(),
+            result: json!({"text": "late but authoritative"}),
+            is_error: false,
+            cancelled: false,
+        }),
+    );
+    assert_eq!(state.tools[&id].status, ToolStatus::Succeeded);
+    assert!(state.tools[&id].authoritative_end);
+}
+
+#[test]
+fn direct_bash_records_results_reconciles_and_cancels_separately() {
+    fn bash_message(key: &str) -> RuntimeMessage {
+        RuntimeMessage {
+            key: MessageKey(key.to_owned()),
+            role: MessageRole::BashExecution,
+            timestamp: 50,
+            content: vec![MessageBlock::Bash {
+                key: BlockKey("bash:0".to_owned()),
+                command: "printf ok".to_owned(),
+                output: "ok".to_owned(),
+                exit_code: Some(0),
+                cancelled: false,
+                truncated: true,
+                full_output_path: Some("C:/tmp/full.txt".to_owned()),
+                exclude_from_context: true,
+            }],
+            visible: true,
+            terminal: true,
+            stop_reason: None,
+            error: None,
+            assistant: None,
+        }
+    }
+
+    let (mut state, _) = connected_state("s1");
+    state.messages.ready(vec![bash_message("bash:historical")]);
+    let request = RequestId::from("bash-1");
+    let effects = apply(
+        &mut state,
+        RuntimeInput::Intent(RuntimeIntent::ExecuteBash {
+            request: request.clone(),
+            command: "printf ok".to_owned(),
+            exclude_from_context: true,
+        }),
+    );
+    assert!(matches!(
+        effects[0].effect,
+        EffectKind::Request(RuntimeRequest::ExecuteBash {
+            exclude_from_context: true,
+            ..
+        })
+    ));
+    assert!(matches!(
+        dispatch_for_effect(&effects[0]),
+        RpcDispatch::Command(Command::Bash {
+            command,
+            exclude_from_context: Some(true),
+        }) if command == "printf ok"
+    ));
+    assert_eq!(state.bash_executions[0].status, BashStatus::Running);
+
+    let abort = apply(&mut state, RuntimeInput::Intent(RuntimeIntent::AbortBash));
+    assert!(matches!(
+        abort[0].effect,
+        EffectKind::Request(RuntimeRequest::AbortBash)
+    ));
+    assert_eq!(state.bash_executions[0].status, BashStatus::Cancelling);
+    assert_ne!(state.lifecycle, RuntimeLifecycle::Cancelling);
+
+    let refresh = response(
+        &mut state,
+        RuntimeRequest::ExecuteBash {
+            request,
+            command: "printf ok".to_owned(),
+            exclude_from_context: true,
+        },
+        Ok(NormalizedResponse::Bash(DirectBashResult {
+            output: "ok".to_owned(),
+            exit_code: Some(0),
+            cancelled: false,
+            truncated: true,
+            full_output_path: Some("C:/tmp/full.txt".to_owned()),
+        })),
+    );
+    assert_eq!(state.bash_executions[0].status, BashStatus::Succeeded);
+    assert!(state.bash_executions[0].truncated);
+    assert!(matches!(
+        refresh[0].effect,
+        EffectKind::Request(RuntimeRequest::GetMessages { .. })
+    ));
+
+    response(
+        &mut state,
+        RuntimeRequest::GetMessages { base_revision: 0 },
+        Ok(NormalizedResponse::Messages(vec![bash_message(
+            "bash:historical",
+        )])),
+    );
+    assert!(!state.bash_executions[0].reconciled);
+
+    response(
+        &mut state,
+        RuntimeRequest::GetMessages { base_revision: 0 },
+        Ok(NormalizedResponse::Messages(vec![
+            bash_message("bash:historical"),
+            bash_message("bash:persisted"),
+        ])),
+    );
+    assert!(state.bash_executions[0].reconciled);
 }
 
 #[test]
@@ -1040,6 +1235,7 @@ fn reconnect_hydration_replaces_stale_partials_but_keeps_new_generation_events()
         StampedInput {
             generation: ConnectionGeneration::new(2),
             epoch,
+            observed_at: Instant::now(),
             input: RuntimeInput::Connected { recovery: true },
         },
     );
@@ -1117,6 +1313,7 @@ fn reconnect_hydration_reconciles_accepted_input_against_authoritative_history()
         StampedInput {
             generation: ConnectionGeneration::new(2),
             epoch,
+            observed_at: Instant::now(),
             input: RuntimeInput::Connected { recovery: true },
         },
     );
@@ -1152,6 +1349,7 @@ fn invalid_incremental_cursor_falls_back_to_full_once() {
     let reconnect = StampedInput {
         generation: ConnectionGeneration::new(2),
         epoch: state.epoch,
+        observed_at: Instant::now(),
         input: RuntimeInput::Connected { recovery: true },
     };
     reduce(&mut state, reconnect);
@@ -1223,6 +1421,7 @@ fn stale_generation_and_epoch_inputs_have_no_side_effects() {
     let stale_generation = StampedInput {
         generation: ConnectionGeneration::new(0),
         epoch: state.epoch,
+        observed_at: Instant::now(),
         input: RuntimeInput::Event(NormalizedEvent::AgentStart),
     };
     assert!(reduce(&mut state, stale_generation).is_empty());
@@ -1231,6 +1430,7 @@ fn stale_generation_and_epoch_inputs_have_no_side_effects() {
     let stale_epoch = StampedInput {
         generation: state.generation,
         epoch: state.epoch.next(),
+        observed_at: Instant::now(),
         input: RuntimeInput::Event(NormalizedEvent::AgentStart),
     };
     assert!(reduce(&mut state, stale_epoch).is_empty());
@@ -1317,6 +1517,7 @@ fn reconnect_uses_fresh_generation_and_only_hydrates() {
         StampedInput {
             generation: ConnectionGeneration::new(2),
             epoch,
+            observed_at: Instant::now(),
             input: RuntimeInput::Connected { recovery: true },
         },
     );
@@ -1360,6 +1561,7 @@ fn uncertain_prompt_is_never_resent_on_reconnect() {
         StampedInput {
             generation: ConnectionGeneration::new(2),
             epoch,
+            observed_at: Instant::now(),
             input: RuntimeInput::Connected { recovery: true },
         },
     );

@@ -17,6 +17,9 @@ use crate::state::runtime::{
     RetryState, RuntimeLifecycle, RuntimeMessage, SubmissionKind,
 };
 use crate::theme;
+use crate::views::tool_card::{
+    ToolCard, bash_message_key, has_tool_call, standalone_result_key, tail_card_keys, tool_key,
+};
 
 const FOLLOW_THRESHOLD: Pixels = px(72.0);
 
@@ -253,16 +256,10 @@ pub(super) fn text_fragments(projection: &ConversationProjection) -> Vec<(String
                 | MessageBlock::Summary { text, .. }
                 | MessageBlock::Custom { text, .. } => Some(text.clone()),
                 MessageBlock::Thinking { text, redacted, .. } => (!redacted).then(|| text.clone()),
-                MessageBlock::ToolResult { content, .. } => Some(content.clone()),
-                MessageBlock::Bash {
-                    command, output, ..
-                } => Some(if output.is_empty() {
-                    command.clone()
-                } else {
-                    format!("{command}\n{output}")
-                }),
                 MessageBlock::Image { .. }
                 | MessageBlock::ToolCall { .. }
+                | MessageBlock::ToolResult { .. }
+                | MessageBlock::Bash { .. }
                 | MessageBlock::Unsupported { .. } => None,
             };
             if let Some(text) = text {
@@ -282,6 +279,7 @@ pub(super) fn text_fragments(projection: &ConversationProjection) -> Vec<(String
 pub(super) fn stream(
     projection: &ConversationProjection,
     texts: &HashMap<String, Entity<TranscriptText>>,
+    tool_cards: &HashMap<String, Entity<ToolCard>>,
 ) -> impl IntoElement {
     let segments = segment_messages(&projection.messages);
     let turn_count = segments
@@ -325,12 +323,14 @@ pub(super) fn stream(
                 ),
         )
         .children(segments.into_iter().map(|segment| match segment {
-            Segment::Preamble(message) => preamble(message, texts),
+            Segment::Preamble(message) => preamble(message, projection, texts, tool_cards),
             Segment::Turn {
                 index,
                 user,
                 messages,
-            } => turn_card(index, user, &messages, texts).into_any_element(),
+            } => {
+                turn_card(index, user, &messages, projection, texts, tool_cards).into_any_element()
+            }
         }))
         .children(
             projection
@@ -346,6 +346,17 @@ pub(super) fn stream(
                     .into_any_element()
                 }),
         )
+        .children(tail_card_keys(projection).into_iter().filter_map(|key| {
+            tool_cards.get(&key).cloned().map(|card| {
+                div()
+                    .w_full()
+                    .px(px(18.0))
+                    .py(px(8.0))
+                    .bg(theme::floor())
+                    .child(card)
+                    .into_any_element()
+            })
+        }))
         .children(notices(projection))
         .when(
             projection.messages.is_empty()
@@ -396,7 +407,9 @@ fn turn_card(
     index: usize,
     user: &RuntimeMessage,
     messages: &[&RuntimeMessage],
+    projection: &ConversationProjection,
     texts: &HashMap<String, Entity<TranscriptText>>,
+    tool_cards: &HashMap<String, Entity<ToolCard>>,
 ) -> impl IntoElement {
     div()
         .id(SharedString::from(format!("turn-{}", user.key.0)))
@@ -408,14 +421,18 @@ fn turn_card(
         .bg(theme::floor())
         .border_1()
         .border_color(theme::edge_soft())
-        .child(user_prompt(index, user, texts, false))
+        .child(user_prompt(
+            index, user, projection, texts, tool_cards, false,
+        ))
         .children(messages.iter().map(|message| match message.role {
-            MessageRole::Assistant => assistant_message(message, texts),
-            MessageRole::ToolResult | MessageRole::BashExecution => work_message(message, texts),
+            MessageRole::Assistant => assistant_message(message, projection, texts, tool_cards),
+            MessageRole::ToolResult | MessageRole::BashExecution => {
+                work_message(message, projection, texts, tool_cards)
+            }
             MessageRole::Custom
             | MessageRole::BranchSummary
             | MessageRole::CompactionSummary
-            | MessageRole::Unknown => activity_message(message, texts),
+            | MessageRole::Unknown => activity_message(message, projection, texts, tool_cards),
             MessageRole::User => div().into_any_element(),
         }))
 }
@@ -465,7 +482,9 @@ fn optimistic_turn(
 fn user_prompt(
     index: usize,
     message: &RuntimeMessage,
+    projection: &ConversationProjection,
     texts: &HashMap<String, Entity<TranscriptText>>,
+    tool_cards: &HashMap<String, Entity<ToolCard>>,
     optimistic: bool,
 ) -> impl IntoElement {
     div()
@@ -488,12 +507,16 @@ fn user_prompt(
             },
             theme::signal(),
         ))
-        .children(
-            message
-                .content
-                .iter()
-                .map(|block| message_block(message, block, texts, BlockPlacement::Prompt)),
-        )
+        .children(message.content.iter().map(|block| {
+            message_block(
+                message,
+                block,
+                projection,
+                texts,
+                tool_cards,
+                BlockPlacement::Prompt,
+            )
+        }))
 }
 
 fn prompt_header(
@@ -543,7 +566,9 @@ fn prompt_header(
 
 fn assistant_message(
     message: &RuntimeMessage,
+    projection: &ConversationProjection,
     texts: &HashMap<String, Entity<TranscriptText>>,
+    tool_cards: &HashMap<String, Entity<ToolCard>>,
 ) -> AnyElement {
     let metadata = assistant_metadata(message);
     div()
@@ -585,12 +610,16 @@ fn assistant_message(
                         .child(metadata),
                 ),
         )
-        .children(
-            message
-                .content
-                .iter()
-                .map(|block| message_block(message, block, texts, BlockPlacement::Reply)),
-        )
+        .children(message.content.iter().map(|block| {
+            message_block(
+                message,
+                block,
+                projection,
+                texts,
+                tool_cards,
+                BlockPlacement::Reply,
+            )
+        }))
         .when_some(message.error.clone(), |reply, error| {
             reply.child(error_text(error))
         })
@@ -609,8 +638,17 @@ fn assistant_message(
 
 fn work_message(
     message: &RuntimeMessage,
+    projection: &ConversationProjection,
     texts: &HashMap<String, Entity<TranscriptText>>,
+    tool_cards: &HashMap<String, Entity<ToolCard>>,
 ) -> AnyElement {
+    if !message.content.is_empty()
+        && message.content.iter().all(|block| {
+            matches!(block, MessageBlock::ToolResult { id, .. } if has_tool_call(projection, id))
+        })
+    {
+        return div().into_any_element();
+    }
     div()
         .id(SharedString::from(format!("message-{}", message.key.0)))
         .w_full()
@@ -619,18 +657,24 @@ fn work_message(
         .bg(theme::floor())
         .border_t_1()
         .border_color(theme::edge_soft())
-        .children(
-            message
-                .content
-                .iter()
-                .map(|block| message_block(message, block, texts, BlockPlacement::Work)),
-        )
+        .children(message.content.iter().map(|block| {
+            message_block(
+                message,
+                block,
+                projection,
+                texts,
+                tool_cards,
+                BlockPlacement::Work,
+            )
+        }))
         .into_any_element()
 }
 
 fn activity_message(
     message: &RuntimeMessage,
+    projection: &ConversationProjection,
     texts: &HashMap<String, Entity<TranscriptText>>,
+    tool_cards: &HashMap<String, Entity<ToolCard>>,
 ) -> AnyElement {
     div()
         .id(SharedString::from(format!("message-{}", message.key.0)))
@@ -640,26 +684,34 @@ fn activity_message(
         .bg(theme::floor())
         .border_t_1()
         .border_color(theme::edge_soft())
-        .children(
-            message
-                .content
-                .iter()
-                .map(|block| message_block(message, block, texts, BlockPlacement::Activity)),
-        )
+        .children(message.content.iter().map(|block| {
+            message_block(
+                message,
+                block,
+                projection,
+                texts,
+                tool_cards,
+                BlockPlacement::Activity,
+            )
+        }))
         .into_any_element()
 }
 
 fn preamble(
     message: &RuntimeMessage,
+    projection: &ConversationProjection,
     texts: &HashMap<String, Entity<TranscriptText>>,
+    tool_cards: &HashMap<String, Entity<ToolCard>>,
 ) -> AnyElement {
     match message.role {
-        MessageRole::Assistant => assistant_message(message, texts),
-        MessageRole::ToolResult | MessageRole::BashExecution => work_message(message, texts),
+        MessageRole::Assistant => assistant_message(message, projection, texts, tool_cards),
+        MessageRole::ToolResult | MessageRole::BashExecution => {
+            work_message(message, projection, texts, tool_cards)
+        }
         MessageRole::Custom
         | MessageRole::BranchSummary
         | MessageRole::CompactionSummary
-        | MessageRole::Unknown => activity_message(message, texts),
+        | MessageRole::Unknown => activity_message(message, projection, texts, tool_cards),
         MessageRole::User => div().into_any_element(),
     }
 }
@@ -675,7 +727,9 @@ enum BlockPlacement {
 fn message_block(
     message: &RuntimeMessage,
     block: &MessageBlock,
+    projection: &ConversationProjection,
     texts: &HashMap<String, Entity<TranscriptText>>,
+    tool_cards: &HashMap<String, Entity<ToolCard>>,
     placement: BlockPlacement,
 ) -> AnyElement {
     let key = fragment_key(message, block);
@@ -727,43 +781,27 @@ fn message_block(
             ))
             .into_any_element(),
         MessageBlock::Image { mime_type, .. } => compact_label(format!("Image · {mime_type}")),
-        MessageBlock::ToolCall { name, .. } => compact_label(format!("Tool call · {name}")),
-        MessageBlock::ToolResult { name, is_error, .. } => div()
-            .flex()
-            .flex_col()
-            .gap(px(6.0))
-            .child(compact_label(if *is_error {
-                format!("Tool result · {name} · error")
+        MessageBlock::ToolCall { id, .. } => tool_cards
+            .get(&tool_key(id))
+            .cloned()
+            .map(IntoElement::into_any_element)
+            .unwrap_or_else(|| compact_label("Tool call unavailable".to_owned())),
+        MessageBlock::ToolResult { id, .. } => {
+            if has_tool_call(projection, id) {
+                div().into_any_element()
             } else {
-                format!("Tool result · {name}")
-            }))
-            .child(selectable(
-                &key,
-                texts,
-                theme::MONO,
-                theme::T_MONO_SM,
-                theme::ash(),
-                FontWeight::NORMAL,
-            ))
-            .into_any_element(),
-        MessageBlock::Bash { cancelled, .. } => div()
-            .flex()
-            .flex_col()
-            .gap(px(6.0))
-            .child(compact_label(if *cancelled {
-                "Bash · cancelled".to_owned()
-            } else {
-                "Bash".to_owned()
-            }))
-            .child(selectable(
-                &key,
-                texts,
-                theme::MONO,
-                theme::T_MONO_SM,
-                theme::ash(),
-                FontWeight::NORMAL,
-            ))
-            .into_any_element(),
+                tool_cards
+                    .get(&standalone_result_key(&message.key.0, id))
+                    .cloned()
+                    .map(IntoElement::into_any_element)
+                    .unwrap_or_else(|| compact_label("Tool result unavailable".to_owned()))
+            }
+        }
+        MessageBlock::Bash { .. } => tool_cards
+            .get(&bash_message_key(&message.key.0))
+            .cloned()
+            .map(IntoElement::into_any_element)
+            .unwrap_or_else(|| compact_label("Bash result unavailable".to_owned())),
         MessageBlock::Summary { .. } => div()
             .flex()
             .flex_col()

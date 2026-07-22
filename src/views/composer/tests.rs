@@ -95,6 +95,22 @@ fn composer_actions_route_send_newline_follow_up_and_abort(cx: &mut TestAppConte
 }
 
 #[gpui::test]
+fn escape_routes_bash_abort_separately_from_agent_abort(cx: &mut TestAppContext) {
+    cx.update(|cx| cx.bind_keys(composer_key_bindings()));
+    let (harness, cx) = cx.add_window_view(ComposerHarness::new);
+    let composer = harness.read_with(cx, |harness, _| harness.composer.clone());
+    composer.update(cx, |composer, cx| {
+        composer.set_availability(ComposerAvailability::BashRunning, cx)
+    });
+
+    cx.simulate_keystrokes("escape");
+    assert_eq!(
+        harness.read_with(cx, |harness, _| harness.events.borrow().clone()),
+        vec![ComposerEvent::AbortBash]
+    );
+}
+
+#[gpui::test]
 fn composer_input_is_grapheme_safe_and_supports_clipboard_undo(cx: &mut TestAppContext) {
     cx.update(|cx| cx.bind_keys(composer_key_bindings()));
     let (harness, cx) = cx.add_window_view(ComposerHarness::new);

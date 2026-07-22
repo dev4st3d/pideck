@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::time::Instant;
 
 use serde_json::Value;
 
@@ -230,6 +231,7 @@ pub enum MessageBlock {
     Image {
         key: BlockKey,
         mime_type: String,
+        data: Option<String>,
     },
     ToolCall {
         key: BlockKey,
@@ -242,13 +244,19 @@ pub enum MessageBlock {
         id: ToolCallId,
         name: String,
         content: String,
+        images: Vec<ToolImage>,
+        details: Option<Value>,
         is_error: bool,
     },
     Bash {
         key: BlockKey,
         command: String,
         output: String,
+        exit_code: Option<i32>,
         cancelled: bool,
+        truncated: bool,
+        full_output_path: Option<String>,
+        exclude_from_context: bool,
     },
     Summary {
         key: BlockKey,
@@ -279,6 +287,12 @@ impl MessageBlock {
             | Self::Unsupported { key, .. } => key,
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolImage {
+    pub data: String,
+    pub mime_type: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -363,6 +377,19 @@ pub struct ToolExecution {
     pub arguments: Value,
     pub result: Option<Value>,
     pub status: ToolStatus,
+    pub authoritative_end: bool,
+    pub sequence: u64,
+    pub started_at: Instant,
+    pub finished_at: Option<Instant>,
+}
+
+impl ToolExecution {
+    pub fn elapsed_ms(&self) -> u128 {
+        self.finished_at
+            .unwrap_or_else(Instant::now)
+            .saturating_duration_since(self.started_at)
+            .as_millis()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -372,6 +399,64 @@ pub enum ToolStatus {
     Succeeded,
     Failed,
     Cancelled,
+}
+
+impl ToolStatus {
+    pub fn is_terminal(self) -> bool {
+        matches!(self, Self::Succeeded | Self::Failed | Self::Cancelled)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BashExecution {
+    pub request: RequestId,
+    pub command: String,
+    pub exclude_from_context: bool,
+    pub output: String,
+    pub exit_code: Option<i32>,
+    pub cancelled: bool,
+    pub truncated: bool,
+    pub full_output_path: Option<String>,
+    pub status: BashStatus,
+    pub started_at: Instant,
+    pub finished_at: Option<Instant>,
+    pub reconciled: bool,
+    pub baseline: HashSet<MessageKey>,
+    pub error: Option<String>,
+}
+
+impl BashExecution {
+    pub fn elapsed_ms(&self) -> u128 {
+        self.finished_at
+            .unwrap_or_else(Instant::now)
+            .saturating_duration_since(self.started_at)
+            .as_millis()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BashStatus {
+    Running,
+    Cancelling,
+    Succeeded,
+    Failed,
+    Cancelled,
+    Uncertain,
+}
+
+impl BashStatus {
+    pub fn is_active(self) -> bool {
+        matches!(self, Self::Running | Self::Cancelling)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DirectBashResult {
+    pub output: String,
+    pub exit_code: Option<i32>,
+    pub cancelled: bool,
+    pub truncated: bool,
+    pub full_output_path: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -548,6 +633,7 @@ pub struct RuntimeState {
     pub models: Facet<Vec<ModelSummary>>,
     pub tree: Facet<Vec<RuntimeTreeNode>>,
     pub tools: HashMap<ToolCallId, ToolExecution>,
+    pub bash_executions: Vec<BashExecution>,
     pub queue: QueueContents,
     pub retry: RetryState,
     pub compaction: CompactionState,
@@ -573,6 +659,7 @@ pub struct RuntimeState {
     pub incremental_fallback_used: bool,
     pub revision: u64,
     pub next_request: u64,
+    pub next_tool_sequence: u64,
 }
 
 impl RuntimeState {
@@ -589,6 +676,7 @@ impl RuntimeState {
             models: Facet::default(),
             tree: Facet::default(),
             tools: HashMap::new(),
+            bash_executions: Vec::new(),
             queue: QueueContents::default(),
             retry: RetryState::Idle,
             compaction: CompactionState::Idle,
@@ -614,6 +702,7 @@ impl RuntimeState {
             incremental_fallback_used: false,
             revision: 0,
             next_request: 1,
+            next_tool_sequence: 1,
         }
     }
 
@@ -657,6 +746,7 @@ pub(crate) fn push_bounded<T>(values: &mut VecDeque<T>, value: T, capacity: usiz
 pub struct StampedInput {
     pub generation: ConnectionGeneration,
     pub epoch: SessionEpoch,
+    pub observed_at: Instant,
     pub input: RuntimeInput,
 }
 
@@ -683,7 +773,13 @@ pub enum RuntimeIntent {
         text: String,
         kind: SubmissionKind,
     },
+    ExecuteBash {
+        request: RequestId,
+        command: String,
+        exclude_from_context: bool,
+    },
     Abort,
+    AbortBash,
     AbortRetry,
     ReplaceSession(SessionMutation),
     AnswerDialog {
@@ -721,7 +817,13 @@ pub enum RuntimeRequest {
         text: String,
         kind: SubmissionKind,
     },
+    ExecuteBash {
+        request: RequestId,
+        command: String,
+        exclude_from_context: bool,
+    },
     Abort,
+    AbortBash,
     AbortRetry,
     SessionMutation(SessionMutation),
 }
@@ -742,6 +844,7 @@ pub enum NormalizedResponse {
         leaf_id: Option<EntryId>,
     },
     Accepted,
+    Bash(DirectBashResult),
     SessionMutation {
         cancelled: bool,
     },
@@ -871,4 +974,17 @@ pub enum EffectKind {
         request: RequestId,
         answer: DialogAnswer,
     },
+}
+
+pub fn sanitize_untrusted_text(value: &str) -> String {
+    value
+        .chars()
+        .map(|character| match character {
+            '\n' | '\t' => character,
+            '\r' => '\n',
+            '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}' => '\u{fffd}',
+            character if character.is_control() => '\u{fffd}',
+            character => character,
+        })
+        .collect()
 }

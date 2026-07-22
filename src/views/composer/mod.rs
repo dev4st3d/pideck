@@ -29,6 +29,8 @@ pub enum ComposerAvailability {
     Idle,
     Running,
     Cancelling,
+    BashRunning,
+    BashCancelling,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -36,6 +38,8 @@ pub enum ComposerFeedback {
     Ready,
     Pending(SubmissionKind),
     Accepted(SubmissionKind),
+    BashRunning { exclude_from_context: bool },
+    BashCompleted,
     Rejected(String),
     Uncertain,
 }
@@ -45,6 +49,7 @@ pub enum ComposerEvent {
     Accept { text: String },
     FollowUp { text: String },
     Abort,
+    AbortBash,
 }
 
 pub struct Composer {
@@ -104,6 +109,25 @@ impl Composer {
         cx.notify();
     }
 
+    pub fn clear_bash_accepted(
+        &mut self,
+        expected_draft: &str,
+        exclude_from_context: bool,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let cleared = self.buffer.clear_if_matches(expected_draft);
+        self.feedback = ComposerFeedback::BashRunning {
+            exclude_from_context,
+        };
+        self.update_disabled();
+        if cleared {
+            self.after_edit(cx);
+        } else {
+            cx.notify();
+        }
+        cleared
+    }
+
     pub fn clear_accepted(
         &mut self,
         expected_draft: &str,
@@ -124,8 +148,14 @@ impl Composer {
     fn update_disabled(&mut self) {
         self.disabled = matches!(
             self.availability,
-            ComposerAvailability::Unavailable | ComposerAvailability::Cancelling
-        ) || matches!(self.feedback, ComposerFeedback::Pending(_));
+            ComposerAvailability::Unavailable
+                | ComposerAvailability::Cancelling
+                | ComposerAvailability::BashRunning
+                | ComposerAvailability::BashCancelling
+        ) || matches!(
+            self.feedback,
+            ComposerFeedback::Pending(_) | ComposerFeedback::BashRunning { .. }
+        );
     }
 
     fn backspace(&mut self, _: &ComposerBackspace, window: &mut Window, cx: &mut Context<Self>) {
@@ -293,11 +323,14 @@ impl Composer {
     }
 
     fn abort(&mut self, _: &AbortRun, _: &mut Window, cx: &mut Context<Self>) {
-        if matches!(
-            self.availability,
-            ComposerAvailability::Running | ComposerAvailability::Cancelling
-        ) {
-            cx.emit(ComposerEvent::Abort);
+        match self.availability {
+            ComposerAvailability::Running | ComposerAvailability::Cancelling => {
+                cx.emit(ComposerEvent::Abort);
+            }
+            ComposerAvailability::BashRunning | ComposerAvailability::BashCancelling => {
+                cx.emit(ComposerEvent::AbortBash);
+            }
+            ComposerAvailability::Unavailable | ComposerAvailability::Idle => {}
         }
     }
 
@@ -454,6 +487,13 @@ impl Composer {
                 "Steering input accepted.".to_owned()
             }
             ComposerFeedback::Accepted(SubmissionKind::FollowUp) => "Follow-up queued.".to_owned(),
+            ComposerFeedback::BashRunning {
+                exclude_from_context: true,
+            } => "Bash is running outside model context.".to_owned(),
+            ComposerFeedback::BashRunning {
+                exclude_from_context: false,
+            } => "Bash is running.".to_owned(),
+            ComposerFeedback::BashCompleted => "Bash finished.".to_owned(),
             ComposerFeedback::Rejected(summary) => summary.clone(),
             ComposerFeedback::Uncertain => {
                 "Delivery is uncertain. The draft was kept; reconnect before retrying.".to_owned()
@@ -465,6 +505,8 @@ impl Composer {
                     "Pi is running. Steer or queue a follow-up.".to_owned()
                 }
                 ComposerAvailability::Cancelling => "Waiting for Pi to settle…".to_owned(),
+                ComposerAvailability::BashRunning => "Bash is running.".to_owned(),
+                ComposerAvailability::BashCancelling => "Cancelling Bash…".to_owned(),
             },
         }
     }
@@ -475,6 +517,8 @@ impl Composer {
                 "Enter steer · Alt+Enter follow up · Shift+Enter newline · Esc abort"
             }
             ComposerAvailability::Idle => "Enter send · Shift+Enter newline",
+            ComposerAvailability::BashRunning => "Esc aborts Bash only",
+            ComposerAvailability::BashCancelling => "Waiting for Bash to stop",
             ComposerAvailability::Unavailable | ComposerAvailability::Cancelling => {
                 "Draft stays on this device"
             }

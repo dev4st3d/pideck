@@ -107,7 +107,7 @@ impl RpcRuntimeService {
             SessionLaunch::Ephemeral,
             ResourcePolicy::disabled(),
         );
-        config.disable_tools = true;
+        config.disable_tools = false;
         config.offline = false;
         Self::new(config)
     }

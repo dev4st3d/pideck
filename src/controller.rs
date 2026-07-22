@@ -1,6 +1,8 @@
 //! GPUI-owned runtime controller and its pure generation gate.
 
+use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Instant;
 
 use gpui::{Context, Task};
 
@@ -10,8 +12,9 @@ use crate::services::runtime_worker::{
 };
 use crate::state::reducer::reduce;
 use crate::state::runtime::{
-    CompactionState, FacetStatus, PromptDelivery, RetryState, RuntimeInput, RuntimeIntent,
-    RuntimeLifecycle, RuntimeMessage, RuntimeState, SafeError, StampedInput, SubmissionKind,
+    BashExecution, BashStatus, CompactionState, FacetStatus, PromptDelivery, RetryState,
+    RuntimeInput, RuntimeIntent, RuntimeLifecycle, RuntimeMessage, RuntimeState, SafeError,
+    StampedInput, SubmissionKind, ToolExecution,
 };
 use crate::state::{ControllerStatus, ShellProjection};
 
@@ -27,6 +30,8 @@ pub enum ComposerRuntime {
     Idle,
     Running,
     Cancelling,
+    BashRunning,
+    BashCancelling,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,6 +55,8 @@ pub struct ConversationProjection {
     pub status: FacetStatus,
     pub messages: Vec<RuntimeMessage>,
     pub accepted_user_inputs: Vec<AcceptedUserInput>,
+    pub tools: HashMap<crate::services::rpc::ToolCallId, ToolExecution>,
+    pub bash_executions: Vec<BashExecution>,
     pub retry: RetryState,
     pub compaction: CompactionState,
     pub error: Option<SafeError>,
@@ -58,13 +65,21 @@ pub struct ConversationProjection {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AcceptedSubmission {
     pub request: RequestId,
-    pub kind: SubmissionKind,
+    pub kind: AcceptedSubmissionKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AcceptedSubmissionKind {
+    Prompt(SubmissionKind),
+    Bash { exclude_from_context: bool },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SubmissionRejection {
     Empty,
+    EmptyBash,
     Pending,
+    BashRunning,
     Unavailable,
     NotRunning,
 }
@@ -73,7 +88,9 @@ impl SubmissionRejection {
     pub fn message(self) -> &'static str {
         match self {
             Self::Empty => "Write a prompt first.",
+            Self::EmptyBash => "Write a Bash command after ! or !!.",
             Self::Pending => "The previous acceptance is still pending.",
+            Self::BashRunning => "A Bash command is already running.",
             Self::Unavailable => "Pi is not ready. The draft was kept.",
             Self::NotRunning => "Follow-ups can be queued while Pi is running.",
         }
@@ -182,6 +199,7 @@ impl ControllerCore {
                     StampedInput {
                         generation,
                         epoch,
+                        observed_at: Instant::now(),
                         input: RuntimeInput::Connected {
                             recovery: generation.value() > 1,
                         },
@@ -230,7 +248,20 @@ impl ControllerCore {
             .as_ref()
             .and_then(|session| session.model.as_ref())
             .is_some();
-        let runtime = if self.status != ControllerStatus::Active || !has_model {
+        let bash_status = self
+            .runtime
+            .bash_executions
+            .iter()
+            .rev()
+            .find(|execution| execution.status.is_active())
+            .map(|execution| execution.status);
+        let runtime = if self.status != ControllerStatus::Active {
+            ComposerRuntime::Unavailable
+        } else if bash_status == Some(BashStatus::Cancelling) {
+            ComposerRuntime::BashCancelling
+        } else if bash_status == Some(BashStatus::Running) {
+            ComposerRuntime::BashRunning
+        } else if !has_model {
             ComposerRuntime::Unavailable
         } else {
             match self.runtime.lifecycle {
@@ -293,6 +324,16 @@ impl ControllerCore {
                     kind: input.kind,
                 })
                 .collect(),
+            tools: if self.runtime.replacement_awaiting_state {
+                HashMap::new()
+            } else {
+                self.runtime.tools.clone()
+            },
+            bash_executions: if self.runtime.replacement_awaiting_state {
+                Vec::new()
+            } else {
+                self.runtime.bash_executions.clone()
+            },
             retry: self.runtime.retry.clone(),
             compaction: self.runtime.compaction.clone(),
             error,
@@ -313,6 +354,47 @@ impl ControllerCore {
         if text.trim().is_empty() {
             return Err(SubmissionRejection::Empty);
         }
+        if let Some(parsed) = parse_bash_submission(&text) {
+            let (command, exclude_from_context) = parsed?;
+            if self.status != ControllerStatus::Active {
+                return Err(SubmissionRejection::Unavailable);
+            }
+            if self
+                .runtime
+                .bash_executions
+                .iter()
+                .any(|execution| execution.status.is_active())
+            {
+                return Err(SubmissionRejection::BashRunning);
+            }
+            let request = self.next_composer_request("bash");
+            let epoch = self.runtime.epoch;
+            let effects = reduce(
+                &mut self.runtime,
+                StampedInput {
+                    generation: self.generation,
+                    epoch,
+                    observed_at: Instant::now(),
+                    input: RuntimeInput::Intent(RuntimeIntent::ExecuteBash {
+                        request: request.clone(),
+                        command,
+                        exclude_from_context,
+                    }),
+                },
+            );
+            if effects.is_empty() {
+                return Err(SubmissionRejection::Unavailable);
+            }
+            return Ok((
+                AcceptedSubmission {
+                    request,
+                    kind: AcceptedSubmissionKind::Bash {
+                        exclude_from_context,
+                    },
+                },
+                effects,
+            ));
+        }
         if matches!(self.runtime.prompt_delivery, PromptDelivery::Pending { .. }) {
             return Err(SubmissionRejection::Pending);
         }
@@ -324,19 +406,14 @@ impl ControllerCore {
             (_, SubmissionPreference::FollowUp) => return Err(SubmissionRejection::NotRunning),
             _ => return Err(SubmissionRejection::Unavailable),
         };
-        let request = RequestId::new(format!(
-            "composer-{}-{}-{}",
-            self.generation.value(),
-            self.runtime.epoch.value(),
-            self.next_submission
-        ));
-        self.next_submission = self.next_submission.saturating_add(1);
+        let request = self.next_composer_request("composer");
         let epoch = self.runtime.epoch;
         let effects = reduce(
             &mut self.runtime,
             StampedInput {
                 generation: self.generation,
                 epoch,
+                observed_at: Instant::now(),
                 input: RuntimeInput::Intent(RuntimeIntent::Submit {
                     request: request.clone(),
                     text,
@@ -347,7 +424,24 @@ impl ControllerCore {
         if effects.is_empty() {
             return Err(SubmissionRejection::Unavailable);
         }
-        Ok((AcceptedSubmission { request, kind }, effects))
+        Ok((
+            AcceptedSubmission {
+                request,
+                kind: AcceptedSubmissionKind::Prompt(kind),
+            },
+            effects,
+        ))
+    }
+
+    fn next_composer_request(&mut self, prefix: &str) -> RequestId {
+        let request = RequestId::new(format!(
+            "{prefix}-{}-{}-{}",
+            self.generation.value(),
+            self.runtime.epoch.value(),
+            self.next_submission
+        ));
+        self.next_submission = self.next_submission.saturating_add(1);
+        request
     }
 
     pub fn abort(&mut self) -> Vec<crate::state::runtime::RuntimeEffect> {
@@ -360,9 +454,41 @@ impl ControllerCore {
             StampedInput {
                 generation: self.generation,
                 epoch,
+                observed_at: Instant::now(),
                 input: RuntimeInput::Intent(RuntimeIntent::Abort),
             },
         )
+    }
+
+    pub fn abort_bash(&mut self) -> Vec<crate::state::runtime::RuntimeEffect> {
+        if self.composer_projection().runtime != ComposerRuntime::BashRunning {
+            return Vec::new();
+        }
+        let epoch = self.runtime.epoch;
+        reduce(
+            &mut self.runtime,
+            StampedInput {
+                generation: self.generation,
+                epoch,
+                observed_at: Instant::now(),
+                input: RuntimeInput::Intent(RuntimeIntent::AbortBash),
+            },
+        )
+    }
+}
+
+fn parse_bash_submission(text: &str) -> Option<Result<(String, bool), SubmissionRejection>> {
+    let (remainder, exclude_from_context) = if let Some(command) = text.strip_prefix("!!") {
+        (command, true)
+    } else {
+        let command = text.strip_prefix('!')?;
+        (command, false)
+    };
+    let command = remainder.strip_prefix(' ').unwrap_or(remainder);
+    if command.trim().is_empty() {
+        Some(Err(SubmissionRejection::EmptyBash))
+    } else {
+        Some(Ok((command.to_owned(), exclude_from_context)))
     }
 }
 
@@ -424,6 +550,16 @@ impl RuntimeController {
 
     pub fn abort(&mut self, cx: &mut Context<Self>) -> bool {
         let effects = self.core.abort();
+        if effects.is_empty() {
+            return false;
+        }
+        self.send_effects(effects);
+        cx.notify();
+        true
+    }
+
+    pub fn abort_bash(&mut self, cx: &mut Context<Self>) -> bool {
+        let effects = self.core.abort_bash();
         if effects.is_empty() {
             return false;
         }
@@ -563,6 +699,7 @@ mod tests {
             input: Box::new(StampedInput {
                 generation: ConnectionGeneration::default(),
                 epoch: crate::services::rpc::SessionEpoch::default(),
+                observed_at: Instant::now(),
                 input: RuntimeInput::Disconnected {
                     error: crate::state::runtime::SafeError::new(
                         crate::state::runtime::ErrorKind::Disconnected,
@@ -624,6 +761,7 @@ mod tests {
             StampedInput {
                 generation: core.generation,
                 epoch,
+                observed_at: Instant::now(),
                 input: RuntimeInput::Response {
                     request,
                     result: Ok(crate::state::runtime::NormalizedResponse::Accepted),
@@ -640,7 +778,10 @@ mod tests {
         let (prompt, effects) = core
             .submit("First".to_owned(), SubmissionPreference::Default)
             .expect("prompt");
-        assert_eq!(prompt.kind, SubmissionKind::Prompt);
+        assert_eq!(
+            prompt.kind,
+            AcceptedSubmissionKind::Prompt(SubmissionKind::Prompt)
+        );
         let EffectKind::Request(prompt_request) = effects[0].effect.clone() else {
             panic!("expected request");
         };
@@ -661,7 +802,10 @@ mod tests {
         let (steer, effects) = core
             .submit("Adjust".to_owned(), SubmissionPreference::Default)
             .expect("steer");
-        assert_eq!(steer.kind, SubmissionKind::Steer);
+        assert_eq!(
+            steer.kind,
+            AcceptedSubmissionKind::Prompt(SubmissionKind::Steer)
+        );
         let EffectKind::Request(steer_request) = effects[0].effect.clone() else {
             panic!("expected request");
         };
@@ -670,7 +814,10 @@ mod tests {
         let (follow_up, effects) = core
             .submit("Then verify".to_owned(), SubmissionPreference::FollowUp)
             .expect("follow-up");
-        assert_eq!(follow_up.kind, SubmissionKind::FollowUp);
+        assert_eq!(
+            follow_up.kind,
+            AcceptedSubmissionKind::Prompt(SubmissionKind::FollowUp)
+        );
         assert!(matches!(
             effects[0].effect,
             EffectKind::Request(RuntimeRequest::Submit {
@@ -678,6 +825,65 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn controller_routes_bang_commands_to_direct_bash_with_exclusion_semantics() {
+        use crate::state::runtime::{EffectKind, RuntimeRequest};
+
+        let mut core = ready_core();
+        let (included, effects) = core
+            .submit("!printf 'a b'\n".to_owned(), SubmissionPreference::Default)
+            .expect("included bash");
+        assert_eq!(
+            included.kind,
+            AcceptedSubmissionKind::Bash {
+                exclude_from_context: false
+            }
+        );
+        assert!(matches!(
+            &effects[0].effect,
+            EffectKind::Request(RuntimeRequest::ExecuteBash {
+                command,
+                exclude_from_context: false,
+                ..
+            }) if command == "printf 'a b'\n"
+        ));
+        assert!(matches!(
+            crate::services::rpc::dispatch_for_effect(&effects[0]),
+            crate::services::rpc::RpcDispatch::Command(crate::services::rpc::Command::Bash {
+                command,
+                exclude_from_context: Some(false),
+            }) if command == "printf 'a b'\n"
+        ));
+        assert_eq!(
+            core.submit("!!echo later".to_owned(), SubmissionPreference::Default),
+            Err(SubmissionRejection::BashRunning)
+        );
+
+        let mut core = ready_core();
+        let (excluded, effects) = core
+            .submit("!! cargo test".to_owned(), SubmissionPreference::Default)
+            .expect("excluded bash");
+        assert_eq!(
+            excluded.kind,
+            AcceptedSubmissionKind::Bash {
+                exclude_from_context: true
+            }
+        );
+        assert!(matches!(
+            &effects[0].effect,
+            EffectKind::Request(RuntimeRequest::ExecuteBash {
+                command,
+                exclude_from_context: true,
+                ..
+            }) if command == "cargo test"
+        ));
+        assert_eq!(
+            parse_bash_submission("!!   "),
+            Some(Err(SubmissionRejection::EmptyBash))
+        );
+        assert!(parse_bash_submission("ordinary prompt").is_none());
     }
 
     #[test]
@@ -729,6 +935,7 @@ mod tests {
             StampedInput {
                 generation: core.generation,
                 epoch,
+                observed_at: Instant::now(),
                 input: RuntimeInput::Disconnected {
                     error: crate::state::runtime::SafeError::new(
                         crate::state::runtime::ErrorKind::Disconnected,

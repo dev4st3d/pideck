@@ -1,3 +1,5 @@
+use std::time::Instant;
+
 use serde_json::Value;
 
 use super::{
@@ -10,13 +12,13 @@ use super::{
 };
 use crate::state::runtime::{
     AssistantMetadata, BlockKey, CommandSource, CompactionKind, DialogAnswer, DialogRequest,
-    EffectKind, EntryKind, ErrorKind, ExtensionFailure, ExtensionStatus, ExtensionWidget,
-    MessageBlock, MessageKey, MessageRole, MessageStopReason, MessageUsage, ModelSummary,
-    NormalizedEvent, NormalizedResponse, NormalizedSessionState, NotificationKind,
+    DirectBashResult, EffectKind, EntryKind, ErrorKind, ExtensionFailure, ExtensionStatus,
+    ExtensionWidget, MessageBlock, MessageKey, MessageRole, MessageStopReason, MessageUsage,
+    ModelSummary, NormalizedEvent, NormalizedResponse, NormalizedSessionState, NotificationKind,
     QueueDeliveryMode, RequestFailure, RequestFailureKind, RuntimeCommand, RuntimeEffect,
     RuntimeEntry, RuntimeInput, RuntimeMessage, RuntimeNotification, RuntimeRequest, RuntimeStats,
     RuntimeThinkingLevel, RuntimeTreeNode, SafeError, SessionMutation, SessionSnapshot,
-    StampedInput, SubmissionKind, WidgetPlacement,
+    StampedInput, SubmissionKind, ToolImage, WidgetPlacement,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -57,6 +59,7 @@ pub fn normalize_call_result(
     Some(StampedInput {
         generation: effect.generation,
         epoch: effect.epoch,
+        observed_at: Instant::now(),
         input: RuntimeInput::Response {
             request: request.clone(),
             result,
@@ -82,6 +85,7 @@ pub fn normalize_tagged_record(
     Some(StampedInput {
         generation: tagged.generation,
         epoch,
+        observed_at: Instant::now(),
         input: RuntimeInput::Event(event),
     })
 }
@@ -90,6 +94,7 @@ pub fn disconnected_input(error: RpcClientError, epoch: SessionEpoch) -> Stamped
     StampedInput {
         generation: error.generation,
         epoch,
+        observed_at: Instant::now(),
         input: RuntimeInput::Disconnected {
             error: SafeError::new(error_kind(error.kind), connection_summary(error.kind)),
         },
@@ -122,7 +127,16 @@ fn command_for_request(request: &RuntimeRequest) -> Command {
                 images: None,
             },
         },
+        RuntimeRequest::ExecuteBash {
+            command,
+            exclude_from_context,
+            ..
+        } => Command::Bash {
+            command: command.clone(),
+            exclude_from_context: Some(*exclude_from_context),
+        },
         RuntimeRequest::Abort => Command::Abort,
+        RuntimeRequest::AbortBash => Command::AbortBash,
         RuntimeRequest::AbortRetry => Command::AbortRetry,
         RuntimeRequest::SessionMutation(mutation) => match mutation {
             SessionMutation::New { parent_session } => Command::NewSession {
@@ -246,7 +260,17 @@ fn normalize_response(
             ResponseResult::FollowUp,
         )
         | (RuntimeRequest::Abort, ResponseResult::Abort)
+        | (RuntimeRequest::AbortBash, ResponseResult::AbortBash)
         | (RuntimeRequest::AbortRetry, ResponseResult::AbortRetry) => NormalizedResponse::Accepted,
+        (RuntimeRequest::ExecuteBash { .. }, ResponseResult::Bash(result)) => {
+            NormalizedResponse::Bash(DirectBashResult {
+                output: result.output,
+                exit_code: result.exit_code,
+                cancelled: result.cancelled,
+                truncated: result.truncated,
+                full_output_path: result.full_output_path,
+            })
+        }
         (
             RuntimeRequest::SessionMutation(SessionMutation::New { .. }),
             ResponseResult::NewSession(data),
@@ -571,15 +595,17 @@ fn runtime_message(message: AgentMessage) -> RuntimeMessage {
             }
         }
         AgentMessage::ToolResult(message) => {
-            let text = message
-                .content
-                .into_iter()
-                .filter_map(|block| match block {
-                    UserContentBlock::Text { text, .. } => Some(text),
-                    UserContentBlock::Image { .. } => None,
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
+            let mut text = Vec::new();
+            let mut images = Vec::new();
+            for block in message.content {
+                match block {
+                    UserContentBlock::Text { text: value, .. } => text.push(value),
+                    UserContentBlock::Image { data, mime_type } => {
+                        images.push(ToolImage { data, mime_type });
+                    }
+                }
+            }
+            let text = text.join("\n");
             let tool_id = message.tool_call_id;
             RuntimeMessage {
                 key: message_key(
@@ -594,6 +620,8 @@ fn runtime_message(message: AgentMessage) -> RuntimeMessage {
                     id: tool_id,
                     name: message.tool_name,
                     content: text,
+                    images,
+                    details: message.details,
                     is_error: message.is_error,
                 }],
                 visible: true,
@@ -613,7 +641,11 @@ fn runtime_message(message: AgentMessage) -> RuntimeMessage {
                     key: block_key("bash", 0, None),
                     command: message.command,
                     output: message.output,
+                    exit_code: message.exit_code,
                     cancelled: message.cancelled,
+                    truncated: message.truncated,
+                    full_output_path: message.full_output_path,
+                    exclude_from_context: message.exclude_from_context.unwrap_or(false),
                 }],
                 visible: true,
                 terminal: true,
@@ -725,7 +757,7 @@ fn assistant_block(index: usize, block: AssistantContentBlock) -> MessageBlock {
             key: block_key("tool-call", index, Some(id.as_str())),
             id,
             name,
-            arguments: Value::Object(arguments),
+            arguments,
         },
     }
 }
@@ -744,9 +776,10 @@ fn user_content(content: UserContent) -> Vec<MessageBlock> {
                     key: block_key("text", index, None),
                     text,
                 },
-                UserContentBlock::Image { mime_type, .. } => MessageBlock::Image {
+                UserContentBlock::Image { data, mime_type } => MessageBlock::Image {
                     key: block_key("image", index, Some(&mime_type)),
                     mime_type,
+                    data: Some(data),
                 },
             })
             .collect(),
@@ -769,9 +802,10 @@ fn custom_content(kind: String, content: UserContent) -> Vec<MessageBlock> {
                     kind: kind.clone(),
                     text,
                 },
-                UserContentBlock::Image { mime_type, .. } => MessageBlock::Image {
+                UserContentBlock::Image { data, mime_type } => MessageBlock::Image {
                     key: block_key("image", index, Some(&mime_type)),
                     mime_type,
+                    data: Some(data),
                 },
             })
             .collect(),
@@ -1002,7 +1036,9 @@ fn operation_name(request: &RuntimeRequest) -> &'static str {
             SubmissionKind::Steer => "steering delivery",
             SubmissionKind::FollowUp => "follow-up delivery",
         },
+        RuntimeRequest::ExecuteBash { .. } => "Bash execution",
         RuntimeRequest::Abort => "abort",
+        RuntimeRequest::AbortBash => "Bash cancellation",
         RuntimeRequest::AbortRetry => "retry cancellation",
         RuntimeRequest::SessionMutation(_) => "session replacement",
     }

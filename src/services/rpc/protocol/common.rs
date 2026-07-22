@@ -71,7 +71,7 @@ pub struct ToolCall {
     pub content_type: ToolCallContentType,
     pub id: ToolCallId,
     pub name: String,
-    pub arguments: Map<String, Value>,
+    pub arguments: Value,
     #[serde(rename = "thoughtSignature", skip_serializing_if = "Option::is_none")]
     pub thought_signature: Option<String>,
 }
@@ -127,7 +127,7 @@ pub enum AssistantContentBlock {
     ToolCall {
         id: ToolCallId,
         name: String,
-        arguments: Map<String, Value>,
+        arguments: Value,
         #[serde(rename = "thoughtSignature", skip_serializing_if = "Option::is_none")]
         thought_signature: Option<String>,
     },

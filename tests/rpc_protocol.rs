@@ -135,6 +135,10 @@ fn every_command_serializes_as_one_lf_terminated_record() {
             serde_json::from_slice(&bytes[..bytes.len() - 1]).expect("record should be JSON");
         assert_eq!(value["type"], expected_type);
         assert_eq!(value["id"], format!("request-{index}"));
+        if expected_type == "bash" {
+            assert_eq!(value["command"], "echo fixture");
+            assert_eq!(value["excludeFromContext"], true);
+        }
     }
 }
 
@@ -416,6 +420,30 @@ fn tool_call_end_round_trips_required_tool_call_discriminator() {
     });
     let record = IncomingRecord::from_value(value.clone()).unwrap();
     assert_eq!(serde_json::to_value(record).unwrap(), value);
+}
+
+#[test]
+fn malformed_and_non_object_tool_arguments_remain_decodable() {
+    let message = json!({
+        "role":"assistant",
+        "content":[{
+            "type":"toolCall","id":"tool-malformed","name":"custom",
+            "arguments":"{not valid json"
+        }],
+        "api":"synthetic-api","provider":"synthetic-provider","model":"synthetic-model",
+        "usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,
+        "cost":{"input":0.0,"output":0.0,"cacheRead":0.0,"cacheWrite":0.0,"total":0.0}},
+        "stopReason":"toolUse","timestamp":1
+    });
+    let record = IncomingRecord::from_value(json!({
+        "type":"message_end","message":message
+    }))
+    .expect("scalar arguments must not fault the protocol");
+    assert!(matches!(
+        record,
+        IncomingRecord::Event(event)
+            if matches!(event.as_ref(), RpcEvent::MessageEnd { .. })
+    ));
 }
 
 #[test]

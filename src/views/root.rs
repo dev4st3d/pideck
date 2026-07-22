@@ -9,15 +9,16 @@ use gpui::{
 
 use crate::actions::{AbortRun, ActivateRecovery, Connect, FocusNext, FocusPrevious, Retry, Stop};
 use crate::controller::{
-    AcceptedSubmission, ComposerRuntime, ConversationProjection, RuntimeController,
-    SubmissionPreference,
+    AcceptedSubmission, AcceptedSubmissionKind, ComposerRuntime, ConversationProjection,
+    RuntimeController, SubmissionPreference,
 };
-use crate::state::runtime::PromptDelivery;
+use crate::state::runtime::{BashStatus, PromptDelivery};
 use crate::state::{RecoveryAction, ShellProjection};
 use crate::theme;
 use crate::views::composer::{Composer, ComposerAvailability, ComposerEvent, ComposerFeedback};
 use crate::views::controls;
 use crate::views::conversation::{self, ScrollPinning, TranscriptText};
+use crate::views::tool_card::{self, ToolCard};
 
 struct PendingDraft {
     request: crate::services::rpc::RequestId,
@@ -31,7 +32,9 @@ pub struct RootView {
     conversation_scroll: ScrollHandle,
     scroll_pinning: ScrollPinning,
     transcript_texts: HashMap<String, Entity<TranscriptText>>,
+    tool_cards: HashMap<String, Entity<ToolCard>>,
     pending_draft: Option<PendingDraft>,
+    pending_bash: Option<crate::services::rpc::RequestId>,
     focus_handle: FocusHandle,
     _controller_observation: Subscription,
     _composer_subscription: Subscription,
@@ -53,6 +56,13 @@ impl RootView {
                 (key, entity)
             })
             .collect();
+        let tool_cards = tool_card::cards_for_projection(&conversation)
+            .into_iter()
+            .map(|card| {
+                let key = card.key.clone();
+                (key, cx.new(|_| ToolCard::new(card)))
+            })
+            .collect();
         window.focus(&composer.read(cx).focus_handle(cx));
         let controller_observation = cx.observe_in(&controller, window, |view, _, window, cx| {
             view.sync_runtime(window, cx)
@@ -67,7 +77,9 @@ impl RootView {
             conversation_scroll: ScrollHandle::new(),
             scroll_pinning: ScrollPinning::default(),
             transcript_texts,
+            tool_cards,
             pending_draft: None,
+            pending_bash: None,
             focus_handle,
             _controller_observation: controller_observation,
             _composer_subscription: composer_subscription,
@@ -104,7 +116,11 @@ impl RootView {
     }
 
     fn on_abort_run(&mut self, _: &AbortRun, _: &mut Window, cx: &mut Context<Self>) {
-        self.abort(cx);
+        match self.controller.read(cx).composer_projection().runtime {
+            ComposerRuntime::BashRunning | ComposerRuntime::BashCancelling => self.abort_bash(cx),
+            ComposerRuntime::Running | ComposerRuntime::Cancelling => self.abort(cx),
+            ComposerRuntime::Unavailable | ComposerRuntime::Idle => {}
+        }
     }
 
     fn on_composer_event(&mut self, event: &ComposerEvent, cx: &mut Context<Self>) {
@@ -116,6 +132,7 @@ impl RootView {
                 self.submit(text.clone(), SubmissionPreference::FollowUp, cx)
             }
             ComposerEvent::Abort => self.abort(cx),
+            ComposerEvent::AbortBash => self.abort_bash(cx),
         }
     }
 
@@ -136,10 +153,25 @@ impl RootView {
             controller.submit(text.clone(), preference, cx)
         });
         match result {
-            Ok(AcceptedSubmission { request, kind }) => {
+            Ok(AcceptedSubmission {
+                request,
+                kind: AcceptedSubmissionKind::Prompt(kind),
+            }) => {
                 self.pending_draft = Some(PendingDraft { request, text });
                 self.composer.update(cx, |composer, cx| {
                     composer.set_feedback(ComposerFeedback::Pending(kind), cx)
+                });
+            }
+            Ok(AcceptedSubmission {
+                request,
+                kind:
+                    AcceptedSubmissionKind::Bash {
+                        exclude_from_context,
+                    },
+            }) => {
+                self.pending_bash = Some(request);
+                self.composer.update(cx, |composer, cx| {
+                    composer.clear_bash_accepted(&text, exclude_from_context, cx);
                 });
             }
             Err(rejection) => {
@@ -159,10 +191,18 @@ impl RootView {
         });
     }
 
+    fn abort_bash(&mut self, cx: &mut Context<Self>) {
+        self.controller.update(cx, |controller, cx| {
+            controller.abort_bash(cx);
+        });
+    }
+
     fn sync_runtime(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let conversation = self.controller.read(cx).conversation_projection();
-        if conversation.epoch != self.conversation.epoch {
+        let epoch_changed = conversation.epoch != self.conversation.epoch;
+        if epoch_changed {
             self.transcript_texts.clear();
+            self.tool_cards.clear();
         }
         let fragments = conversation::text_fragments(&conversation);
         let active = fragments
@@ -178,6 +218,20 @@ impl RootView {
                 self.transcript_texts.insert(key, entity);
             }
         }
+        let cards = tool_card::cards_for_projection(&conversation);
+        let active_cards = cards
+            .iter()
+            .map(|card| card.key.clone())
+            .collect::<HashSet<_>>();
+        self.tool_cards.retain(|key, _| active_cards.contains(key));
+        for card in cards {
+            if let Some(entity) = self.tool_cards.get(&card.key) {
+                entity.update(cx, |view, cx| view.set_data(card, cx));
+            } else {
+                let key = card.key.clone();
+                self.tool_cards.insert(key, cx.new(|_| ToolCard::new(card)));
+            }
+        }
         self.conversation = conversation;
 
         let projection = self.controller.read(cx).composer_projection();
@@ -186,6 +240,8 @@ impl RootView {
             ComposerRuntime::Idle => ComposerAvailability::Idle,
             ComposerRuntime::Running => ComposerAvailability::Running,
             ComposerRuntime::Cancelling => ComposerAvailability::Cancelling,
+            ComposerRuntime::BashRunning => ComposerAvailability::BashRunning,
+            ComposerRuntime::BashCancelling => ComposerAvailability::BashCancelling,
         };
         let was_available = matches!(
             self.composer.read(cx).availability(),
@@ -201,6 +257,56 @@ impl RootView {
             )
         {
             window.focus(&self.composer.read(cx).focus_handle(cx));
+        }
+
+        if epoch_changed
+            && self.pending_bash.as_ref().is_some_and(|request| {
+                !self
+                    .conversation
+                    .bash_executions
+                    .iter()
+                    .any(|execution| &execution.request == request)
+            })
+        {
+            self.pending_bash = None;
+            self.composer.update(cx, |composer, cx| {
+                composer.set_feedback(
+                    ComposerFeedback::Rejected(
+                        "The session changed before Bash could be reconciled.".to_owned(),
+                    ),
+                    cx,
+                )
+            });
+        }
+
+        if let Some(request) = self.pending_bash.as_ref()
+            && let Some(execution) = self
+                .conversation
+                .bash_executions
+                .iter()
+                .find(|execution| &execution.request == request)
+        {
+            match execution.status {
+                BashStatus::Running | BashStatus::Cancelling => {}
+                BashStatus::Succeeded | BashStatus::Cancelled => {
+                    self.composer.update(cx, |composer, cx| {
+                        composer.set_feedback(ComposerFeedback::BashCompleted, cx)
+                    });
+                    self.pending_bash = None;
+                }
+                BashStatus::Failed | BashStatus::Uncertain => {
+                    let summary = execution.error.clone().unwrap_or_else(|| {
+                        execution.exit_code.map_or_else(
+                            || "Bash did not complete successfully.".to_owned(),
+                            |code| format!("Bash exited with code {code}."),
+                        )
+                    });
+                    self.composer.update(cx, |composer, cx| {
+                        composer.set_feedback(ComposerFeedback::Rejected(summary), cx)
+                    });
+                    self.pending_bash = None;
+                }
+            }
         }
 
         let Some(pending) = self.pending_draft.as_ref() else {
@@ -316,6 +422,7 @@ impl Render for RootView {
                         &self.conversation,
                         &self.conversation_scroll,
                         &self.transcript_texts,
+                        &self.tool_cards,
                         &self.composer,
                         cx,
                     ))
@@ -410,6 +517,7 @@ fn conversation_area(
     conversation_projection: &ConversationProjection,
     scroll: &ScrollHandle,
     transcript_texts: &HashMap<String, Entity<TranscriptText>>,
+    tool_cards: &HashMap<String, Entity<ToolCard>>,
     composer: &Entity<Composer>,
     cx: &mut Context<RootView>,
 ) -> impl IntoElement {
@@ -497,6 +605,7 @@ fn conversation_area(
                         .child(conversation::stream(
                             conversation_projection,
                             transcript_texts,
+                            tool_cards,
                         )),
                 ),
         )

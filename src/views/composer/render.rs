@@ -9,11 +9,12 @@ impl Composer {
         let can_submit = !self.disabled && !self.buffer.text().trim().is_empty();
         let handles_composer_keys = self.availability != ComposerAvailability::Unavailable;
         let running = self.availability == ComposerAvailability::Running;
+        let bash_running = self.availability == ComposerAvailability::BashRunning;
         let primary_label = if running { "Steer" } else { "Send" };
         let status_color = match self.feedback {
             ComposerFeedback::Rejected(_) | ComposerFeedback::Uncertain => theme::error(),
-            ComposerFeedback::Pending(_) => theme::data(),
-            ComposerFeedback::Accepted(_) => theme::live(),
+            ComposerFeedback::Pending(_) | ComposerFeedback::BashRunning { .. } => theme::data(),
+            ComposerFeedback::Accepted(_) | ComposerFeedback::BashCompleted => theme::live(),
             ComposerFeedback::Ready => theme::ash(),
         };
 
@@ -126,51 +127,65 @@ impl Composer {
                             .flex_row()
                             .items_center()
                             .gap(px(12.0))
-                            .when(running, |actions| {
+                            .when(running || bash_running, |actions| {
                                 actions
                                     .child(
                                         div()
                                             .id("composer-abort")
                                             .tab_index(0)
                                             .cursor_pointer()
+                                            .min_h(px(34.0))
+                                            .px(px(4.0))
+                                            .flex()
+                                            .items_center()
                                             .font_family(theme::SANS)
                                             .text_size(px(theme::T_UI_SM))
                                             .font_weight(FontWeight::SEMIBOLD)
                                             .text_color(theme::bone_dim())
                                             .hover(|button| button.text_color(theme::error()))
                                             .focus(|button| button.text_color(theme::focus()))
-                                            .on_click(cx.listener(|_, _, _, cx| {
-                                                cx.emit(ComposerEvent::Abort);
+                                            .on_click(cx.listener(move |_, _, _, cx| {
+                                                cx.emit(if bash_running {
+                                                    ComposerEvent::AbortBash
+                                                } else {
+                                                    ComposerEvent::Abort
+                                                });
                                             }))
-                                            .child("Abort"),
-                                    )
-                                    .child(
-                                        div()
-                                            .id("composer-follow-up")
-                                            .when(can_submit, |button| {
-                                                button
-                                                    .tab_index(0)
-                                                    .cursor_pointer()
-                                                    .hover(|button| {
-                                                        button.text_color(theme::bone())
-                                                    })
-                                                    .focus(|button| {
-                                                        button.text_color(theme::focus())
-                                                    })
-                                                    .on_click(cx.listener(|view, _, _, cx| {
-                                                        view.emit_accept(true, cx);
-                                                    }))
-                                            })
-                                            .font_family(theme::SANS)
-                                            .text_size(px(theme::T_UI_SM))
-                                            .font_weight(FontWeight::SEMIBOLD)
-                                            .text_color(if can_submit {
-                                                theme::bone_dim()
+                                            .child(if bash_running {
+                                                "Abort Bash"
                                             } else {
-                                                theme::smoke()
-                                            })
-                                            .child("Follow up"),
+                                                "Abort"
+                                            }),
                                     )
+                                    .when(running, |actions| {
+                                        actions.child(
+                                            div()
+                                                .id("composer-follow-up")
+                                                .when(can_submit, |button| {
+                                                    button
+                                                        .tab_index(0)
+                                                        .cursor_pointer()
+                                                        .hover(|button| {
+                                                            button.text_color(theme::bone())
+                                                        })
+                                                        .focus(|button| {
+                                                            button.text_color(theme::focus())
+                                                        })
+                                                        .on_click(cx.listener(|view, _, _, cx| {
+                                                            view.emit_accept(true, cx);
+                                                        }))
+                                                })
+                                                .font_family(theme::SANS)
+                                                .text_size(px(theme::T_UI_SM))
+                                                .font_weight(FontWeight::SEMIBOLD)
+                                                .text_color(if can_submit {
+                                                    theme::bone_dim()
+                                                } else {
+                                                    theme::smoke()
+                                                })
+                                                .child("Follow up"),
+                                        )
+                                    })
                             })
                             .child(
                                 div()
