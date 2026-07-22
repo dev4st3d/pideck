@@ -90,6 +90,14 @@ pub fn signal_hot() -> Rgba {
     rgb(0xd46a48)
 }
 
+pub fn focus() -> Rgba {
+    rgb(0xffd39a)
+}
+
+pub fn error() -> Rgba {
+    rgb(0xe18263)
+}
+
 pub fn live() -> Rgba {
     rgb(0xc5d2a8)
 }

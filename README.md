@@ -1,10 +1,26 @@
 # Pi GUI
 
-Native desktop shell for the pi coding harness. Rust + GPUI 0.2.2.
+Native Windows-first desktop shell for Pi, built with Rust and GPUI 0.2.2.
 
-## Run
+## Current maturity
+
+Phase 5 connects the shell to a supervised external Pi 0.80.10 runtime. Startup, discovery, correlated readiness, hydration requests, event reads, retries, and shutdown all run behind a dedicated standard-thread worker. The GPUI-owned controller observes normalized reducer state and never performs I/O from `render`.
+
+The visible shell now shows only live or explicitly Loading, Awaiting, Unknown, stale, stopped, and error values:
+
+- active session, model, thinking level, lifecycle, and cost in the title bar;
+- canonical current workspace and connection/recovery state in the main area;
+- context, input/output tokens, cache usage, cost, model, and thinking in the inspector;
+- one applicable Connect, Retry, or Stop action with pointer and keyboard paths.
+
+There is no composer, prompt submission, model switching, session browser, auth UI, transcript rendering, task/subagent view, resource browser, queue UI, or fake backend content yet. Those capabilities remain later phases.
+
+## Prerequisite and launch
+
+Install the tested Pi package and configure any provider credentials through Pi itself:
 
 ```powershell
+npm install -g @earendil-works/pi-coding-agent@0.80.10
 cargo run
 ```
 
@@ -14,27 +30,43 @@ If Cargo is not on `PATH` on Windows:
 & "$env:USERPROFILE\.cargo\bin\cargo.exe" run
 ```
 
-## Concept UI
+The app connects automatically using the canonical current working directory with:
 
-The current build is an interactive three-region shell backed by placeholder data. Tabs, selection, run status, and the demo send action work locally. The service layer models Pi 0.80.10 RPC and supervises a contained external Pi process, but no RPC client, conversation UI, or composer delivery is connected yet.
+- `ProjectTrust::Reject` (`--no-approve`);
+- an ephemeral session (`--no-session`);
+- extensions, skills, prompt templates, themes, and context files disabled;
+- tools disabled (`--no-tools`);
+- offline mode disabled so Pi can resolve existing Pi-managed credentials and models.
 
-| Region | Contents |
+If no model is available, configure credentials in Pi and choose Retry. The GUI does not read, display, or store credential values.
+
+## Keyboard
+
+| Action | Shortcut |
 |---|---|
-| Title bar | Session, model, thinking level, cost, and run status |
-| Sidebar | Sessions / Skills / Extensions tabs |
-| Conversation | Message stream and tool calls |
-| Inspector | Context, tasks, subagents, and queue |
-| Composer | Input preview + demo send action |
+| Connect | `Ctrl+Alt+C` |
+| Retry | `Ctrl+Alt+R` |
+| Stop | `Ctrl+Alt+S` |
+| Activate visible action | `Enter` or `Space` |
+| Next focus | `Tab` |
+| Previous focus | `Shift+Tab` |
 
-The interface uses Switzer for body text, Tanker for the wordmark, and Cascadia Mono for data.
+The interface preserves the warm-charcoal Switzer/Tanker identity, with Cascadia Mono reserved for runtime data.
 
-## Layout
+## Architecture
 
-- `src/app.rs` - window bootstrap and font registration
-- `src/fonts.rs` - embedded Tanker and Switzer registration
-- `src/theme.rs` - shared visual tokens
-- `src/state.rs` - UI-independent placeholder domain
-- `src/services/rpc/` - Pi 0.80.10 wire contract and JSONL framing
-- `src/services/pi_process/` - executable discovery, capability probing, and process supervision
-- `src/views/root.rs` - shell composition
-- `src/views/pier/` - conversation, sidebar, and inspector presentation
+- `src/app.rs` - window bootstrap, service injection, keybindings, automatic connection, and send-only window-close shutdown
+- `src/actions.rs` - logical runtime and focus actions
+- `src/controller.rs` - GPUI-owned controller plus pure attempt/generation gate
+- `src/services/runtime_worker.rs` - injectable GPUI-independent service boundary and responsive worker coordinator
+- `src/services/rpc/` - Pi 0.80.10 wire contract, strict JSONL framing, correlated client, and runtime adapter
+- `src/services/pi_process/` - executable discovery, capability probing, launch policy, and process-tree supervision
+- `src/state/runtime.rs` - normalized owned runtime state, stamped inputs, requests, and effects
+- `src/state/reducer.rs` - pure lifecycle, hydration, streaming, tool, queue, and extension reducer
+- `src/state.rs` - truthful owned shell projections with stale/unknown semantics
+- `src/views/root.rs` - minimal observed runtime shell
+- `src/views/controls.rs` - focus-visible recovery control and inspector rows
+
+The worker uses a controller attempt generation in addition to `ConnectionGeneration` and `SessionEpoch`. A retry starts a fresh process and generation; prior-attempt startup/results cannot overwrite it, and a late obsolete client is stopped immediately. Recovery hydrates state and never resends a prompt.
+
+Initial and recovery hydration request `get_state` first, then messages, durable entries, session statistics, commands, available models, and tree state. Optional facet failures preserve prior valid values and do not make an otherwise ready connection unusable. Window/controller release requests shutdown without waiting for `RpcClient::stop` on the GPUI event loop.

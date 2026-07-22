@@ -31,6 +31,7 @@ const DEFAULT_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 const DEFAULT_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
 const DEFAULT_STDERR_CAPACITY: usize = 64 * 1024;
 const DEFAULT_STDOUT_QUEUE_CAPACITY: usize = 256;
+const DEFAULT_WRITE_TIMEOUT: Duration = Duration::from_secs(2);
 const ABORT_RECORD: &[u8] = b"{\"type\":\"abort\",\"id\":\"pi-gui-shutdown\"}\n";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -97,6 +98,9 @@ pub struct PiLaunchConfig {
     pub trust: ProjectTrust,
     pub session: SessionLaunch,
     pub resources: ResourcePolicy,
+    pub offline: bool,
+    pub disable_tools: bool,
+    pub environment_overrides: Vec<(OsString, OsString)>,
     pub probe_timeout: Duration,
     pub shutdown_timeout: Duration,
     pub stderr_capacity_bytes: usize,
@@ -116,6 +120,9 @@ impl PiLaunchConfig {
             trust,
             session,
             resources,
+            offline: false,
+            disable_tools: false,
+            environment_overrides: Vec::new(),
             probe_timeout: DEFAULT_PROBE_TIMEOUT,
             shutdown_timeout: DEFAULT_SHUTDOWN_TIMEOUT,
             stderr_capacity_bytes: DEFAULT_STDERR_CAPACITY,
@@ -130,6 +137,8 @@ pub enum ProcessFailureKind {
     EarlyStdoutEof,
     StdoutRead,
     StdoutBackpressure,
+    StdinWrite,
+    RpcFault,
     Wait,
     TerminationTimedOut,
 }
@@ -224,6 +233,25 @@ pub struct ShutdownReport {
     pub forced: bool,
     pub abort_sent: bool,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StdinWriteError {
+    Closed,
+    TimedOut,
+    Failed(String),
+}
+
+impl fmt::Display for StdinWriteError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Closed => formatter.write_str("Pi stdin is closed"),
+            Self::TimedOut => formatter.write_str("timed out waiting for the Pi stdin writer"),
+            Self::Failed(message) => write!(formatter, "could not write Pi stdin: {message}"),
+        }
+    }
+}
+
+impl std::error::Error for StdinWriteError {}
 
 struct SharedState {
     state: Mutex<SupervisorState>,
@@ -359,6 +387,10 @@ impl SharedState {
 }
 
 enum StdinControl {
+    Write {
+        record: Vec<u8>,
+        acknowledge: mpsc::Sender<Result<(), String>>,
+    },
     AbortAndClose(mpsc::Sender<bool>),
 }
 
@@ -368,7 +400,7 @@ pub struct PiSupervisor {
     shared: Arc<SharedState>,
     process: Arc<ProcessHandle>,
     stderr: Arc<Mutex<StderrRing>>,
-    stdout: mpsc::Receiver<StdoutEvent>,
+    stdout: Option<mpsc::Receiver<StdoutEvent>>,
     stdin_control: Option<mpsc::Sender<StdinControl>>,
     threads: Vec<JoinHandle<()>>,
     shutdown_timeout: Duration,
@@ -396,6 +428,7 @@ impl PiSupervisor {
             &installation.executable,
             &arguments,
             &canonical_working_directory,
+            &config.environment_overrides,
         )
         .map_err(StartError::Spawn)?;
         let process = Arc::new(child.handle);
@@ -409,7 +442,12 @@ impl PiSupervisor {
         let (stdin_sender, stdin_receiver) = mpsc::channel();
 
         let mut threads = Vec::with_capacity(4);
-        threads.push(spawn_stdin_worker(stdin, stdin_receiver));
+        threads.push(spawn_stdin_worker(
+            stdin,
+            stdin_receiver,
+            Arc::clone(&process),
+            Arc::clone(&shared),
+        ));
         threads.push(spawn_stdout_worker(
             stdout_pipe,
             stdout_sender,
@@ -429,7 +467,7 @@ impl PiSupervisor {
             shared,
             process,
             stderr,
-            stdout,
+            stdout: Some(stdout),
             stdin_control: Some(stdin_sender),
             threads,
             shutdown_timeout: config.shutdown_timeout,
@@ -449,7 +487,51 @@ impl PiSupervisor {
     }
 
     pub fn stdout(&self) -> &mpsc::Receiver<StdoutEvent> {
-        &self.stdout
+        self.stdout
+            .as_ref()
+            .expect("stdout was transferred to the RPC client")
+    }
+
+    pub fn take_stdout(&mut self) -> Option<mpsc::Receiver<StdoutEvent>> {
+        self.stdout.take()
+    }
+
+    pub fn write_record(&self, record: Vec<u8>) -> Result<(), StdinWriteError> {
+        self.write_record_with_timeout(record, DEFAULT_WRITE_TIMEOUT)
+    }
+
+    pub fn write_record_with_timeout(
+        &self,
+        record: Vec<u8>,
+        timeout: Duration,
+    ) -> Result<(), StdinWriteError> {
+        let Some(sender) = &self.stdin_control else {
+            return Err(StdinWriteError::Closed);
+        };
+        let (acknowledge, result) = mpsc::channel();
+        sender
+            .send(StdinControl::Write {
+                record,
+                acknowledge,
+            })
+            .map_err(|_| StdinWriteError::Closed)?;
+        result
+            .recv_timeout(timeout)
+            .map_err(|error| match error {
+                mpsc::RecvTimeoutError::Timeout => StdinWriteError::TimedOut,
+                mpsc::RecvTimeoutError::Disconnected => StdinWriteError::Closed,
+            })?
+            .map_err(StdinWriteError::Failed)
+    }
+
+    pub(crate) fn terminate_due_to_rpc_fault(&self) {
+        if self.shared.fail(ProcessFailure {
+            kind: ProcessFailureKind::RpcFault,
+            message: "Pi RPC connection failed and was closed".to_owned(),
+            exit_status: None,
+        }) {
+            let _ = self.process.terminate();
+        }
     }
 
     pub fn stderr_snapshot(&self) -> Vec<String> {
@@ -556,6 +638,14 @@ fn validate_config(config: &PiLaunchConfig) -> Result<(), StartError> {
             "the session ID must not be empty".to_owned(),
         ));
     }
+    for (name, value) in &config.environment_overrides {
+        if name.is_empty() || contains_nul(name) || contains_equals(name) || contains_nul(value) {
+            return Err(StartError::InvalidConfiguration(
+                "environment overrides require a non-empty key without `=` or NUL and a value without NUL"
+                    .to_owned(),
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -566,6 +656,15 @@ fn contains_nul(value: &OsStr) -> bool {
     value.encode_wide().any(|character| character == 0)
 }
 
+#[cfg(windows)]
+fn contains_equals(value: &OsStr) -> bool {
+    use std::os::windows::ffi::OsStrExt;
+
+    value
+        .encode_wide()
+        .any(|character| character == b'=' as u16)
+}
+
 #[cfg(unix)]
 fn contains_nul(value: &OsStr) -> bool {
     use std::os::unix::ffi::OsStrExt;
@@ -573,9 +672,21 @@ fn contains_nul(value: &OsStr) -> bool {
     value.as_bytes().contains(&0)
 }
 
+#[cfg(unix)]
+fn contains_equals(value: &OsStr) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+
+    value.as_bytes().contains(&b'=')
+}
+
 #[cfg(not(any(windows, unix)))]
 fn contains_nul(value: &OsStr) -> bool {
     value.to_string_lossy().contains('\0')
+}
+
+#[cfg(not(any(windows, unix)))]
+fn contains_equals(value: &OsStr) -> bool {
+    value.to_string_lossy().contains('=')
 }
 
 fn launch_arguments(installation: &PiInstallation, config: &PiLaunchConfig) -> Vec<OsString> {
@@ -585,6 +696,12 @@ fn launch_arguments(installation: &PiInstallation, config: &PiLaunchConfig) -> V
         ProjectTrust::Approve => OsString::from("--approve"),
         ProjectTrust::Reject => OsString::from("--no-approve"),
     });
+    if config.offline {
+        arguments.push(OsString::from("--offline"));
+    }
+    if config.disable_tools {
+        arguments.push(OsString::from("--no-tools"));
+    }
     match &config.session {
         SessionLaunch::Ephemeral => arguments.push(OsString::from("--no-session")),
         SessionLaunch::Existing(path) => {
@@ -668,14 +785,42 @@ fn take_pipe<T>(
 fn spawn_stdin_worker(
     mut stdin: Box<dyn Write + Send>,
     receiver: mpsc::Receiver<StdinControl>,
+    process: Arc<ProcessHandle>,
+    shared: Arc<SharedState>,
 ) -> JoinHandle<()> {
     thread::spawn(move || {
-        if let Ok(StdinControl::AbortAndClose(acknowledge)) = receiver.recv() {
-            let sent = stdin
-                .write_all(ABORT_RECORD)
-                .and_then(|()| stdin.flush())
-                .is_ok();
-            let _ = acknowledge.send(sent);
+        while let Ok(control) = receiver.recv() {
+            match control {
+                StdinControl::Write {
+                    record,
+                    acknowledge,
+                } => {
+                    let result = stdin
+                        .write_all(&record)
+                        .and_then(|()| stdin.flush())
+                        .map_err(|error| error.to_string());
+                    let failed = result.is_err();
+                    let _ = acknowledge.send(result);
+                    if failed {
+                        if shared.fail(ProcessFailure {
+                            kind: ProcessFailureKind::StdinWrite,
+                            message: "could not write to Pi stdin".to_owned(),
+                            exit_status: None,
+                        }) {
+                            let _ = process.terminate();
+                        }
+                        return;
+                    }
+                }
+                StdinControl::AbortAndClose(acknowledge) => {
+                    let sent = stdin
+                        .write_all(ABORT_RECORD)
+                        .and_then(|()| stdin.flush())
+                        .is_ok();
+                    let _ = acknowledge.send(sent);
+                    return;
+                }
+            }
         }
     })
 }

@@ -1,4 +1,6 @@
+pub mod actions;
 pub mod app;
+pub mod controller;
 pub mod fonts;
 pub mod services;
 pub mod state;

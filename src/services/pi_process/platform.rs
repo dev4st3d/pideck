@@ -72,8 +72,14 @@ pub(crate) fn spawn_contained(
     executable: &Path,
     arguments: &[OsString],
     working_directory: &Path,
+    environment_overrides: &[(OsString, OsString)],
 ) -> io::Result<SpawnedProcess> {
-    ProcessInner::spawn(executable, arguments, working_directory)
+    ProcessInner::spawn(
+        executable,
+        arguments,
+        working_directory,
+        environment_overrides,
+    )
 }
 
 #[cfg(not(windows))]
@@ -88,6 +94,7 @@ impl ProcessInner {
         executable: &Path,
         arguments: &[OsString],
         working_directory: &Path,
+        environment_overrides: &[(OsString, OsString)],
     ) -> io::Result<SpawnedProcess> {
         use std::process::{Command, Stdio};
 
@@ -95,6 +102,7 @@ impl ProcessInner {
         command
             .args(arguments)
             .current_dir(working_directory)
+            .envs(environment_overrides.iter().cloned())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -212,10 +220,11 @@ mod windows {
     };
     use windows_sys::Win32::System::Pipes::CreatePipe;
     use windows_sys::Win32::System::Threading::{
-        CREATE_NO_WINDOW, CreateProcessW, DeleteProcThreadAttributeList,
-        EXTENDED_STARTUPINFO_PRESENT, GetExitCodeProcess, InitializeProcThreadAttributeList,
-        PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROC_THREAD_ATTRIBUTE_JOB_LIST, PROCESS_INFORMATION,
-        STARTF_USESTDHANDLES, STARTUPINFOEXW, UpdateProcThreadAttribute, WaitForSingleObject,
+        CREATE_NO_WINDOW, CREATE_UNICODE_ENVIRONMENT, CreateProcessW,
+        DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT, GetExitCodeProcess,
+        InitializeProcThreadAttributeList, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+        PROC_THREAD_ATTRIBUTE_JOB_LIST, PROCESS_INFORMATION, STARTF_USESTDHANDLES, STARTUPINFOEXW,
+        UpdateProcThreadAttribute, WaitForSingleObject,
     };
 
     use super::{ExitStatus, ProcessHandle, SpawnedProcess};
@@ -232,6 +241,7 @@ mod windows {
             executable: &Path,
             arguments: &[OsString],
             working_directory: &Path,
+            environment_overrides: &[(OsString, OsString)],
         ) -> io::Result<SpawnedProcess> {
             let job = create_kill_on_close_job().map_err(|error| context("create job", error))?;
             let (child_stdin, parent_stdin) = create_pipe_pair(PipeDirection::ParentWrites)
@@ -268,6 +278,18 @@ mod windows {
             let application = wide_null(executable.as_os_str());
             let mut command_line = build_command_line(executable.as_os_str(), arguments);
             let current_directory = wide_null(working_directory.as_os_str());
+            let mut environment = (!environment_overrides.is_empty())
+                .then(|| build_environment_block(environment_overrides));
+            let environment_pointer = environment
+                .as_mut()
+                .map_or(null_mut(), |block| block.as_mut_ptr().cast());
+            let creation_flags = EXTENDED_STARTUPINFO_PRESENT
+                | CREATE_NO_WINDOW
+                | if environment.is_some() {
+                    CREATE_UNICODE_ENVIRONMENT
+                } else {
+                    0
+                };
             // SAFETY: Every pointer references initialized storage for the duration of the call.
             // The inherited-handle allowlist contains only the three child pipe ends, and the job
             // attribute assigns the process before its initial thread can run.
@@ -278,8 +300,8 @@ mod windows {
                     null(),
                     null(),
                     1,
-                    EXTENDED_STARTUPINFO_PRESENT | CREATE_NO_WINDOW,
-                    null(),
+                    creation_flags,
+                    environment_pointer,
                     current_directory.as_ptr(),
                     &startup.StartupInfo,
                     &mut process_information,
@@ -530,6 +552,31 @@ mod windows {
 
     fn wide_null(value: &OsStr) -> Vec<u16> {
         value.encode_wide().chain(Some(0)).collect()
+    }
+
+    fn build_environment_block(overrides: &[(OsString, OsString)]) -> Vec<u16> {
+        let mut variables = std::env::vars_os().collect::<Vec<_>>();
+        for (override_name, override_value) in overrides {
+            if let Some((_, value)) = variables.iter_mut().find(|(name, _)| {
+                name.to_string_lossy()
+                    .eq_ignore_ascii_case(&override_name.to_string_lossy())
+            }) {
+                *value = override_value.clone();
+            } else {
+                variables.push((override_name.clone(), override_value.clone()));
+            }
+        }
+        variables.sort_by_cached_key(|(name, _)| name.to_string_lossy().to_uppercase());
+
+        let mut block = Vec::new();
+        for (name, value) in variables {
+            block.extend(name.encode_wide());
+            block.push(b'=' as u16);
+            block.extend(value.encode_wide());
+            block.push(0);
+        }
+        block.push(0);
+        block
     }
 
     fn build_command_line(executable: &OsStr, arguments: &[OsString]) -> Vec<u16> {

@@ -1,519 +1,468 @@
-//! UI-independent placeholder domain for the harness desk.
+//! UI-independent application projections and Pi runtime state.
+
+pub mod reducer;
+pub mod runtime;
+
+use runtime::{
+    Facet, FacetStatus, RuntimeLifecycle, RuntimeState, RuntimeStats, RuntimeThinkingLevel,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RunStatus {
+pub enum ControllerStatus {
     Idle,
-    Thinking,
-    Tooling,
-    Waiting,
-    Blocked,
-}
-
-impl RunStatus {
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Idle => "Idle",
-            Self::Thinking => "Thinking",
-            Self::Tooling => "Running tools",
-            Self::Waiting => "Waiting",
-            Self::Blocked => "Blocked",
-        }
-    }
+    Connecting,
+    Active,
+    Stopping,
+    Stopped,
+    Failed,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TaskStatus {
-    Pending,
-    Running,
-    Blocked,
-    Done,
+pub enum RecoveryAction {
+    Connect,
+    Retry,
+    Stop,
 }
 
-impl TaskStatus {
+impl RecoveryAction {
     pub fn label(self) -> &'static str {
         match self {
-            Self::Pending => "Pending",
-            Self::Running => "Running",
-            Self::Blocked => "Blocked",
-            Self::Done => "Done",
+            Self::Connect => "Connect",
+            Self::Retry => "Retry",
+            Self::Stop => "Stop",
         }
     }
-}
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SubagentKind {
-    Explore,
-    Plan,
-    General,
-}
-
-impl SubagentKind {
-    pub fn label(self) -> &'static str {
+    pub fn shortcut(self) -> &'static str {
         match self {
-            Self::Explore => "Explore",
-            Self::Plan => "Plan",
-            Self::General => "General",
+            Self::Connect => "Ctrl+Alt+C",
+            Self::Retry => "Ctrl+Alt+R",
+            Self::Stop => "Ctrl+Alt+S",
         }
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SessionSummary {
-    pub id: &'static str,
-    pub name: &'static str,
-    pub project: &'static str,
-    pub updated: &'static str,
-    pub active: bool,
+pub enum DisplayValue {
+    Known(String),
+    Loading,
+    Awaiting,
+    Unknown,
+    Stale(String),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ResourceItem {
-    pub name: &'static str,
-    pub kind: &'static str,
-    pub scope: &'static str,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum StreamEntry {
-    User {
-        body: &'static str,
-        timestamp: &'static str,
-    },
-    Assistant {
-        body: &'static str,
-        timestamp: &'static str,
-    },
-    Thinking {
-        body: &'static str,
-        level: &'static str,
-    },
-    Tool {
-        name: &'static str,
-        body: &'static str,
-        summary: &'static str,
-    },
-    System {
-        title: &'static str,
-        body: &'static str,
-    },
-    Compaction {
-        body: &'static str,
-    },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TaskItem {
-    pub id: &'static str,
-    pub subject: &'static str,
-    pub detail: &'static str,
-    pub status: TaskStatus,
-    pub owner: Option<&'static str>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SubagentItem {
-    pub id: &'static str,
-    pub kind: SubagentKind,
-    pub brief: &'static str,
-    pub status: RunStatus,
-    pub turns: u32,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct QueueItem {
-    pub mode: &'static str,
-    pub preview: &'static str,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct ModelStrip {
-    pub provider: &'static str,
-    pub model: &'static str,
-    pub thinking: &'static str,
-    pub context_used_pct: f32,
-    pub context_label: &'static str,
-    pub tokens_in: &'static str,
-    pub tokens_out: &'static str,
-    pub cost: &'static str,
-    pub cache: &'static str,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SideSection {
-    Sessions,
-    Skills,
-    Extensions,
-}
-
-impl SideSection {
-    pub const ALL: [Self; 3] = [Self::Sessions, Self::Skills, Self::Extensions];
-
-    pub fn label(self) -> &'static str {
+impl DisplayValue {
+    pub fn label(&self) -> String {
         match self {
-            Self::Sessions => "Sessions",
-            Self::Skills => "Skills",
-            Self::Extensions => "Extensions",
+            Self::Known(value) => value.clone(),
+            Self::Loading => "Loading".to_owned(),
+            Self::Awaiting => "Awaiting".to_owned(),
+            Self::Unknown => "Unknown".to_owned(),
+            Self::Stale(value) => format!("{value} · stale"),
         }
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub struct DashboardState {
-    pub session_name: &'static str,
-    pub cwd: &'static str,
-    pub run_status: RunStatus,
-    pub branch_label: &'static str,
-    pub sessions: Vec<SessionSummary>,
-    pub skills: Vec<ResourceItem>,
-    pub extensions: Vec<ResourceItem>,
-    pub packages: Vec<ResourceItem>,
-    pub stream: Vec<StreamEntry>,
-    pub tasks: Vec<TaskItem>,
-    pub subagents: Vec<SubagentItem>,
-    pub queue: Vec<QueueItem>,
-    pub model: ModelStrip,
-    pub side_section: SideSection,
-    pub selected_task_id: Option<&'static str>,
-    pub composer: String,
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShellProjection {
+    pub workspace: String,
+    pub session: DisplayValue,
+    pub model: DisplayValue,
+    pub thinking: DisplayValue,
+    pub cost: DisplayValue,
+    pub context: DisplayValue,
+    pub input_tokens: DisplayValue,
+    pub output_tokens: DisplayValue,
+    pub cache: DisplayValue,
+    pub lifecycle: String,
+    pub headline: String,
+    pub detail: String,
+    pub action: Option<RecoveryAction>,
+    pub has_stale_values: bool,
+    pub no_model: bool,
 }
 
-impl Default for DashboardState {
-    fn default() -> Self {
-        Self::placeholder()
-    }
-}
+impl ShellProjection {
+    pub fn from_runtime(
+        status: ControllerStatus,
+        workspace: impl Into<String>,
+        runtime: &RuntimeState,
+        controller_error: Option<&str>,
+    ) -> Self {
+        let workspace = workspace.into();
+        let session = project_session(runtime);
+        let model = project_model(runtime);
+        let thinking = project_thinking(runtime);
+        let cost = project_stats(&runtime.stats, |stats| format_cost(stats.cost));
+        let context = project_context(&runtime.stats);
+        let input_tokens = project_stats(&runtime.stats, |stats| format_count(stats.input_tokens));
+        let output_tokens =
+            project_stats(&runtime.stats, |stats| format_count(stats.output_tokens));
+        let cache = project_stats(&runtime.stats, |stats| {
+            format!(
+                "{} read / {} write",
+                format_count(stats.cache_read_tokens),
+                format_count(stats.cache_write_tokens)
+            )
+        });
+        let no_model = status == ControllerStatus::Active && model_is_unavailable(runtime);
+        let reducer_error = runtime
+            .errors
+            .back()
+            .map(|error| error.summary.as_str())
+            .or(match &runtime.session.status {
+                FacetStatus::Failed(error) => Some(error.summary.as_str()),
+                FacetStatus::Loading | FacetStatus::Ready => None,
+            });
+        let error = controller_error.or(reducer_error);
 
-impl DashboardState {
-    pub fn placeholder() -> Self {
-        Self {
-            session_name: "Review auth middleware",
-            cwd: r"C:\workspace\pi-gui",
-            run_status: RunStatus::Tooling,
-            branch_label: "main",
-            sessions: vec![
-                SessionSummary {
-                    id: "s-8841",
-                    name: "Review auth middleware",
-                    project: "pi-gui",
-                    updated: "Now",
-                    active: true,
-                },
-                SessionSummary {
-                    id: "s-7710",
-                    name: "Fix session resume",
-                    project: "pi-gui",
-                    updated: "2h",
-                    active: false,
-                },
-                SessionSummary {
-                    id: "s-6602",
-                    name: "Tree navigation",
-                    project: "pi-mono",
-                    updated: "Yesterday",
-                    active: false,
-                },
-                SessionSummary {
-                    id: "s-5509",
-                    name: "Extension host",
-                    project: "pi-gui",
-                    updated: "Mon",
-                    active: false,
-                },
-            ],
-            skills: vec![
-                ResourceItem {
-                    name: "slop",
-                    kind: "skill",
-                    scope: "user",
-                },
-                ResourceItem {
-                    name: "feature-suggest",
-                    kind: "skill",
-                    scope: "user",
-                },
-                ResourceItem {
-                    name: "apple-design",
-                    kind: "skill",
-                    scope: "user",
-                },
-            ],
-            extensions: vec![
-                ResourceItem {
-                    name: "git-checkpoint",
-                    kind: "ext",
-                    scope: "project",
-                },
-                ResourceItem {
-                    name: "path-guard",
-                    kind: "ext",
-                    scope: "user",
-                },
-                ResourceItem {
-                    name: "summarize",
-                    kind: "ext",
-                    scope: "user",
-                },
-            ],
-            packages: vec![
-                ResourceItem {
-                    name: "@pi/devtools",
-                    kind: "pkg",
-                    scope: "global",
-                },
-                ResourceItem {
-                    name: "@pi/review-kit",
-                    kind: "pkg",
-                    scope: "project",
-                },
-            ],
-            stream: vec![
-                StreamEntry::System {
-                    title: "Session ready",
-                    body: "Loaded project context, 3 skills, and 3 extensions.",
-                },
-                StreamEntry::User {
-                    body: "Walk the auth middleware and flag anything that can drop a valid session on refresh.",
-                    timestamp: "12:41",
-                },
-                StreamEntry::Thinking {
-                    body: "Session drops on refresh usually mean restore runs before refresh settles, or the guard treats a mid-refresh token as invalid. Start at restore_session and the 401 path.",
-                    level: "medium",
-                },
-                StreamEntry::Tool {
-                    name: "read",
-                    body: "src/auth/session.rs\nsrc/auth/refresh.rs\nsrc/middleware/auth.rs",
-                    summary: "3 files",
-                },
-                StreamEntry::Tool {
-                    name: "grep",
-                    body: "restore_session\nrefresh_access_token\nUnauthorized",
-                    summary: "12 hits",
-                },
-                StreamEntry::Tool {
-                    name: "explore",
-                    body: "Map callers of restore_session and the cookie write path before the guard.",
-                    summary: "done",
-                },
-                StreamEntry::Thinking {
-                    body: "auth.rs returns 401 when access is expired even if a refresh is already in flight. A second tab hits that branch and clears the session. Fix: await the shared refresh future, then re-check once.",
-                    level: "medium",
-                },
-                StreamEntry::Tool {
-                    name: "edit",
-                    body: "src/middleware/auth.rs\n@@ fn guard_request\n- return Err(AuthError::Unauthorized);\n+ let session = refresh_lock.wait().await?;\n+ recheck_session(&session)?;",
-                    summary: "+2 -1",
-                },
-                StreamEntry::Assistant {
-                    body: "There is a race in the stale-token branch: it returns 401 before an in-flight refresh can finish.\n\nI patched the guard to await the shared refresh future, then re-check the session once. A reload during refresh should no longer drop a valid user.",
-                    timestamp: "12:43",
-                },
-            ],
-            tasks: vec![
-                TaskItem {
-                    id: "t-1",
-                    subject: "Trace session restore",
-                    detail: "cookie → restore_session → guard",
-                    status: TaskStatus::Done,
-                    owner: Some("explore"),
-                },
-                TaskItem {
-                    id: "t-2",
-                    subject: "Fix refresh race",
-                    detail: "await in-flight refresh before 401",
-                    status: TaskStatus::Running,
-                    owner: Some("main"),
-                },
-                TaskItem {
-                    id: "t-3",
-                    subject: "Add regression test",
-                    detail: "concurrent refresh + page reload",
-                    status: TaskStatus::Pending,
-                    owner: None,
-                },
-                TaskItem {
-                    id: "t-4",
-                    subject: "Verify cookie flags",
-                    detail: "Secure / HttpOnly / SameSite",
-                    status: TaskStatus::Blocked,
-                    owner: None,
-                },
-            ],
-            subagents: vec![
-                SubagentItem {
-                    id: "a-21",
-                    kind: SubagentKind::Explore,
-                    brief: "Map restore_session call graph",
-                    status: RunStatus::Tooling,
-                    turns: 4,
-                },
-                SubagentItem {
-                    id: "a-22",
-                    kind: SubagentKind::Plan,
-                    brief: "Outline fix and test cases",
-                    status: RunStatus::Waiting,
-                    turns: 2,
-                },
-            ],
-            queue: vec![
-                QueueItem {
-                    mode: "steer",
-                    preview: "Prefer the smaller patch in refresh.rs",
-                },
-                QueueItem {
-                    mode: "follow-up",
-                    preview: "Summarize residual risk after the fix",
-                },
-            ],
-            model: ModelStrip {
-                provider: "Anthropic",
-                model: "claude-sonnet-4-5",
-                thinking: "Medium",
-                context_used_pct: 0.62,
-                context_label: "124k / 200k",
-                tokens_in: "86.2k",
-                tokens_out: "12.4k",
-                cost: "$1.84",
-                cache: "41k hit",
+        let (lifecycle, headline, detail, action) = match status {
+            ControllerStatus::Idle => (
+                "Not connected",
+                "Pi is ready to connect",
+                "The runtime will use this workspace with tools and project resources disabled.",
+                Some(RecoveryAction::Connect),
+            ),
+            ControllerStatus::Connecting => (
+                "Connecting",
+                "Starting Pi",
+                "Discovering Pi and waiting for correlated RPC readiness.",
+                Some(RecoveryAction::Stop),
+            ),
+            ControllerStatus::Stopping => (
+                "Stopping",
+                "Stopping Pi",
+                "The supervised runtime is shutting down.",
+                None,
+            ),
+            ControllerStatus::Stopped => (
+                "Stopped",
+                "Pi is stopped",
+                "Connect to start a fresh ephemeral runtime.",
+                Some(RecoveryAction::Connect),
+            ),
+            ControllerStatus::Failed => (
+                "Connection error",
+                "Pi could not connect",
+                error.unwrap_or("The Pi runtime is unavailable."),
+                Some(RecoveryAction::Retry),
+            ),
+            ControllerStatus::Active if no_model => (
+                "No model",
+                "No model is available",
+                "Configure credentials in Pi, then retry. Credentials remain managed by Pi.",
+                Some(RecoveryAction::Retry),
+            ),
+            ControllerStatus::Active => match runtime.lifecycle {
+                RuntimeLifecycle::Loading => (
+                    "Loading",
+                    "Reading runtime state",
+                    "Pi is ready. Session and model details are loading.",
+                    Some(RecoveryAction::Stop),
+                ),
+                RuntimeLifecycle::Ready | RuntimeLifecycle::Settled => (
+                    "Ready",
+                    "Pi is ready",
+                    "Live runtime, model, and usage values are shown here.",
+                    Some(RecoveryAction::Stop),
+                ),
+                RuntimeLifecycle::Running => (
+                    "Running",
+                    "Pi is running",
+                    "The active runtime reports work in progress.",
+                    Some(RecoveryAction::Stop),
+                ),
+                RuntimeLifecycle::Cancelling => (
+                    "Cancelling",
+                    "Pi is cancelling",
+                    "The current runtime operation is being cancelled.",
+                    Some(RecoveryAction::Stop),
+                ),
+                RuntimeLifecycle::Disconnected | RuntimeLifecycle::Failed => (
+                    "Connection error",
+                    "The Pi connection closed",
+                    error.unwrap_or("The last valid values remain visible."),
+                    Some(RecoveryAction::Retry),
+                ),
             },
-            side_section: SideSection::Sessions,
-            selected_task_id: Some("t-2"),
-            composer: String::new(),
-        }
-    }
-
-    pub fn select_side(&mut self, section: SideSection) {
-        self.side_section = section;
-    }
-
-    pub fn select_session(&mut self, id: &'static str) -> bool {
-        let Some(session_name) = self
-            .sessions
-            .iter()
-            .find(|session| session.id == id)
-            .map(|session| session.name)
-        else {
-            return false;
         };
 
-        for session in &mut self.sessions {
-            session.active = session.id == id;
+        let has_stale_values = [
+            &session,
+            &model,
+            &thinking,
+            &cost,
+            &context,
+            &input_tokens,
+            &output_tokens,
+            &cache,
+        ]
+        .into_iter()
+        .any(|value| matches!(value, DisplayValue::Stale(_)));
+
+        Self {
+            workspace,
+            session,
+            model,
+            thinking,
+            cost,
+            context,
+            input_tokens,
+            output_tokens,
+            cache,
+            lifecycle: lifecycle.to_owned(),
+            headline: headline.to_owned(),
+            detail: detail.to_owned(),
+            action,
+            has_stale_values,
+            no_model,
         }
-        self.session_name = session_name;
-        true
     }
+}
 
-    pub fn select_task(&mut self, id: &'static str) -> bool {
-        if !self.tasks.iter().any(|task| task.id == id) {
-            return false;
-        }
+fn project_session(runtime: &RuntimeState) -> DisplayValue {
+    project_facet(&runtime.session, |session| {
+        session
+            .name
+            .clone()
+            .filter(|name| !name.trim().is_empty())
+            .unwrap_or_else(|| "Unknown".to_owned())
+    })
+}
 
-        self.selected_task_id = Some(id);
-        true
-    }
-
-    pub fn cycle_run_status(&mut self) {
-        self.run_status = match self.run_status {
-            RunStatus::Idle => RunStatus::Thinking,
-            RunStatus::Thinking => RunStatus::Tooling,
-            RunStatus::Tooling => RunStatus::Waiting,
-            RunStatus::Waiting => RunStatus::Blocked,
-            RunStatus::Blocked => RunStatus::Idle,
-        };
-    }
-
-    pub fn active_task_count(&self) -> usize {
-        self.tasks
-            .iter()
-            .filter(|task| {
-                matches!(
-                    task.status,
-                    TaskStatus::Running | TaskStatus::Pending | TaskStatus::Blocked
-                )
+fn project_model(runtime: &RuntimeState) -> DisplayValue {
+    project_facet(&runtime.session, |session| {
+        session
+            .model
+            .as_ref()
+            .map(|model| {
+                if model.name.trim().is_empty() {
+                    format!("{}/{}", model.provider, model.id)
+                } else {
+                    model.name.clone()
+                }
             })
-            .count()
-    }
+            .unwrap_or_else(|| "Unknown".to_owned())
+    })
+}
 
-    pub fn live_subagent_count(&self) -> usize {
-        self.subagents
-            .iter()
-            .filter(|agent| !matches!(agent.status, RunStatus::Idle))
-            .count()
+fn project_thinking(runtime: &RuntimeState) -> DisplayValue {
+    project_facet(&runtime.session, |session| {
+        match session.thinking_level {
+            RuntimeThinkingLevel::Off => "Off",
+            RuntimeThinkingLevel::Minimal => "Minimal",
+            RuntimeThinkingLevel::Low => "Low",
+            RuntimeThinkingLevel::Medium => "Medium",
+            RuntimeThinkingLevel::High => "High",
+            RuntimeThinkingLevel::Xhigh => "Xhigh",
+            RuntimeThinkingLevel::Max => "Max",
+        }
+        .to_owned()
+    })
+}
+
+fn project_context(stats: &Facet<RuntimeStats>) -> DisplayValue {
+    match (&stats.status, stats.data.as_ref()) {
+        (FacetStatus::Loading, None) => DisplayValue::Awaiting,
+        (FacetStatus::Loading, Some(stats)) => context_value(stats, true),
+        (FacetStatus::Ready, Some(stats)) => context_value(stats, false),
+        (FacetStatus::Failed(_), Some(stats)) => context_value(stats, true),
+        (FacetStatus::Ready | FacetStatus::Failed(_), None) => DisplayValue::Unknown,
+    }
+}
+
+fn context_value(stats: &RuntimeStats, stale: bool) -> DisplayValue {
+    let Some(tokens) = stats.context_tokens else {
+        return DisplayValue::Unknown;
+    };
+    let value = match stats.context_window {
+        Some(window) => format!("{} / {}", format_count(tokens), format_count(window)),
+        None => format_count(tokens),
+    };
+    if stale {
+        DisplayValue::Stale(value)
+    } else {
+        DisplayValue::Known(value)
+    }
+}
+
+fn project_stats(
+    stats: &Facet<RuntimeStats>,
+    value: impl Fn(&RuntimeStats) -> String,
+) -> DisplayValue {
+    match (&stats.status, stats.data.as_ref()) {
+        (FacetStatus::Loading, None) => DisplayValue::Awaiting,
+        (FacetStatus::Loading, Some(stats)) | (FacetStatus::Failed(_), Some(stats)) => {
+            DisplayValue::Stale(value(stats))
+        }
+        (FacetStatus::Ready, Some(stats)) => DisplayValue::Known(value(stats)),
+        (FacetStatus::Ready | FacetStatus::Failed(_), None) => DisplayValue::Unknown,
+    }
+}
+
+fn project_facet<T>(facet: &Facet<T>, value: impl Fn(&T) -> String) -> DisplayValue {
+    match (&facet.status, facet.data.as_ref()) {
+        (FacetStatus::Loading, None) => DisplayValue::Loading,
+        (FacetStatus::Loading, Some(data)) | (FacetStatus::Failed(_), Some(data)) => {
+            let value = value(data);
+            if value == "Unknown" {
+                DisplayValue::Unknown
+            } else {
+                DisplayValue::Stale(value)
+            }
+        }
+        (FacetStatus::Ready, Some(data)) => {
+            let value = value(data);
+            if value == "Unknown" {
+                DisplayValue::Unknown
+            } else {
+                DisplayValue::Known(value)
+            }
+        }
+        (FacetStatus::Ready | FacetStatus::Failed(_), None) => DisplayValue::Unknown,
+    }
+}
+
+fn model_is_unavailable(runtime: &RuntimeState) -> bool {
+    let session_has_model = runtime
+        .session
+        .data
+        .as_ref()
+        .and_then(|session| session.model.as_ref())
+        .is_some();
+    if session_has_model {
+        return false;
+    }
+    !matches!(runtime.models.status, FacetStatus::Loading)
+}
+
+fn format_count(value: u64) -> String {
+    let digits = value.to_string();
+    let mut formatted = String::with_capacity(digits.len() + digits.len() / 3);
+    for (index, character) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index) % 3 == 0 {
+            formatted.push(',');
+        }
+        formatted.push(character);
+    }
+    formatted
+}
+
+fn format_cost(cost: f64) -> String {
+    if cost < 0.01 {
+        format!("${cost:.4}")
+    } else {
+        format!("${cost:.2}")
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::services::rpc::{ConnectionGeneration, SessionId};
 
     #[test]
-    fn placeholder_has_core_surfaces() {
-        let state = DashboardState::placeholder();
-        assert!(!state.sessions.is_empty());
-        assert!(!state.stream.is_empty());
-        assert!(!state.tasks.is_empty());
-        assert!(!state.subagents.is_empty());
+    fn recovery_actions_have_distinct_keyboard_paths() {
+        assert_eq!(RecoveryAction::Connect.shortcut(), "Ctrl+Alt+C");
+        assert_eq!(RecoveryAction::Retry.shortcut(), "Ctrl+Alt+R");
+        assert_eq!(RecoveryAction::Stop.shortcut(), "Ctrl+Alt+S");
     }
 
     #[test]
-    fn placeholder_selection_is_consistent() {
-        let state = DashboardState::placeholder();
-        let active_sessions: Vec<_> = state
-            .sessions
-            .iter()
-            .filter(|session| session.active)
-            .collect();
+    fn unavailable_context_is_unknown_not_zero() {
+        let mut runtime = RuntimeState::default();
+        runtime.stats.ready(RuntimeStats {
+            session_id: SessionId::from("session"),
+            user_messages: 0,
+            assistant_messages: 0,
+            tool_calls: 0,
+            tool_results: 0,
+            total_messages: 0,
+            input_tokens: 0,
+            output_tokens: 0,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+            total_tokens: 0,
+            cost: 0.0,
+            context_tokens: None,
+            context_window: Some(100_000),
+            context_percent: None,
+        });
 
-        assert_eq!(active_sessions.len(), 1);
-        assert_eq!(active_sessions[0].name, state.session_name);
-        assert!(
-            state
-                .selected_task_id
-                .is_some_and(|id| state.tasks.iter().any(|task| task.id == id))
+        let projection = ShellProjection::from_runtime(
+            ControllerStatus::Active,
+            "C:\\workspace",
+            &runtime,
+            None,
         );
+        assert_eq!(projection.context, DisplayValue::Unknown);
+        assert_ne!(projection.context.label(), "0");
     }
 
     #[test]
-    fn selections_and_status_update() {
-        let mut state = DashboardState::placeholder();
-        assert!(state.select_session("s-7710"));
-        assert_eq!(state.session_name, "Fix session resume");
+    fn checked_missing_model_exposes_only_retry_recovery() {
+        let mut runtime = RuntimeState::new(ConnectionGeneration::new(1));
+        runtime.session.ready(runtime::SessionSnapshot {
+            id: SessionId::from("session"),
+            file: None,
+            name: None,
+            model: None,
+            thinking_level: RuntimeThinkingLevel::Off,
+            steering_mode: runtime::QueueDeliveryMode::All,
+            follow_up_mode: runtime::QueueDeliveryMode::All,
+            auto_compaction_enabled: true,
+            message_count: 0,
+        });
+        runtime.models.ready(Vec::new());
+        runtime.lifecycle = RuntimeLifecycle::Ready;
+
+        let projection =
+            ShellProjection::from_runtime(ControllerStatus::Active, "workspace", &runtime, None);
+        assert!(projection.no_model);
+        assert_eq!(projection.action, Some(RecoveryAction::Retry));
+        assert!(projection.detail.contains("Configure credentials in Pi"));
+    }
+
+    #[test]
+    fn failed_optional_stats_keep_prior_values_and_ready_connection() {
+        let mut runtime = RuntimeState {
+            lifecycle: RuntimeLifecycle::Ready,
+            ..RuntimeState::default()
+        };
+        runtime.stats.ready(RuntimeStats {
+            session_id: SessionId::from("session"),
+            user_messages: 1,
+            assistant_messages: 1,
+            tool_calls: 0,
+            tool_results: 0,
+            total_messages: 2,
+            input_tokens: 120,
+            output_tokens: 40,
+            cache_read_tokens: 20,
+            cache_write_tokens: 5,
+            total_tokens: 185,
+            cost: 0.12,
+            context_tokens: Some(160),
+            context_window: Some(1_000),
+            context_percent: Some(16.0),
+        });
+        runtime.stats.failed(runtime::SafeError::new(
+            runtime::ErrorKind::OptionalFacet,
+            "Statistics are unavailable",
+        ));
+
+        let projection = ShellProjection::from_runtime(
+            ControllerStatus::Active,
+            "C:\\workspace",
+            &runtime,
+            None,
+        );
+        assert_eq!(projection.lifecycle, "Ready");
         assert_eq!(
-            state
-                .sessions
-                .iter()
-                .filter(|session| session.active)
-                .count(),
-            1
+            projection.input_tokens,
+            DisplayValue::Stale("120".to_owned())
         );
-
-        assert!(state.select_task("t-3"));
-        assert_eq!(state.selected_task_id, Some("t-3"));
-
-        state.select_side(SideSection::Skills);
-        assert_eq!(state.side_section, SideSection::Skills);
-
-        let status = state.run_status;
-        state.cycle_run_status();
-        assert_ne!(state.run_status, status);
-    }
-
-    #[test]
-    fn invalid_selection_preserves_current_state() {
-        let mut state = DashboardState::placeholder();
-        let session_name = state.session_name;
-        let selected_task = state.selected_task_id;
-
-        assert!(!state.select_session("missing"));
-        assert!(!state.select_task("missing"));
-        assert_eq!(state.session_name, session_name);
-        assert_eq!(state.selected_task_id, selected_task);
-        assert_eq!(
-            state
-                .sessions
-                .iter()
-                .filter(|session| session.active)
-                .count(),
-            1
-        );
+        assert_eq!(projection.cost, DisplayValue::Stale("$0.12".to_owned()));
+        assert!(projection.has_stale_values);
     }
 }

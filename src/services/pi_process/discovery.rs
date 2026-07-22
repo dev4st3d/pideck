@@ -409,7 +409,10 @@ fn resolve_npm_shim_with_paths(
         },
     )?;
 
-    Ok((node, vec![cli.into_os_string()]))
+    Ok((
+        child_compatible_path(node),
+        vec![child_compatible_path(cli).into_os_string()],
+    ))
 }
 
 #[cfg(windows)]
@@ -439,6 +442,32 @@ fn find_program_in_directories(
     None
 }
 
+#[cfg(windows)]
+fn child_compatible_path(path: PathBuf) -> PathBuf {
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
+
+    let encoded = path.as_os_str().encode_wide().collect::<Vec<_>>();
+    let verbatim = [b'\\' as u16, b'\\' as u16, b'?' as u16, b'\\' as u16];
+    if !encoded.starts_with(&verbatim) {
+        return path;
+    }
+    let unc = [b'U' as u16, b'N' as u16, b'C' as u16, b'\\' as u16];
+    let normalized = if encoded[verbatim.len()..].starts_with(&unc) {
+        [b'\\' as u16, b'\\' as u16]
+            .into_iter()
+            .chain(encoded[verbatim.len() + unc.len()..].iter().copied())
+            .collect()
+    } else {
+        encoded[verbatim.len()..].to_vec()
+    };
+    PathBuf::from(OsString::from_wide(&normalized))
+}
+
+#[cfg(not(windows))]
+fn child_compatible_path(path: PathBuf) -> PathBuf {
+    path
+}
+
 fn run_probe(
     executable: &Path,
     launcher_arguments: &[OsString],
@@ -450,7 +479,7 @@ fn run_probe(
     let mut arguments = launcher_arguments.to_vec();
     arguments.push(probe_argument.to_os_string());
     let mut process =
-        spawn_contained(executable, &arguments, working_directory).map_err(|source| {
+        spawn_contained(executable, &arguments, working_directory, &[]).map_err(|source| {
             DiscoveryError::Io {
                 operation: "start the Pi compatibility probe",
                 source,
@@ -630,7 +659,10 @@ mod tests {
 
         let (launcher, prefix) = resolve_npm_shim_with_paths(&shim, [root.clone()].into_iter())
             .expect("resolve standard npm shim");
-        assert_eq!(launcher, fs::canonicalize(node).expect("canonical node"));
+        assert_eq!(
+            launcher,
+            child_compatible_path(fs::canonicalize(node).expect("canonical node"))
+        );
         assert_eq!(prefix.len(), 1);
         assert!(Path::new(&prefix[0]).ends_with("dist/cli.js"));
         let _ = fs::remove_dir_all(root);
