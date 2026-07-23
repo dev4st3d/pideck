@@ -10,8 +10,8 @@ use gpui::{
 
 use crate::actions::{
     AbortRun, ActivateRecovery, Connect, FocusNext, FocusPrevious, HistoryActivate, HistoryFirst,
-    HistoryFold, HistoryLast, HistoryNext, HistoryPrevious, HistoryUnfold, OpenCommandPalette,
-    Retry, ShowHotkeys, Stop,
+    HistoryFold, HistoryLast, HistoryNext, HistoryPrevious, HistoryUnfold,
+    ORCHESTRATION_ROW_CONTEXT, OpenCommandPalette, OrchestrationActivate, Retry, ShowHotkeys, Stop,
 };
 use crate::command_catalog::{
     CommandCatalog, CommandEntry, CommandTarget, InvocationResolution, NativeAction,
@@ -19,11 +19,16 @@ use crate::command_catalog::{
 use crate::controller::{
     AcceptedSubmission, AcceptedSubmissionKind, BridgeProjection, CatalogProjection, CatalogStatus,
     ComposerRuntime, ConversationProjection, ExtensionUiProjection, HistoryProjection,
-    ModelRuntimeProjection, ResourceCenterProjection, RuntimeController, SubmissionPreference,
+    ModelRuntimeProjection, OrchestrationProjection, ResourceCenterProjection, RuntimeController,
+    SubmissionPreference,
 };
 use crate::model_runtime::{
     AuthMethod, AuthPromptKind, AuthStage, CatalogPhase, ModelCatalogEntry, ModelChangePolicy,
     ModelIdentity, ThinkingLevel,
+};
+use crate::orchestration::{
+    GoalItemSnapshot, OrchestrationAction, OrchestrationPhase, SubagentSnapshot, SubagentStatus,
+    TaskSnapshot, TaskStatus, TranscriptRole,
 };
 use crate::resource_center::{
     ResourceLoadState, ResourcePhase, ResourceScopeFilter, ResourceStateFilter,
@@ -98,6 +103,8 @@ pub struct RootView {
     auth_secret_composer: Entity<Composer>,
     extension_input_composer: Entity<Composer>,
     extension_editor_composer: Entity<Composer>,
+    subagent_composer: Entity<Composer>,
+    goal_edit_composer: Entity<Composer>,
     model_panel: Option<ModelPanel>,
     resource_scope_filter: ResourceScopeFilter,
     resource_state_filter: ResourceStateFilter,
@@ -115,6 +122,10 @@ pub struct RootView {
     extension_dialog_selection: usize,
     extension_dialog_focus: FocusHandle,
     extension_dialog_timeout_task: Option<Task<()>>,
+    selected_task_id: Option<String>,
+    selected_subagent_id: Option<String>,
+    subagent_dialog_focus: FocusHandle,
+    subagent_dialog_scroll: ScrollHandle,
     window_title: String,
     history: HistoryBrowser,
     history_focus: FocusHandle,
@@ -147,6 +158,8 @@ pub struct RootView {
     _auth_secret_subscription: Subscription,
     _extension_input_subscription: Subscription,
     _extension_editor_subscription: Subscription,
+    _subagent_subscription: Subscription,
+    _goal_edit_subscription: Subscription,
 }
 
 impl RootView {
@@ -194,8 +207,25 @@ impl RootView {
             .new(|cx| Composer::field("extension-dialog-input", "Enter a value...", "Submit", cx));
         let extension_editor_composer =
             cx.new(|cx| Composer::scoped("extension-dialog-editor", "Edit text...", "Submit", cx));
+        let subagent_composer = cx.new(|cx| {
+            Composer::scoped(
+                "subagent-message",
+                "Steer this agent or resume it with a new prompt…",
+                "Send",
+                cx,
+            )
+        });
+        let goal_edit_composer = cx.new(|cx| {
+            Composer::field(
+                "goal-objective",
+                "Edit the active goal objective…",
+                "Update",
+                cx,
+            )
+        });
         let history_focus = cx.focus_handle();
         let extension_dialog_focus = cx.focus_handle();
+        let subagent_dialog_focus = cx.focus_handle();
         let conversation = controller.read(cx).conversation_projection();
         let extension_ui = controller.read(cx).extension_ui_projection();
         let transcript_texts = conversation::text_fragments(&conversation)
@@ -275,6 +305,14 @@ impl RootView {
             window,
             |view, _, event, window, cx| view.on_extension_composer_event(event, true, window, cx),
         );
+        let subagent_subscription =
+            cx.subscribe_in(&subagent_composer, window, |view, _, event, window, cx| {
+                view.on_subagent_composer_event(event, window, cx)
+            });
+        let goal_edit_subscription =
+            cx.subscribe_in(&goal_edit_composer, window, |view, _, event, _, cx| {
+                view.on_goal_edit_event(event, cx)
+            });
         window.set_window_title("Pi GUI");
         Self {
             controller,
@@ -290,6 +328,8 @@ impl RootView {
             auth_secret_composer,
             extension_input_composer,
             extension_editor_composer,
+            subagent_composer,
+            goal_edit_composer,
             model_panel: None,
             resource_scope_filter: ResourceScopeFilter::All,
             resource_state_filter: ResourceStateFilter::All,
@@ -307,6 +347,10 @@ impl RootView {
             extension_dialog_selection: 0,
             extension_dialog_focus,
             extension_dialog_timeout_task: None,
+            selected_task_id: None,
+            selected_subagent_id: None,
+            subagent_dialog_focus,
+            subagent_dialog_scroll: ScrollHandle::new(),
             window_title: "Pi GUI".to_owned(),
             history: HistoryBrowser::default(),
             history_focus,
@@ -339,6 +383,8 @@ impl RootView {
             _auth_secret_subscription: auth_secret_subscription,
             _extension_input_subscription: extension_input_subscription,
             _extension_editor_subscription: extension_editor_subscription,
+            _subagent_subscription: subagent_subscription,
+            _goal_edit_subscription: goal_edit_subscription,
         }
     }
 
@@ -2001,6 +2047,120 @@ impl RootView {
             | ComposerEvent::AbortBash => {}
         }
     }
+
+    fn dispatch_orchestration_action(
+        &mut self,
+        action: OrchestrationAction,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        self.controller.update(cx, |controller, cx| {
+            controller.orchestration_action(action, cx)
+        })
+    }
+
+    fn open_subagent(&mut self, agent_id: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.selected_subagent_id = Some(agent_id);
+        self.subagent_dialog_scroll.scroll_to_bottom();
+        window.focus(&self.subagent_dialog_focus);
+        cx.notify();
+    }
+
+    fn close_subagent(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.selected_subagent_id = None;
+        self.subagent_composer
+            .update(cx, |composer, cx| composer.set_draft("", cx));
+        window.focus(&self.focus_handle);
+        cx.notify();
+    }
+
+    fn on_subagent_dialog_key_down(
+        &mut self,
+        event: &gpui::KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if event.keystroke.key == "escape" {
+            cx.stop_propagation();
+            self.close_subagent(window, cx);
+        }
+    }
+
+    fn on_subagent_composer_event(
+        &mut self,
+        event: &ComposerEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            ComposerEvent::Accept { text } if !text.trim().is_empty() => {
+                let Some(agent_id) = self.selected_subagent_id.clone() else {
+                    return;
+                };
+                let active = self
+                    .controller
+                    .read(cx)
+                    .orchestration_projection()
+                    .snapshot
+                    .as_ref()
+                    .and_then(|snapshot| snapshot.subagent(&agent_id))
+                    .is_some_and(|agent| agent.status.is_active());
+                let action = if active {
+                    OrchestrationAction::SubagentSteer {
+                        agent_id,
+                        message: text.clone(),
+                    }
+                } else {
+                    OrchestrationAction::SubagentResume {
+                        agent_id,
+                        prompt: text.clone(),
+                    }
+                };
+                if self.dispatch_orchestration_action(action, cx) {
+                    self.subagent_composer
+                        .update(cx, |composer, cx| composer.set_draft("", cx));
+                }
+            }
+            ComposerEvent::Abort | ComposerEvent::AbortBash => self.close_subagent(window, cx),
+            ComposerEvent::Accept { .. }
+            | ComposerEvent::FollowUp { .. }
+            | ComposerEvent::CommandNext
+            | ComposerEvent::CommandPrevious
+            | ComposerEvent::CommandAccept
+            | ComposerEvent::CommandDismiss => {}
+        }
+    }
+
+    fn on_goal_edit_event(&mut self, event: &ComposerEvent, cx: &mut Context<Self>) {
+        let ComposerEvent::Accept { text } = event else {
+            return;
+        };
+        let objective = text.trim();
+        if objective.is_empty() {
+            return;
+        }
+        let Some(goal) = self
+            .controller
+            .read(cx)
+            .orchestration_projection()
+            .snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.goal.as_ref())
+            .and_then(|goal| goal.active.clone())
+        else {
+            return;
+        };
+        if self.dispatch_orchestration_action(
+            OrchestrationAction::GoalEdit {
+                goal_id: goal.id,
+                objective: objective.to_owned(),
+                token_budget: goal.token_budget,
+            },
+            cx,
+        ) {
+            self.goal_edit_composer
+                .update(cx, |composer, cx| composer.set_draft("", cx));
+        }
+    }
 }
 
 impl Render for RootView {
@@ -2011,6 +2171,7 @@ impl Render for RootView {
         let bridge = self.controller.read(cx).bridge_projection();
         let models = self.controller.read(cx).model_runtime_projection();
         let resources = self.controller.read(cx).resource_center_projection();
+        let orchestration = self.controller.read(cx).orchestration_projection();
         let command_catalog = self.command_catalog(cx);
         let selection_active = self
             .transcript_texts
@@ -2112,10 +2273,15 @@ impl Render for RootView {
                         }
                     })
                     .child(inspector(
-                        &projection,
-                        &self.conversation,
-                        &self.extension_ui,
-                        &self.compaction_composer,
+                        InspectorParams {
+                            projection: &projection,
+                            conversation: &self.conversation,
+                            extension_ui: &self.extension_ui,
+                            compaction_composer: &self.compaction_composer,
+                            orchestration: &orchestration,
+                            selected_task_id: self.selected_task_id.as_deref(),
+                            goal_edit_composer: &self.goal_edit_composer,
+                        },
                         cx,
                     )),
             )
@@ -2155,6 +2321,19 @@ impl Render for RootView {
             })
             .when(!self.runtime_notifications.is_empty(), |shell| {
                 shell.child(runtime_notification_stack(&self.runtime_notifications, cx))
+            })
+            .when_some(self.selected_subagent_id.clone(), |shell, agent_id| {
+                shell.child(subagent_dialog(
+                    orchestration
+                        .snapshot
+                        .as_ref()
+                        .and_then(|snapshot| snapshot.subagent(&agent_id)),
+                    &agent_id,
+                    &self.subagent_dialog_focus,
+                    &self.subagent_dialog_scroll,
+                    &self.subagent_composer,
+                    cx,
+                ))
             })
             .when_some(self.extension_ui.active_dialog.clone(), |shell, dialog| {
                 shell.child(extension_dialog_overlay(
@@ -5517,13 +5696,26 @@ fn compact_label(value: &str, max_chars: usize) -> String {
     out
 }
 
-fn inspector(
-    projection: &ShellProjection,
-    conversation: &ConversationProjection,
-    extension_ui: &ExtensionUiProjection,
-    compaction_composer: &Entity<Composer>,
-    cx: &mut Context<RootView>,
-) -> impl IntoElement {
+struct InspectorParams<'a> {
+    projection: &'a ShellProjection,
+    conversation: &'a ConversationProjection,
+    extension_ui: &'a ExtensionUiProjection,
+    compaction_composer: &'a Entity<Composer>,
+    orchestration: &'a OrchestrationProjection,
+    selected_task_id: Option<&'a str>,
+    goal_edit_composer: &'a Entity<Composer>,
+}
+
+fn inspector(params: InspectorParams<'_>, cx: &mut Context<RootView>) -> impl IntoElement {
+    let InspectorParams {
+        projection,
+        conversation,
+        extension_ui,
+        compaction_composer,
+        orchestration,
+        selected_task_id,
+        goal_edit_composer,
+    } = params;
     div()
         .w(px(theme::INSPECT_W))
         .flex_shrink_0()
@@ -5585,11 +5777,1113 @@ fn inspector(
                                 ))
                                 .child(controls::metric_row("Cost", projection.cost.label())),
                         )
+                        .child(orchestration_panel(
+                            orchestration,
+                            selected_task_id,
+                            goal_edit_composer,
+                            cx,
+                        ))
                         .child(run_controls(conversation, compaction_composer, cx))
                         .child(queue_panel(conversation))
                         .child(extension_diagnostics_panel(extension_ui)),
                 ),
         )
+}
+
+fn orchestration_panel(
+    orchestration: &OrchestrationProjection,
+    selected_task_id: Option<&str>,
+    goal_edit_composer: &Entity<Composer>,
+    cx: &mut Context<RootView>,
+) -> impl IntoElement {
+    let body = match (&orchestration.phase, orchestration.snapshot.as_ref()) {
+        (OrchestrationPhase::Loading, None) => orchestration_state_note(
+            "Connecting to Pi tasks, subagents, and goal…",
+            theme::data(),
+            false,
+            cx,
+        )
+        .into_any_element(),
+        (OrchestrationPhase::Error, None) => orchestration_state_note(
+            orchestration
+                .feedback
+                .as_deref()
+                .unwrap_or("Pi's orchestration state could not be loaded."),
+            theme::error(),
+            true,
+            cx,
+        )
+        .into_any_element(),
+        (OrchestrationPhase::Disconnected, None) => orchestration_state_note(
+            "The orchestration adapter is disconnected.",
+            theme::error(),
+            true,
+            cx,
+        )
+        .into_any_element(),
+        (OrchestrationPhase::Empty, Some(_)) => controls::empty_list_note(
+            "No task, subagent, schedule, or active goal in this Pi session.",
+        )
+        .into_any_element(),
+        (_, Some(snapshot)) => {
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(16.0))
+                .when(
+                    matches!(
+                        orchestration.phase,
+                        OrchestrationPhase::Stale | OrchestrationPhase::Disconnected
+                    ),
+                    |panel| {
+                        panel.child(orchestration_state_note(
+                            orchestration
+                                .feedback
+                                .as_deref()
+                                .unwrap_or("Showing the last authoritative snapshot."),
+                            theme::signal(),
+                            true,
+                            cx,
+                        ))
+                    },
+                )
+                .child(task_list(snapshot.tasks.as_slice(), selected_task_id, cx))
+                .child(subagent_list(snapshot.subagents.as_slice(), cx))
+                .when(!snapshot.schedules.is_empty(), |panel| {
+                    panel.child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(7.0))
+                            .child(controls::section_label("Schedules"))
+                            .child(controls::divider_list().children(
+                                snapshot.schedules.iter().map(|schedule| {
+                                    controls::queue_row(
+                                        if schedule.enabled { "ON" } else { "OFF" },
+                                        format!(
+                                            "{} · {} · {}",
+                                            schedule.name,
+                                            schedule.schedule,
+                                            schedule.subagent_type
+                                        ),
+                                    )
+                                }),
+                            )),
+                    )
+                })
+                .child(goal_panel(snapshot.goal.as_ref(), goal_edit_composer, cx))
+                .into_any_element()
+        }
+        _ => controls::empty_list_note("Waiting for Pi orchestration state.").into_any_element(),
+    };
+
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(9.0))
+        .child(
+            div()
+                .flex()
+                .items_baseline()
+                .justify_between()
+                .child(controls::section_label("Work"))
+                .when(orchestration.pending_actions > 0, |row| {
+                    row.child(
+                        div()
+                            .font_family(theme::MONO)
+                            .text_size(px(theme::T_TINY))
+                            .text_color(theme::data())
+                            .child(format!("{} pending", orchestration.pending_actions)),
+                    )
+                }),
+        )
+        .child(body)
+}
+
+fn orchestration_state_note(
+    message: impl Into<String>,
+    color: gpui::Rgba,
+    reconnect: bool,
+    cx: &mut Context<RootView>,
+) -> impl IntoElement {
+    div()
+        .p(px(10.0))
+        .rounded(px(theme::RADIUS_SM))
+        .bg(theme::panel())
+        .border_1()
+        .border_color(theme::edge_soft())
+        .flex()
+        .flex_col()
+        .gap(px(8.0))
+        .child(
+            div()
+                .font_family(theme::SANS)
+                .text_size(px(theme::T_UI_SM))
+                .line_height(gpui::relative(1.4))
+                .text_color(color)
+                .child(message.into()),
+        )
+        .when(reconnect, |note| {
+            note.child(controls::quiet_button(
+                "orchestration-reconnect",
+                "Reconnect",
+                true,
+                Box::new(cx.listener(|view, _, _, cx| {
+                    view.controller
+                        .update(cx, |controller, cx| controller.restart_bridge(cx));
+                })),
+            ))
+        })
+}
+
+fn task_list(
+    tasks: &[TaskSnapshot],
+    selected_task_id: Option<&str>,
+    cx: &mut Context<RootView>,
+) -> impl IntoElement {
+    let completed = tasks
+        .iter()
+        .filter(|task| task.status == TaskStatus::Completed)
+        .map(|task| task.id.as_str())
+        .collect::<HashSet<_>>();
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(7.0))
+        .child(
+            div()
+                .flex()
+                .items_baseline()
+                .justify_between()
+                .child(controls::section_label("Tasks"))
+                .child(
+                    div()
+                        .font_family(theme::MONO)
+                        .text_size(px(theme::T_TINY))
+                        .text_color(theme::smoke())
+                        .child(tasks.len().to_string()),
+                ),
+        )
+        .child(
+            controls::divider_list()
+                .when(tasks.is_empty(), |list| {
+                    list.child(controls::empty_list_note("No tasks in this session."))
+                })
+                .children(tasks.iter().enumerate().map(|(index, task)| {
+                    task_row(
+                        index,
+                        task,
+                        selected_task_id == Some(task.id.as_str()),
+                        task.blocked_by
+                            .iter()
+                            .filter(|id| !completed.contains(id.as_str()))
+                            .count(),
+                        cx,
+                    )
+                })),
+        )
+}
+
+fn task_row(
+    index: usize,
+    task: &TaskSnapshot,
+    selected: bool,
+    open_blockers: usize,
+    cx: &mut Context<RootView>,
+) -> gpui::AnyElement {
+    let id = task.id.clone();
+    let keyboard_id = task.id.clone();
+    let action_id = task.id.clone();
+    let status_color = task_status_color(task.status, open_blockers);
+    let can_execute = task.status == TaskStatus::Pending && open_blockers == 0;
+    let can_stop = task.status == TaskStatus::InProgress;
+    div()
+        .border_l_2()
+        .border_color(if selected {
+            theme::signal()
+        } else {
+            gpui::rgba(0x0000_0000)
+        })
+        .bg(if selected {
+            theme::panel_lift()
+        } else {
+            gpui::rgba(0x0000_0000)
+        })
+        .child(
+            div()
+                .id(("task-row", index))
+                .tab_index(0)
+                .key_context(ORCHESTRATION_ROW_CONTEXT)
+                .cursor_pointer()
+                .px(px(10.0))
+                .py(px(9.0))
+                .flex()
+                .flex_col()
+                .gap(px(3.0))
+                .hover(|row| row.bg(theme::panel_hover()))
+                .focus(|row| row.border_1().border_color(theme::focus()))
+                .on_click(cx.listener(move |view, _, _, cx| {
+                    view.selected_task_id = if view.selected_task_id.as_deref() == Some(&id) {
+                        None
+                    } else {
+                        Some(id.clone())
+                    };
+                    cx.notify();
+                }))
+                .on_action(cx.listener(move |view, _: &OrchestrationActivate, _, cx| {
+                    view.selected_task_id =
+                        if view.selected_task_id.as_deref() == Some(&keyboard_id) {
+                            None
+                        } else {
+                            Some(keyboard_id.clone())
+                        };
+                    cx.notify();
+                }))
+                .child(
+                    div()
+                        .flex()
+                        .items_baseline()
+                        .justify_between()
+                        .gap(px(8.0))
+                        .child(
+                            div()
+                                .min_w_0()
+                                .font_family(theme::SANS)
+                                .text_size(px(theme::T_UI))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(theme::bone())
+                                .overflow_hidden()
+                                .text_ellipsis()
+                                .whitespace_nowrap()
+                                .child(task.subject.clone()),
+                        )
+                        .child(
+                            div()
+                                .flex_shrink_0()
+                                .font_family(theme::SANS)
+                                .text_size(px(theme::T_TINY))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(status_color)
+                                .child(if open_blockers > 0 {
+                                    "Blocked".to_owned()
+                                } else {
+                                    task.status.label().to_owned()
+                                }),
+                        ),
+                )
+                .child(
+                    div()
+                        .font_family(theme::MONO)
+                        .text_size(px(theme::T_TINY))
+                        .text_color(theme::smoke())
+                        .child(format!(
+                            "{} · {}",
+                            task.id,
+                            task.owner.as_deref().unwrap_or("unassigned")
+                        )),
+                ),
+        )
+        .when(selected, |row| {
+            let task_id = action_id.clone();
+            row.child(
+                div()
+                    .px(px(10.0))
+                    .pb(px(10.0))
+                    .flex()
+                    .flex_col()
+                    .gap(px(8.0))
+                    .child(
+                        div()
+                            .font_family(theme::SANS)
+                            .text_size(px(theme::T_UI_SM))
+                            .line_height(gpui::relative(1.45))
+                            .text_color(theme::bone_dim())
+                            .child(task.description.clone()),
+                    )
+                    .when(open_blockers > 0, |detail| {
+                        detail.child(controls::empty_list_note(format!(
+                            "Waiting on {}",
+                            task.blocked_by.join(", ")
+                        )))
+                    })
+                    .when_some(task.output.clone(), |detail, output| {
+                        detail.child(
+                            div()
+                                .p(px(8.0))
+                                .rounded(px(theme::RADIUS_SM))
+                                .bg(theme::canvas())
+                                .font_family(theme::MONO)
+                                .text_size(px(theme::T_TINY))
+                                .text_color(theme::ash())
+                                .child(output),
+                        )
+                    })
+                    .when(
+                        !task.metadata.is_null()
+                            && task
+                                .metadata
+                                .as_object()
+                                .is_none_or(|value| !value.is_empty()),
+                        |detail| {
+                            detail.child(
+                                div()
+                                    .font_family(theme::MONO)
+                                    .text_size(px(theme::T_TINY))
+                                    .text_color(theme::smoke())
+                                    .child(task.metadata.to_string()),
+                            )
+                        },
+                    )
+                    .child(controls::quiet_button(
+                        format!("task-action-{task_id}"),
+                        if can_stop {
+                            "Stop task"
+                        } else {
+                            "Execute task"
+                        },
+                        can_stop || can_execute,
+                        Box::new(cx.listener(move |view, _, _, cx| {
+                            let action = if can_stop {
+                                OrchestrationAction::TaskStop {
+                                    task_id: task_id.clone(),
+                                }
+                            } else {
+                                OrchestrationAction::TaskExecute {
+                                    task_ids: vec![task_id.clone()],
+                                    additional_context: None,
+                                    model: None,
+                                    max_turns: None,
+                                    cascade: true,
+                                }
+                            };
+                            view.dispatch_orchestration_action(action, cx);
+                        })),
+                    )),
+            )
+        })
+        .into_any_element()
+}
+
+fn subagent_list(agents: &[SubagentSnapshot], cx: &mut Context<RootView>) -> impl IntoElement {
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(7.0))
+        .child(
+            div()
+                .flex()
+                .items_baseline()
+                .justify_between()
+                .child(controls::section_label("Subagents"))
+                .child(
+                    div()
+                        .font_family(theme::MONO)
+                        .text_size(px(theme::T_TINY))
+                        .text_color(theme::smoke())
+                        .child(agents.len().to_string()),
+                ),
+        )
+        .child(
+            controls::divider_list()
+                .when(agents.is_empty(), |list| {
+                    list.child(controls::empty_list_note("No subagents in this session."))
+                })
+                .children(agents.iter().enumerate().map(|(index, agent)| {
+                    let agent_id = agent.id.clone();
+                    let keyboard_agent_id = agent.id.clone();
+                    div()
+                        .id(("subagent-row", index))
+                        .tab_index(0)
+                        .key_context(ORCHESTRATION_ROW_CONTEXT)
+                        .cursor_pointer()
+                        .px(px(10.0))
+                        .py(px(9.0))
+                        .flex()
+                        .flex_col()
+                        .gap(px(3.0))
+                        .hover(|row| row.bg(theme::panel_hover()))
+                        .focus(|row| row.border_1().border_color(theme::focus()))
+                        .on_click(cx.listener(move |view, _, window, cx| {
+                            view.open_subagent(agent_id.clone(), window, cx);
+                        }))
+                        .on_action(cx.listener(
+                            move |view, _: &OrchestrationActivate, window, cx| {
+                                view.open_subagent(keyboard_agent_id.clone(), window, cx);
+                            },
+                        ))
+                        .child(
+                            div()
+                                .flex()
+                                .items_baseline()
+                                .justify_between()
+                                .gap(px(8.0))
+                                .child(
+                                    div()
+                                        .font_family(theme::SANS)
+                                        .text_size(px(theme::T_UI_SM))
+                                        .font_weight(FontWeight::BOLD)
+                                        .text_color(agent_type_color(&agent.agent_type))
+                                        .child(agent.agent_type.clone()),
+                                )
+                                .child(
+                                    div()
+                                        .font_family(theme::SANS)
+                                        .text_size(px(theme::T_TINY))
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(subagent_status_color(agent.status))
+                                        .child(agent.status.label()),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .font_family(theme::SANS)
+                                .text_size(px(theme::T_UI_SM))
+                                .line_height(gpui::relative(1.4))
+                                .text_color(theme::bone_dim())
+                                .child(agent.description.clone()),
+                        )
+                        .child(
+                            div()
+                                .font_family(theme::MONO)
+                                .text_size(px(theme::T_TINY))
+                                .text_color(theme::smoke())
+                                .child(match agent.queue_position {
+                                    Some(position) => format!(
+                                        "{} · queue {} · limit {}",
+                                        agent.id, position, agent.max_concurrent
+                                    ),
+                                    None => format!(
+                                        "{} · {} tool use{}",
+                                        agent.id,
+                                        agent.tool_uses,
+                                        plural(agent.tool_uses)
+                                    ),
+                                }),
+                        )
+                })),
+        )
+}
+
+fn goal_panel(
+    goal: Option<&crate::orchestration::GoalSnapshot>,
+    goal_edit_composer: &Entity<Composer>,
+    cx: &mut Context<RootView>,
+) -> impl IntoElement {
+    let Some(goal) = goal else {
+        return div()
+            .flex()
+            .flex_col()
+            .gap(px(7.0))
+            .child(controls::section_label("Goal"))
+            .child(controls::empty_list_note("No active goal."))
+            .into_any_element();
+    };
+    let Some(active) = goal.active.as_ref() else {
+        return div()
+            .flex()
+            .flex_col()
+            .gap(px(7.0))
+            .child(controls::section_label("Goal queue"))
+            .child(controls::empty_list_note(
+                "No active goal. Pi still has queued goal work.",
+            ))
+            .child(
+                controls::divider_list().children(goal.queue.iter().enumerate().map(
+                    |(index, item)| {
+                        controls::queue_row(
+                            format!("GOAL {:02}", index + 1),
+                            item.objective.clone(),
+                        )
+                    },
+                )),
+            )
+            .into_any_element();
+    };
+    let goal_id = active.id.clone();
+    let pause_id = goal_id.clone();
+    let resume_id = goal_id.clone();
+    let clear_id = goal_id.clone();
+    let resumable = matches!(
+        active.status.as_str(),
+        "paused" | "blocked" | "usage_limited" | "budget_limited"
+    );
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(8.0))
+        .child(
+            div()
+                .flex()
+                .items_baseline()
+                .justify_between()
+                .child(controls::section_label("Goal"))
+                .child(
+                    div()
+                        .font_family(theme::MONO)
+                        .text_size(px(theme::T_TINY))
+                        .text_color(goal_status_color(&active.status))
+                        .child(active.status.clone()),
+                ),
+        )
+        .child(
+            div()
+                .p(px(10.0))
+                .rounded(px(theme::RADIUS_SM))
+                .bg(theme::panel())
+                .border_1()
+                .border_color(theme::edge_soft())
+                .flex()
+                .flex_col()
+                .gap(px(7.0))
+                .child(
+                    div()
+                        .font_family(theme::SANS)
+                        .text_size(px(theme::T_UI))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .line_height(gpui::relative(1.45))
+                        .text_color(theme::bone())
+                        .child(active.objective.clone()),
+                )
+                .child(goal_metrics(active, goal.queue.len()))
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .flex_wrap()
+                        .gap(px(6.0))
+                        .child(controls::chip_button(
+                            format!("goal-pause-{goal_id}"),
+                            "Pause",
+                            false,
+                            active.status == "active",
+                            Box::new(cx.listener(move |view, _, _, cx| {
+                                view.dispatch_orchestration_action(
+                                    OrchestrationAction::GoalPause {
+                                        goal_id: pause_id.clone(),
+                                    },
+                                    cx,
+                                );
+                            })),
+                        ))
+                        .child(controls::chip_button(
+                            format!("goal-resume-{goal_id}"),
+                            "Resume",
+                            false,
+                            resumable,
+                            Box::new(cx.listener(move |view, _, _, cx| {
+                                view.dispatch_orchestration_action(
+                                    OrchestrationAction::GoalResume {
+                                        goal_id: resume_id.clone(),
+                                    },
+                                    cx,
+                                );
+                            })),
+                        ))
+                        .child(controls::chip_button(
+                            format!("goal-clear-{goal_id}"),
+                            "Clear",
+                            false,
+                            true,
+                            Box::new(cx.listener(move |view, _, _, cx| {
+                                view.dispatch_orchestration_action(
+                                    OrchestrationAction::GoalClear {
+                                        goal_id: clear_id.clone(),
+                                    },
+                                    cx,
+                                );
+                            })),
+                        )),
+                ),
+        )
+        .child(goal_edit_composer.clone())
+        .when(!goal.queue.is_empty(), |panel| {
+            panel.child(
+                controls::divider_list().children(goal.queue.iter().enumerate().map(
+                    |(index, item)| {
+                        controls::queue_row(
+                            format!("GOAL {:02}", index + 1),
+                            item.objective.clone(),
+                        )
+                    },
+                )),
+            )
+        })
+        .into_any_element()
+}
+
+fn goal_metrics(goal: &GoalItemSnapshot, queued: usize) -> impl IntoElement {
+    let budget = goal
+        .token_budget
+        .map(|budget| format!("{} / {} tokens", goal.tokens_used, budget))
+        .unwrap_or_else(|| format!("{} tokens", goal.tokens_used));
+    div()
+        .font_family(theme::MONO)
+        .text_size(px(theme::T_TINY))
+        .text_color(theme::ash())
+        .child(format!(
+            "{} · {} elapsed · iteration {} · {} queued",
+            budget,
+            format_elapsed(goal.time_used_seconds),
+            goal.iteration,
+            queued
+        ))
+}
+
+fn task_status_color(status: TaskStatus, blockers: usize) -> gpui::Rgba {
+    if blockers > 0 {
+        return theme::signal();
+    }
+    match status {
+        TaskStatus::Pending => theme::ash(),
+        TaskStatus::InProgress => theme::live(),
+        TaskStatus::Completed => theme::smoke(),
+    }
+}
+
+fn subagent_status_color(status: SubagentStatus) -> gpui::Rgba {
+    match status {
+        SubagentStatus::Queued => theme::data(),
+        SubagentStatus::Running => theme::live(),
+        SubagentStatus::Completed | SubagentStatus::Steered => theme::smoke(),
+        SubagentStatus::Aborted | SubagentStatus::Stopped => theme::signal(),
+        SubagentStatus::Error => theme::error(),
+    }
+}
+
+fn agent_type_color(agent_type: &str) -> gpui::Rgba {
+    match agent_type {
+        "explore" | "research" => theme::live(),
+        "plan" | "review" => theme::data(),
+        _ => theme::signal(),
+    }
+}
+
+fn goal_status_color(status: &str) -> gpui::Rgba {
+    match status {
+        "active" => theme::live(),
+        "paused" | "usage_limited" | "budget_limited" => theme::signal(),
+        "complete" | "completed" => theme::smoke(),
+        "blocked" | "error" => theme::error(),
+        _ => theme::ash(),
+    }
+}
+
+fn format_elapsed(seconds: f64) -> String {
+    let seconds = seconds.max(0.0) as u64;
+    let hours = seconds / 3600;
+    let minutes = (seconds % 3600) / 60;
+    if hours > 0 {
+        format!("{hours}h {minutes}m")
+    } else if minutes > 0 {
+        format!("{minutes}m")
+    } else {
+        format!("{}s", seconds % 60)
+    }
+}
+
+fn subagent_dialog(
+    agent: Option<&SubagentSnapshot>,
+    requested_id: &str,
+    focus: &FocusHandle,
+    scroll: &ScrollHandle,
+    composer: &Entity<Composer>,
+    cx: &mut Context<RootView>,
+) -> impl IntoElement {
+    let header = agent
+        .map(|agent| {
+            (
+                agent.agent_type.clone(),
+                agent.description.clone(),
+                agent.status.label().to_owned(),
+                subagent_status_color(agent.status),
+            )
+        })
+        .unwrap_or_else(|| {
+            (
+                "Subagent".to_owned(),
+                "This agent ID is no longer present in Pi's authoritative store.".to_owned(),
+                "Stale ID".to_owned(),
+                theme::error(),
+            )
+        });
+    let active = agent.is_some_and(|agent| agent.status.is_active());
+    let stop_id = requested_id.to_owned();
+
+    div()
+        .absolute()
+        .top_0()
+        .right_0()
+        .bottom_0()
+        .left_0()
+        .occlude()
+        .bg(gpui::rgba(0x0b0a_09ed))
+        .flex()
+        .items_center()
+        .justify_center()
+        .p(px(28.0))
+        .track_focus(focus)
+        .tab_index(0)
+        .on_key_down(cx.listener(RootView::on_subagent_dialog_key_down))
+        .child(
+            div()
+                .id("subagent-conversation-dialog")
+                .w_full()
+                .max_w(px(980.0))
+                .h_full()
+                .max_h(px(780.0))
+                .rounded(px(theme::RADIUS))
+                .bg(theme::floor())
+                .border_1()
+                .border_color(theme::edge_hard())
+                .flex()
+                .flex_col()
+                .overflow_hidden()
+                .child(
+                    div()
+                        .h(px(62.0))
+                        .px(px(18.0))
+                        .flex_shrink_0()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .gap(px(16.0))
+                        .border_b_1()
+                        .border_color(theme::edge_hard())
+                        .child(
+                            div()
+                                .min_w_0()
+                                .flex()
+                                .flex_col()
+                                .gap(px(3.0))
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_baseline()
+                                        .gap(px(9.0))
+                                        .child(
+                                            div()
+                                                .font_family(theme::SANS)
+                                                .text_size(px(theme::T_TITLE))
+                                                .font_weight(FontWeight::BOLD)
+                                                .text_color(agent_type_color(&header.0))
+                                                .child(header.0.clone()),
+                                        )
+                                        .child(
+                                            div()
+                                                .font_family(theme::MONO)
+                                                .text_size(px(theme::T_TINY))
+                                                .text_color(theme::smoke())
+                                                .child(requested_id.to_owned()),
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .font_family(theme::SANS)
+                                        .text_size(px(theme::T_UI_SM))
+                                        .text_color(theme::ash())
+                                        .overflow_hidden()
+                                        .text_ellipsis()
+                                        .whitespace_nowrap()
+                                        .child(header.1.clone()),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(8.0))
+                                .child(controls::status_pill(header.2.clone(), header.3))
+                                .when(active, |row| {
+                                    row.child(controls::quiet_button(
+                                        "subagent-stop",
+                                        "Stop",
+                                        true,
+                                        Box::new(cx.listener(move |view, _, _, cx| {
+                                            view.dispatch_orchestration_action(
+                                                OrchestrationAction::SubagentStop {
+                                                    agent_id: stop_id.clone(),
+                                                },
+                                                cx,
+                                            );
+                                        })),
+                                    ))
+                                })
+                                .child(controls::quiet_button(
+                                    "subagent-close",
+                                    "Close · Esc",
+                                    true,
+                                    Box::new(cx.listener(|view, _, window, cx| {
+                                        view.close_subagent(window, cx);
+                                    })),
+                                )),
+                        ),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_h_0()
+                        .flex()
+                        .flex_row()
+                        .child(
+                            div()
+                                .id("subagent-live-transcript")
+                                .flex_1()
+                                .min_w_0()
+                                .h_full()
+                                .overflow_y_scroll()
+                                .scrollbar_width(px(theme::SCROLLBAR))
+                                .track_scroll(scroll)
+                                .child(
+                                    div()
+                                        .w_full()
+                                        .max_w(px(720.0))
+                                        .mx_auto()
+                                        .px(px(24.0))
+                                        .py(px(22.0))
+                                        .flex()
+                                        .flex_col()
+                                        .gap(px(18.0))
+                                        .when(agent.is_none(), |transcript| {
+                                            transcript.child(controls::empty_list_note(
+                                                "Close this view and open a current agent from the Inspector.",
+                                            ))
+                                        })
+                                        .when_some(agent, |transcript, agent| {
+                                            transcript
+                                                .when(agent.transcript.is_empty(), |transcript| {
+                                                    transcript.child(controls::empty_list_note(
+                                                        if agent.status == SubagentStatus::Queued {
+                                                            "Queued. Live output will appear when Pi starts the agent."
+                                                        } else {
+                                                            "Pi has not emitted conversation output for this agent yet."
+                                                        },
+                                                    ))
+                                                })
+                                                .children(agent.transcript.iter().map(
+                                                    subagent_transcript_entry,
+                                                ))
+                                                .when(agent.transcript_truncated, |transcript| {
+                                                    transcript.child(
+                                                        div()
+                                                            .font_family(theme::MONO)
+                                                            .text_size(px(theme::T_TINY))
+                                                            .text_color(theme::smoke())
+                                                            .child(
+                                                                "Earlier output is truncated; the live tail is shown.",
+                                                            ),
+                                                    )
+                                                })
+                                        }),
+                                ),
+                        )
+                        .when_some(agent, |layout, agent| {
+                            layout.child(subagent_metadata_panel(agent))
+                        }),
+                )
+                .when(agent.is_some(), |dialog| {
+                    dialog.child(
+                        div()
+                            .flex_shrink_0()
+                            .px(px(18.0))
+                            .py(px(12.0))
+                            .border_t_1()
+                            .border_color(theme::edge_hard())
+                            .bg(theme::panel())
+                            .child(composer.clone()),
+                    )
+                }),
+        )
+}
+
+fn subagent_transcript_entry(
+    entry: &crate::orchestration::SubagentTranscriptEntry,
+) -> impl IntoElement {
+    let (label, color, background) = match entry.role {
+        TranscriptRole::User => ("YOU", theme::signal(), theme::panel_lift()),
+        TranscriptRole::Assistant => ("AGENT", theme::live(), theme::panel()),
+        TranscriptRole::ToolResult => ("TOOL", theme::data(), theme::canvas()),
+        TranscriptRole::System => ("SYSTEM", theme::ash(), theme::canvas()),
+    };
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(6.0))
+        .child(
+            div()
+                .flex()
+                .items_baseline()
+                .gap(px(8.0))
+                .child(
+                    div()
+                        .font_family(theme::MONO)
+                        .text_size(px(theme::T_TINY))
+                        .font_weight(FontWeight::BOLD)
+                        .text_color(if entry.is_error {
+                            theme::error()
+                        } else {
+                            color
+                        })
+                        .child(label),
+                )
+                .when_some(entry.tool_name.clone(), |row, tool| {
+                    row.child(
+                        div()
+                            .font_family(theme::MONO)
+                            .text_size(px(theme::T_TINY))
+                            .text_color(theme::smoke())
+                            .child(tool),
+                    )
+                }),
+        )
+        .child(
+            div()
+                .p(px(12.0))
+                .rounded(px(theme::RADIUS_SM))
+                .bg(background)
+                .border_1()
+                .border_color(if entry.is_error {
+                    theme::error()
+                } else {
+                    theme::edge_soft()
+                })
+                .font_family(if entry.role == TranscriptRole::ToolResult {
+                    theme::MONO
+                } else {
+                    theme::SANS
+                })
+                .text_size(px(theme::T_UI))
+                .line_height(gpui::relative(1.5))
+                .text_color(theme::bone_dim())
+                .child(entry.content.clone()),
+        )
+}
+
+fn subagent_metadata_panel(agent: &SubagentSnapshot) -> impl IntoElement {
+    div()
+        .id("subagent-metadata")
+        .w(px(230.0))
+        .flex_shrink_0()
+        .h_full()
+        .overflow_y_scroll()
+        .px(px(14.0))
+        .py(px(18.0))
+        .border_l_1()
+        .border_color(theme::edge_hard())
+        .bg(theme::panel())
+        .flex()
+        .flex_col()
+        .gap(px(14.0))
+        .child(controls::section_label("Run details"))
+        .child(controls::metric_row(
+            "Tool uses",
+            agent.tool_uses.to_string(),
+        ))
+        .child(controls::metric_row(
+            "Concurrency",
+            agent.max_concurrent.to_string(),
+        ))
+        .when_some(agent.queue_position, |panel, position| {
+            panel.child(controls::metric_row("Queue", position.to_string()))
+        })
+        .when_some(agent.output_file.clone(), |panel, output| {
+            panel.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(4.0))
+                    .child(controls::section_label("Output"))
+                    .child(
+                        div()
+                            .font_family(theme::MONO)
+                            .text_size(px(theme::T_TINY))
+                            .text_color(theme::ash())
+                            .child(short_path(&output)),
+                    ),
+            )
+        })
+        .when_some(agent.worktree.as_ref(), |panel, worktree| {
+            panel.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(4.0))
+                    .child(controls::section_label("Worktree"))
+                    .child(
+                        div()
+                            .font_family(theme::MONO)
+                            .text_size(px(theme::T_TINY))
+                            .text_color(theme::ash())
+                            .child(format!(
+                                "{}\n{}",
+                                worktree.branch,
+                                short_path(&worktree.work_path)
+                            )),
+                    )
+                    .when_some(agent.worktree_result.as_ref(), |detail, result| {
+                        detail.child(
+                            div()
+                                .font_family(theme::SANS)
+                                .text_size(px(theme::T_UI_SM))
+                                .text_color(if result.has_changes {
+                                    theme::live()
+                                } else {
+                                    theme::smoke()
+                                })
+                                .child(if result.has_changes {
+                                    "Changes available"
+                                } else {
+                                    "No changes"
+                                }),
+                        )
+                    }),
+            )
+        })
+        .when_some(agent.memory.as_ref(), |panel, memory| {
+            panel.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(4.0))
+                    .child(controls::section_label("Memory"))
+                    .child(
+                        div()
+                            .font_family(theme::MONO)
+                            .text_size(px(theme::T_TINY))
+                            .text_color(theme::ash())
+                            .child(match memory.path.as_deref() {
+                                Some(path) => format!("{} · {}", memory.scope, short_path(path)),
+                                None => memory.scope.clone(),
+                            }),
+                    ),
+            )
+        })
+        .when_some(agent.result.clone(), |panel, result| {
+            panel.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(4.0))
+                    .child(controls::section_label("Result"))
+                    .child(
+                        div()
+                            .font_family(theme::SANS)
+                            .text_size(px(theme::T_UI_SM))
+                            .line_height(gpui::relative(1.4))
+                            .text_color(theme::bone_dim())
+                            .child(result),
+                    ),
+            )
+        })
+        .when_some(agent.error.clone(), |panel, error| {
+            panel.child(
+                div()
+                    .font_family(theme::SANS)
+                    .text_size(px(theme::T_UI_SM))
+                    .line_height(gpui::relative(1.4))
+                    .text_color(theme::error())
+                    .child(error),
+            )
+        })
 }
 
 fn run_controls(

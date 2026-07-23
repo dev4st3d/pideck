@@ -3,12 +3,14 @@
 import { createInterface } from "node:readline";
 import { basename, dirname, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, unlinkSync, writeFileSync } from "node:fs";
+import { createServer } from "node:net";
 
 const PROTOCOL_VERSION = 1;
 const MAX_LINE_BYTES = 1024 * 1024;
 const SDK_VERSION = "0.80.10";
 const SESSION_VERSION = 3;
+const ORCHESTRATION_ENDPOINT = process.env.PI_GUI_ORCHESTRATION_PIPE;
 const CAPABILITIES = Object.freeze({
   navigateTree: true,
   branchSummary: true,
@@ -24,6 +26,7 @@ const CAPABILITIES = Object.freeze({
   activeToolState: true,
   resourceSettings: true,
   packageMutations: false,
+  orchestration: Boolean(ORCHESTRATION_ENDPOINT),
 });
 
 const CAPABILITY_BY_COMMAND = Object.freeze({
@@ -42,6 +45,8 @@ const CAPABILITY_BY_COMMAND = Object.freeze({
   reload_resources: "resourceReload",
   set_skill_commands_enabled: "resourceSettings",
   set_resource_theme: "resourceSettings",
+  get_orchestration_snapshot: "orchestration",
+  orchestration_action: "orchestration",
   package_install: "packageMutations",
   package_remove: "packageMutations",
   package_update: "packageMutations",
@@ -70,9 +75,99 @@ let modelRefreshErrors = new Map();
 let resourceGeneration = 0;
 let resourcePlane;
 let resourceBuildPromise;
+let orchestrationSocket;
+let orchestrationSnapshot;
+let orchestrationRequestId = 0;
+const orchestrationPending = new Map();
 
 function emit(event, value) {
   process.stdout.write(`${JSON.stringify({ version: PROTOCOL_VERSION, type: "event", event, ...value })}\n`);
+}
+
+function orchestrationError(message = "The orchestration adapter is unavailable.") {
+  const error = new Error(message);
+  error.bridgeCode = "orchestration_unavailable";
+  return error;
+}
+
+function failOrchestrationPending(message) {
+  for (const pending of orchestrationPending.values()) {
+    clearTimeout(pending.timer);
+    pending.reject(orchestrationError(message));
+  }
+  orchestrationPending.clear();
+}
+
+function acceptOrchestrationSocket(socket) {
+  orchestrationSocket?.destroy();
+  orchestrationSocket = socket;
+  socket.setEncoding("utf8");
+  const lines = createInterface({ input: socket, crlfDelay: Infinity });
+  lines.on("line", (line) => {
+    if (Buffer.byteLength(line, "utf8") > MAX_LINE_BYTES) return;
+    let record;
+    try {
+      record = JSON.parse(line);
+    } catch {
+      return;
+    }
+    if (record?.type === "snapshot" && record.snapshot && typeof record.snapshot === "object") {
+      orchestrationSnapshot = record.snapshot;
+      emit("orchestration_snapshot", { snapshot: record.snapshot });
+      return;
+    }
+    if (record?.type !== "response" || typeof record.id !== "string") return;
+    const pending = orchestrationPending.get(record.id);
+    if (!pending) return;
+    orchestrationPending.delete(record.id);
+    clearTimeout(pending.timer);
+    if (record.ok) pending.resolve(record.result ?? {});
+    else pending.reject(orchestrationError("The Pi orchestration action was rejected."));
+  });
+  socket.on("close", () => {
+    if (orchestrationSocket === socket) orchestrationSocket = undefined;
+    failOrchestrationPending("The orchestration adapter disconnected.");
+    emit("orchestration_disconnected", {});
+  });
+  socket.on("error", () => {});
+}
+
+let orchestrationServer;
+if (ORCHESTRATION_ENDPOINT) {
+  if (process.platform !== "win32" && existsSync(ORCHESTRATION_ENDPOINT)) {
+    try {
+      unlinkSync(ORCHESTRATION_ENDPOINT);
+    } catch {
+      // A live owner will make listen fail; Rust then exposes reconnect recovery.
+    }
+  }
+  orchestrationServer = createServer(acceptOrchestrationSocket);
+  orchestrationServer.on("error", () => {
+    emit("orchestration_disconnected", {});
+  });
+  orchestrationServer.listen(ORCHESTRATION_ENDPOINT);
+}
+
+function requestOrchestration(action, sessionId) {
+  if (!orchestrationSocket || orchestrationSocket.destroyed) {
+    return Promise.reject(orchestrationError());
+  }
+  const id = `orchestration-${++orchestrationRequestId}`;
+  return new Promise((resolveRequest, rejectRequest) => {
+    const timer = setTimeout(() => {
+      orchestrationPending.delete(id);
+      rejectRequest(orchestrationError("The orchestration adapter did not answer in time."));
+    }, 30_000);
+    orchestrationPending.set(id, { resolve: resolveRequest, reject: rejectRequest, timer });
+    orchestrationSocket.write(`${JSON.stringify({ type: "request", id, sessionId, action })}\n`, (error) => {
+      if (!error) return;
+      const pending = orchestrationPending.get(id);
+      if (!pending) return;
+      orchestrationPending.delete(id);
+      clearTimeout(pending.timer);
+      rejectRequest(orchestrationError("The orchestration adapter could not receive the action."));
+    });
+  });
 }
 
 function safeAuthSource(source) {
@@ -1043,6 +1138,25 @@ async function execute(record) {
         result = await resourceSnapshot(token.abortController.signal, true);
         break;
       }
+      case "get_orchestration_snapshot": {
+        const requestedSession =
+          typeof params.sessionId === "string" && params.sessionId ? params.sessionId : undefined;
+        if (
+          orchestrationSnapshot &&
+          (!requestedSession || orchestrationSnapshot.sessionId === requestedSession)
+        ) {
+          result = orchestrationSnapshot;
+          break;
+        }
+        result = await requestOrchestration({ kind: "snapshot" }, requestedSession);
+        break;
+      }
+      case "orchestration_action":
+        if (!params.action || typeof params.action !== "object") {
+          throw orchestrationError("The orchestration action was invalid.");
+        }
+        result = await requestOrchestration(params.action, params.action.sessionId);
+        break;
       default: {
         const unsupported = new Error("Unsupported bridge command");
         unsupported.bridgeCode = "unsupported_command";
@@ -1063,9 +1177,13 @@ async function execute(record) {
       "reload_resources",
       "set_skill_commands_enabled",
       "set_resource_theme",
+      "get_orchestration_snapshot",
+      "orchestration_action",
     ].includes(command);
     const message = sensitiveOperation
-      ? command.includes("resource") || command.includes("skill")
+      ? command.includes("orchestration")
+        ? "The orchestration operation failed."
+        : command.includes("resource") || command.includes("skill")
         ? "The resource operation failed. Details were redacted."
         : "The model or authentication operation failed."
       : error instanceof Error
@@ -1131,4 +1249,14 @@ input.on("close", () => {
     operation.session?.abortBranchSummary();
   }
   resourcePlane?.session?.dispose?.();
+  failOrchestrationPending("The Pi SDK bridge stopped.");
+  orchestrationSocket?.destroy();
+  orchestrationServer?.close();
+  if (ORCHESTRATION_ENDPOINT && process.platform !== "win32") {
+    try {
+      unlinkSync(ORCHESTRATION_ENDPOINT);
+    } catch {
+      // The endpoint may already have been removed by the server shutdown.
+    }
+  }
 });

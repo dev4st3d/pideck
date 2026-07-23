@@ -22,6 +22,7 @@ export interface BridgeCapabilities {
   resourceReload: boolean;
   activeToolState: boolean;
   resourceSettings: boolean;
+  orchestration: boolean;
   packageMutations: false;
 }
 
@@ -77,6 +78,17 @@ export type EventRecord =
   | {
       version: typeof PROTOCOL_VERSION;
       type: "event";
+      event: "orchestration_snapshot";
+      snapshot: Record<string, unknown>;
+    }
+  | {
+      version: typeof PROTOCOL_VERSION;
+      type: "event";
+      event: "orchestration_disconnected";
+    }
+  | {
+      version: typeof PROTOCOL_VERSION;
+      type: "event";
       event:
         | "auth_prompt"
         | "auth_info"
@@ -89,4 +101,3 @@ export type EventRecord =
 
 export type InboundRecord = RequestRecord | CancelRecord;
 export type OutboundRecord = ResponseRecord | EventRecord;
-

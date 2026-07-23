@@ -114,6 +114,7 @@ impl RpcRuntimeService {
         );
         config.disable_tools = false;
         config.offline = false;
+        attach_orchestration_adapter(&mut config);
         Self::new(config)
     }
 
@@ -129,8 +130,20 @@ impl RpcRuntimeService {
         );
         config.disable_tools = false;
         config.offline = false;
+        attach_orchestration_adapter(&mut config);
         Self::new(config)
     }
+}
+
+fn attach_orchestration_adapter(config: &mut PiLaunchConfig) {
+    let adapter = crate::services::sdk_bridge::orchestration_adapter_path();
+    if adapter.is_file() {
+        config.resources.extensions.push(adapter);
+    }
+    config.environment_overrides.push((
+        crate::services::sdk_bridge::ORCHESTRATION_PIPE_ENV.into(),
+        crate::services::sdk_bridge::orchestration_endpoint(&config.working_directory).into(),
+    ));
 }
 
 impl RuntimeService for RpcRuntimeService {

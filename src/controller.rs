@@ -11,6 +11,10 @@ use crate::model_runtime::{
     AuthFlow, AuthMethod, AuthPrompt, CatalogPhase, ModelCatalogSnapshot, ModelChangePolicy,
     ModelIdentity, ModelRuntimeState, ThinkingLevel, model_change_policy,
 };
+use crate::orchestration::{
+    OrchestrationAction, OrchestrationActionRequest, OrchestrationPhase, OrchestrationSnapshot,
+    OrchestrationState,
+};
 use crate::resource_center::{ResourceCenterState, ResourceInventorySnapshot, ResourcePhase};
 use crate::services::rpc::{ConnectionGeneration, RequestId, SessionEpoch};
 use crate::services::runtime_worker::{
@@ -18,7 +22,7 @@ use crate::services::runtime_worker::{
 };
 use crate::services::sdk_bridge::{
     BridgeCapabilities, BridgeCommand, BridgeErrorKind, BridgeEvent, BridgeWorkerResult,
-    ResourceEvent, SdkBridgeWorker, SensitiveValue, decode_resource_snapshot,
+    OrchestrationEvent, ResourceEvent, SdkBridgeWorker, SensitiveValue, decode_resource_snapshot,
 };
 use crate::services::session_catalog::{
     CatalogWorkerResult, CorruptSession, SessionCatalogConfig, SessionCatalogWorker, SessionRoot,
@@ -197,6 +201,14 @@ pub struct ResourceCenterProjection {
     pub phase: ResourcePhase,
     pub snapshot: Option<ResourceInventorySnapshot>,
     pub feedback: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct OrchestrationProjection {
+    pub phase: OrchestrationPhase,
+    pub snapshot: Option<OrchestrationSnapshot>,
+    pub feedback: Option<String>,
+    pub pending_actions: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -937,6 +949,9 @@ pub struct RuntimeController {
     model_snapshot_pending: Option<u64>,
     resource_center: ResourceCenterState,
     resource_snapshot_pending: Option<u64>,
+    orchestration: OrchestrationState,
+    orchestration_snapshot_pending: Option<u64>,
+    orchestration_actions_pending: HashMap<u64, OrchestrationAction>,
     requested_thinking: Option<ThinkingLevel>,
     clamp_notice: Option<String>,
     _event_task: Task<()>,
@@ -1015,6 +1030,9 @@ impl RuntimeController {
             model_snapshot_pending: None,
             resource_center: ResourceCenterState::default(),
             resource_snapshot_pending: None,
+            orchestration: OrchestrationState::default(),
+            orchestration_snapshot_pending: None,
+            orchestration_actions_pending: HashMap::new(),
             requested_thinking: None,
             clamp_notice: None,
             _event_task: event_task,
@@ -1150,6 +1168,63 @@ impl RuntimeController {
             snapshot: self.resource_center.snapshot.clone(),
             feedback: self.resource_center.feedback.clone(),
         }
+    }
+
+    pub fn orchestration_projection(&self) -> OrchestrationProjection {
+        OrchestrationProjection {
+            phase: self.orchestration.phase,
+            snapshot: self.orchestration.snapshot.clone(),
+            feedback: self.orchestration.feedback.clone(),
+            pending_actions: self.orchestration_actions_pending.len(),
+        }
+    }
+
+    pub fn orchestration_action(
+        &mut self,
+        action: OrchestrationAction,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !self
+            .bridge_capabilities
+            .as_ref()
+            .is_some_and(|capabilities| capabilities.orchestration)
+        {
+            self.orchestration
+                .fail("The installed Pi bridge does not expose orchestration actions.");
+            cx.notify();
+            return false;
+        }
+        let Some(session_id) = self
+            .core
+            .runtime
+            .session
+            .data
+            .as_ref()
+            .map(|session| session.id.to_string())
+        else {
+            self.orchestration
+                .fail("No active Pi session is available for this action.");
+            cx.notify();
+            return false;
+        };
+        let operation = self.take_bridge_operation();
+        let request = OrchestrationActionRequest {
+            session_id,
+            action: action.clone(),
+        };
+        let accepted = self.bridge_worker.execute(
+            operation,
+            BridgeCommand::OrchestrationAction { action: request },
+        );
+        if accepted {
+            self.orchestration_actions_pending.insert(operation, action);
+            self.orchestration.feedback = Some("Sending action to Pi…".to_owned());
+        } else {
+            self.orchestration
+                .fail("The orchestration bridge is unavailable.");
+        }
+        cx.notify();
+        accepted
     }
 
     pub fn reload_resources(&mut self, cx: &mut Context<Self>) -> bool {
@@ -1574,6 +1649,11 @@ impl RuntimeController {
         self.resource_snapshot_pending = None;
         self.resource_center.phase = ResourcePhase::Loading;
         self.resource_center.feedback = Some("Restarting resource bridge…".to_owned());
+        self.orchestration_snapshot_pending = None;
+        self.orchestration_actions_pending.clear();
+        self.orchestration.phase = OrchestrationPhase::Loading;
+        self.orchestration.feedback =
+            Some("Reconnecting to Pi's orchestration extensions…".to_owned());
         let accepted = self.bridge_worker.restart();
         cx.notify();
         accepted
@@ -1673,8 +1753,21 @@ impl RuntimeController {
 
     fn receive(&mut self, result: WorkerResult) {
         let before = self.catalog_refresh_identity();
+        let previous_session = self.orchestration.expected_session_id.clone();
         let effects = self.core.apply_worker_result(result);
         self.send_effects(effects);
+        let active_session = self
+            .core
+            .runtime
+            .session
+            .data
+            .as_ref()
+            .map(|session| session.id.to_string());
+        self.orchestration.begin_session(active_session);
+        if previous_session != self.orchestration.expected_session_id {
+            self.orchestration_actions_pending.clear();
+            self.request_orchestration_snapshot();
+        }
         if before != self.catalog_refresh_identity() {
             self.preferred_session_file = self
                 .core
@@ -1746,12 +1839,14 @@ impl RuntimeController {
                         self.resource_snapshot_pending = Some(operation);
                     }
                 }
+                self.request_orchestration_snapshot();
                 self.bridge_feedback =
                     Some(format!("Session bridge ready · SDK {}", hello.sdk_version));
             }
             BridgeWorkerResult::Capabilities(Err(error)) => {
                 self.bridge_capabilities = None;
                 self.bridge_unavailable = Some(error.summary);
+                self.orchestration.disconnect();
             }
             BridgeWorkerResult::Event(BridgeEvent::Auth(event)) => {
                 self.model_runtime.apply_auth_event(event);
@@ -1762,6 +1857,14 @@ impl RuntimeController {
                 }
                 ResourceEvent::ResourcesChanged { .. } => {}
             },
+            BridgeWorkerResult::Event(BridgeEvent::Orchestration(event)) => match event {
+                OrchestrationEvent::OrchestrationSnapshot { snapshot } => {
+                    self.orchestration.apply_snapshot(*snapshot);
+                }
+                OrchestrationEvent::OrchestrationDisconnected => {
+                    self.orchestration.disconnect();
+                }
+            },
             BridgeWorkerResult::Completed {
                 id,
                 command,
@@ -1771,6 +1874,9 @@ impl RuntimeController {
                     return;
                 }
                 if self.receive_resource_bridge_result(id, &command, &result) {
+                    return;
+                }
+                if self.receive_orchestration_bridge_result(id, &command, &result) {
                     return;
                 }
                 let Some((pending_id, kind)) = self.bridge_pending else {
@@ -1862,6 +1968,10 @@ impl RuntimeController {
                                 | BridgeCommand::ReloadResources
                                 | BridgeCommand::SetSkillCommandsEnabled { .. }
                                 | BridgeCommand::SetResourceTheme { .. } => "Resource operation",
+                                BridgeCommand::GetOrchestrationSnapshot { .. }
+                                | BridgeCommand::OrchestrationAction { .. } => {
+                                    "Orchestration operation"
+                                }
                             },
                             error.summary
                         ));
@@ -1995,7 +2105,9 @@ impl RuntimeController {
             | BridgeCommand::GetResourceInventory
             | BridgeCommand::ReloadResources
             | BridgeCommand::SetSkillCommandsEnabled { .. }
-            | BridgeCommand::SetResourceTheme { .. } => false,
+            | BridgeCommand::SetResourceTheme { .. }
+            | BridgeCommand::GetOrchestrationSnapshot { .. }
+            | BridgeCommand::OrchestrationAction { .. } => false,
         }
     }
 
@@ -2053,7 +2165,122 @@ impl RuntimeController {
             | BridgeCommand::AuthRespond { .. }
             | BridgeCommand::LogoutProvider { .. }
             | BridgeCommand::SetModelDefaults { .. }
-            | BridgeCommand::SetModelScope { .. } => false,
+            | BridgeCommand::SetModelScope { .. }
+            | BridgeCommand::GetOrchestrationSnapshot { .. }
+            | BridgeCommand::OrchestrationAction { .. } => false,
+        }
+    }
+
+    fn request_orchestration_snapshot(&mut self) {
+        if self.orchestration_snapshot_pending.is_some()
+            || !self
+                .bridge_capabilities
+                .as_ref()
+                .is_some_and(|capabilities| capabilities.orchestration)
+        {
+            return;
+        }
+        let Some(session_id) = self.orchestration.expected_session_id.clone() else {
+            return;
+        };
+        let operation = self.take_bridge_operation();
+        if self.bridge_worker.execute(
+            operation,
+            BridgeCommand::GetOrchestrationSnapshot {
+                session_id: Some(session_id),
+            },
+        ) {
+            self.orchestration_snapshot_pending = Some(operation);
+            if self.orchestration.snapshot.is_none() {
+                self.orchestration.phase = OrchestrationPhase::Loading;
+            }
+        }
+    }
+
+    fn receive_orchestration_bridge_result(
+        &mut self,
+        id: u64,
+        command: &BridgeCommand,
+        result: &Result<serde_json::Value, crate::services::sdk_bridge::BridgeError>,
+    ) -> bool {
+        match command {
+            BridgeCommand::GetOrchestrationSnapshot { .. } => {
+                if self.orchestration_snapshot_pending != Some(id) {
+                    return true;
+                }
+                self.orchestration_snapshot_pending = None;
+                match result {
+                    Ok(value) => {
+                        match serde_json::from_value::<OrchestrationSnapshot>(value.clone()) {
+                            Ok(snapshot) => {
+                                self.orchestration.apply_snapshot(snapshot);
+                            }
+                            Err(_) => self
+                                .orchestration
+                                .fail("Pi returned an invalid orchestration snapshot."),
+                        }
+                    }
+                    Err(error) if matches!(error.kind, BridgeErrorKind::Disconnected) => {
+                        self.orchestration.disconnect();
+                    }
+                    Err(error) => self.orchestration.fail(error.summary.clone()),
+                }
+                true
+            }
+            BridgeCommand::OrchestrationAction { .. } => {
+                let Some(_action) = self.orchestration_actions_pending.remove(&id) else {
+                    return true;
+                };
+                match result {
+                    Ok(value) => {
+                        if let Some(command) = value
+                            .get("invokeCommand")
+                            .and_then(serde_json::Value::as_str)
+                        {
+                            match self.core.invoke_dynamic_command(
+                                command.to_owned(),
+                                CommandSource::Extension,
+                                SubmissionPreference::Default,
+                            ) {
+                                Ok((_submission, effects)) => {
+                                    self.send_effects(effects);
+                                    self.orchestration.feedback =
+                                        Some("Pi accepted the goal action.".to_owned());
+                                }
+                                Err(error) => self.orchestration.fail(format!(
+                                    "Pi could not run the goal action: {}",
+                                    error.message()
+                                )),
+                            }
+                        } else {
+                            self.orchestration.feedback =
+                                Some("Pi accepted the orchestration action.".to_owned());
+                            self.request_orchestration_snapshot();
+                        }
+                    }
+                    Err(error) if matches!(error.kind, BridgeErrorKind::Disconnected) => {
+                        self.orchestration.disconnect();
+                    }
+                    Err(error) => self.orchestration.fail(error.summary.clone()),
+                }
+                true
+            }
+            BridgeCommand::Hello
+            | BridgeCommand::NavigateTree { .. }
+            | BridgeCommand::SetLabel { .. }
+            | BridgeCommand::ExportJsonl { .. }
+            | BridgeCommand::ImportJsonl { .. }
+            | BridgeCommand::GetModelRuntime
+            | BridgeCommand::RefreshModels
+            | BridgeCommand::LoginProvider { .. }
+            | BridgeCommand::AuthRespond { .. }
+            | BridgeCommand::LogoutProvider { .. }
+            | BridgeCommand::SetModelDefaults { .. }
+            | BridgeCommand::SetModelScope { .. }
+            | BridgeCommand::GetResourceInventory
+            | BridgeCommand::ReloadResources
+            | BridgeCommand::SetSkillCommandsEnabled { .. }
+            | BridgeCommand::SetResourceTheme { .. } => false,
         }
     }
 
@@ -2075,8 +2302,7 @@ impl RuntimeController {
         command: BridgeCommand,
         cx: &mut Context<Self>,
     ) -> bool {
-        let id = self.next_bridge_operation;
-        self.next_bridge_operation = self.next_bridge_operation.saturating_add(1);
+        let id = self.take_bridge_operation();
         if !self.bridge_worker.execute(id, command) {
             return false;
         }
@@ -2092,6 +2318,12 @@ impl RuntimeController {
         );
         cx.notify();
         true
+    }
+
+    fn take_bridge_operation(&mut self) -> u64 {
+        let id = self.next_bridge_operation;
+        self.next_bridge_operation = self.next_bridge_operation.saturating_add(1);
+        id
     }
 
     fn start_catalog_refresh(&mut self) {

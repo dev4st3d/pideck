@@ -4,7 +4,7 @@ Native Windows-first desktop shell for Pi, built with Rust and GPUI 0.2.2.
 
 ## Current maturity
 
-Phases 9 through 15 complete run-control recovery UX, Pi's persisted session lifecycle, native branch history, the model/provider experience, the unified command system, the stock RPC extension UI host, and the audited SDK resource plane. Startup, discovery, correlated readiness, hydration, prompt acceptance, message streaming, tools, retries, compaction, session catalog scanning, direct Bash, SDK session/model/resource operations, command discovery, and shutdown all run behind dedicated workers. The GPUI-owned controller observes normalized state and never performs I/O from `render`.
+Phases 9 through 16 complete run-control recovery UX, Pi's persisted session lifecycle, native branch history, the model/provider experience, the unified command system, the stock RPC extension UI host, the audited SDK resource plane, and native orchestration for installed Pi task, subagent, and goal extensions. Startup, discovery, correlated readiness, hydration, prompt acceptance, message streaming, tools, retries, compaction, session catalog scanning, direct Bash, SDK session/model/resource operations, orchestration snapshots/actions, command discovery, and shutdown all run behind dedicated workers. The GPUI-owned controller observes normalized state and never performs I/O from `render`.
 
 The visible shell now shows only live or explicitly Loading, Awaiting, Unknown, stale, stopped, and error values:
 
@@ -34,12 +34,14 @@ The visible shell now shows only live or explicitly Loading, Awaiting, Unknown, 
 - a capability-gated Resource Center inventory for extensions, tools, skills, prompt templates, themes, packages, context files, and dynamically registered providers, including global/project/package scope, loaded/disabled/error state, source path, provenance, trust, diagnostics, active-tool state, and reload;
 - rejected project trust for the sidecar execution plane: project resources are inventoried through Pi's public SDK but project extension/package code is never loaded. Missing packages use Pi's explicit non-installing resolution path;
 - package install/remove/update/config advertised as unsupported until arbitrary-code confirmation, progress, pin/filter handling, and rollback-safe error UX exist.
+- a session-scoped orchestration Inspector backed by `pi-tasks`, `pi-subagents`, and `pi-goal` stores and event-bus APIs: task dependency/blocker/output details and guarded execute/stop actions; live subagent lifecycle, queue, concurrency, schedules, worktrees, memory, and steer/stop/resume actions; and goal objective, status, token budget, elapsed time, queue, pause/resume/edit/clear actions;
+- a conversation-style subagent overlay opened from any Inspector agent row, with the authoritative bounded live transcript tail, visible stale-ID and reconnect states, worktree/result metadata, and an agent-scoped composer. Generic transcript tool cards remain unchanged.
 
 Accepted idle input uses `prompt`. While Pi is running, the primary action uses `steer` and follow-ups use `follow_up`. A composer line beginning with `!` executes the remaining text through Pi's direct `bash` RPC; `!!` does the same with `excludeFromContext=true`. Direct Bash is recorded locally until the authoritative session message reconciles it. Escape and the visible abort action route to `abort_bash` while direct Bash is active, independently from agent `abort`. Empty and rapid duplicate submissions are rejected. Prompt drafts clear only after the matching accepted response; Bash drafts clear when the local execution is recorded. Rejection and uncertain disconnect never trigger replay.
 
 Discovered extension, prompt-template, and skill commands always invoke through Pi's `prompt` RPC. Prompt/skill commands use `streamingBehavior` while a run is active; extension commands execute immediately as Pi specifies. Exact dynamic-command arguments are preserved. Known TUI-only built-ins such as `/login`, `/logout`, `/resume`, `/share`, and `/theme` are rejected locally instead of becoming ordinary model prompts.
 
-There is no rich Markdown/link rendering, task/subagent view, share, or concurrent session process UI. Resource Center management is deliberately read-mostly; package mutation remains unavailable. Queue items are authoritative and read-only because stock Pi RPC has no remove/restore operation. Reversible trash stays unavailable until both catalog ownership and a platform trash provider are proven.
+There is no rich Markdown/link rendering, share, or concurrent top-level session process UI. Resource Center management is deliberately read-mostly; package mutation remains unavailable. Main-session queue items are authoritative and read-only because stock Pi RPC has no remove/restore operation. Reversible trash stays unavailable until both catalog ownership and a platform trash provider are proven.
 
 ## Prerequisite and launch
 
@@ -87,6 +89,8 @@ If no model is available, open Settings > Providers, authenticate, refresh catal
 | Accept the highlighted extension choice | `Enter` or `Space` |
 | Cancel an extension dialog | `Escape` |
 | Keep focus inside an extension dialog | `Tab` or `Shift+Tab` |
+| Send a subagent steer/resume message | `Enter` |
+| Close the subagent conversation | `Escape` |
 | Activate visible recovery action | `Enter` or `Space` |
 | Next focus | `Tab` |
 | Previous focus | `Shift+Tab` |
@@ -102,7 +106,8 @@ The interface preserves the warm-charcoal Switzer/Tanker identity, with Cascadia
 - `src/services/runtime_worker.rs` - injectable GPUI-independent service boundary and responsive worker coordinator
 - `src/services/session_catalog.rs` - strict streaming v1-v3 JSONL metadata scanner, directory precedence, canonical workspace filtering, corruption reporting, and stale-scan worker
 - `src/model_runtime.rs` - secret-free provider/model catalog, cached refresh, auth prompt state machine, sparse thinking, pricing-tier, and streaming-change policy
-- `src/services/sdk_bridge.rs`, `bridge/pi-bridge.mjs`, and `bridge/protocol.schema.json` - negotiated, versioned, cancellable stdio JSONL SDK sidecar for the Phase 11 session gaps, Phase 12 ModelRuntime/settings/auth gaps, and Phase 15 resource inventory/reload plane
+- `src/services/sdk_bridge.rs`, `bridge/pi-bridge.mjs`, and `bridge/protocol.schema.json` - negotiated, versioned, cancellable stdio JSONL SDK sidecar for the Phase 11 session gaps, Phase 12 ModelRuntime/settings/auth gaps, Phase 15 resource inventory/reload plane, and Phase 16 orchestration adapter transport
+- `src/orchestration.rs`, `bridge/orchestration-adapter.mjs`, and `bridge/orchestration-core.mjs` - typed task/subagent/goal snapshots, stale/session guards, Pi event-bus actions, task DAG checks, schedule restoration, and bounded live subagent transcripts
 - `src/resource_center.rs` - secret-free resource inventory contract, trust/load state, package mutation policy, and UI filters
 - `src/services/rpc/` - Pi 0.80.10 wire contract, strict JSONL framing, correlated client, and runtime adapter
 - `src/services/pi_process/` - executable discovery, capability probing, launch policy, and process-tree supervision

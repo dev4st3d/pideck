@@ -44,7 +44,9 @@
                 "get_resource_inventory",
                 "reload_resources",
                 "set_skill_commands_enabled",
-                "set_resource_theme"
+                "set_resource_theme",
+                "get_orchestration_snapshot",
+                "orchestration_action"
               ]
             },
             "params": { "type": "object" }
@@ -113,7 +115,9 @@
             "auth_device_code",
             "auth_progress",
             "resource_progress",
-            "resources_changed"
+            "resources_changed",
+            "orchestration_snapshot",
+            "orchestration_disconnected"
           ]
         }
       }

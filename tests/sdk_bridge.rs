@@ -14,7 +14,7 @@ use pi_gui::services::sdk_bridge::{
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(1);
 
 #[test]
-fn bridge_schema_covers_resource_requests_responses_events_and_cancellation() {
+fn bridge_schema_covers_resource_and_orchestration_requests_events_and_cancellation() {
     let schema: serde_json::Value =
         serde_json::from_str(include_str!("../bridge/protocol.schema.json"))
             .expect("bridge protocol schema must be valid JSON");
@@ -24,6 +24,10 @@ fn bridge_schema_covers_resource_requests_responses_events_and_cancellation() {
         "reload_resources",
         "resource_progress",
         "resources_changed",
+        "get_orchestration_snapshot",
+        "orchestration_action",
+        "orchestration_snapshot",
+        "orchestration_disconnected",
         "targetId",
         "unsupported_capability",
     ] {

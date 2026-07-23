@@ -15,6 +15,14 @@ Cancellation is correlated by request ID. Operations with an SDK abort surface r
 
 Closing stdin aborts active controllers, aborts an active branch summary, disposes the resource-plane session, and lets Node exit. Rust also waits after forced termination, so the sidecar cannot outlive its owner during normal shutdown.
 
+## Orchestration adapter
+
+`orchestration-adapter.mjs` is injected into the same Pi extension process as the installed `pi-tasks`, `pi-subagents`, and `pi-goal` extensions. It reads task files through the extension's `TaskStore`, subagents through the extension's process-global manager and lifecycle event bus, schedules from the extension's session store, and goals from canonical `goal-state` session entries. It never parses TUI widgets or derives semantic state from transcript tool names.
+
+The adapter connects to `pi-bridge.mjs` over a per-process local named pipe/Unix socket. The sidecar proxies bounded typed snapshots, lifecycle events, and correlated actions to Rust; the endpoint is not a network listener. Task execution preserves dependency and cycle guards before using the subagent RPC bus. Subagent actions verify current IDs and lifecycle state. Goal actions verify the active goal ID, then return the installed extension command for invocation through Pi so its completion, blocking, budget, pause, and resume guards remain authoritative.
+
+The last valid snapshot remains visible as stale after adapter loss. Bridge restart establishes a fresh endpoint and reloads the active session; a session switch clears the old snapshot until the new session ID is observed.
+
 ## Resource and trust policy
 
 The resource plane uses only Pi 0.80.10 public SDK exports. Already-installed global resources are loaded into a disposable in-memory SDK session so tool inventory and active-tool state come from `getAllTools()` and `getActiveToolNames()`. Project settings are inspected through `SettingsManager` and `DefaultPackageManager` only to build provenance; project extensions and package code are never passed to the loader because Pi GUI fixes project trust to rejected.

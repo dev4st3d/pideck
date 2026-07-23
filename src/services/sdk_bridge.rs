@@ -15,11 +15,40 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::model_runtime::{AuthEvent, AuthMethod, ModelIdentity, ThinkingLevel};
+use crate::orchestration::{OrchestrationActionRequest, OrchestrationSnapshot};
 use crate::resource_center::ResourceInventorySnapshot;
 
 const PROTOCOL_VERSION: u64 = 1;
 const MAX_RECORD_BYTES: usize = 1024 * 1024;
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
+pub const ORCHESTRATION_PIPE_ENV: &str = "PI_GUI_ORCHESTRATION_PIPE";
+
+pub fn orchestration_adapter_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("bridge/orchestration-adapter.mjs")
+}
+
+pub fn orchestration_endpoint(working_directory: &std::path::Path) -> String {
+    let normalized = working_directory.to_string_lossy();
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    for byte in normalized.bytes() {
+        hash ^= u64::from(byte.to_ascii_lowercase());
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    if cfg!(windows) {
+        format!(
+            r"\\.\pipe\pi-gui-orchestration-{}-{hash:016x}",
+            std::process::id()
+        )
+    } else {
+        std::env::temp_dir()
+            .join(format!(
+                "pi-gui-orchestration-{}-{hash:016x}.sock",
+                std::process::id()
+            ))
+            .to_string_lossy()
+            .into_owned()
+    }
+}
 
 #[derive(Clone, Serialize)]
 #[serde(transparent)]
@@ -77,6 +106,7 @@ pub struct BridgeCapabilities {
     pub active_tool_state: bool,
     pub resource_settings: bool,
     pub package_mutations: bool,
+    pub orchestration: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -208,6 +238,13 @@ pub enum BridgeCommand {
     SetResourceTheme {
         theme: String,
     },
+    GetOrchestrationSnapshot {
+        #[serde(rename = "sessionId", skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
+    },
+    OrchestrationAction {
+        action: OrchestrationActionRequest,
+    },
 }
 
 impl BridgeCommand {
@@ -229,6 +266,9 @@ impl BridgeCommand {
             Self::ReloadResources => capabilities.resource_reload,
             Self::SetSkillCommandsEnabled { .. } | Self::SetResourceTheme { .. } => {
                 capabilities.resource_settings
+            }
+            Self::GetOrchestrationSnapshot { .. } | Self::OrchestrationAction { .. } => {
+                capabilities.orchestration
             }
         }
     }
@@ -285,11 +325,21 @@ pub enum ResourceEvent {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(tag = "event", rename_all = "snake_case")]
+pub enum OrchestrationEvent {
+    OrchestrationSnapshot {
+        snapshot: Box<OrchestrationSnapshot>,
+    },
+    OrchestrationDisconnected,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(untagged)]
 pub enum BridgeEvent {
     Auth(AuthEvent),
     Resource(ResourceEvent),
+    Orchestration(OrchestrationEvent),
 }
 
 struct BridgeInner {
@@ -319,6 +369,10 @@ impl SdkBridgeClient {
         let mut child = Command::new(&config.node)
             .arg(&config.script)
             .arg(&config.sdk_root)
+            .env(
+                ORCHESTRATION_PIPE_ENV,
+                orchestration_endpoint(&config.working_directory),
+            )
             .current_dir(&config.working_directory)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

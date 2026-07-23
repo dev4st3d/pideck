@@ -3,6 +3,7 @@
 use gpui::{KeyBinding, actions};
 
 pub(crate) const RECOVERY_BUTTON_CONTEXT: &str = "RecoveryButton";
+pub(crate) const ORCHESTRATION_ROW_CONTEXT: &str = "OrchestrationRow";
 
 actions!(
     pi_gui,
@@ -47,7 +48,8 @@ actions!(
         HistoryLast,
         HistoryFold,
         HistoryUnfold,
-        HistoryActivate
+        HistoryActivate,
+        OrchestrationActivate
     ]
 );
 
@@ -56,6 +58,14 @@ pub(crate) fn transcript_key_bindings() -> Vec<KeyBinding> {
     vec![
         KeyBinding::new("ctrl-c", TranscriptCopy, context),
         KeyBinding::new("ctrl-a", TranscriptSelectAll, context),
+    ]
+}
+
+pub(crate) fn orchestration_key_bindings() -> Vec<KeyBinding> {
+    let context = Some(ORCHESTRATION_ROW_CONTEXT);
+    vec![
+        KeyBinding::new("enter", OrchestrationActivate, context),
+        KeyBinding::new("space", OrchestrationActivate, context),
     ]
 }
 
