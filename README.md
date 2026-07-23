@@ -4,15 +4,15 @@ Native Windows-first desktop shell for Pi, built with Rust and GPUI 0.2.2.
 
 ## Current maturity
 
-Phases 9 through 11 complete run-control recovery UX and Pi's persisted session lifecycle, including native branch history. Startup, discovery, correlated readiness, hydration, prompt acceptance, message streaming, tools, retries, compaction, session catalog scanning, direct Bash, SDK session operations, and shutdown all run behind dedicated workers. The GPUI-owned controller observes normalized state and never performs I/O from `render`.
+Phases 9 through 12 complete run-control recovery UX, Pi's persisted session lifecycle, native branch history, and the full model/provider experience. Startup, discovery, correlated readiness, hydration, prompt acceptance, message streaming, tools, retries, compaction, session catalog scanning, direct Bash, SDK session/model operations, and shutdown all run behind dedicated workers. The GPUI-owned controller observes normalized state and never performs I/O from `render`.
 
 The visible shell now shows only live or explicitly Loading, Awaiting, Unknown, stale, stopped, and error values:
 
-- active session, model, thinking level, lifecycle, and cost in the title bar;
+- active session, lifecycle, and cost in the title bar;
 - canonical current workspace and connection/recovery state in the main area;
 - context, input/output tokens, cache usage, cost, model, and thinking in the inspector;
 - one applicable Connect, Retry, or Stop action with pointer and keyboard paths;
-- a native multiline composer with grapheme-safe editing, IME, clipboard, selection, undo, wrapping, scrolling, and visible pending/accepted/rejected/uncertain delivery state;
+- a native multiline composer with model and thinking pickers in the prompt chrome, grapheme-safe editing, IME, clipboard, selection, undo, wrapping, scrolling, and visible pending/accepted/rejected/uncertain delivery state;
 - the authoritative current transcript with user and assistant text, thinking, visible custom messages, branch/compaction summaries, generic running/success/error/cancelled tool and Bash cards, lifecycle notices, and in-place accumulated partial updates;
 - expandable sanitized tool arguments, bounded text/diff previews, image results, opaque detail fallback, copy controls, elapsed time, truncation metadata, and explicit full-output Reveal/Open folder actions;
 - provider/model/time/stop/usage metadata with raw provider diagnostics and private payloads excluded from normalized diagnostics;
@@ -22,14 +22,17 @@ The visible shell now shows only live or explicitly Loading, Awaiting, Unknown, 
 - atomic new/switch/rename/export operations that retain the old transcript read-only until Pi confirms a replacement and never replay an uncertain prompt.
 - a searchable, foldable, filterable session tree with the authoritative active leaf, keyboard navigation, entry details, stock fork-before-message and clone-path actions, and explicit same-file/new-file confirmations;
 - a negotiated Pi SDK 0.80.10 stdio JSONL bridge for same-file navigation, optional branch summaries, labels, active-path JSONL export, and safe import into a new session file. Unsupported bridge actions stay hidden.
+- cached-first provider and model catalogs with background refresh, stale/per-provider failures, a searchable model switcher and thinking chips attached to the prompt box, and Providers/Models/Thinking/Usage settings;
+- provider-owned API-key, browser, device-code, text, select, progress, cancel, and logout flows. Secret input is masked and redacted from Rust debug output; catalogs expose no credential values, resolved environment values, headers, base URLs, or raw provider errors;
+- honest separation between the active session model/thinking state (stock RPC) and Pi's persisted defaults/model cycle order (SDK settings), plus nullable current context, lifetime token/cache/reasoning totals, and estimated cost with zero pricing labeled as unpriced rather than free.
 
 Accepted idle input uses `prompt`. While Pi is running, the primary action uses `steer` and follow-ups use `follow_up`. A composer line beginning with `!` executes the remaining text through Pi's direct `bash` RPC; `!!` does the same with `excludeFromContext=true`. Direct Bash is recorded locally until the authoritative session message reconciles it. Escape and the visible abort action route to `abort_bash` while direct Bash is active, independently from agent `abort`. Empty and rapid duplicate submissions are rejected. Prompt drafts clear only after the matching accepted response; Bash drafts clear when the local execution is recorded. Rejection and uncertain disconnect never trigger replay.
 
-There is no model switching, auth UI, rich Markdown/link rendering, task/subagent view, resource browser, share, or concurrent session process UI. Queue items are authoritative and read-only because stock Pi RPC has no remove/restore operation. Reversible trash stays unavailable until both catalog ownership and a platform trash provider are proven.
+There is no rich Markdown/link rendering, task/subagent view, resource browser, share, or concurrent session process UI. Queue items are authoritative and read-only because stock Pi RPC has no remove/restore operation. Reversible trash stays unavailable until both catalog ownership and a platform trash provider are proven.
 
 ## Prerequisite and launch
 
-Install the tested Pi package and configure any provider credentials through Pi itself:
+Install the tested Pi package. Existing Pi credentials are detected automatically, and providers can also be configured from the app's Providers settings:
 
 ```powershell
 npm install -g @earendil-works/pi-coding-agent@0.80.10
@@ -52,7 +55,7 @@ The app connects automatically using the canonical current working directory wit
 
 Tool events are observational, not a permission prompt. Tools and direct Bash run with the user's normal account permissions. Returned `fullOutputPath` values are treated as untrusted: the app never reads or executes them automatically, and only passes them as direct process arguments after an explicit Reveal or Open folder action.
 
-If no model is available, configure credentials in Pi and choose Retry. The GUI does not read, display, or store credential values.
+If no model is available, open Settings > Providers, authenticate, refresh catalogs, and choose a model. Pi remains the credential owner. The GUI transports provider prompts but never includes credential values in catalog state or diagnostics.
 
 ## Keyboard
 
@@ -79,7 +82,8 @@ The interface preserves the warm-charcoal Switzer/Tanker identity, with Cascadia
 - `src/controller.rs` - GPUI-owned controller plus pure attempt/generation gate
 - `src/services/runtime_worker.rs` - injectable GPUI-independent service boundary and responsive worker coordinator
 - `src/services/session_catalog.rs` - strict streaming v1-v3 JSONL metadata scanner, directory precedence, canonical workspace filtering, corruption reporting, and stale-scan worker
-- `src/services/sdk_bridge.rs` and `bridge/pi-bridge.mjs` - negotiated, versioned, cancellable stdio JSONL SDK bridge for the Phase 11 session gaps
+- `src/model_runtime.rs` - secret-free provider/model catalog, cached refresh, auth prompt state machine, sparse thinking, pricing-tier, and streaming-change policy
+- `src/services/sdk_bridge.rs` and `bridge/pi-bridge.mjs` - negotiated, versioned, cancellable stdio JSONL SDK bridge for the Phase 11 session gaps and Phase 12 ModelRuntime/settings/auth gaps
 - `src/services/rpc/` - Pi 0.80.10 wire contract, strict JSONL framing, correlated client, and runtime adapter
 - `src/services/pi_process/` - executable discovery, capability probing, launch policy, and process-tree supervision
 - `src/state/runtime.rs` - normalized owned runtime/transcript state, safe message metadata, stamped inputs, requests, and effects

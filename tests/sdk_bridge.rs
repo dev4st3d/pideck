@@ -84,6 +84,77 @@ export async function createAgentSession({ sessionManager }) {
   };
   return { session };
 }
+
+let storedAuth = false;
+const fakeModel = {
+  provider: "synthetic-provider",
+  id: "synthetic-model",
+  name: "Synthetic Model",
+  api: "synthetic-api",
+  reasoning: true,
+  thinkingLevelMap: { minimal: null, xhigh: "xhigh", max: null },
+  input: ["text"],
+  contextWindow: 32000,
+  maxTokens: 4096,
+  cost: {
+    input: 1,
+    output: 2,
+    cacheRead: 0.1,
+    cacheWrite: 1.25,
+    tiers: [{ inputTokensAbove: 200000, input: 2, output: 3, cacheRead: 0.2, cacheWrite: 2.5 }],
+  },
+};
+const fakeProvider = {
+  id: "synthetic-provider",
+  name: "Synthetic Provider",
+  auth: {
+    apiKey: {
+      async login(interaction) {
+        interaction.notify({ type: "progress", message: "Waiting for synthetic input" });
+        const key = await interaction.prompt({ type: "secret", message: "Synthetic credential" });
+        if (key !== "synthetic-value") throw new Error("Unexpected synthetic input");
+        return { type: "api_key", key };
+      },
+    },
+  },
+};
+
+export class ModelRuntime {
+  static async create() { return new ModelRuntime(); }
+  getModels() { return [fakeModel]; }
+  getAvailableSnapshot() { return [fakeModel]; }
+  getProviders() { return [fakeProvider]; }
+  getProviderAuthStatus() {
+    return storedAuth
+      ? { configured: true, source: "stored" }
+      : { configured: true, source: "environment", label: "SYNTHETIC_SECRET" };
+  }
+  getModel(provider, id) {
+    return provider === fakeModel.provider && id === fakeModel.id ? fakeModel : undefined;
+  }
+  getError() { return undefined; }
+  async refresh() { return { aborted: false, errors: new Map() }; }
+  async login(_provider, _type, interaction) {
+    await fakeProvider.auth.apiKey.login(interaction);
+    storedAuth = true;
+  }
+  async logout() { storedAuth = false; }
+}
+
+export function getAgentDir() { return "."; }
+
+export class SettingsManager {
+  static create() { return new SettingsManager(); }
+  getDefaultProvider() { return "synthetic-provider"; }
+  getDefaultModel() { return "synthetic-model"; }
+  getDefaultThinkingLevel() { return "high"; }
+  getEnabledModels() { return ["synthetic-provider/synthetic-model"]; }
+  setDefaultModelAndProvider() {}
+  setDefaultThinkingLevel() {}
+  setEnabledModels() {}
+  async flush() {}
+  drainErrors() { return []; }
+}
 "#,
     )
     .expect("write fake SDK module");
@@ -284,6 +355,67 @@ fn navigation_cancellation_aborts_the_sdk_operation() {
         .expect("cancelled navigation response");
     assert_eq!(result["cancelled"], true);
     assert_eq!(result["aborted"], true);
+    client.stop();
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn model_runtime_auth_flow_is_secret_free_and_logout_reports_environment_fallback() {
+    let root = temp_dir();
+    let Some(config) = fake_bridge_config(&root) else {
+        let _ = fs::remove_dir_all(root);
+        return;
+    };
+    let client = SdkBridgeClient::start(config).expect("start fake bridge");
+    assert!(client.hello().capabilities.model_runtime);
+    assert!(client.hello().capabilities.provider_auth);
+
+    let snapshot = client
+        .call_default(BridgeCommand::GetModelRuntime)
+        .expect("read cached model snapshot");
+    let encoded = snapshot.to_string();
+    assert!(encoded.contains("synthetic-provider"));
+    assert!(encoded.contains("inputTokensAbove"));
+    assert!(!encoded.contains("SYNTHETIC_SECRET"));
+    assert!(!encoded.contains("headers"));
+    assert!(!encoded.contains("baseUrl"));
+
+    let caller = client.clone();
+    let login = thread::spawn(move || {
+        caller.call_with_id(
+            BridgeCommand::LoginProvider {
+                operation_id: 42,
+                provider: "synthetic-provider".to_owned(),
+                auth_type: pi_gui::model_runtime::AuthMethod::ApiKey,
+            },
+            "operation-42".to_owned(),
+            Duration::from_secs(5),
+        )
+    });
+    let events = client.events();
+    let prompt = loop {
+        let event = events.recv_blocking().expect("authentication event");
+        if let pi_gui::model_runtime::AuthEvent::AuthPrompt { operation, prompt } = event {
+            assert_eq!(operation, 42);
+            break prompt;
+        }
+    };
+    client
+        .call_default(BridgeCommand::AuthRespond {
+            operation_id: 42,
+            prompt_id: prompt.prompt_id,
+            value: pi_gui::services::sdk_bridge::SensitiveValue::new("synthetic-value".to_owned()),
+        })
+        .expect("answer synthetic prompt");
+    let logged_in = login.join().expect("join login").expect("complete login");
+    assert!(!logged_in.to_string().contains("synthetic-value"));
+
+    let logged_out = client
+        .call_default(BridgeCommand::LogoutProvider {
+            provider: "synthetic-provider".to_owned(),
+        })
+        .expect("logout");
+    assert_eq!(logged_out["environmentFallback"], true);
     client.stop();
     let _ = fs::remove_dir_all(root);
 }

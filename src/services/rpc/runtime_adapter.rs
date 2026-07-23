@@ -139,6 +139,13 @@ fn command_for_request(request: &RuntimeRequest) -> Command {
         RuntimeRequest::Abort => Command::Abort,
         RuntimeRequest::AbortBash => Command::AbortBash,
         RuntimeRequest::AbortRetry => Command::AbortRetry,
+        RuntimeRequest::SetModel { provider, id } => Command::SetModel {
+            provider: provider.clone(),
+            model_id: id.clone(),
+        },
+        RuntimeRequest::SetThinkingLevel { level } => Command::SetThinkingLevel {
+            level: thinking_level_for_command(*level),
+        },
         RuntimeRequest::SetSteeringMode { mode } => Command::SetSteeringMode {
             mode: queue_mode_for_command(*mode),
         },
@@ -252,6 +259,11 @@ fn normalize_response(
         (RuntimeRequest::GetModels, ResponseResult::GetAvailableModels(data)) => {
             NormalizedResponse::Models(data.models.into_iter().map(model_summary).collect())
         }
+        (RuntimeRequest::SetModel { .. }, ResponseResult::SetModel(model)) => {
+            NormalizedResponse::ModelChanged {
+                model: model_summary(model),
+            }
+        }
         (RuntimeRequest::GetTree { .. }, ResponseResult::GetTree(data)) => {
             NormalizedResponse::Tree {
                 tree: data.tree.into_iter().map(runtime_tree).collect(),
@@ -293,6 +305,7 @@ fn normalize_response(
         | (RuntimeRequest::Abort, ResponseResult::Abort)
         | (RuntimeRequest::AbortBash, ResponseResult::AbortBash)
         | (RuntimeRequest::AbortRetry, ResponseResult::AbortRetry)
+        | (RuntimeRequest::SetThinkingLevel { .. }, ResponseResult::SetThinkingLevel)
         | (RuntimeRequest::SetSteeringMode { .. }, ResponseResult::SetSteeringMode)
         | (RuntimeRequest::SetFollowUpMode { .. }, ResponseResult::SetFollowUpMode)
         | (RuntimeRequest::SetAutoCompaction { .. }, ResponseResult::SetAutoCompaction)
@@ -1034,6 +1047,18 @@ fn thinking_level(level: ThinkingLevel) -> RuntimeThinkingLevel {
     }
 }
 
+fn thinking_level_for_command(level: RuntimeThinkingLevel) -> ThinkingLevel {
+    match level {
+        RuntimeThinkingLevel::Off => ThinkingLevel::Off,
+        RuntimeThinkingLevel::Minimal => ThinkingLevel::Minimal,
+        RuntimeThinkingLevel::Low => ThinkingLevel::Low,
+        RuntimeThinkingLevel::Medium => ThinkingLevel::Medium,
+        RuntimeThinkingLevel::High => ThinkingLevel::High,
+        RuntimeThinkingLevel::Xhigh => ThinkingLevel::Xhigh,
+        RuntimeThinkingLevel::Max => ThinkingLevel::Max,
+    }
+}
+
 fn queue_mode(mode: QueueMode) -> QueueDeliveryMode {
     match mode {
         QueueMode::All => QueueDeliveryMode::All,
@@ -1096,6 +1121,8 @@ fn operation_name(request: &RuntimeRequest) -> &'static str {
         RuntimeRequest::Abort => "abort",
         RuntimeRequest::AbortBash => "Bash cancellation",
         RuntimeRequest::AbortRetry => "retry cancellation",
+        RuntimeRequest::SetModel { .. } => "model update",
+        RuntimeRequest::SetThinkingLevel { .. } => "thinking level update",
         RuntimeRequest::SetSteeringMode { .. } => "steering mode update",
         RuntimeRequest::SetFollowUpMode { .. } => "follow-up mode update",
         RuntimeRequest::Compact { .. } => "manual compaction",

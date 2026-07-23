@@ -14,8 +14,12 @@ use crate::actions::{
 };
 use crate::controller::{
     AcceptedSubmission, AcceptedSubmissionKind, BridgeProjection, CatalogProjection, CatalogStatus,
-    ComposerRuntime, ConversationProjection, HistoryProjection, RuntimeController,
-    SubmissionPreference,
+    ComposerRuntime, ConversationProjection, HistoryProjection, ModelRuntimeProjection,
+    RuntimeController, SubmissionPreference,
+};
+use crate::model_runtime::{
+    AuthMethod, AuthPromptKind, AuthStage, CatalogPhase, ModelCatalogEntry, ModelChangePolicy,
+    ModelIdentity, ThinkingLevel,
 };
 use crate::state::history::{HistoryBrowser, HistoryFilter};
 use crate::state::runtime::{
@@ -41,6 +45,24 @@ enum HistoryConfirmation {
     Clone,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ModelPanel {
+    /// Attached model list above the prompt box.
+    Switcher,
+    /// Thinking effort select menu on the prompt chrome.
+    Thinking,
+    /// Full center settings workspace.
+    Settings(ModelSettingsTab),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ModelSettingsTab {
+    Providers,
+    Models,
+    Thinking,
+    Usage,
+}
+
 pub struct RootView {
     controller: Entity<RuntimeController>,
     composer: Entity<Composer>,
@@ -49,6 +71,11 @@ pub struct RootView {
     history_search_composer: Entity<Composer>,
     history_label_composer: Entity<Composer>,
     import_path_composer: Entity<Composer>,
+    model_search_composer: Entity<Composer>,
+    auth_input_composer: Entity<Composer>,
+    auth_secret_composer: Entity<Composer>,
+    model_panel: Option<ModelPanel>,
+    active_auth_prompt_id: Option<String>,
     history: HistoryBrowser,
     history_focus: FocusHandle,
     history_open: bool,
@@ -72,6 +99,9 @@ pub struct RootView {
     _history_search_observation: Subscription,
     _history_label_subscription: Subscription,
     _import_path_subscription: Subscription,
+    _model_search_observation: Subscription,
+    _auth_input_subscription: Subscription,
+    _auth_secret_subscription: Subscription,
 }
 
 impl RootView {
@@ -98,6 +128,20 @@ impl RootView {
             cx.new(|cx| Composer::field("history-label", "Label selected entry…", "Set", cx));
         let import_path_composer =
             cx.new(|cx| Composer::field("import-jsonl", "JSONL path to import…", "Import", cx));
+        let model_search_composer = cx.new(|cx| {
+            Composer::field("model-search", "Search models…", "", cx).with_field_height(30.0)
+        });
+        let auth_input_composer = cx.new(|cx| {
+            Composer::field(
+                "provider-auth-input",
+                "Provider response...",
+                "Continue",
+                cx,
+            )
+        });
+        let auth_secret_composer = cx.new(|cx| {
+            Composer::secret_field("provider-auth-secret", "Credential...", "Continue", cx)
+        });
         let history_focus = cx.focus_handle();
         let conversation = controller.read(cx).conversation_projection();
         let transcript_texts = conversation::text_fragments(&conversation)
@@ -143,6 +187,16 @@ impl RootView {
             cx.subscribe_in(&import_path_composer, window, |view, _, event, _, cx| {
                 view.on_import_path_event(event, cx)
             });
+        let model_search_observation =
+            cx.observe_in(&model_search_composer, window, |_, _, _, cx| cx.notify());
+        let auth_input_subscription =
+            cx.subscribe_in(&auth_input_composer, window, |view, _, event, _, cx| {
+                view.on_auth_input_event(event, false, cx)
+            });
+        let auth_secret_subscription =
+            cx.subscribe_in(&auth_secret_composer, window, |view, _, event, _, cx| {
+                view.on_auth_input_event(event, true, cx)
+            });
         Self {
             controller,
             composer,
@@ -151,6 +205,11 @@ impl RootView {
             history_search_composer,
             history_label_composer,
             import_path_composer,
+            model_search_composer,
+            auth_input_composer,
+            auth_secret_composer,
+            model_panel: None,
+            active_auth_prompt_id: None,
             history: HistoryBrowser::default(),
             history_focus,
             history_open: false,
@@ -174,6 +233,9 @@ impl RootView {
             _history_search_observation: history_search_observation,
             _history_label_subscription: history_label_subscription,
             _import_path_subscription: import_path_subscription,
+            _model_search_observation: model_search_observation,
+            _auth_input_subscription: auth_input_subscription,
+            _auth_secret_subscription: auth_secret_subscription,
         }
     }
 
@@ -388,6 +450,171 @@ impl RootView {
         }
         self.controller.update(cx, |controller, cx| {
             controller.import_jsonl(path, cx);
+        });
+    }
+
+    fn on_auth_input_event(&mut self, event: &ComposerEvent, secret: bool, cx: &mut Context<Self>) {
+        let ComposerEvent::Accept { text } = event else {
+            return;
+        };
+        let Some(AuthStage::Prompt(prompt)) = self
+            .controller
+            .read(cx)
+            .model_runtime_projection()
+            .auth
+            .map(|flow| flow.stage)
+        else {
+            return;
+        };
+        if secret != (prompt.kind == AuthPromptKind::Secret) || text.is_empty() {
+            return;
+        }
+        let accepted = self.controller.update(cx, |controller, cx| {
+            controller.answer_auth_prompt(&prompt, text.clone(), cx)
+        });
+        if accepted {
+            let composer = if secret {
+                &self.auth_secret_composer
+            } else {
+                &self.auth_input_composer
+            };
+            composer.update(cx, |composer, cx| composer.set_draft("", cx));
+        }
+    }
+
+    fn show_model_panel(&mut self, panel: ModelPanel, window: &mut Window, cx: &mut Context<Self>) {
+        self.model_panel = Some(panel);
+        match panel {
+            ModelPanel::Switcher | ModelPanel::Settings(ModelSettingsTab::Models) => {
+                window.focus(&self.model_search_composer.read(cx).focus_handle(cx));
+            }
+            ModelPanel::Thinking | ModelPanel::Settings(_) => {}
+        }
+        cx.notify();
+    }
+
+    fn toggle_model_panel(
+        &mut self,
+        panel: ModelPanel,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.model_panel == Some(panel) {
+            self.close_model_panel(window, cx);
+        } else {
+            self.show_model_panel(panel, window, cx);
+        }
+    }
+
+    fn close_model_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.model_panel = None;
+        window.focus(&self.composer.read(cx).focus_handle(cx));
+        cx.notify();
+    }
+
+    fn set_model_settings_tab(&mut self, tab: ModelSettingsTab, cx: &mut Context<Self>) {
+        self.model_panel = Some(ModelPanel::Settings(tab));
+        cx.notify();
+    }
+
+    fn select_model(
+        &mut self,
+        identity: ModelIdentity,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let accepted = self.controller.update(cx, |controller, cx| {
+            controller.set_active_model(identity, cx)
+        });
+        if accepted && matches!(self.model_panel, Some(ModelPanel::Switcher)) {
+            self.close_model_panel(window, cx);
+        } else {
+            cx.notify();
+        }
+    }
+
+    fn set_thinking(&mut self, level: ThinkingLevel, window: &mut Window, cx: &mut Context<Self>) {
+        let accepted = self.controller.update(cx, |controller, cx| {
+            controller.set_active_thinking(level, cx)
+        });
+        if accepted && matches!(self.model_panel, Some(ModelPanel::Thinking)) {
+            self.close_model_panel(window, cx);
+        } else {
+            cx.notify();
+        }
+    }
+
+    fn refresh_models(&mut self, cx: &mut Context<Self>) {
+        self.controller.update(cx, |controller, cx| {
+            controller.refresh_model_catalog(cx);
+        });
+    }
+
+    fn login_provider(&mut self, provider: String, method: AuthMethod, cx: &mut Context<Self>) {
+        self.controller.update(cx, |controller, cx| {
+            controller.login_provider(provider, method, cx);
+        });
+    }
+
+    fn logout_provider(&mut self, provider: String, cx: &mut Context<Self>) {
+        self.controller.update(cx, |controller, cx| {
+            controller.logout_provider(provider, cx);
+        });
+    }
+
+    fn cancel_provider_auth(&mut self, cx: &mut Context<Self>) {
+        self.controller.update(cx, |controller, cx| {
+            controller.cancel_provider_auth(cx);
+        });
+    }
+
+    fn answer_auth_select(
+        &mut self,
+        prompt: crate::model_runtime::AuthPrompt,
+        value: String,
+        cx: &mut Context<Self>,
+    ) {
+        self.controller.update(cx, |controller, cx| {
+            controller.answer_auth_prompt(&prompt, value, cx);
+        });
+    }
+
+    fn set_default_model(&mut self, identity: ModelIdentity, cx: &mut Context<Self>) {
+        let thinking = self
+            .controller
+            .read(cx)
+            .model_runtime_projection()
+            .catalog
+            .and_then(|catalog| catalog.defaults.thinking);
+        self.controller.update(cx, |controller, cx| {
+            controller.set_model_defaults(Some(identity), thinking, cx);
+        });
+    }
+
+    fn set_default_thinking(&mut self, thinking: ThinkingLevel, cx: &mut Context<Self>) {
+        let model = self
+            .controller
+            .read(cx)
+            .model_runtime_projection()
+            .catalog
+            .and_then(|catalog| catalog.defaults.model);
+        self.controller.update(cx, |controller, cx| {
+            controller.set_model_defaults(model, Some(thinking), cx);
+        });
+    }
+
+    fn toggle_model_scope(&mut self, identity: ModelIdentity, cx: &mut Context<Self>) {
+        let Some(catalog) = self.controller.read(cx).model_runtime_projection().catalog else {
+            return;
+        };
+        let mut scope = catalog.defaults.scoped_models;
+        if let Some(index) = scope.iter().position(|model| model == &identity) {
+            scope.remove(index);
+        } else {
+            scope.push(identity);
+        }
+        self.controller.update(cx, |controller, cx| {
+            controller.set_model_scope(scope, cx);
         });
     }
 
@@ -703,6 +930,34 @@ impl RootView {
                 cx,
             )
         });
+        let auth_prompt = self
+            .controller
+            .read(cx)
+            .model_runtime_projection()
+            .auth
+            .and_then(|flow| match flow.stage {
+                AuthStage::Prompt(prompt) => Some(prompt),
+                _ => None,
+            });
+        let prompt_id = auth_prompt.as_ref().map(|prompt| prompt.prompt_id.clone());
+        if prompt_id != self.active_auth_prompt_id {
+            self.active_auth_prompt_id = prompt_id;
+            self.auth_input_composer
+                .update(cx, |composer, cx| composer.set_draft("", cx));
+            self.auth_secret_composer
+                .update(cx, |composer, cx| composer.set_draft("", cx));
+            if let Some(prompt) = auth_prompt
+                && self.model_panel.is_some()
+                && prompt.kind != AuthPromptKind::Select
+            {
+                let composer = if prompt.kind == AuthPromptKind::Secret {
+                    &self.auth_secret_composer
+                } else {
+                    &self.auth_input_composer
+                };
+                window.focus(&composer.read(cx).focus_handle(cx));
+            }
+        }
         self.reconcile_scoped_operations(&catalog, cx);
 
         let projection = self.controller.read(cx).composer_projection();
@@ -721,7 +976,8 @@ impl RootView {
         self.composer.update(cx, |composer, cx| {
             composer.set_availability(availability, cx)
         });
-        if !was_available
+        if self.model_panel.is_none()
+            && !was_available
             && matches!(
                 availability,
                 ComposerAvailability::Idle | ComposerAvailability::Running
@@ -922,6 +1178,7 @@ impl Render for RootView {
         let catalog = self.controller.read(cx).catalog_projection();
         let history = self.controller.read(cx).history_projection();
         let bridge = self.controller.read(cx).bridge_projection();
+        let models = self.controller.read(cx).model_runtime_projection();
         let selection_active = self
             .transcript_texts
             .values()
@@ -992,13 +1249,27 @@ impl Render for RootView {
                             cx,
                         ))
                     })
-                    .child(conversation_area(
-                        &projection,
-                        &self.conversation,
-                        &self.conversation_scroll,
-                        &self.transcript_texts,
-                        &self.tool_cards,
-                    ))
+                    .child(match self.model_panel {
+                        Some(ModelPanel::Settings(tab)) => model_settings_panel(
+                            &models,
+                            tab,
+                            &self.model_search_composer,
+                            &self.auth_input_composer,
+                            &self.auth_secret_composer,
+                            cx,
+                        )
+                        .into_any_element(),
+                        Some(ModelPanel::Switcher) | Some(ModelPanel::Thinking) | None => {
+                            conversation_area(
+                                &projection,
+                                &self.conversation,
+                                &self.conversation_scroll,
+                                &self.transcript_texts,
+                                &self.tool_cards,
+                            )
+                            .into_any_element()
+                        }
+                    })
                     .child(inspector(
                         &projection,
                         &self.conversation,
@@ -1006,7 +1277,22 @@ impl Render for RootView {
                         cx,
                     )),
             )
-            .child(composer_bar(&self.composer, self.history_open))
+            .when(
+                !matches!(self.model_panel, Some(ModelPanel::Settings(_))),
+                |shell| {
+                    shell.child(composer_bar(
+                        ComposerBarParams {
+                            composer: &self.composer,
+                            history_open: self.history_open,
+                            models: &models,
+                            projection: &projection,
+                            panel: self.model_panel,
+                            search: &self.model_search_composer,
+                        },
+                        cx,
+                    ))
+                },
+            )
     }
 }
 
@@ -1078,10 +1364,6 @@ fn titlebar(projection: &ShellProjection, cx: &mut Context<RootView>) -> impl In
                 .items_center()
                 .gap(px(10.0))
                 .flex_shrink_0()
-                .child(controls::meta_text(projection.model.label()))
-                .child(controls::meta_sep())
-                .child(controls::meta_text(projection.thinking.label()))
-                .child(controls::meta_sep())
                 .child(controls::meta_text(projection.cost.label()))
                 .child(controls::meta_sep())
                 .child(controls::status_pill(
@@ -1760,6 +2042,1163 @@ fn history_panel(params: HistoryPanelParams<'_>, cx: &mut Context<RootView>) -> 
         })
 }
 
+fn model_settings_panel(
+    projection: &ModelRuntimeProjection,
+    tab: ModelSettingsTab,
+    search: &Entity<Composer>,
+    auth_input: &Entity<Composer>,
+    auth_secret: &Entity<Composer>,
+    cx: &mut Context<RootView>,
+) -> impl IntoElement {
+    let refreshing = matches!(projection.phase, CatalogPhase::Refreshing);
+    div()
+        .flex_1()
+        .min_w_0()
+        .h_full()
+        .flex()
+        .flex_col()
+        .bg(theme::canvas())
+        .child(
+            div()
+                .px(px(18.0))
+                .pt(px(14.0))
+                .pb(px(12.0))
+                .flex()
+                .flex_col()
+                .gap(px(12.0))
+                .border_b_1()
+                .border_color(theme::edge_soft())
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .justify_between()
+                        .gap(px(12.0))
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap(px(2.0))
+                                .child(
+                                    div()
+                                        .font_family(theme::SANS)
+                                        .text_size(px(theme::T_UI))
+                                        .font_weight(FontWeight::BOLD)
+                                        .text_color(theme::bone())
+                                        .child("Model settings"),
+                                )
+                                .child(
+                                    div()
+                                        .font_family(theme::SANS)
+                                        .text_size(px(theme::T_TINY))
+                                        .text_color(theme::ash())
+                                        .child(
+                                            "Providers, defaults, cycle order, and usage. Session model and thinking live in the prompt box.",
+                                        ),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .gap(px(6.0))
+                                .flex_shrink_0()
+                                .child(controls::quiet_button(
+                                    "refresh-model-catalog",
+                                    if refreshing {
+                                        "Refreshing…"
+                                    } else {
+                                        "Refresh"
+                                    },
+                                    !refreshing,
+                                    Box::new(cx.listener(|view, _, _, cx| view.refresh_models(cx))),
+                                ))
+                                .child(controls::quiet_button(
+                                    "close-model-settings",
+                                    "Done",
+                                    true,
+                                    Box::new(cx.listener(|view, _, window, cx| {
+                                        view.close_model_panel(window, cx)
+                                    })),
+                                )),
+                        ),
+                )
+                .child(
+                    controls::tab_track().children(
+                        [
+                            (ModelSettingsTab::Providers, "Providers"),
+                            (ModelSettingsTab::Models, "Models"),
+                            (ModelSettingsTab::Thinking, "Thinking"),
+                            (ModelSettingsTab::Usage, "Usage"),
+                        ]
+                        .into_iter()
+                        .map(|(target, label)| {
+                            controls::tab_button(
+                                gpui::SharedString::from(format!("model-tab-{label}")),
+                                label,
+                                tab == target,
+                                Box::new(cx.listener(move |view, _, _, cx| {
+                                    view.set_model_settings_tab(target, cx)
+                                })),
+                            )
+                        }),
+                    ),
+                ),
+        )
+        .child(match tab {
+            ModelSettingsTab::Providers => {
+                providers_settings(projection, auth_input, auth_secret, cx).into_any_element()
+            }
+            ModelSettingsTab::Models => models_settings(projection, search, cx).into_any_element(),
+            ModelSettingsTab::Thinking => thinking_settings(projection, cx).into_any_element(),
+            ModelSettingsTab::Usage => usage_settings(projection).into_any_element(),
+        })
+        .when_some(catalog_phase_note(&projection.phase), |panel, note| {
+            panel.child(controls::panel_footer_status(note))
+        })
+        .when_some(projection.feedback.clone(), |panel, feedback| {
+            panel.child(controls::panel_footer_status(feedback))
+        })
+}
+
+fn popup_sheet() -> gpui::Div {
+    // Fully opaque fill so conversation chrome cannot show through the overlay.
+    div()
+        .w_full()
+        .flex()
+        .flex_col()
+        .rounded(px(theme::RADIUS_SM))
+        .border_1()
+        .border_color(theme::panel_hover())
+        .bg(theme::panel())
+        .overflow_hidden()
+}
+
+fn popup_sheet_header(
+    title: &'static str,
+    close_id: &'static str,
+    cx: &mut Context<RootView>,
+) -> impl IntoElement {
+    div()
+        .h(px(28.0))
+        .px(px(8.0))
+        .flex()
+        .flex_row()
+        .items_center()
+        .justify_between()
+        .gap(px(8.0))
+        .bg(theme::panel())
+        .border_b_1()
+        .border_color(theme::panel_hover())
+        .child(
+            div()
+                .font_family(theme::SANS)
+                .text_size(px(theme::T_TINY))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(theme::ash())
+                .child(title),
+        )
+        .child(controls::chrome_action(
+            close_id,
+            "Close",
+            true,
+            Box::new(cx.listener(|view, _, window, cx| view.close_model_panel(window, cx))),
+        ))
+}
+
+fn model_switcher_sheet(
+    projection: &ModelRuntimeProjection,
+    search: &Entity<Composer>,
+    cx: &mut Context<RootView>,
+) -> impl IntoElement {
+    let query = search.read(cx).draft().to_owned();
+    let models = projection
+        .catalog
+        .as_ref()
+        .map(|catalog| {
+            catalog
+                .models
+                .iter()
+                .filter(|model| model.available && model.search_matches(&query))
+                .take(48)
+                .cloned()
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let active = projection.active_model.clone();
+    let can_change = projection.model_change_policy == ModelChangePolicy::Allowed;
+
+    popup_sheet()
+        .id("model-switcher-sheet")
+        .max_h(px(300.0))
+        .child(
+            div()
+                .px(px(10.0))
+                .py(px(8.0))
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(10.0))
+                .bg(theme::panel())
+                .border_b_1()
+                .border_color(theme::edge_soft())
+                .child(
+                    div()
+                        .font_family(theme::SANS)
+                        .text_size(px(theme::T_LABEL))
+                        .font_weight(FontWeight::BOLD)
+                        .text_color(theme::bone_dim())
+                        .flex_shrink_0()
+                        .child("Model"),
+                )
+                .child(div().flex_1().min_w_0().child(search.clone()))
+                .child(controls::chrome_action(
+                    "close-model-switcher",
+                    "Close",
+                    true,
+                    Box::new(cx.listener(|view, _, window, cx| view.close_model_panel(window, cx))),
+                )),
+        )
+        .when(!can_change, |sheet| {
+            sheet.child(
+                div()
+                    .px(px(8.0))
+                    .py(px(4.0))
+                    .bg(theme::panel())
+                    .border_b_1()
+                    .border_color(theme::panel_hover())
+                    .font_family(theme::SANS)
+                    .text_size(px(theme::T_TINY))
+                    .text_color(theme::smoke())
+                    .child("Settle stream to change"),
+            )
+        })
+        .child(
+            div()
+                .id("model-switcher-scroll")
+                .flex_1()
+                .min_h_0()
+                .bg(theme::panel())
+                .overflow_y_scroll()
+                .scrollbar_width(px(6.0))
+                .when(models.is_empty(), |list| {
+                    list.child(
+                        div()
+                            .px(px(12.0))
+                            .py(px(18.0))
+                            .font_family(theme::SANS)
+                            .text_size(px(theme::T_UI_SM))
+                            .text_color(theme::smoke())
+                            .child(match projection.phase {
+                                CatalogPhase::Loading => "Loading models…",
+                                _ => "No matching models.",
+                            }),
+                    )
+                })
+                .children(models.into_iter().map(|model| {
+                    let identity = model.identity.clone();
+                    let selected = active.as_ref() == Some(&identity);
+                    let context = format!("{} ctx", compact_count(model.context_window));
+                    let monogram = model
+                        .name
+                        .chars()
+                        .next()
+                        .unwrap_or('M')
+                        .to_uppercase()
+                        .to_string();
+                    div()
+                        .id(gpui::SharedString::from(format!(
+                            "switch-model-{}-{}",
+                            identity.provider, identity.id
+                        )))
+                        .h(px(48.0))
+                        .mx(px(6.0))
+                        .my(px(2.0))
+                        .px(px(10.0))
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(10.0))
+                        .rounded(px(theme::RADIUS_SM))
+                        .border_1()
+                        .border_color(if selected {
+                            theme::data()
+                        } else {
+                            theme::edge_soft()
+                        })
+                        .bg(if selected {
+                            theme::data_wash()
+                        } else {
+                            theme::panel()
+                        })
+                        .when(can_change && !selected, |row| {
+                            let identity = identity.clone();
+                            row.tab_index(0)
+                                .cursor_pointer()
+                                .hover(|row| {
+                                    row.bg(theme::panel_lift()).border_color(theme::edge())
+                                })
+                                .active(|row| row.bg(theme::panel_hover()))
+                                .focus(|row| {
+                                    row.bg(theme::panel_lift()).border_color(theme::focus())
+                                })
+                                .on_click(cx.listener(move |view, _, window, cx| {
+                                    view.select_model(identity.clone(), window, cx)
+                                }))
+                        })
+                        .child(
+                            div()
+                                .size(px(28.0))
+                                .rounded(px(theme::RADIUS_SM))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .flex_shrink_0()
+                                .border_1()
+                                .border_color(if selected {
+                                    theme::data()
+                                } else {
+                                    theme::edge_soft()
+                                })
+                                .bg(if selected {
+                                    theme::data_wash()
+                                } else {
+                                    theme::canvas()
+                                })
+                                .font_family(theme::SANS)
+                                .text_size(px(theme::T_LABEL))
+                                .font_weight(FontWeight::BOLD)
+                                .text_color(if selected {
+                                    theme::data()
+                                } else {
+                                    theme::ash()
+                                })
+                                .child(monogram),
+                        )
+                        .child(
+                            div()
+                                .min_w_0()
+                                .flex_1()
+                                .flex()
+                                .flex_col()
+                                .gap(px(1.0))
+                                .child(
+                                    div()
+                                        .font_family(theme::SANS)
+                                        .text_size(px(theme::T_UI_SM))
+                                        .font_weight(if selected {
+                                            FontWeight::BOLD
+                                        } else {
+                                            FontWeight::SEMIBOLD
+                                        })
+                                        .text_color(if selected {
+                                            theme::bone()
+                                        } else {
+                                            theme::bone_dim()
+                                        })
+                                        .overflow_hidden()
+                                        .text_ellipsis()
+                                        .whitespace_nowrap()
+                                        .child(model.name),
+                                )
+                                .child(
+                                    div()
+                                        .font_family(theme::MONO)
+                                        .text_size(px(10.0))
+                                        .text_color(theme::smoke())
+                                        .overflow_hidden()
+                                        .text_ellipsis()
+                                        .whitespace_nowrap()
+                                        .child(identity.provider),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .font_family(theme::MONO)
+                                .text_size(px(10.0))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(theme::ash())
+                                .flex_shrink_0()
+                                .child(context),
+                        )
+                        .when(selected, |row| {
+                            row.child(
+                                div()
+                                    .px(px(6.0))
+                                    .py(px(3.0))
+                                    .rounded(px(theme::RADIUS_SM))
+                                    .bg(theme::data_wash())
+                                    .font_family(theme::SANS)
+                                    .text_size(px(9.0))
+                                    .font_weight(FontWeight::BOLD)
+                                    .text_color(theme::data())
+                                    .flex_shrink_0()
+                                    .child("Active"),
+                            )
+                        })
+                })),
+        )
+        .when_some(projection.feedback.clone(), |sheet, feedback| {
+            sheet.child(
+                div()
+                    .px(px(8.0))
+                    .py(px(5.0))
+                    .bg(theme::panel())
+                    .border_t_1()
+                    .border_color(theme::panel_hover())
+                    .font_family(theme::MONO)
+                    .text_size(px(theme::T_TINY))
+                    .text_color(theme::smoke())
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .whitespace_nowrap()
+                    .child(feedback),
+            )
+        })
+}
+
+fn thinking_select_sheet(
+    projection: &ModelRuntimeProjection,
+    cx: &mut Context<RootView>,
+) -> impl IntoElement {
+    let levels = projection
+        .active_model
+        .as_ref()
+        .and_then(|identity| projection.catalog.as_ref()?.model(identity))
+        .map(|model| model.supported_thinking.clone())
+        .unwrap_or_else(|| vec![ThinkingLevel::Off]);
+    let can_change = projection.model_change_policy == ModelChangePolicy::Allowed;
+    let active = projection
+        .effective_thinking
+        .or(projection.active_thinking)
+        .or(projection.requested_thinking);
+
+    popup_sheet()
+        .id("thinking-select-sheet")
+        .max_h(px(168.0))
+        .child(popup_sheet_header("Thinking", "close-thinking-select", cx))
+        .when(!can_change, |sheet| {
+            sheet.child(
+                div()
+                    .px(px(8.0))
+                    .py(px(5.0))
+                    .bg(theme::panel())
+                    .border_b_1()
+                    .border_color(theme::panel_hover())
+                    .font_family(theme::SANS)
+                    .text_size(px(theme::T_TINY))
+                    .text_color(theme::smoke())
+                    .child("Settle stream to change"),
+            )
+        })
+        .child(
+            div()
+                .id("thinking-select-scroll")
+                .flex_1()
+                .min_h_0()
+                .bg(theme::panel())
+                .overflow_y_scroll()
+                .scrollbar_width(px(6.0))
+                .children(levels.into_iter().map(|level| {
+                    let selected = active == Some(level);
+                    div()
+                        .id(gpui::SharedString::from(format!(
+                            "thinking-select-{level:?}"
+                        )))
+                        .h(px(28.0))
+                        .px(px(8.0))
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .justify_between()
+                        .gap(px(8.0))
+                        .border_b_1()
+                        .border_color(theme::panel_hover())
+                        .bg(if selected {
+                            theme::panel_lift()
+                        } else {
+                            theme::panel()
+                        })
+                        .text_color(if !can_change {
+                            theme::smoke()
+                        } else if selected {
+                            theme::bone()
+                        } else {
+                            theme::ash()
+                        })
+                        .when(can_change && !selected, |row| {
+                            row.tab_index(0)
+                                .cursor_pointer()
+                                .hover(|row| {
+                                    row.bg(theme::panel_lift()).text_color(theme::bone())
+                                })
+                                .active(|row| row.bg(theme::panel_hover()))
+                                .focus(|row| row.bg(theme::panel_lift()))
+                                .on_click(cx.listener(move |view, _, window, cx| {
+                                    view.set_thinking(level, window, cx)
+                                }))
+                        })
+                        .child(
+                            div()
+                                .font_family(theme::SANS)
+                                .text_size(px(theme::T_TINY))
+                                .font_weight(if selected {
+                                    FontWeight::SEMIBOLD
+                                } else {
+                                    FontWeight::MEDIUM
+                                })
+                                .child(level.label()),
+                        )
+                        .when(selected, |row| {
+                            row.child(
+                                div()
+                                    .w(px(5.0))
+                                    .h(px(5.0))
+                                    .rounded_full()
+                                    .bg(theme::data())
+                                    .flex_shrink_0(),
+                            )
+                        })
+                })),
+        )
+}
+
+fn providers_settings(
+    projection: &ModelRuntimeProjection,
+    auth_input: &Entity<Composer>,
+    auth_secret: &Entity<Composer>,
+    cx: &mut Context<RootView>,
+) -> impl IntoElement {
+    let providers = projection
+        .catalog
+        .as_ref()
+        .map(|catalog| catalog.providers.clone())
+        .unwrap_or_default();
+    div()
+        .id("provider-settings-scroll")
+        .flex_1()
+        .min_h_0()
+        .overflow_y_scroll()
+        .scrollbar_width(px(theme::SCROLLBAR))
+        .child(div().w_full().px(px(18.0))
+        .pb(px(22.0))
+        .pt(px(14.0))
+        .flex()
+        .flex_col()
+        .gap(px(12.0))
+        .when_some(projection.auth.as_ref(), |panel, auth| {
+            panel.child(auth_flow_panel(auth, auth_input, auth_secret, cx))
+        })
+        .child(controls::panel_note(
+            "Pi owns credentials. The GUI only hosts provider prompts and never stores secret values in catalog state.",
+            controls::ControlTone::Normal,
+        ))
+        .child(
+            controls::divider_list()
+                .when(providers.is_empty(), |list| {
+                    list.child(controls::empty_list_note(
+                        "No provider catalog is available. Connect to Pi or refresh catalogs.",
+                    ))
+                })
+                .children(providers.into_iter().map(|provider| {
+                    let provider_id = provider.id.clone();
+                    let auth_busy = projection.auth.is_some();
+                    let status = if provider.auth.configured {
+                        provider
+                            .auth
+                            .source
+                            .map(|source| source.label())
+                            .unwrap_or("Configured")
+                    } else {
+                        "Not configured"
+                    };
+                    div()
+                        .px(px(12.0))
+                        .py(px(12.0))
+                        .border_b_1()
+                        .border_color(theme::edge_soft())
+                        .flex()
+                        .flex_col()
+                        .gap(px(8.0))
+                        .child(
+                            div()
+                                .flex()
+                                .flex_row()
+                                .items_baseline()
+                                .justify_between()
+                                .gap(px(10.0))
+                                .child(
+                                    div()
+                                        .font_family(theme::SANS)
+                                        .text_size(px(theme::T_UI_SM))
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(theme::bone())
+                                        .child(provider.name),
+                                )
+                                .child(controls::meta_text(format!(
+                                    "{status} · {}/{} models",
+                                    provider.available_model_count, provider.model_count
+                                ))),
+                        )
+                        .when_some(provider.refresh_error, |row, error| {
+                            row.child(controls::panel_note(error, controls::ControlTone::Danger))
+                        })
+                        .child(
+                            div()
+                                .flex()
+                                .flex_row()
+                                .flex_wrap()
+                                .gap(px(6.0))
+                                .children(provider.auth_methods.into_iter().map(|method| {
+                                    let id = provider_id.clone();
+                                    controls::chip_button(
+                                        gpui::SharedString::from(format!(
+                                            "login-{}-{method:?}",
+                                            id
+                                        )),
+                                        method.label(),
+                                        false,
+                                        !auth_busy,
+                                        Box::new(cx.listener(move |view, _, _, cx| {
+                                            view.login_provider(id.clone(), method, cx)
+                                        })),
+                                    )
+                                }))
+                                .when(provider.auth.configured, |buttons| {
+                                    let id = provider_id.clone();
+                                    buttons.child(controls::chip_button(
+                                        gpui::SharedString::from(format!("logout-{id}")),
+                                        "Log out",
+                                        false,
+                                        !auth_busy,
+                                        Box::new(cx.listener(move |view, _, _, cx| {
+                                            view.logout_provider(id.clone(), cx)
+                                        })),
+                                    ))
+                                }),
+                        )
+                })),
+        )
+        )
+}
+
+fn auth_flow_panel(
+    auth: &crate::model_runtime::AuthFlow,
+    auth_input: &Entity<Composer>,
+    auth_secret: &Entity<Composer>,
+    cx: &mut Context<RootView>,
+) -> impl IntoElement {
+    let stage = match &auth.stage {
+        AuthStage::Starting => controls::panel_note(
+            "Starting provider-owned authentication...",
+            controls::ControlTone::Normal,
+        )
+        .into_any_element(),
+        AuthStage::Info { message, links } => div()
+            .flex()
+            .flex_col()
+            .gap(px(6.0))
+            .child(controls::panel_note(
+                message.clone(),
+                controls::ControlTone::Normal,
+            ))
+            .children(links.iter().cloned().map(|link| {
+                let url = link.url;
+                controls::quiet_button(
+                    gpui::SharedString::from(format!("auth-link-{url}")),
+                    link.label
+                        .unwrap_or_else(|| "Open provider page".to_owned()),
+                    true,
+                    Box::new(move |_, _, _| {
+                        let _ = crate::services::path_actions::open_provider_auth_url(&url);
+                    }),
+                )
+            }))
+            .into_any_element(),
+        AuthStage::Browser { url, instructions } => {
+            let url = url.clone();
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(6.0))
+                .child(controls::panel_note(
+                    instructions
+                        .clone()
+                        .unwrap_or_else(|| "Continue authentication in your browser.".to_owned()),
+                    controls::ControlTone::Normal,
+                ))
+                .child(controls::quiet_button(
+                    "open-provider-auth-url",
+                    "Open browser",
+                    true,
+                    Box::new(move |_, _, _| {
+                        let _ = crate::services::path_actions::open_provider_auth_url(&url);
+                    }),
+                ))
+                .into_any_element()
+        }
+        AuthStage::DeviceCode {
+            user_code,
+            verification_uri,
+            expires_in_seconds,
+        } => {
+            let url = verification_uri.clone();
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(6.0))
+                .child(controls::panel_note(
+                    format!(
+                        "Enter device code {}{}",
+                        user_code,
+                        expires_in_seconds
+                            .map(|seconds| format!(" · expires in {seconds}s"))
+                            .unwrap_or_default()
+                    ),
+                    controls::ControlTone::Normal,
+                ))
+                .child(controls::quiet_button(
+                    "open-device-code-url",
+                    "Open verification page",
+                    true,
+                    Box::new(move |_, _, _| {
+                        let _ = crate::services::path_actions::open_provider_auth_url(&url);
+                    }),
+                ))
+                .into_any_element()
+        }
+        AuthStage::Progress { message } => {
+            controls::panel_note(message.clone(), controls::ControlTone::Normal).into_any_element()
+        }
+        AuthStage::Prompt(prompt) if prompt.kind == AuthPromptKind::Select => div()
+            .flex()
+            .flex_col()
+            .gap(px(6.0))
+            .child(controls::panel_note(
+                prompt.message.clone(),
+                controls::ControlTone::Normal,
+            ))
+            .children(prompt.options.iter().cloned().map(|option| {
+                let prompt = prompt.clone();
+                let value = option.id;
+                controls::action_row(
+                    gpui::SharedString::from(format!("auth-select-{value}")),
+                    option.label,
+                    option.description.unwrap_or_default(),
+                    true,
+                    controls::ControlTone::Normal,
+                    Box::new(cx.listener(move |view, _, _, cx| {
+                        view.answer_auth_select(prompt.clone(), value.clone(), cx)
+                    })),
+                )
+            }))
+            .into_any_element(),
+        AuthStage::Prompt(prompt) => div()
+            .flex()
+            .flex_col()
+            .gap(px(6.0))
+            .child(controls::panel_note(
+                prompt.message.clone(),
+                controls::ControlTone::Normal,
+            ))
+            .child(if prompt.kind == AuthPromptKind::Secret {
+                auth_secret.clone().into_any_element()
+            } else {
+                auth_input.clone().into_any_element()
+            })
+            .into_any_element(),
+        AuthStage::Cancelling => controls::panel_note(
+            "Cancelling authentication...",
+            controls::ControlTone::Normal,
+        )
+        .into_any_element(),
+    };
+    div()
+        .p(px(10.0))
+        .border_1()
+        .border_color(theme::signal())
+        .rounded(px(theme::RADIUS_SM))
+        .flex()
+        .flex_col()
+        .gap(px(8.0))
+        .child(controls::section_label(format!(
+            "Authenticate {} · {}",
+            auth.provider,
+            auth.method.label()
+        )))
+        .child(stage)
+        .child(controls::quiet_button(
+            "cancel-provider-auth",
+            "Cancel",
+            !matches!(auth.stage, AuthStage::Cancelling),
+            Box::new(cx.listener(|view, _, _, cx| view.cancel_provider_auth(cx))),
+        ))
+}
+
+fn models_settings(
+    projection: &ModelRuntimeProjection,
+    search: &Entity<Composer>,
+    cx: &mut Context<RootView>,
+) -> impl IntoElement {
+    let query = search.read(cx).draft().to_owned();
+    let (models, defaults) = projection
+        .catalog
+        .as_ref()
+        .map(|catalog| {
+            (
+                catalog
+                    .models
+                    .iter()
+                    .filter(|model| model.search_matches(&query))
+                    .take(200)
+                    .cloned()
+                    .collect::<Vec<_>>(),
+                catalog.defaults.clone(),
+            )
+        })
+        .unwrap_or_default();
+    div()
+        .id("models-settings-scroll")
+        .flex_1()
+        .min_h_0()
+        .overflow_y_scroll()
+        .scrollbar_width(px(theme::SCROLLBAR))
+        .child(div().w_full().px(px(18.0))
+        .pb(px(22.0))
+        .pt(px(14.0))
+        .flex()
+        .flex_col()
+        .gap(px(12.0))
+        .child(search.clone())
+        .child(controls::panel_note(
+            "Defaults and cycle order are saved by Pi for future sessions. Switch the active model from the prompt box.",
+            controls::ControlTone::Normal,
+        ))
+        .child(
+            controls::divider_list()
+                .when(models.is_empty(), |list| {
+                    list.child(controls::empty_list_note("No models match this search."))
+                })
+                .children(
+                    models
+                        .into_iter()
+                        .map(|model| model_settings_row(model, defaults.clone(), cx)),
+                ),
+        )
+        )
+}
+
+fn model_settings_row(
+    model: ModelCatalogEntry,
+    defaults: crate::model_runtime::ModelDefaults,
+    cx: &mut Context<RootView>,
+) -> gpui::AnyElement {
+    let identity = model.identity.clone();
+    let is_default = defaults.model.as_ref() == Some(&identity);
+    let in_scope = defaults.scoped_models.contains(&identity);
+    let default_identity = identity.clone();
+    let scope_identity = identity.clone();
+    let availability = if model.available {
+        "Available"
+    } else {
+        "Unavailable"
+    };
+    div()
+        .px(px(12.0))
+        .py(px(11.0))
+        .border_b_1()
+        .border_color(theme::edge_soft())
+        .flex()
+        .flex_col()
+        .gap(px(7.0))
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .justify_between()
+                .gap(px(10.0))
+                .child(
+                    div()
+                        .min_w_0()
+                        .flex_1()
+                        .flex()
+                        .flex_col()
+                        .gap(px(2.0))
+                        .child(
+                            div()
+                                .font_family(theme::SANS)
+                                .text_size(px(theme::T_UI_SM))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(theme::bone())
+                                .overflow_hidden()
+                                .text_ellipsis()
+                                .whitespace_nowrap()
+                                .child(model.name),
+                        )
+                        .child(controls::meta_text(format!(
+                            "{} · {} · {} ctx · max {}",
+                            identity.display(),
+                            model.api,
+                            compact_count(model.context_window),
+                            compact_count(model.max_tokens),
+                        ))),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(6.0))
+                        .flex_shrink_0()
+                        .when(is_default, |row| {
+                            row.child(controls::chip_button(
+                                gpui::SharedString::from(format!(
+                                    "badge-default-{}-{}",
+                                    identity.provider, identity.id
+                                )),
+                                "Default",
+                                true,
+                                false,
+                                Box::new(|_, _, _| {}),
+                            ))
+                        })
+                        .when(in_scope, |row| {
+                            row.child(controls::chip_button(
+                                gpui::SharedString::from(format!(
+                                    "badge-cycle-{}-{}",
+                                    identity.provider, identity.id
+                                )),
+                                "Cycle",
+                                true,
+                                false,
+                                Box::new(|_, _, _| {}),
+                            ))
+                        }),
+                ),
+        )
+        .child(controls::meta_text(format!(
+            "{availability} · {}",
+            model.pricing.label()
+        )))
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .gap(px(6.0))
+                .child(controls::chip_button(
+                    gpui::SharedString::from(format!(
+                        "default-{}-{}",
+                        identity.provider, identity.id
+                    )),
+                    if is_default {
+                        "Default model"
+                    } else {
+                        "Set as default"
+                    },
+                    is_default,
+                    !is_default,
+                    Box::new(cx.listener(move |view, _, _, cx| {
+                        view.set_default_model(default_identity.clone(), cx)
+                    })),
+                ))
+                .child(controls::chip_button(
+                    gpui::SharedString::from(format!(
+                        "scope-{}-{}",
+                        identity.provider, identity.id
+                    )),
+                    if in_scope {
+                        "Remove from cycle"
+                    } else {
+                        "Add to cycle"
+                    },
+                    in_scope,
+                    true,
+                    Box::new(cx.listener(move |view, _, _, cx| {
+                        view.toggle_model_scope(scope_identity.clone(), cx)
+                    })),
+                )),
+        )
+        .into_any_element()
+}
+
+fn thinking_settings(
+    projection: &ModelRuntimeProjection,
+    cx: &mut Context<RootView>,
+) -> impl IntoElement {
+    let defaults = projection
+        .catalog
+        .as_ref()
+        .map(|catalog| catalog.defaults.clone());
+    let session_label = format!(
+        "Session: requested {} · effective {}",
+        projection
+            .requested_thinking
+            .or(projection.active_thinking)
+            .map(ThinkingLevel::label)
+            .unwrap_or("Unknown"),
+        projection
+            .effective_thinking
+            .or(projection.active_thinking)
+            .map(ThinkingLevel::label)
+            .unwrap_or("Unknown")
+    );
+    div()
+        .id("thinking-settings-scroll")
+        .flex_1()
+        .min_h_0()
+        .overflow_y_scroll()
+        .child(div().w_full().px(px(18.0))
+        .pb(px(22.0))
+        .pt(px(14.0))
+        .flex()
+        .flex_col()
+        .gap(px(14.0))
+        .child(controls::panel_note(
+            "Change the active session thinking level from the prompt box. This page only sets Pi's default for future sessions. Levels are discrete and model-specific; unsupported values are never invented.",
+            controls::ControlTone::Normal,
+        ))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(6.0))
+                .px(px(12.0))
+                .py(px(10.0))
+                .rounded(px(theme::RADIUS_SM))
+                .border_1()
+                .border_color(theme::edge_soft())
+                .bg(theme::panel())
+                .child(controls::section_label("Current session"))
+                .child(controls::meta_text(session_label))
+                .when_some(projection.clamp_notice.clone(), |panel, notice| {
+                    panel.child(controls::panel_note(notice, controls::ControlTone::Normal))
+                }),
+        )
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(8.0))
+                .child(controls::section_label("Default for new sessions"))
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .flex_wrap()
+                        .gap(px(6.0))
+                        .children(ThinkingLevel::ALL.into_iter().map(|level| {
+                            let selected =
+                                defaults.as_ref().and_then(|value| value.thinking) == Some(level);
+                            controls::chip_button(
+                                gpui::SharedString::from(format!("default-thinking-{level:?}")),
+                                level.label(),
+                                selected,
+                                !selected,
+                                Box::new(cx.listener(move |view, _, _, cx| {
+                                    view.set_default_thinking(level, cx)
+                                })),
+                            )
+                        })),
+                ),
+        )
+        )
+}
+
+fn usage_settings(projection: &ModelRuntimeProjection) -> impl IntoElement {
+    let usage = &projection.usage;
+    let context = match (usage.context_tokens, usage.context_window) {
+        (Some(tokens), Some(window)) => {
+            format!("{} / {}", compact_count(tokens), compact_count(window))
+        }
+        _ => "Unknown until Pi reports current context".to_owned(),
+    };
+    let cost = usage.estimated_cost.map_or_else(
+        || "Unknown".to_owned(),
+        |cost| {
+            if usage.pricing_known {
+                format!("${cost:.4} estimated")
+            } else {
+                format!("${cost:.4} estimated · pricing may be unavailable")
+            }
+        },
+    );
+    div()
+        .id("usage-settings-scroll")
+        .flex_1()
+        .min_h_0()
+        .overflow_y_scroll()
+        .child(div().w_full().px(px(18.0))
+        .pb(px(22.0))
+        .pt(px(14.0))
+        .flex()
+        .flex_col()
+        .gap(px(12.0))
+        .child(controls::panel_note(
+            "Current context is nullable and separate from lifetime session totals. Cost is an estimate; zero catalog rates mean unpriced, not free.",
+            controls::ControlTone::Normal,
+        ))
+        .child(
+            controls::divider_list()
+                .child(controls::metric_row("Current context", context))
+                .child(controls::metric_row(
+                    "Lifetime input",
+                    optional_count(usage.input_tokens),
+                ))
+                .child(controls::metric_row(
+                    "Lifetime output",
+                    optional_count(usage.output_tokens),
+                ))
+                .child(controls::metric_row(
+                    "Lifetime cache read",
+                    optional_count(usage.cache_read_tokens),
+                ))
+                .child(controls::metric_row(
+                    "Lifetime cache write",
+                    optional_count(usage.cache_write_tokens),
+                ))
+                .child(controls::metric_row(
+                    "Lifetime reasoning",
+                    optional_count(usage.reasoning_tokens),
+                ))
+                .child(controls::metric_row(
+                    "Lifetime total",
+                    optional_count(usage.total_tokens),
+                ))
+                .child(controls::metric_row("Estimated cost", cost)),
+        )
+        )
+}
+
+fn catalog_phase_note(phase: &CatalogPhase) -> Option<String> {
+    match phase {
+        CatalogPhase::Loading => Some("Loading cached model catalogs...".to_owned()),
+        CatalogPhase::Refreshing => {
+            Some("Refreshing provider catalogs; cached models remain visible.".to_owned())
+        }
+        CatalogPhase::Stale(summary) | CatalogPhase::Failed(summary) => Some(summary.clone()),
+        CatalogPhase::Ready => None,
+    }
+}
+
+fn optional_count(value: Option<u64>) -> String {
+    value
+        .map(compact_count)
+        .unwrap_or_else(|| "Unknown".to_owned())
+}
+
+fn compact_count(value: u64) -> String {
+    if value >= 1_000_000 {
+        format!("{:.1}M", value as f64 / 1_000_000.0)
+    } else if value >= 1_000 {
+        format!("{:.1}K", value as f64 / 1_000.0)
+    } else {
+        value.to_string()
+    }
+}
+
 fn conversation_area(
     projection: &ShellProjection,
     conversation_projection: &ConversationProjection,
@@ -1807,10 +3246,34 @@ fn conversation_area(
         )
 }
 
-fn composer_bar(composer: &Entity<Composer>, history_open: bool) -> impl IntoElement {
+struct ComposerBarParams<'a> {
+    composer: &'a Entity<Composer>,
+    history_open: bool,
+    models: &'a ModelRuntimeProjection,
+    projection: &'a ShellProjection,
+    panel: Option<ModelPanel>,
+    search: &'a Entity<Composer>,
+}
+
+fn composer_bar(params: ComposerBarParams<'_>, cx: &mut Context<RootView>) -> impl IntoElement {
+    let ComposerBarParams {
+        composer,
+        history_open,
+        models,
+        projection,
+        panel,
+        search,
+    } = params;
     let inset_left =
         theme::SIDE_W + if history_open { theme::HISTORY_W } else { 0.0 } + theme::STREAM_PAD_X;
     let inset_right = theme::INSPECT_W + theme::STREAM_PAD_X;
+    let model_open = matches!(panel, Some(ModelPanel::Switcher));
+    let thinking_open = matches!(panel, Some(ModelPanel::Thinking));
+    let model_label = short_model_label(projection, models);
+    let thinking_label = short_thinking_label(projection, models);
+    let catalog_ready = models.catalog.is_some();
+    let can_pick_model = catalog_ready;
+    let can_pick_thinking = catalog_ready || models.active_thinking.is_some();
 
     div()
         .bg(theme::floor())
@@ -1818,9 +3281,198 @@ fn composer_bar(composer: &Entity<Composer>, history_open: bool) -> impl IntoEle
         .border_color(theme::edge_hard())
         .pl(px(inset_left))
         .pr(px(inset_right))
-        .pt(px(12.0))
+        .pt(px(10.0))
         .pb(px(14.0))
-        .child(composer.clone())
+        // Overlay host: popups are absolute and must not grow this bar's layout height.
+        .relative()
+        .child(
+            div()
+                .w_full()
+                .relative()
+                .when(model_open || thinking_open, |host| {
+                    // Clear gap so popup bottom border never stacks on the prompt top border.
+                    host.child(
+                        div()
+                            .absolute()
+                            .left_0()
+                            .right_0()
+                            .bottom_full()
+                            .pb(px(10.0))
+                            .occlude()
+                            .child(if model_open {
+                                model_switcher_sheet(models, search, cx).into_any_element()
+                            } else {
+                                thinking_select_sheet(models, cx).into_any_element()
+                            }),
+                    )
+                })
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .rounded(px(theme::RADIUS_SM))
+                        .border_1()
+                        .border_color(theme::edge_hard())
+                        .bg(theme::panel())
+                        .overflow_hidden()
+                        .child(
+                            div()
+                                .px(px(8.0))
+                                .pt(px(6.0))
+                                .pb(px(6.0))
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .gap(px(4.0))
+                                .border_b_1()
+                                .border_color(theme::edge_soft())
+                                .child(
+                                    div()
+                                        .flex()
+                                        .flex_row()
+                                        .items_center()
+                                        .gap(px(3.0))
+                                        .flex_shrink_0()
+                                        .child(controls::compact_select(
+                                            "prompt-model-picker",
+                                            model_label,
+                                            model_open,
+                                            can_pick_model,
+                                            148.0,
+                                            Box::new(cx.listener(|view, _, window, cx| {
+                                                view.toggle_model_panel(
+                                                    ModelPanel::Switcher,
+                                                    window,
+                                                    cx,
+                                                )
+                                            })),
+                                        ))
+                                        .child(controls::compact_select(
+                                            "prompt-thinking-select",
+                                            thinking_label,
+                                            thinking_open,
+                                            can_pick_thinking,
+                                            86.0,
+                                            Box::new(cx.listener(|view, _, window, cx| {
+                                                view.toggle_model_panel(
+                                                    ModelPanel::Thinking,
+                                                    window,
+                                                    cx,
+                                                )
+                                            })),
+                                        )),
+                                )
+                                .child(div().flex_1().min_w_0())
+                                .when_some(models.clamp_notice.clone(), |row, notice| {
+                                    row.child(
+                                        div()
+                                            .min_w_0()
+                                            .max_w(px(220.0))
+                                            .font_family(theme::SANS)
+                                            .text_size(px(theme::T_TINY))
+                                            .text_color(theme::data())
+                                            .overflow_hidden()
+                                            .text_ellipsis()
+                                            .whitespace_nowrap()
+                                            .child(notice),
+                                    )
+                                })
+                                .when_some(
+                                    models
+                                        .feedback
+                                        .clone()
+                                        .filter(|_| !model_open && !thinking_open),
+                                    |row, fb| {
+                                        row.child(
+                                            div()
+                                                .min_w_0()
+                                                .max_w(px(180.0))
+                                                .font_family(theme::MONO)
+                                                .text_size(px(theme::T_TINY))
+                                                .text_color(theme::smoke())
+                                                .overflow_hidden()
+                                                .text_ellipsis()
+                                                .whitespace_nowrap()
+                                                .child(fb),
+                                        )
+                                    },
+                                )
+                                .child(controls::chrome_action(
+                                    "prompt-model-settings",
+                                    "Settings",
+                                    true,
+                                    Box::new(cx.listener(|view, _, window, cx| {
+                                        view.show_model_panel(
+                                            ModelPanel::Settings(ModelSettingsTab::Providers),
+                                            window,
+                                            cx,
+                                        )
+                                    })),
+                                )),
+                        )
+                        .child(composer.clone()),
+                ),
+        )
+}
+
+fn short_model_label(projection: &ShellProjection, models: &ModelRuntimeProjection) -> String {
+    let raw = if let Some(identity) = models.active_model.as_ref() {
+        if let Some(entry) = models
+            .catalog
+            .as_ref()
+            .and_then(|catalog| catalog.model(identity))
+        {
+            entry.name.clone()
+        } else {
+            identity.id.clone()
+        }
+    } else {
+        let label = projection.model.label();
+        if label == "Unknown" || label == "Loading" || label == "Awaiting" {
+            "Model".to_owned()
+        } else {
+            label
+        }
+    };
+    compact_label(&raw, 22)
+}
+
+fn short_thinking_label(projection: &ShellProjection, models: &ModelRuntimeProjection) -> String {
+    let level = models
+        .effective_thinking
+        .or(models.active_thinking)
+        .or(models.requested_thinking);
+    if let Some(level) = level {
+        return thinking_short(level);
+    }
+    let label = projection.thinking.label();
+    if label == "Unknown" || label == "Loading" || label == "Awaiting" {
+        "Off".to_owned()
+    } else {
+        compact_label(&label, 10)
+    }
+}
+
+fn thinking_short(level: ThinkingLevel) -> String {
+    match level {
+        ThinkingLevel::Off => "Off".to_owned(),
+        ThinkingLevel::Minimal => "Min".to_owned(),
+        ThinkingLevel::Low => "Low".to_owned(),
+        ThinkingLevel::Medium => "Med".to_owned(),
+        ThinkingLevel::High => "High".to_owned(),
+        ThinkingLevel::Xhigh => "XHigh".to_owned(),
+        ThinkingLevel::Max => "Max".to_owned(),
+    }
+}
+
+fn compact_label(value: &str, max_chars: usize) -> String {
+    let trimmed = value.trim();
+    if trimmed.chars().count() <= max_chars {
+        return trimmed.to_owned();
+    }
+    let mut out = trimmed.chars().take(max_chars.saturating_sub(1)).collect::<String>();
+    out.push('…');
+    out
 }
 
 fn inspector(
@@ -2243,6 +3895,8 @@ fn context_pct(label: &str) -> Option<f32> {
 
 fn operation_label(operation: &RuntimeOperation) -> &'static str {
     match operation {
+        RuntimeOperation::SetModel { .. } => "Switching model",
+        RuntimeOperation::SetThinkingLevel(_) => "Changing thinking",
         RuntimeOperation::SetSteeringMode(_) => "Changing steering mode",
         RuntimeOperation::SetFollowUpMode(_) => "Changing follow-up mode",
         RuntimeOperation::Compact => "Compacting",

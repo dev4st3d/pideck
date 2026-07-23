@@ -2,6 +2,7 @@ pub mod actions;
 pub mod app;
 pub mod controller;
 pub mod fonts;
+pub mod model_runtime;
 pub mod services;
 pub mod state;
 pub mod theme;

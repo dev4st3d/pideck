@@ -241,6 +241,194 @@ pub fn chip_button(
         )
 }
 
+/// Compact select trigger for model / thinking controls in the prompt chrome.
+pub fn compact_select(
+    id: impl Into<SharedString>,
+    label: impl Into<SharedString>,
+    open: bool,
+    enabled: bool,
+    max_width: f32,
+    on_click: ClickHandler,
+) -> impl IntoElement {
+    div()
+        .id(id.into())
+        .h(px(22.0))
+        .max_w(px(max_width))
+        .px(px(7.0))
+        .rounded(px(theme::RADIUS_SM))
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(4.0))
+        .flex_shrink_0()
+        .bg(if open {
+            theme::panel_hover()
+        } else {
+            theme::canvas()
+        })
+        .border_1()
+        .border_color(if open {
+            theme::edge()
+        } else {
+            theme::edge_soft()
+        })
+        .text_color(if !enabled {
+            theme::smoke()
+        } else if open {
+            theme::bone()
+        } else {
+            theme::ash()
+        })
+        .when(enabled, |button| {
+            button
+                .tab_index(0)
+                .cursor_pointer()
+                .hover(|button| {
+                    button
+                        .bg(theme::panel_lift())
+                        .border_color(theme::edge())
+                        .text_color(theme::bone())
+                })
+                .active(|button| button.bg(theme::panel_hover()))
+                .focus(|button| button.border_color(theme::focus()))
+                .on_click(move |event, window, cx| on_click(event, window, cx))
+        })
+        .child(
+            div()
+                .min_w_0()
+                .flex_1()
+                .font_family(theme::SANS)
+                .text_size(px(theme::T_TINY))
+                .font_weight(FontWeight::MEDIUM)
+                .overflow_hidden()
+                .text_ellipsis()
+                .whitespace_nowrap()
+                .child(label.into()),
+        )
+        .child(
+            div()
+                .font_family(theme::MONO)
+                .text_size(px(9.0))
+                .line_height(px(12.0))
+                .text_color(if open {
+                    theme::data()
+                } else {
+                    theme::smoke()
+                })
+                .opacity(0.9)
+                .flex_shrink_0()
+                .child(if open { "▴" } else { "▾" }),
+        )
+}
+
+/// Quiet icon-sized action for dense toolbars.
+pub fn chrome_action(
+    id: impl Into<SharedString>,
+    label: impl Into<SharedString>,
+    enabled: bool,
+    on_click: ClickHandler,
+) -> impl IntoElement {
+    div()
+        .id(id.into())
+        .h(px(20.0))
+        .px(px(6.0))
+        .rounded(px(theme::RADIUS_SM))
+        .flex()
+        .items_center()
+        .justify_center()
+        .flex_shrink_0()
+        .text_color(theme::smoke())
+        .when(enabled, |button| {
+            button
+                .tab_index(0)
+                .cursor_pointer()
+                .hover(|button| {
+                    button
+                        .bg(theme::canvas())
+                        .text_color(theme::bone_dim())
+                })
+                .active(|button| button.bg(theme::panel_lift()))
+                .focus(|button| button.border_1().border_color(theme::focus()))
+                .on_click(move |event, window, cx| on_click(event, window, cx))
+        })
+        .child(
+            div()
+                .font_family(theme::SANS)
+                .text_size(px(10.0))
+                .font_weight(FontWeight::MEDIUM)
+                .child(label.into()),
+        )
+}
+
+/// Segmented tab track for multi-section settings.
+pub fn tab_track() -> gpui::Div {
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(2.0))
+        .p(px(3.0))
+        .rounded(px(theme::RADIUS_SM))
+        .bg(theme::canvas())
+        .border_1()
+        .border_color(theme::edge_soft())
+}
+
+pub fn tab_button(
+    id: impl Into<SharedString>,
+    label: impl Into<SharedString>,
+    selected: bool,
+    on_click: ClickHandler,
+) -> impl IntoElement {
+    div()
+        .id(id.into())
+        .h(px(28.0))
+        .px(px(12.0))
+        .rounded(px(2.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .bg(if selected {
+            theme::panel_lift()
+        } else {
+            clear()
+        })
+        .border_1()
+        .border_color(if selected {
+            theme::edge_hard()
+        } else {
+            clear()
+        })
+        .text_color(if selected {
+            theme::bone()
+        } else {
+            theme::ash()
+        })
+        .tab_index(0)
+        .cursor_pointer()
+        .hover(|button| {
+            if selected {
+                button.bg(theme::panel_hover())
+            } else {
+                button.bg(theme::panel()).text_color(theme::bone())
+            }
+        })
+        .active(|button| button.bg(theme::panel_lift()))
+        .focus(|button| button.border_color(theme::focus()))
+        .on_click(move |event, window, cx| on_click(event, window, cx))
+        .child(
+            div()
+                .font_family(theme::SANS)
+                .text_size(px(theme::T_TINY))
+                .font_weight(if selected {
+                    FontWeight::BOLD
+                } else {
+                    FontWeight::SEMIBOLD
+                })
+                .child(label.into()),
+        )
+}
+
 pub fn panel_note(text: impl Into<SharedString>, tone: ControlTone) -> impl IntoElement {
     let (border, color) = match tone {
         ControlTone::Danger => (theme::error(), theme::error()),

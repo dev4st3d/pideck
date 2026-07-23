@@ -69,6 +69,9 @@ pub struct Composer {
     pub(super) focus_handle: FocusHandle,
     buffer: TextBuffer,
     placeholder: SharedString,
+    masked: bool,
+    /// Optional override for Field chrome input height (defaults to 34).
+    field_height: Option<f32>,
     disabled: bool,
     availability: ComposerAvailability,
     feedback: ComposerFeedback,
@@ -88,6 +91,8 @@ impl Composer {
             focus_handle: cx.focus_handle(),
             buffer: TextBuffer::default(),
             placeholder: "Message Pi…  @ file  / command  ! shell".into(),
+            masked: false,
+            field_height: None,
             disabled: true,
             availability: ComposerAvailability::Unavailable,
             feedback: ComposerFeedback::Ready,
@@ -115,6 +120,27 @@ impl Composer {
         cx: &mut Context<Self>,
     ) -> Self {
         Self::with_chrome(id, placeholder, action_label, ComposerChrome::Field, cx)
+    }
+
+    pub fn secret_field(
+        id: impl Into<SharedString>,
+        placeholder: impl Into<SharedString>,
+        action_label: impl Into<SharedString>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let mut composer =
+            Self::with_chrome(id, placeholder, action_label, ComposerChrome::Field, cx);
+        composer.masked = true;
+        composer
+    }
+
+    pub fn with_field_height(mut self, height: f32) -> Self {
+        self.field_height = Some(height);
+        self
+    }
+
+    pub(super) fn field_height(&self) -> f32 {
+        self.field_height.unwrap_or(34.0)
     }
 
     fn with_chrome(
@@ -341,13 +367,16 @@ impl Composer {
     }
 
     fn copy(&mut self, _: &ComposerCopy, _: &mut Window, cx: &mut Context<Self>) {
+        if self.masked {
+            return;
+        }
         if let Some(text) = self.buffer.selected_text() {
             cx.write_to_clipboard(ClipboardItem::new_string(text.to_owned()));
         }
     }
 
     fn cut(&mut self, _: &ComposerCut, window: &mut Window, cx: &mut Context<Self>) {
-        if self.disabled {
+        if self.disabled || self.masked {
             return;
         }
         self.copy(&ComposerCopy, window, cx);

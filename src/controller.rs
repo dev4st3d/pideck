@@ -7,12 +7,17 @@ use std::time::Instant;
 
 use gpui::{Context, Task};
 
+use crate::model_runtime::{
+    AuthFlow, AuthMethod, AuthPrompt, CatalogPhase, ModelCatalogSnapshot, ModelChangePolicy,
+    ModelIdentity, ModelRuntimeState, ThinkingLevel, model_change_policy,
+};
 use crate::services::rpc::{ConnectionGeneration, RequestId, SessionEpoch};
 use crate::services::runtime_worker::{
     AttemptGeneration, RuntimeService, RuntimeWorkerHandle, WorkerResult,
 };
 use crate::services::sdk_bridge::{
     BridgeCapabilities, BridgeCommand, BridgeErrorKind, BridgeWorkerResult, SdkBridgeWorker,
+    SensitiveValue,
 };
 use crate::services::session_catalog::{
     CatalogWorkerResult, CorruptSession, SessionCatalogConfig, SessionCatalogWorker, SessionRoot,
@@ -22,8 +27,8 @@ use crate::state::reducer::reduce;
 use crate::state::runtime::{
     BashExecution, BashStatus, CompactionState, FacetStatus, PromptDelivery, QueueContents,
     QueueDeliveryMode, RetryState, RuntimeForkMessage, RuntimeInput, RuntimeIntent,
-    RuntimeLifecycle, RuntimeMessage, RuntimeOperation, RuntimeState, RuntimeTreeNode, SafeError,
-    StampedInput, SubmissionKind, ToolExecution,
+    RuntimeLifecycle, RuntimeMessage, RuntimeOperation, RuntimeState, RuntimeThinkingLevel,
+    RuntimeTreeNode, SafeError, StampedInput, SubmissionKind, ToolExecution,
 };
 use crate::state::{ControllerStatus, ShellProjection};
 
@@ -137,6 +142,36 @@ pub struct BridgeProjection {
     pub unavailable: Option<String>,
     pub pending: Option<(u64, BridgeOperationKind)>,
     pub feedback: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct UsageProjection {
+    pub context_tokens: Option<u64>,
+    pub context_window: Option<u64>,
+    pub context_percent: Option<f64>,
+    pub input_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
+    pub cache_read_tokens: Option<u64>,
+    pub cache_write_tokens: Option<u64>,
+    pub reasoning_tokens: Option<u64>,
+    pub total_tokens: Option<u64>,
+    pub estimated_cost: Option<f64>,
+    pub pricing_known: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ModelRuntimeProjection {
+    pub phase: CatalogPhase,
+    pub catalog: Option<ModelCatalogSnapshot>,
+    pub auth: Option<AuthFlow>,
+    pub feedback: Option<String>,
+    pub active_model: Option<ModelIdentity>,
+    pub active_thinking: Option<ThinkingLevel>,
+    pub requested_thinking: Option<ThinkingLevel>,
+    pub effective_thinking: Option<ThinkingLevel>,
+    pub clamp_notice: Option<String>,
+    pub model_change_policy: ModelChangePolicy,
+    pub usage: UsageProjection,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -687,6 +722,21 @@ impl ControllerCore {
         self.intent(RuntimeIntent::ExportHtml { output_path })
     }
 
+    pub fn set_model(
+        &mut self,
+        provider: String,
+        id: String,
+    ) -> Vec<crate::state::runtime::RuntimeEffect> {
+        self.intent(RuntimeIntent::SetModel { provider, id })
+    }
+
+    pub fn set_thinking_level(
+        &mut self,
+        level: RuntimeThinkingLevel,
+    ) -> Vec<crate::state::runtime::RuntimeEffect> {
+        self.intent(RuntimeIntent::SetThinkingLevel(level))
+    }
+
     fn intent(&mut self, intent: RuntimeIntent) -> Vec<crate::state::runtime::RuntimeEffect> {
         let epoch = self.runtime.epoch;
         reduce(
@@ -716,6 +766,30 @@ fn parse_bash_submission(text: &str) -> Option<Result<(String, bool), Submission
     }
 }
 
+fn model_thinking(level: RuntimeThinkingLevel) -> ThinkingLevel {
+    match level {
+        RuntimeThinkingLevel::Off => ThinkingLevel::Off,
+        RuntimeThinkingLevel::Minimal => ThinkingLevel::Minimal,
+        RuntimeThinkingLevel::Low => ThinkingLevel::Low,
+        RuntimeThinkingLevel::Medium => ThinkingLevel::Medium,
+        RuntimeThinkingLevel::High => ThinkingLevel::High,
+        RuntimeThinkingLevel::Xhigh => ThinkingLevel::Xhigh,
+        RuntimeThinkingLevel::Max => ThinkingLevel::Max,
+    }
+}
+
+fn runtime_thinking(level: ThinkingLevel) -> RuntimeThinkingLevel {
+    match level {
+        ThinkingLevel::Off => RuntimeThinkingLevel::Off,
+        ThinkingLevel::Minimal => RuntimeThinkingLevel::Minimal,
+        ThinkingLevel::Low => RuntimeThinkingLevel::Low,
+        ThinkingLevel::Medium => RuntimeThinkingLevel::Medium,
+        ThinkingLevel::High => RuntimeThinkingLevel::High,
+        ThinkingLevel::Xhigh => RuntimeThinkingLevel::Xhigh,
+        ThinkingLevel::Max => RuntimeThinkingLevel::Max,
+    }
+}
+
 pub struct RuntimeController {
     core: ControllerCore,
     service: Arc<dyn RuntimeService>,
@@ -734,6 +808,10 @@ pub struct RuntimeController {
     bridge_pending: Option<(u64, BridgeOperationKind)>,
     bridge_feedback: Option<String>,
     next_bridge_operation: u64,
+    model_runtime: ModelRuntimeState,
+    model_snapshot_pending: Option<u64>,
+    requested_thinking: Option<ThinkingLevel>,
+    clamp_notice: Option<String>,
     _event_task: Task<()>,
     _catalog_task: Task<()>,
     _bridge_task: Task<()>,
@@ -806,6 +884,10 @@ impl RuntimeController {
             bridge_pending: None,
             bridge_feedback: None,
             next_bridge_operation: 1,
+            model_runtime: ModelRuntimeState::default(),
+            model_snapshot_pending: None,
+            requested_thinking: None,
+            clamp_notice: None,
             _event_task: event_task,
             _catalog_task: catalog_task,
             _bridge_task: bridge_task,
@@ -856,6 +938,233 @@ impl RuntimeController {
             pending: self.bridge_pending,
             feedback: self.bridge_feedback.clone(),
         }
+    }
+
+    pub fn model_runtime_projection(&self) -> ModelRuntimeProjection {
+        let session = self.core.runtime.session.data.as_ref();
+        let active_model = session.and_then(|session| {
+            session.model.as_ref().map(|model| ModelIdentity {
+                provider: model.provider.clone(),
+                id: model.id.clone(),
+            })
+        });
+        let active_thinking = session.map(|session| model_thinking(session.thinking_level));
+        let pricing_known = active_model
+            .as_ref()
+            .and_then(|identity| self.model_runtime.catalog.as_ref()?.model(identity))
+            .is_some_and(|model| {
+                !model.pricing.rates.is_zero()
+                    || model.pricing.tiers.iter().any(|tier| !tier.rates.is_zero())
+            });
+        let stats = self.core.runtime.stats.data.as_ref();
+        let reasoning = self
+            .core
+            .runtime
+            .messages
+            .data
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|message| message.assistant.as_ref()?.usage.reasoning)
+            .reduce(u64::saturating_add);
+        ModelRuntimeProjection {
+            phase: self.model_runtime.phase.clone(),
+            catalog: self.model_runtime.catalog.clone(),
+            auth: self.model_runtime.auth.clone(),
+            feedback: self.model_runtime.feedback.clone(),
+            active_model,
+            active_thinking,
+            requested_thinking: self.requested_thinking,
+            effective_thinking: active_thinking,
+            clamp_notice: self.clamp_notice.clone(),
+            model_change_policy: model_change_policy(
+                self.core.status() == ControllerStatus::Active,
+                !matches!(
+                    self.core.runtime.lifecycle,
+                    RuntimeLifecycle::Ready | RuntimeLifecycle::Settled
+                ),
+            ),
+            usage: UsageProjection {
+                context_tokens: stats.and_then(|stats| stats.context_tokens),
+                context_window: stats.and_then(|stats| stats.context_window),
+                context_percent: stats.and_then(|stats| stats.context_percent),
+                input_tokens: stats.map(|stats| stats.input_tokens),
+                output_tokens: stats.map(|stats| stats.output_tokens),
+                cache_read_tokens: stats.map(|stats| stats.cache_read_tokens),
+                cache_write_tokens: stats.map(|stats| stats.cache_write_tokens),
+                reasoning_tokens: reasoning,
+                total_tokens: stats.map(|stats| stats.total_tokens),
+                estimated_cost: stats.map(|stats| stats.cost),
+                pricing_known,
+            },
+        }
+    }
+
+    pub fn set_active_model(&mut self, identity: ModelIdentity, cx: &mut Context<Self>) -> bool {
+        if self.model_runtime_projection().model_change_policy != ModelChangePolicy::Allowed {
+            self.model_runtime.feedback =
+                Some("Model changes apply only after the current stream settles.".to_owned());
+            cx.notify();
+            return false;
+        }
+        self.requested_thinking = None;
+        self.clamp_notice = None;
+        self.send_core_effects(|core| core.set_model(identity.provider, identity.id), cx)
+    }
+
+    pub fn set_active_thinking(
+        &mut self,
+        requested: ThinkingLevel,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.model_runtime_projection().model_change_policy != ModelChangePolicy::Allowed {
+            self.model_runtime.feedback =
+                Some("Thinking changes apply only after the current stream settles.".to_owned());
+            cx.notify();
+            return false;
+        }
+        let active = self.model_runtime_projection().active_model;
+        let effective = active
+            .as_ref()
+            .and_then(|identity| self.model_runtime.catalog.as_ref()?.model(identity))
+            .map(|model| model.clamp_thinking(requested))
+            .unwrap_or(requested);
+        self.requested_thinking = Some(requested);
+        self.clamp_notice = (effective != requested).then(|| {
+            format!(
+                "Requested {}. This model uses {} instead.",
+                requested.label(),
+                effective.label()
+            )
+        });
+        self.send_core_effects(
+            |core| core.set_thinking_level(runtime_thinking(effective)),
+            cx,
+        )
+    }
+
+    pub fn refresh_model_catalog(&mut self, cx: &mut Context<Self>) -> bool {
+        if !self
+            .bridge_capabilities
+            .as_ref()
+            .is_some_and(|capabilities| capabilities.model_runtime)
+        {
+            return false;
+        }
+        let (operation, start) = self.model_runtime.begin_refresh();
+        if !start {
+            return false;
+        }
+        let accepted = self
+            .bridge_worker
+            .execute(operation, BridgeCommand::RefreshModels);
+        if !accepted {
+            self.model_runtime.apply_refresh(
+                operation,
+                Err("The model bridge is unavailable.".to_owned()),
+            );
+        }
+        cx.notify();
+        accepted
+    }
+
+    pub fn login_provider(
+        &mut self,
+        provider: String,
+        method: AuthMethod,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.model_runtime.auth.is_some()
+            || !self
+                .bridge_capabilities
+                .as_ref()
+                .is_some_and(|capabilities| capabilities.provider_auth)
+        {
+            return false;
+        }
+        let operation = self.model_runtime.start_auth(provider.clone(), method);
+        let accepted = self.bridge_worker.execute(
+            operation,
+            BridgeCommand::LoginProvider {
+                operation_id: operation,
+                provider,
+                auth_type: method,
+            },
+        );
+        if !accepted {
+            self.model_runtime.finish_auth(
+                operation,
+                Err("The model bridge is unavailable.".to_owned()),
+            );
+        }
+        cx.notify();
+        accepted
+    }
+
+    pub fn answer_auth_prompt(
+        &mut self,
+        prompt: &AuthPrompt,
+        value: String,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(flow) = self.model_runtime.auth.as_ref() else {
+            return false;
+        };
+        let operation_id = flow.operation;
+        let command_id = self.model_runtime.take_operation();
+        let accepted = self.bridge_worker.execute(
+            command_id,
+            BridgeCommand::AuthRespond {
+                operation_id,
+                prompt_id: prompt.prompt_id.clone(),
+                value: SensitiveValue::new(value),
+            },
+        );
+        cx.notify();
+        accepted
+    }
+
+    pub fn cancel_provider_auth(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(operation) = self.model_runtime.auth.as_ref().map(|flow| flow.operation) else {
+            return false;
+        };
+        self.model_runtime.cancel_auth(operation);
+        let accepted = self.bridge_worker.cancel(operation);
+        cx.notify();
+        accepted
+    }
+
+    pub fn logout_provider(&mut self, provider: String, cx: &mut Context<Self>) -> bool {
+        let operation = self.model_runtime.take_operation();
+        let accepted = self
+            .bridge_worker
+            .execute(operation, BridgeCommand::LogoutProvider { provider });
+        cx.notify();
+        accepted
+    }
+
+    pub fn set_model_defaults(
+        &mut self,
+        model: Option<ModelIdentity>,
+        thinking: Option<ThinkingLevel>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let operation = self.model_runtime.take_operation();
+        let accepted = self.bridge_worker.execute(
+            operation,
+            BridgeCommand::SetModelDefaults { model, thinking },
+        );
+        cx.notify();
+        accepted
+    }
+
+    pub fn set_model_scope(&mut self, models: Vec<ModelIdentity>, cx: &mut Context<Self>) -> bool {
+        let operation = self.model_runtime.take_operation();
+        let accepted = self
+            .bridge_worker
+            .execute(operation, BridgeCommand::SetModelScope { models });
+        cx.notify();
+        accepted
     }
 
     pub fn submit(
@@ -1201,6 +1510,19 @@ impl RuntimeController {
             BridgeWorkerResult::Capabilities(Ok(hello)) => {
                 self.bridge_capabilities = Some(hello.capabilities);
                 self.bridge_unavailable = None;
+                if self
+                    .bridge_capabilities
+                    .as_ref()
+                    .is_some_and(|capabilities| capabilities.model_runtime)
+                {
+                    let operation = self.model_runtime.take_operation();
+                    if self
+                        .bridge_worker
+                        .execute(operation, BridgeCommand::GetModelRuntime)
+                    {
+                        self.model_snapshot_pending = Some(operation);
+                    }
+                }
                 self.bridge_feedback =
                     Some(format!("Session bridge ready · SDK {}", hello.sdk_version));
             }
@@ -1208,11 +1530,17 @@ impl RuntimeController {
                 self.bridge_capabilities = None;
                 self.bridge_unavailable = Some(error.summary);
             }
+            BridgeWorkerResult::Event(event) => {
+                self.model_runtime.apply_auth_event(event);
+            }
             BridgeWorkerResult::Completed {
                 id,
                 command,
                 result,
             } => {
+                if self.receive_model_bridge_result(id, &command, &result) {
+                    return;
+                }
                 let Some((pending_id, kind)) = self.bridge_pending else {
                     return;
                 };
@@ -1291,12 +1619,143 @@ impl RuntimeController {
                                 BridgeCommand::SetLabel { .. } => "Label update",
                                 BridgeCommand::ExportJsonl { .. } => "JSONL export",
                                 BridgeCommand::ImportJsonl { .. } => "JSONL import",
+                                BridgeCommand::GetModelRuntime
+                                | BridgeCommand::RefreshModels
+                                | BridgeCommand::LoginProvider { .. }
+                                | BridgeCommand::AuthRespond { .. }
+                                | BridgeCommand::LogoutProvider { .. }
+                                | BridgeCommand::SetModelDefaults { .. }
+                                | BridgeCommand::SetModelScope { .. } => "Model operation",
                             },
                             error.summary
                         ));
                     }
                 }
             }
+        }
+    }
+
+    fn receive_model_bridge_result(
+        &mut self,
+        id: u64,
+        command: &BridgeCommand,
+        result: &Result<serde_json::Value, crate::services::sdk_bridge::BridgeError>,
+    ) -> bool {
+        match command {
+            BridgeCommand::GetModelRuntime => {
+                if self.model_snapshot_pending != Some(id) {
+                    return true;
+                }
+                self.model_snapshot_pending = None;
+                match result {
+                    Ok(value) => {
+                        match serde_json::from_value::<ModelCatalogSnapshot>(value.clone()) {
+                            Ok(snapshot) => self.model_runtime.apply_snapshot(snapshot),
+                            Err(_) => {
+                                self.model_runtime.phase = CatalogPhase::Failed(
+                                    "The model bridge returned an invalid catalog.".to_owned(),
+                                )
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        self.model_runtime.phase = CatalogPhase::Failed(error.summary.clone())
+                    }
+                }
+                true
+            }
+            BridgeCommand::RefreshModels => {
+                let parsed = result
+                    .as_ref()
+                    .map_err(|error| error.summary.clone())
+                    .and_then(|value| {
+                        serde_json::from_value::<ModelCatalogSnapshot>(value.clone())
+                            .map_err(|_| "The model bridge returned an invalid catalog.".to_owned())
+                    });
+                self.model_runtime.apply_refresh(id, parsed);
+                true
+            }
+            BridgeCommand::LoginProvider { operation_id, .. } => {
+                let parsed = result
+                    .as_ref()
+                    .map_err(|error| error.summary.clone())
+                    .and_then(|value| {
+                        serde_json::from_value::<ModelCatalogSnapshot>(value.clone())
+                            .map_err(|_| "The provider returned an invalid catalog.".to_owned())
+                    });
+                match parsed {
+                    Ok(snapshot) => {
+                        self.model_runtime.apply_snapshot(snapshot);
+                        self.model_runtime.finish_auth(*operation_id, Ok(()));
+                    }
+                    Err(summary) => {
+                        self.model_runtime.finish_auth(*operation_id, Err(summary));
+                    }
+                }
+                true
+            }
+            BridgeCommand::AuthRespond { .. } => true,
+            BridgeCommand::LogoutProvider { provider } => {
+                match result {
+                    Ok(value) => {
+                        if let Some(snapshot) = value.get("snapshot").cloned().and_then(|value| {
+                            serde_json::from_value::<ModelCatalogSnapshot>(value).ok()
+                        }) {
+                            self.model_runtime.apply_snapshot(snapshot);
+                        }
+                        self.model_runtime.feedback = Some(
+                            if value
+                                .get("environmentFallback")
+                                .and_then(serde_json::Value::as_bool)
+                                == Some(true)
+                            {
+                                format!(
+                                    "Removed Pi's stored {provider} credential. Environment authentication is still active."
+                                )
+                            } else {
+                                format!("Logged out of {provider}.")
+                            },
+                        );
+                    }
+                    Err(error) => {
+                        self.model_runtime.feedback = Some(format!(
+                            "Could not log out of {provider}. {}",
+                            error.summary
+                        ));
+                    }
+                }
+                true
+            }
+            BridgeCommand::SetModelDefaults { .. } | BridgeCommand::SetModelScope { .. } => {
+                match result {
+                    Ok(value) => {
+                        match serde_json::from_value::<ModelCatalogSnapshot>(value.clone()) {
+                            Ok(snapshot) => {
+                                self.model_runtime.apply_snapshot(snapshot);
+                                self.model_runtime.feedback = Some(
+                                "Saved Pi defaults for future sessions. The active session is unchanged."
+                                    .to_owned(),
+                            );
+                            }
+                            Err(_) => {
+                                self.model_runtime.feedback = Some(
+                                    "Pi saved settings but returned an invalid catalog.".to_owned(),
+                                );
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        self.model_runtime.feedback =
+                            Some(format!("Pi settings were not changed. {}", error.summary));
+                    }
+                }
+                true
+            }
+            BridgeCommand::Hello
+            | BridgeCommand::NavigateTree { .. }
+            | BridgeCommand::SetLabel { .. }
+            | BridgeCommand::ExportJsonl { .. }
+            | BridgeCommand::ImportJsonl { .. } => false,
         }
     }
 

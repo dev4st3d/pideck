@@ -180,7 +180,11 @@ impl Element for ComposerTextElement {
         cx: &mut App,
     ) -> Self::PrepaintState {
         let input = self.input.read(cx);
-        let text = input.buffer.text().to_owned();
+        let text = if input.masked {
+            "*".repeat(input.buffer.text().len())
+        } else {
+            input.buffer.text().to_owned()
+        };
         let placeholder = input.placeholder.clone();
         let selection = input.buffer.selection().clone();
         let marked_range = input.buffer.marked_range().cloned();

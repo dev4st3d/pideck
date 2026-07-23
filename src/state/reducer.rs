@@ -237,6 +237,25 @@ fn reduce_intent(
             state.retry = RetryState::Cancelling;
             vec![effect(state, RuntimeRequest::AbortRetry)]
         }
+        RuntimeIntent::SetModel { provider, id } => {
+            if !idle_settings_allowed(state) || state.pending_operation.is_some() {
+                return Vec::new();
+            }
+            state.pending_operation = Some(RuntimeOperation::SetModel {
+                provider: provider.clone(),
+                id: id.clone(),
+            });
+            state.bump_revision();
+            vec![effect(state, RuntimeRequest::SetModel { provider, id })]
+        }
+        RuntimeIntent::SetThinkingLevel(level) => {
+            if !idle_settings_allowed(state) || state.pending_operation.is_some() {
+                return Vec::new();
+            }
+            state.pending_operation = Some(RuntimeOperation::SetThinkingLevel(level));
+            state.bump_revision();
+            vec![effect(state, RuntimeRequest::SetThinkingLevel { level })]
+        }
         RuntimeIntent::SetSteeringMode(mode) => {
             if !settings_allowed(state) || state.pending_operation.is_some() {
                 return Vec::new();
@@ -535,6 +554,33 @@ fn reduce_response(
             }
             Vec::new()
         }
+        (
+            RuntimeRequest::SetModel { provider, id },
+            Ok(NormalizedResponse::ModelChanged { model }),
+        ) => {
+            if matches!(state.pending_operation.as_ref(), Some(RuntimeOperation::SetModel { provider: pending_provider, id: pending_id }) if pending_provider == &provider && pending_id == &id)
+            {
+                if let Some(session) = state.session.data.as_mut() {
+                    session.model = Some(model);
+                }
+                state.pending_operation = None;
+                state.stats.loading();
+                state.context_awaiting_fresh_usage = true;
+                state.bump_revision();
+            }
+            vec![effect(state, RuntimeRequest::GetStats)]
+        }
+        (RuntimeRequest::SetThinkingLevel { level }, Ok(NormalizedResponse::Accepted)) => {
+            if matches!(state.pending_operation, Some(RuntimeOperation::SetThinkingLevel(pending)) if pending == level)
+            {
+                if let Some(session) = state.session.data.as_mut() {
+                    session.thinking_level = level;
+                }
+                state.pending_operation = None;
+                state.bump_revision();
+            }
+            Vec::new()
+        }
         (RuntimeRequest::Compact { .. }, Ok(NormalizedResponse::Compacted { summary })) => {
             state.pending_operation = None;
             state.compaction = CompactionState::Completed {
@@ -639,6 +685,8 @@ fn reduce_response(
         (
             request @ (RuntimeRequest::SetSteeringMode { .. }
             | RuntimeRequest::SetFollowUpMode { .. }
+            | RuntimeRequest::SetModel { .. }
+            | RuntimeRequest::SetThinkingLevel { .. }
             | RuntimeRequest::Compact { .. }
             | RuntimeRequest::SetAutoCompaction { .. }
             | RuntimeRequest::SetAutoRetry { .. }
@@ -1125,6 +1173,14 @@ fn settings_allowed(state: &RuntimeState) -> bool {
         )
 }
 
+fn idle_settings_allowed(state: &RuntimeState) -> bool {
+    state.session.data.is_some()
+        && matches!(
+            state.lifecycle,
+            RuntimeLifecycle::Ready | RuntimeLifecycle::Settled
+        )
+}
+
 fn apply_entries(
     state: &mut RuntimeState,
     since: Option<EntryId>,
@@ -1429,6 +1485,8 @@ fn request_name(request: &RuntimeRequest) -> &'static str {
         RuntimeRequest::Abort => "abort",
         RuntimeRequest::AbortBash => "abort_bash",
         RuntimeRequest::AbortRetry => "abort_retry",
+        RuntimeRequest::SetModel { .. } => "set_model",
+        RuntimeRequest::SetThinkingLevel { .. } => "set_thinking_level",
         RuntimeRequest::SetSteeringMode { .. } => "set_steering_mode",
         RuntimeRequest::SetFollowUpMode { .. } => "set_follow_up_mode",
         RuntimeRequest::Compact { .. } => "compact",

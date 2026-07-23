@@ -14,9 +14,27 @@ use async_channel::{Receiver, Sender};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::model_runtime::{AuthEvent, AuthMethod, ModelIdentity, ThinkingLevel};
+
 const PROTOCOL_VERSION: u64 = 1;
 const MAX_RECORD_BYTES: usize = 1024 * 1024;
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
+
+#[derive(Clone, Serialize)]
+#[serde(transparent)]
+pub struct SensitiveValue(String);
+
+impl SensitiveValue {
+    pub fn new(value: String) -> Self {
+        Self(value)
+    }
+}
+
+impl fmt::Debug for SensitiveValue {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("<redacted>")
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct SdkBridgeConfig {
@@ -41,6 +59,7 @@ impl SdkBridgeConfig {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(default)]
 #[serde(rename_all = "camelCase")]
 pub struct BridgeCapabilities {
     pub navigate_tree: bool,
@@ -49,6 +68,9 @@ pub struct BridgeCapabilities {
     pub jsonl_import: bool,
     pub jsonl_export: bool,
     pub session_list: bool,
+    pub model_runtime: bool,
+    pub provider_auth: bool,
+    pub model_settings: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -132,6 +154,32 @@ pub enum BridgeCommand {
         #[serde(rename = "sessionDir")]
         session_dir: String,
     },
+    GetModelRuntime,
+    RefreshModels,
+    LoginProvider {
+        #[serde(rename = "operationId")]
+        operation_id: u64,
+        provider: String,
+        #[serde(rename = "authType")]
+        auth_type: AuthMethod,
+    },
+    AuthRespond {
+        #[serde(rename = "operationId")]
+        operation_id: u64,
+        #[serde(rename = "promptId")]
+        prompt_id: String,
+        value: SensitiveValue,
+    },
+    LogoutProvider {
+        provider: String,
+    },
+    SetModelDefaults {
+        model: Option<ModelIdentity>,
+        thinking: Option<ThinkingLevel>,
+    },
+    SetModelScope {
+        models: Vec<ModelIdentity>,
+    },
 }
 
 #[derive(Serialize)]
@@ -176,12 +224,14 @@ struct BridgeInner {
     pending: Mutex<HashMap<String, mpsc::Sender<Result<Value, BridgeError>>>>,
     next_id: AtomicU64,
     stopped: AtomicBool,
+    event_sender: Sender<AuthEvent>,
 }
 
 #[derive(Clone)]
 pub struct SdkBridgeClient {
     inner: Arc<BridgeInner>,
     hello: BridgeHello,
+    events: Receiver<AuthEvent>,
 }
 
 impl SdkBridgeClient {
@@ -227,12 +277,14 @@ impl SdkBridgeClient {
                 }
             });
         }
+        let (event_sender, events) = async_channel::unbounded();
         let inner = Arc::new(BridgeInner {
             child: Mutex::new(Some(child)),
             stdin: Mutex::new(Some(stdin)),
             pending: Mutex::new(HashMap::new()),
             next_id: AtomicU64::new(1),
             stopped: AtomicBool::new(false),
+            event_sender,
         });
         spawn_reader(stdout, Arc::clone(&inner));
         let provisional = Self {
@@ -242,6 +294,7 @@ impl SdkBridgeClient {
                 sdk_version: String::new(),
                 capabilities: BridgeCapabilities::default(),
             },
+            events: events.clone(),
         };
         let hello: BridgeHello = serde_json::from_value(
             provisional.call(BridgeCommand::Hello, Duration::from_secs(10))?,
@@ -259,11 +312,16 @@ impl SdkBridgeClient {
         Ok(Self {
             inner: provisional.inner,
             hello,
+            events,
         })
     }
 
     pub fn hello(&self) -> &BridgeHello {
         &self.hello
+    }
+
+    pub fn events(&self) -> Receiver<AuthEvent> {
+        self.events.clone()
     }
 
     pub fn call_default(&self, command: BridgeCommand) -> Result<Value, BridgeError> {
@@ -423,7 +481,16 @@ fn spawn_reader(stdout: impl std::io::Read + Send + 'static, inner: Arc<BridgeIn
                 Ok(_) if buffer.len() > MAX_RECORD_BYTES => continue,
                 Ok(_) => {}
             }
-            let Ok(response) = serde_json::from_slice::<ResponseRecord>(&buffer) else {
+            let Ok(value) = serde_json::from_slice::<Value>(&buffer) else {
+                continue;
+            };
+            if value.get("type").and_then(Value::as_str) == Some("event") {
+                if let Ok(event) = serde_json::from_value::<AuthEvent>(value) {
+                    let _ = inner.event_sender.send_blocking(event);
+                }
+                continue;
+            }
+            let Ok(response) = serde_json::from_value::<ResponseRecord>(value) else {
                 continue;
             };
             if response.version != PROTOCOL_VERSION || response.record_type != "response" {
@@ -470,6 +537,7 @@ fn fail_pending(inner: &BridgeInner, summary: &str) {
 #[derive(Debug, Clone)]
 pub enum BridgeWorkerResult {
     Capabilities(Result<BridgeHello, BridgeError>),
+    Event(AuthEvent),
     Completed {
         id: u64,
         command: BridgeCommand,
@@ -531,6 +599,7 @@ fn bridge_worker(
 ) {
     let (internal_sender, internal_receiver) = mpsc::channel();
     let mut client = start_discovered_bridge(&working_directory);
+    let mut event_receiver = client.as_ref().ok().map(SdkBridgeClient::events);
     let _ = results.send_blocking(BridgeWorkerResult::Capabilities(
         client
             .as_ref()
@@ -538,6 +607,11 @@ fn bridge_worker(
             .map_err(Clone::clone),
     ));
     loop {
+        if let Some(events) = &event_receiver {
+            while let Ok(event) = events.try_recv() {
+                let _ = results.send_blocking(BridgeWorkerResult::Event(event));
+            }
+        }
         while let Ok(result) = internal_receiver.try_recv() {
             let _ = results.send_blocking(result);
         }
@@ -550,6 +624,7 @@ fn bridge_worker(
             BridgeWorkerCommand::Execute { id, command } => {
                 if client.is_err() {
                     client = start_discovered_bridge(&working_directory);
+                    event_receiver = client.as_ref().ok().map(SdkBridgeClient::events);
                     let _ = results.send_blocking(BridgeWorkerResult::Capabilities(
                         client
                             .as_ref()
@@ -596,6 +671,7 @@ fn bridge_worker(
                     active.stop();
                 }
                 client = start_discovered_bridge(&working_directory);
+                event_receiver = client.as_ref().ok().map(SdkBridgeClient::events);
                 let _ = results.send_blocking(BridgeWorkerResult::Capabilities(
                     client
                         .as_ref()

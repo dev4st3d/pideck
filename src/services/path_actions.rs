@@ -51,6 +51,38 @@ pub fn activate_untrusted_output_path(path: &str, action: PathAction) -> Result<
     }
 }
 
+pub fn open_provider_auth_url(url: &str) -> Result<(), String> {
+    if url.chars().any(char::is_control)
+        || !(url.starts_with("https://") || url.starts_with("http://localhost"))
+    {
+        return Err("The provider returned an unsupported authentication URL.".to_owned());
+    }
+
+    #[cfg(windows)]
+    {
+        Command::new("explorer.exe")
+            .arg(url)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map(|_| ())
+            .map_err(|_| "The authentication page could not be opened.".to_owned())
+    }
+
+    #[cfg(not(windows))]
+    {
+        Command::new("xdg-open")
+            .arg(url)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map(|_| ())
+            .map_err(|_| "The authentication page could not be opened.".to_owned())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -101,6 +101,8 @@ pub struct SessionSnapshot {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RuntimeOperation {
+    SetModel { provider: String, id: String },
+    SetThinkingLevel(RuntimeThinkingLevel),
     SetSteeringMode(QueueDeliveryMode),
     SetFollowUpMode(QueueDeliveryMode),
     Compact,
@@ -832,6 +834,11 @@ pub enum RuntimeIntent {
     Abort,
     AbortBash,
     AbortRetry,
+    SetModel {
+        provider: String,
+        id: String,
+    },
+    SetThinkingLevel(RuntimeThinkingLevel),
     SetSteeringMode(QueueDeliveryMode),
     SetFollowUpMode(QueueDeliveryMode),
     Compact {
@@ -894,6 +901,13 @@ pub enum RuntimeRequest {
     Abort,
     AbortBash,
     AbortRetry,
+    SetModel {
+        provider: String,
+        id: String,
+    },
+    SetThinkingLevel {
+        level: RuntimeThinkingLevel,
+    },
     SetSteeringMode {
         mode: QueueDeliveryMode,
     },
@@ -935,6 +949,9 @@ pub enum NormalizedResponse {
     },
     ForkMessages(Vec<RuntimeForkMessage>),
     Accepted,
+    ModelChanged {
+        model: ModelSummary,
+    },
     Bash(DirectBashResult),
     Compacted {
         summary: String,

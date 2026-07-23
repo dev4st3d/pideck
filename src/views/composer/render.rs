@@ -19,6 +19,8 @@ impl Composer {
     fn render_field(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let can_submit = !self.disabled && !self.buffer.text().trim().is_empty();
         let handles_composer_keys = self.availability != ComposerAvailability::Unavailable;
+        let field_height = self.field_height();
+        let field_padding_y = ((field_height - 22.0) / 2.0).max(0.0);
         let status = self.status_text();
         let show_status = !status.is_empty();
         let status_color = match self.feedback {
@@ -30,11 +32,13 @@ impl Composer {
 
         div()
             .id(self.id_prefix.clone())
+            .w_full()
             .flex()
             .flex_col()
             .gap(px(4.0))
             .child(
                 div()
+                    .w_full()
                     .flex()
                     .flex_row()
                     .items_center()
@@ -55,9 +59,9 @@ impl Composer {
                             })
                             .flex_1()
                             .min_w_0()
-                            .h(px(34.0))
+                            .h(px(field_height))
                             .px(px(10.0))
-                            .py(px(6.0))
+                            .py(px(field_padding_y))
                             .overflow_hidden()
                             .rounded(px(theme::RADIUS_SM))
                             .border_1()
@@ -69,7 +73,7 @@ impl Composer {
                             .bg(if self.disabled {
                                 theme::canvas()
                             } else {
-                                theme::panel()
+                                theme::panel_lift()
                             })
                             .text_size(px(theme::T_UI_SM))
                             .line_height(px(20.0))
@@ -195,95 +199,113 @@ impl Composer {
             ComposerFeedback::Ready => theme::ash(),
         };
         let panel = self.chrome == ComposerChrome::Panel;
+        // Full desk chrome sits inside the prompt card from RootView, so the input
+        // has no outer border; Panel chrome keeps a self-contained field look.
+        let desk = self.chrome == ComposerChrome::Full;
         let status = self.status_text();
         let show_status = !status.is_empty() || !panel;
+
+        let mut input = div()
+            .id(gpui::SharedString::from(format!(
+                "{}-input",
+                self.id_prefix
+            )))
+            .track_focus(&self.focus_handle)
+            .when(!self.disabled, |input| input.tab_index(0))
+            .when(handles_composer_keys, |input| input.key_context("Composer"))
+            .cursor(if self.disabled {
+                CursorStyle::Arrow
+            } else {
+                CursorStyle::IBeam
+            })
+            .h(px(if panel { 64.0 } else { 88.0 }))
+            .px(px(12.0))
+            .py(px(if panel { 8.0 } else { 10.0 }))
+            .overflow_hidden()
+            .text_size(px(theme::T_BODY_SM))
+            .line_height(px(21.0))
+            .text_color(if self.disabled {
+                theme::smoke()
+            } else {
+                theme::bone()
+            });
+
+        if panel {
+            input = input
+                .rounded(px(theme::RADIUS_SM))
+                .border_1()
+                .border_color(if self.disabled {
+                    theme::edge_soft()
+                } else {
+                    theme::edge()
+                })
+                .bg(if self.disabled {
+                    theme::canvas()
+                } else {
+                    theme::panel()
+                })
+                .focus(|input| {
+                    input.border_color(theme::focus()).bg(if self.disabled {
+                        theme::canvas()
+                    } else {
+                        theme::panel_lift()
+                    })
+                });
+        } else {
+            // Desk: focus ring via subtle lift so the shared prompt card stays clean.
+            input = input.focus(|input| input.bg(theme::panel_lift()));
+        }
+
+        input = input
+            .when(handles_composer_keys, |input| {
+                input
+                    .on_action(cx.listener(Self::backspace))
+                    .on_action(cx.listener(Self::delete))
+                    .on_action(cx.listener(Self::left))
+                    .on_action(cx.listener(Self::right))
+                    .on_action(cx.listener(Self::up))
+                    .on_action(cx.listener(Self::down))
+                    .on_action(cx.listener(Self::select_left))
+                    .on_action(cx.listener(Self::select_right))
+                    .on_action(cx.listener(Self::select_up))
+                    .on_action(cx.listener(Self::select_down))
+                    .on_action(cx.listener(Self::line_start))
+                    .on_action(cx.listener(Self::line_end))
+                    .on_action(cx.listener(Self::select_line_start))
+                    .on_action(cx.listener(Self::select_line_end))
+                    .on_action(cx.listener(Self::select_all))
+                    .on_action(cx.listener(Self::copy))
+                    .on_action(cx.listener(Self::cut))
+                    .on_action(cx.listener(Self::paste))
+                    .on_action(cx.listener(Self::undo))
+                    .on_action(cx.listener(Self::redo))
+                    .on_action(cx.listener(Self::insert_newline))
+                    .on_action(cx.listener(Self::accept))
+                    .on_action(cx.listener(Self::follow_up))
+            })
+            .on_action(cx.listener(Self::abort))
+            .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
+            .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
+            .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
+            .on_mouse_move(cx.listener(Self::on_mouse_move))
+            .on_scroll_wheel(cx.listener(Self::on_scroll_wheel))
+            .child(ComposerTextElement { input: cx.entity() });
 
         div()
             .id(self.id_prefix.clone())
             .flex()
             .flex_col()
-            .gap(px(if panel { 6.0 } else { 8.0 }))
+            .gap(px(if panel { 6.0 } else { 0.0 }))
+            .child(input)
             .child(
                 div()
-                    .id(gpui::SharedString::from(format!(
-                        "{}-input",
-                        self.id_prefix
-                    )))
-                    .track_focus(&self.focus_handle)
-                    .when(!self.disabled, |input| input.tab_index(0))
-                    .when(handles_composer_keys, |input| input.key_context("Composer"))
-                    .cursor(if self.disabled {
-                        CursorStyle::Arrow
-                    } else {
-                        CursorStyle::IBeam
+                    .min_h(px(if panel { 28.0 } else { 36.0 }))
+                    .px(px(if desk { 10.0 } else { 0.0 }))
+                    .pb(px(if desk { 8.0 } else { 0.0 }))
+                    .pt(px(if desk { 6.0 } else { 0.0 }))
+                    .when(desk, |footer| {
+                        footer.border_t_1().border_color(theme::edge_soft())
                     })
-                    .h(px(if panel { 64.0 } else { 88.0 }))
-                    .px(px(12.0))
-                    .py(px(if panel { 8.0 } else { 10.0 }))
-                    .overflow_hidden()
-                    .rounded(px(theme::RADIUS_SM))
-                    .border_1()
-                    .border_color(if self.disabled {
-                        theme::edge_soft()
-                    } else {
-                        theme::edge()
-                    })
-                    .bg(if self.disabled {
-                        theme::canvas()
-                    } else {
-                        theme::panel()
-                    })
-                    .text_size(px(theme::T_BODY_SM))
-                    .line_height(px(21.0))
-                    .text_color(if self.disabled {
-                        theme::smoke()
-                    } else {
-                        theme::bone()
-                    })
-                    .focus(|input| {
-                        input.border_color(theme::focus()).bg(if self.disabled {
-                            theme::canvas()
-                        } else {
-                            theme::panel_lift()
-                        })
-                    })
-                    .when(handles_composer_keys, |input| {
-                        input
-                            .on_action(cx.listener(Self::backspace))
-                            .on_action(cx.listener(Self::delete))
-                            .on_action(cx.listener(Self::left))
-                            .on_action(cx.listener(Self::right))
-                            .on_action(cx.listener(Self::up))
-                            .on_action(cx.listener(Self::down))
-                            .on_action(cx.listener(Self::select_left))
-                            .on_action(cx.listener(Self::select_right))
-                            .on_action(cx.listener(Self::select_up))
-                            .on_action(cx.listener(Self::select_down))
-                            .on_action(cx.listener(Self::line_start))
-                            .on_action(cx.listener(Self::line_end))
-                            .on_action(cx.listener(Self::select_line_start))
-                            .on_action(cx.listener(Self::select_line_end))
-                            .on_action(cx.listener(Self::select_all))
-                            .on_action(cx.listener(Self::copy))
-                            .on_action(cx.listener(Self::cut))
-                            .on_action(cx.listener(Self::paste))
-                            .on_action(cx.listener(Self::undo))
-                            .on_action(cx.listener(Self::redo))
-                            .on_action(cx.listener(Self::insert_newline))
-                            .on_action(cx.listener(Self::accept))
-                            .on_action(cx.listener(Self::follow_up))
-                    })
-                    .on_action(cx.listener(Self::abort))
-                    .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
-                    .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
-                    .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
-                    .on_mouse_move(cx.listener(Self::on_mouse_move))
-                    .on_scroll_wheel(cx.listener(Self::on_scroll_wheel))
-                    .child(ComposerTextElement { input: cx.entity() }),
-            )
-            .child(
-                div()
-                    .min_h(px(if panel { 28.0 } else { 32.0 }))
                     .flex()
                     .flex_row()
                     .items_center()

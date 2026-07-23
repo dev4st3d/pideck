@@ -194,6 +194,80 @@ fn happy_path_hydrates_in_required_order_and_settles() {
 }
 
 #[test]
+fn model_and_thinking_changes_use_stock_rpc_only_after_streaming_settles() {
+    let (mut state, _) = connected_state("model-policy");
+    apply(&mut state, RuntimeInput::Event(NormalizedEvent::AgentStart));
+    let blocked = apply(
+        &mut state,
+        RuntimeInput::Intent(RuntimeIntent::SetModel {
+            provider: "next-provider".to_owned(),
+            id: "next-model".to_owned(),
+        }),
+    );
+    assert!(blocked.is_empty());
+
+    apply(
+        &mut state,
+        RuntimeInput::Event(NormalizedEvent::AgentSettled),
+    );
+    let effects = apply(
+        &mut state,
+        RuntimeInput::Intent(RuntimeIntent::SetModel {
+            provider: "next-provider".to_owned(),
+            id: "next-model".to_owned(),
+        }),
+    );
+    assert!(matches!(
+        effects.as_slice(),
+        [RuntimeEffect {
+            effect: EffectKind::Request(RuntimeRequest::SetModel { provider, id }),
+            ..
+        }] if provider == "next-provider" && id == "next-model"
+    ));
+    response(
+        &mut state,
+        RuntimeRequest::SetModel {
+            provider: "next-provider".to_owned(),
+            id: "next-model".to_owned(),
+        },
+        Ok(NormalizedResponse::ModelChanged {
+            model: ModelSummary {
+                provider: "next-provider".to_owned(),
+                id: "next-model".to_owned(),
+                name: "Next model".to_owned(),
+                reasoning: true,
+                context_window: 200_000,
+                max_tokens: 8_192,
+                supports_images: true,
+            },
+        }),
+    );
+    assert_eq!(
+        state
+            .session
+            .data
+            .as_ref()
+            .and_then(|session| session.model.as_ref())
+            .map(|model| model.id.as_str()),
+        Some("next-model")
+    );
+
+    let thinking = apply(
+        &mut state,
+        RuntimeInput::Intent(RuntimeIntent::SetThinkingLevel(RuntimeThinkingLevel::High)),
+    );
+    assert!(matches!(
+        thinking.as_slice(),
+        [RuntimeEffect {
+            effect: EffectKind::Request(RuntimeRequest::SetThinkingLevel {
+                level: RuntimeThinkingLevel::High
+            }),
+            ..
+        }]
+    ));
+}
+
+#[test]
 fn flat_entries_build_deep_history_without_requesting_nested_tree_json() {
     let (mut state, hydration) = connected_state("deep");
     assert!(hydration.iter().all(|effect| {
