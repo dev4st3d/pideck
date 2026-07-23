@@ -1060,15 +1060,46 @@ fn runtime_tree(node: SessionTreeNode) -> RuntimeTreeNode {
 }
 
 fn model_summary(model: Model) -> ModelSummary {
+    let supported_thinking = supported_thinking_levels(&model);
     ModelSummary {
         provider: model.provider,
         id: model.id,
         name: model.name,
         reasoning: model.reasoning,
+        supported_thinking,
         context_window: model.context_window,
         max_tokens: model.max_tokens,
         supports_images: model.input.contains(&ModelInput::Image),
     }
+}
+
+fn supported_thinking_levels(model: &Model) -> Vec<RuntimeThinkingLevel> {
+    if !model.reasoning {
+        return vec![RuntimeThinkingLevel::Off];
+    }
+
+    let levels = [
+        ("minimal", RuntimeThinkingLevel::Minimal),
+        ("low", RuntimeThinkingLevel::Low),
+        ("medium", RuntimeThinkingLevel::Medium),
+        ("high", RuntimeThinkingLevel::High),
+        ("xhigh", RuntimeThinkingLevel::Xhigh),
+        ("max", RuntimeThinkingLevel::Max),
+    ];
+    let Some(level_map) = model.thinking_level_map.as_ref() else {
+        return std::iter::once(RuntimeThinkingLevel::Off)
+            .chain(levels.into_iter().map(|(_, level)| level))
+            .collect();
+    };
+
+    std::iter::once(RuntimeThinkingLevel::Off)
+        .chain(
+            levels
+                .into_iter()
+                .filter(|(name, _)| level_map.get(*name).is_some_and(Option::is_some))
+                .map(|(_, level)| level),
+        )
+        .collect()
 }
 
 fn runtime_command(command: SlashCommand) -> RuntimeCommand {
@@ -1228,4 +1259,50 @@ fn safe_identifier(value: &str) -> String {
         })
         .take(80)
         .collect::<String>()
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    #[test]
+    fn stock_model_preserves_supported_thinking_efforts() {
+        let model: Model = serde_json::from_value(json!({
+            "id": "reasoning-model",
+            "name": "Reasoning Model",
+            "api": "responses",
+            "provider": "test",
+            "baseUrl": "https://invalid.example",
+            "reasoning": true,
+            "thinkingLevelMap": {
+                "off": null,
+                "minimal": null,
+                "low": "low",
+                "medium": "medium",
+                "high": "high"
+            },
+            "input": ["text"],
+            "cost": {
+                "input": 0.0,
+                "output": 0.0,
+                "cacheRead": 0.0,
+                "cacheWrite": 0.0
+            },
+            "contextWindow": 128000,
+            "maxTokens": 8192
+        }))
+        .expect("valid model fixture");
+
+        assert_eq!(
+            supported_thinking_levels(&model),
+            vec![
+                RuntimeThinkingLevel::Off,
+                RuntimeThinkingLevel::Low,
+                RuntimeThinkingLevel::Medium,
+                RuntimeThinkingLevel::High,
+            ]
+        );
+    }
 }

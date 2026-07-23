@@ -31,10 +31,11 @@ use crate::services::session_catalog::{
 use crate::state::reducer::reduce;
 use crate::state::runtime::{
     BashExecution, BashStatus, CommandSource, CompactionState, DialogAnswer, ExtensionDialog,
-    ExtensionFailure, ExtensionStatus, ExtensionWidget, FacetStatus, PromptDelivery, QueueContents,
-    QueueDeliveryMode, RetryState, RuntimeCommand, RuntimeForkMessage, RuntimeInput, RuntimeIntent,
-    RuntimeLifecycle, RuntimeMessage, RuntimeNotification, RuntimeOperation, RuntimeState,
-    RuntimeThinkingLevel, RuntimeTreeNode, SafeError, StampedInput, SubmissionKind, ToolExecution,
+    ExtensionFailure, ExtensionStatus, ExtensionWidget, FacetStatus, ModelSummary, PromptDelivery,
+    QueueContents, QueueDeliveryMode, RetryState, RuntimeCommand, RuntimeForkMessage, RuntimeInput,
+    RuntimeIntent, RuntimeLifecycle, RuntimeMessage, RuntimeNotification, RuntimeOperation,
+    RuntimeState, RuntimeThinkingLevel, RuntimeTreeNode, SafeError, StampedInput, SubmissionKind,
+    ToolExecution,
 };
 use crate::state::{ControllerStatus, ShellProjection};
 
@@ -185,6 +186,7 @@ pub struct UsageProjection {
 pub struct ModelRuntimeProjection {
     pub phase: CatalogPhase,
     pub catalog: Option<ModelCatalogSnapshot>,
+    pub stock_models: Vec<ModelSummary>,
     pub auth: Option<AuthFlow>,
     pub feedback: Option<String>,
     pub active_model: Option<ModelIdentity>,
@@ -1132,6 +1134,7 @@ impl RuntimeController {
         ModelRuntimeProjection {
             phase: self.model_runtime.phase.clone(),
             catalog: self.model_runtime.catalog.clone(),
+            stock_models: self.core.runtime.models.data.clone().unwrap_or_default(),
             auth: self.model_runtime.auth.clone(),
             feedback: self.model_runtime.feedback.clone(),
             active_model,
@@ -2529,6 +2532,7 @@ mod tests {
                 id: "model".to_owned(),
                 name: "Model".to_owned(),
                 reasoning: false,
+                supported_thinking: vec![RuntimeThinkingLevel::Off],
                 context_window: 100_000,
                 max_tokens: 4_096,
                 supports_images: false,

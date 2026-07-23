@@ -136,6 +136,7 @@ pub struct ModelSummary {
     pub id: String,
     pub name: String,
     pub reasoning: bool,
+    pub supported_thinking: Vec<RuntimeThinkingLevel>,
     pub context_window: u64,
     pub max_tokens: u64,
     pub supports_images: bool,

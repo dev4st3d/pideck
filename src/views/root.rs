@@ -36,7 +36,7 @@ use crate::resource_center::{
 use crate::state::history::{HistoryBrowser, HistoryFilter};
 use crate::state::runtime::{
     BashStatus, CompactionState, DialogAnswer, DialogRequest, MessageBlock, MessageRole,
-    NotificationKind, PromptDelivery, QueueContents, QueueDeliveryMode, RetryState,
+    ModelSummary, NotificationKind, PromptDelivery, QueueContents, QueueDeliveryMode, RetryState,
     RuntimeLifecycle, RuntimeNotification, RuntimeOperation, SubmissionKind, WidgetPlacement,
     sanitize_untrusted_text,
 };
@@ -2261,16 +2261,36 @@ impl Render for RootView {
                             cx,
                         )
                         .into_any_element(),
-                        Some(ModelPanel::Switcher) | Some(ModelPanel::Thinking) | None => {
-                            conversation_area(
+                        Some(ModelPanel::Switcher) | Some(ModelPanel::Thinking) | None => div()
+                            .flex_1()
+                            .min_w_0()
+                            .h_full()
+                            .flex()
+                            .flex_col()
+                            .child(conversation_area(
                                 &projection,
                                 &self.conversation,
                                 &self.conversation_scroll,
                                 &self.transcript_texts,
                                 &self.tool_cards,
-                            )
-                            .into_any_element()
-                        }
+                            ))
+                            .child(composer_bar(
+                                ComposerBarParams {
+                                    composer: &self.composer,
+                                    models: &models,
+                                    projection: &projection,
+                                    panel: self.model_panel,
+                                    search: &self.model_search_composer,
+                                    command_catalog: &command_catalog,
+                                    command_selection: self.command_selection,
+                                    command_scroll: &self.slash_command_scroll,
+                                    slash_dismissed: self.dismissed_slash_draft.as_deref()
+                                        == Some(self.composer.read(cx).draft()),
+                                    extension_ui: &self.extension_ui,
+                                },
+                                cx,
+                            ))
+                            .into_any_element(),
                     })
                     .child(inspector(
                         InspectorParams {
@@ -2284,28 +2304,6 @@ impl Render for RootView {
                         },
                         cx,
                     )),
-            )
-            .when(
-                !matches!(self.model_panel, Some(ModelPanel::Settings(_))),
-                |shell| {
-                    shell.child(composer_bar(
-                        ComposerBarParams {
-                            composer: &self.composer,
-                            history_open: self.history_open,
-                            models: &models,
-                            projection: &projection,
-                            panel: self.model_panel,
-                            search: &self.model_search_composer,
-                            command_catalog: &command_catalog,
-                            command_selection: self.command_selection,
-                            command_scroll: &self.slash_command_scroll,
-                            slash_dismissed: self.dismissed_slash_draft.as_deref()
-                                == Some(self.composer.read(cx).draft()),
-                            extension_ui: &self.extension_ui,
-                        },
-                        cx,
-                    ))
-                },
             )
             .when(self.command_palette_open, |shell| {
                 shell.child(command_palette_overlay(
@@ -3336,19 +3334,7 @@ fn model_switcher_sheet(
     cx: &mut Context<RootView>,
 ) -> impl IntoElement {
     let query = search.read(cx).draft().to_owned();
-    let models = projection
-        .catalog
-        .as_ref()
-        .map(|catalog| {
-            catalog
-                .models
-                .iter()
-                .filter(|model| model.available && model.search_matches(&query))
-                .take(48)
-                .cloned()
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
+    let models = model_choices(projection, &query);
     let active = projection.active_model.clone();
     let can_change = projection.model_change_policy == ModelChangePolicy::Allowed;
 
@@ -3581,16 +3567,57 @@ fn model_switcher_sheet(
         })
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ModelChoice {
+    identity: ModelIdentity,
+    name: String,
+    context_window: u64,
+}
+
+fn model_choices(projection: &ModelRuntimeProjection, query: &str) -> Vec<ModelChoice> {
+    if let Some(catalog) = projection.catalog.as_ref() {
+        return catalog
+            .models
+            .iter()
+            .filter(|model| model.available && model.search_matches(query))
+            .take(48)
+            .map(|model| ModelChoice {
+                identity: model.identity.clone(),
+                name: model.name.clone(),
+                context_window: model.context_window,
+            })
+            .collect();
+    }
+
+    projection
+        .stock_models
+        .iter()
+        .filter(|model| stock_model_matches(model, query))
+        .take(48)
+        .map(|model| ModelChoice {
+            identity: ModelIdentity {
+                provider: model.provider.clone(),
+                id: model.id.clone(),
+            },
+            name: model.name.clone(),
+            context_window: model.context_window,
+        })
+        .collect()
+}
+
+fn stock_model_matches(model: &ModelSummary, query: &str) -> bool {
+    let query = query.trim().to_lowercase();
+    query.is_empty()
+        || model.name.to_lowercase().contains(&query)
+        || model.provider.to_lowercase().contains(&query)
+        || model.id.to_lowercase().contains(&query)
+}
+
 fn thinking_select_sheet(
     projection: &ModelRuntimeProjection,
     cx: &mut Context<RootView>,
 ) -> impl IntoElement {
-    let levels = projection
-        .active_model
-        .as_ref()
-        .and_then(|identity| projection.catalog.as_ref()?.model(identity))
-        .map(|model| model.supported_thinking.clone())
-        .unwrap_or_else(|| vec![ThinkingLevel::Off]);
+    let levels = thinking_choices(projection);
     let can_change = projection.model_change_policy == ModelChangePolicy::Allowed;
     let active = projection
         .effective_thinking
@@ -3683,6 +3710,42 @@ fn thinking_select_sheet(
                         })
                 })),
         )
+}
+
+fn thinking_choices(projection: &ModelRuntimeProjection) -> Vec<ThinkingLevel> {
+    let Some(active) = projection.active_model.as_ref() else {
+        return vec![ThinkingLevel::Off];
+    };
+    if let Some(levels) = projection
+        .catalog
+        .as_ref()
+        .and_then(|catalog| catalog.model(active))
+        .map(|model| model.supported_thinking.clone())
+    {
+        return levels;
+    }
+
+    projection
+        .stock_models
+        .iter()
+        .find(|model| model.provider == active.provider && model.id == active.id)
+        .map(|model| {
+            model
+                .supported_thinking
+                .iter()
+                .copied()
+                .map(|level| match level {
+                    crate::state::runtime::RuntimeThinkingLevel::Off => ThinkingLevel::Off,
+                    crate::state::runtime::RuntimeThinkingLevel::Minimal => ThinkingLevel::Minimal,
+                    crate::state::runtime::RuntimeThinkingLevel::Low => ThinkingLevel::Low,
+                    crate::state::runtime::RuntimeThinkingLevel::Medium => ThinkingLevel::Medium,
+                    crate::state::runtime::RuntimeThinkingLevel::High => ThinkingLevel::High,
+                    crate::state::runtime::RuntimeThinkingLevel::Xhigh => ThinkingLevel::Xhigh,
+                    crate::state::runtime::RuntimeThinkingLevel::Max => ThinkingLevel::Max,
+                })
+                .collect()
+        })
+        .unwrap_or_else(|| vec![ThinkingLevel::Off])
 }
 
 fn providers_settings(
@@ -4573,10 +4636,12 @@ fn conversation_area(
 ) -> impl IntoElement {
     let scroll = scroll.clone();
 
+    // The transcript shares the center column with the composer and must yield
+    // height to it on every lifecycle-driven rerender.
     div()
         .flex_1()
         .min_w_0()
-        .h_full()
+        .min_h_0()
         .flex()
         .flex_col()
         .bg(theme::canvas())
@@ -5409,7 +5474,6 @@ fn hotkey_help_overlay(cx: &mut Context<RootView>) -> impl IntoElement {
 
 struct ComposerBarParams<'a> {
     composer: &'a Entity<Composer>,
-    history_open: bool,
     models: &'a ModelRuntimeProjection,
     projection: &'a ShellProjection,
     panel: Option<ModelPanel>,
@@ -5424,7 +5488,6 @@ struct ComposerBarParams<'a> {
 fn composer_bar(params: ComposerBarParams<'_>, cx: &mut Context<RootView>) -> impl IntoElement {
     let ComposerBarParams {
         composer,
-        history_open,
         models,
         projection,
         panel,
@@ -5435,26 +5498,23 @@ fn composer_bar(params: ComposerBarParams<'_>, cx: &mut Context<RootView>) -> im
         slash_dismissed,
         extension_ui,
     } = params;
-    let inset_left =
-        theme::SIDE_W + if history_open { theme::HISTORY_W } else { 0.0 } + theme::STREAM_PAD_X;
-    let inset_right = theme::INSPECT_W + theme::STREAM_PAD_X;
     let model_open = matches!(panel, Some(ModelPanel::Switcher));
     let thinking_open = matches!(panel, Some(ModelPanel::Thinking));
     let model_label = short_model_label(projection, models);
     let thinking_label = short_thinking_label(projection, models);
     let catalog_ready = models.catalog.is_some();
-    let can_pick_model = catalog_ready;
+    let can_pick_model = catalog_ready || !models.stock_models.is_empty();
     let can_pick_thinking = catalog_ready || models.active_thinking.is_some();
     let slash_completion = (!slash_dismissed)
         .then(|| command_catalog.slash_completion(composer.read(cx).draft()))
         .flatten();
 
     div()
+        .flex_shrink_0()
         .bg(theme::floor())
         .border_t_1()
         .border_color(theme::edge_hard())
-        .pl(px(inset_left))
-        .pr(px(inset_right))
+        .px(px(theme::STREAM_PAD_X))
         .pt(px(10.0))
         .pb(px(14.0))
         // Overlay host: popups are absolute and must not grow this bar's layout height.
@@ -7286,7 +7346,12 @@ fn lifecycle_color(projection: &ShellProjection) -> gpui::Rgba {
 
 #[cfg(test)]
 mod tests {
-    use super::{ExtensionDialogKey, extension_dialog_key, short_path};
+    use super::{
+        ExtensionDialogKey, extension_dialog_key, model_choices, short_path, thinking_choices,
+    };
+    use crate::controller::{ModelRuntimeProjection, UsageProjection};
+    use crate::model_runtime::{CatalogPhase, ModelChangePolicy, ModelIdentity, ThinkingLevel};
+    use crate::state::runtime::{ModelSummary, RuntimeThinkingLevel};
 
     #[test]
     fn short_path_preserves_short_values_and_truncates_deep_values() {
@@ -7304,6 +7369,62 @@ mod tests {
         assert_eq!(super::context_pct("42%"), Some(0.42));
         assert_eq!(super::context_pct("Awaiting"), None);
         assert_eq!(super::context_pct("1,000 / 2,000 · stale"), Some(0.5));
+    }
+
+    #[test]
+    fn model_choices_fall_back_to_stock_rpc_models() {
+        let projection = ModelRuntimeProjection {
+            phase: CatalogPhase::Failed("SDK catalog unavailable".into()),
+            catalog: None,
+            stock_models: vec![ModelSummary {
+                provider: "openai".into(),
+                id: "gpt-test".into(),
+                name: "GPT Test".into(),
+                reasoning: true,
+                supported_thinking: vec![
+                    RuntimeThinkingLevel::Off,
+                    RuntimeThinkingLevel::Low,
+                    RuntimeThinkingLevel::High,
+                ],
+                context_window: 128_000,
+                max_tokens: 8_192,
+                supports_images: true,
+            }],
+            auth: None,
+            feedback: None,
+            active_model: Some(ModelIdentity {
+                provider: "openai".into(),
+                id: "gpt-test".into(),
+            }),
+            active_thinking: Some(ThinkingLevel::Medium),
+            requested_thinking: None,
+            effective_thinking: Some(ThinkingLevel::Medium),
+            clamp_notice: None,
+            model_change_policy: ModelChangePolicy::Allowed,
+            usage: UsageProjection {
+                context_tokens: None,
+                context_window: None,
+                context_percent: None,
+                input_tokens: None,
+                output_tokens: None,
+                cache_read_tokens: None,
+                cache_write_tokens: None,
+                reasoning_tokens: None,
+                total_tokens: None,
+                estimated_cost: None,
+                pricing_known: false,
+            },
+        };
+
+        let choices = model_choices(&projection, "gpt");
+        assert_eq!(choices.len(), 1);
+        assert_eq!(choices[0].identity.provider, "openai");
+        assert_eq!(choices[0].identity.id, "gpt-test");
+        assert_eq!(choices[0].context_window, 128_000);
+        assert_eq!(
+            thinking_choices(&projection),
+            vec![ThinkingLevel::Off, ThinkingLevel::Low, ThinkingLevel::High]
+        );
     }
 
     #[test]
