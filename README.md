@@ -13,7 +13,7 @@ The visible shell now shows only live or explicitly Loading, Awaiting, Unknown, 
 - context, input/output tokens, cache usage, cost, model, and thinking in the inspector;
 - one applicable Connect, Retry, or Stop action with pointer and keyboard paths;
 - a native multiline composer with model and thinking pickers in the prompt chrome, grapheme-safe editing, IME, clipboard, selection, undo, wrapping, scrolling, and visible pending/accepted/rejected/uncertain delivery state;
-- the authoritative current transcript with user and assistant text, thinking, visible custom messages, branch/compaction summaries, generic running/success/error/cancelled tool and Bash cards, lifecycle notices, and in-place accumulated partial updates;
+- the authoritative current transcript with Markdown-rendered user input, assistant output, and thinking; visible custom messages; branch/compaction summaries; generic running/success/error/cancelled tool and Bash cards; lifecycle notices; and in-place accumulated partial updates;
 - expandable sanitized tool arguments, bounded text/diff previews, image results, opaque detail fallback, copy controls, elapsed time, truncation metadata, and explicit full-output Reveal/Open folder actions;
 - provider/model/time/stop/usage metadata with raw provider diagnostics and private payloads excluded from normalized diagnostics;
 - selectable transcript text and near-bottom-only auto-follow, preserving manual scroll and selection during streaming.
@@ -41,7 +41,7 @@ Accepted idle input uses `prompt`. While Pi is running, the primary action uses 
 
 Discovered extension, prompt-template, and skill commands always invoke through Pi's `prompt` RPC. Prompt/skill commands use `streamingBehavior` while a run is active; extension commands execute immediately as Pi specifies. Exact dynamic-command arguments are preserved. Known TUI-only built-ins such as `/login`, `/logout`, `/resume`, `/share`, and `/theme` are rejected locally instead of becoming ordinary model prompts.
 
-There is no rich Markdown/link rendering, share, or concurrent top-level session process UI. Resource Center management is deliberately read-mostly; package mutation remains unavailable. Main-session queue items are authoritative and read-only because stock Pi RPC has no remove/restore operation. Reversible trash stays unavailable until both catalog ownership and a platform trash provider are proven.
+Rendered Markdown links are styled but not yet clickable. There is no share or concurrent top-level session process UI. Resource Center management is deliberately read-mostly; package mutation remains unavailable. Main-session queue items are authoritative and read-only because stock Pi RPC has no remove/restore operation. Reversible trash stays unavailable until both catalog ownership and a platform trash provider are proven.
 
 ## Prerequisite and launch
 
@@ -115,7 +115,7 @@ The interface preserves the warm-charcoal Switzer/Tanker identity, with Cascadia
 - `src/state/reducer.rs` - pure lifecycle, hydration, streaming reconciliation, tool, queue, and extension reducer
 - `src/state.rs` - truthful owned shell projections with stale/unknown semantics
 - `src/views/root.rs` - observed runtime shell, conversation ownership, scroll pinning, and draft/acceptance correlation
-- `src/views/conversation.rs` - turn-grouped live transcript, stable text entities, safe metadata, notices, and selectable plain text
+- `src/views/conversation.rs` and `src/views/markdown.rs` - turn-grouped live transcript, stable selectable text entities, safe CommonMark presentation, metadata, and notices
 - `src/views/tool_card.rs` - generic tool/Bash payload normalization, bounded previews, image/diff rendering, copy, and explicit output-path actions
 - `src/views/composer/` - native GPUI input handler, text buffer, multiline layout/paint, and focused tests
 - `src/views/controls.rs` - focus-visible recovery control and inspector rows

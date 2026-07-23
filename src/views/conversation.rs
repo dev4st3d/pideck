@@ -4,9 +4,10 @@ use std::collections::HashMap;
 use std::ops::Range;
 
 use gpui::{
-    AnyElement, ClipboardItem, Context, CursorStyle, Entity, FocusHandle, Focusable, FontWeight,
-    HighlightStyle, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels,
-    Render, SharedString, StyledText, TextLayout, Window, div, prelude::*, px, relative,
+    AnyElement, ClipboardItem, Context, CursorStyle, Entity, FocusHandle, Focusable, FontStyle,
+    FontWeight, HighlightStyle, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, Pixels, Render, SharedString, StrikethroughStyle, StyledText, TextLayout,
+    UnderlineStyle, Window, div, prelude::*, px, relative,
 };
 
 use crate::actions::{TranscriptCopy, TranscriptSelectAll};
@@ -17,6 +18,7 @@ use crate::state::runtime::{
     RetryState, RuntimeLifecycle, RuntimeMessage, SubmissionKind,
 };
 use crate::theme;
+use crate::views::markdown::{MarkdownDocument, MarkdownStyle};
 use crate::views::tool_card::{
     ToolCard, ToolPresentation, has_tool_call, presentation_for_bash_block,
     presentation_for_standalone_result, presentation_for_tool_call, render_tool_presentation,
@@ -75,7 +77,8 @@ impl ScrollPinning {
 
 pub(super) struct TranscriptText {
     id: SharedString,
-    text: String,
+    source: String,
+    document: MarkdownDocument,
     selection: Range<usize>,
     selection_reversed: bool,
     is_selecting: bool,
@@ -85,9 +88,11 @@ pub(super) struct TranscriptText {
 
 impl TranscriptText {
     pub(super) fn new(id: String, text: String, cx: &mut Context<Self>) -> Self {
+        let document = MarkdownDocument::parse(&text);
         Self {
             id: SharedString::from(id),
-            text,
+            source: text,
+            document,
             selection: 0..0,
             selection_reversed: false,
             is_selecting: false,
@@ -97,15 +102,18 @@ impl TranscriptText {
     }
 
     pub(super) fn set_text(&mut self, text: String, cx: &mut Context<Self>) {
-        if self.text == text {
+        if self.source == text {
             return;
         }
 
-        self.selection = preserved_selection(&self.text, &text, self.selection.clone());
+        let document = MarkdownDocument::parse(&text);
+        self.selection =
+            preserved_selection(&self.document.text, &document.text, self.selection.clone());
         if self.selection.is_empty() {
             self.selection_reversed = false;
         }
-        self.text = text;
+        self.source = text;
+        self.document = document;
         cx.notify();
     }
 
@@ -147,7 +155,7 @@ impl TranscriptText {
     }
 
     fn copy(&mut self, _: &TranscriptCopy, _: &mut Window, cx: &mut Context<Self>) {
-        if let Some(text) = self.text.get(self.selection.clone())
+        if let Some(text) = self.document.text.get(self.selection.clone())
             && !text.is_empty()
         {
             cx.write_to_clipboard(ClipboardItem::new_string(text.to_owned()));
@@ -155,7 +163,7 @@ impl TranscriptText {
     }
 
     fn select_all(&mut self, _: &TranscriptSelectAll, _: &mut Window, cx: &mut Context<Self>) {
-        self.selection = 0..self.text.len();
+        self.selection = 0..self.document.text.len();
         self.selection_reversed = false;
         cx.notify();
     }
@@ -177,7 +185,7 @@ impl TranscriptText {
         let index = layout
             .index_for_position(position)
             .unwrap_or_else(|nearest| nearest);
-        clamp_boundary(&self.text, index)
+        clamp_boundary(&self.document.text, index)
     }
 }
 
@@ -189,15 +197,10 @@ impl Focusable for TranscriptText {
 
 impl Render for TranscriptText {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let mut text = StyledText::new(self.text.clone());
-        if !self.selection.is_empty() {
-            text = text.with_highlights([(
-                self.selection.clone(),
-                HighlightStyle {
-                    background_color: Some(theme::data_wash().into()),
-                    ..Default::default()
-                },
-            )]);
+        let mut text = StyledText::new(self.document.text.clone());
+        let highlights = markdown_highlights(&self.document, self.selection.clone());
+        if !highlights.is_empty() {
+            text = text.with_highlights(highlights);
         }
         self.layout = Some(text.layout().clone());
 
@@ -216,6 +219,83 @@ impl Render for TranscriptText {
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .child(text)
+    }
+}
+
+fn markdown_highlights(
+    document: &MarkdownDocument,
+    selection: Range<usize>,
+) -> Vec<(Range<usize>, HighlightStyle)> {
+    let mut boundaries = vec![0, document.text.len()];
+    for span in &document.spans {
+        boundaries.push(span.range.start);
+        boundaries.push(span.range.end);
+    }
+    if !selection.is_empty() {
+        boundaries.push(selection.start);
+        boundaries.push(selection.end);
+    }
+    boundaries.sort_unstable();
+    boundaries.dedup();
+
+    boundaries
+        .windows(2)
+        .filter_map(|boundary| {
+            let range = boundary[0]..boundary[1];
+            if range.is_empty() {
+                return None;
+            }
+            let markdown = document
+                .spans
+                .iter()
+                .find(|span| span.range.start <= range.start && span.range.end >= range.end)
+                .map(|span| span.style)
+                .unwrap_or_default();
+            let selected = !selection.is_empty()
+                && selection.start <= range.start
+                && selection.end >= range.end;
+            let style = highlight_style(markdown, selected);
+            (style != HighlightStyle::default()).then_some((range, style))
+        })
+        .collect()
+}
+
+fn highlight_style(markdown: MarkdownStyle, selected: bool) -> HighlightStyle {
+    HighlightStyle {
+        color: if markdown.code {
+            Some(theme::focus().into())
+        } else if markdown.link {
+            Some(theme::data().into())
+        } else if markdown.quote {
+            Some(theme::ash().into())
+        } else {
+            None
+        },
+        font_weight: if markdown.heading {
+            Some(FontWeight::BOLD)
+        } else if markdown.strong {
+            Some(FontWeight::SEMIBOLD)
+        } else {
+            None
+        },
+        font_style: markdown.emphasis.then_some(FontStyle::Italic),
+        background_color: if selected {
+            Some(theme::data_wash().into())
+        } else if markdown.code {
+            Some(theme::panel_lift().into())
+        } else {
+            None
+        },
+        underline: markdown.link.then_some(UnderlineStyle {
+            thickness: px(1.0),
+            color: Some(theme::data().into()),
+            ..Default::default()
+        }),
+        strikethrough: markdown.strikethrough.then_some(StrikethroughStyle {
+            thickness: px(1.0),
+            color: Some(theme::smoke().into()),
+        }),
+        fade_out: None,
     }
 }
 
