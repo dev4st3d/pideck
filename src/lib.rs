@@ -4,6 +4,7 @@ pub mod command_catalog;
 pub mod controller;
 pub mod fonts;
 pub mod model_runtime;
+pub mod resource_center;
 pub mod services;
 pub mod state;
 pub mod theme;

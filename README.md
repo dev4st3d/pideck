@@ -4,7 +4,7 @@ Native Windows-first desktop shell for Pi, built with Rust and GPUI 0.2.2.
 
 ## Current maturity
 
-Phases 9 through 14 complete run-control recovery UX, Pi's persisted session lifecycle, native branch history, the model/provider experience, the unified command system, and the stock RPC extension UI host. Startup, discovery, correlated readiness, hydration, prompt acceptance, message streaming, tools, retries, compaction, session catalog scanning, direct Bash, SDK session/model operations, command discovery, and shutdown all run behind dedicated workers. The GPUI-owned controller observes normalized state and never performs I/O from `render`.
+Phases 9 through 15 complete run-control recovery UX, Pi's persisted session lifecycle, native branch history, the model/provider experience, the unified command system, the stock RPC extension UI host, and the audited SDK resource plane. Startup, discovery, correlated readiness, hydration, prompt acceptance, message streaming, tools, retries, compaction, session catalog scanning, direct Bash, SDK session/model/resource operations, command discovery, and shutdown all run behind dedicated workers. The GPUI-owned controller observes normalized state and never performs I/O from `render`.
 
 The visible shell now shows only live or explicitly Loading, Awaiting, Unknown, stale, stopped, and error values:
 
@@ -31,12 +31,15 @@ The visible shell now shows only live or explicitly Loading, Awaiting, Unknown, 
 - stock `select`, `confirm`, `input`, and `editor` extension dialogs in a deterministic FIFO modal queue, with focus containment, Escape cancellation, answer-type validation, one response per request ID, and timeout/process/session tombstones that prevent late or duplicate answers;
 - keyed `setStatus` and text-line `setWidget` replacement/clear semantics, above/below-composer widget placement, native window `setTitle`, immediate last-write-wins `set_editor_text`, and redacted extension errors that retain only source basename and event context;
 - an explicit RPC capability boundary: `custom()` overlays/components, component-factory widgets, custom editor/header/footer, TUI renderers, themes, and the process-local extension event bus are unsupported. Extension dialogs are untrusted application content, not secure permission prompts, because stock requests carry no verified provenance.
+- a capability-gated Resource Center inventory for extensions, tools, skills, prompt templates, themes, packages, context files, and dynamically registered providers, including global/project/package scope, loaded/disabled/error state, source path, provenance, trust, diagnostics, active-tool state, and reload;
+- rejected project trust for the sidecar execution plane: project resources are inventoried through Pi's public SDK but project extension/package code is never loaded. Missing packages use Pi's explicit non-installing resolution path;
+- package install/remove/update/config advertised as unsupported until arbitrary-code confirmation, progress, pin/filter handling, and rollback-safe error UX exist.
 
 Accepted idle input uses `prompt`. While Pi is running, the primary action uses `steer` and follow-ups use `follow_up`. A composer line beginning with `!` executes the remaining text through Pi's direct `bash` RPC; `!!` does the same with `excludeFromContext=true`. Direct Bash is recorded locally until the authoritative session message reconciles it. Escape and the visible abort action route to `abort_bash` while direct Bash is active, independently from agent `abort`. Empty and rapid duplicate submissions are rejected. Prompt drafts clear only after the matching accepted response; Bash drafts clear when the local execution is recorded. Rejection and uncertain disconnect never trigger replay.
 
 Discovered extension, prompt-template, and skill commands always invoke through Pi's `prompt` RPC. Prompt/skill commands use `streamingBehavior` while a run is active; extension commands execute immediately as Pi specifies. Exact dynamic-command arguments are preserved. Known TUI-only built-ins such as `/login`, `/logout`, `/resume`, `/share`, and `/theme` are rejected locally instead of becoming ordinary model prompts.
 
-There is no rich Markdown/link rendering, task/subagent view, resource browser, share, or concurrent session process UI. Queue items are authoritative and read-only because stock Pi RPC has no remove/restore operation. Reversible trash stays unavailable until both catalog ownership and a platform trash provider are proven.
+There is no rich Markdown/link rendering, task/subagent view, share, or concurrent session process UI. Resource Center management is deliberately read-mostly; package mutation remains unavailable. Queue items are authoritative and read-only because stock Pi RPC has no remove/restore operation. Reversible trash stays unavailable until both catalog ownership and a platform trash provider are proven.
 
 ## Prerequisite and launch
 
@@ -99,7 +102,8 @@ The interface preserves the warm-charcoal Switzer/Tanker identity, with Cascadia
 - `src/services/runtime_worker.rs` - injectable GPUI-independent service boundary and responsive worker coordinator
 - `src/services/session_catalog.rs` - strict streaming v1-v3 JSONL metadata scanner, directory precedence, canonical workspace filtering, corruption reporting, and stale-scan worker
 - `src/model_runtime.rs` - secret-free provider/model catalog, cached refresh, auth prompt state machine, sparse thinking, pricing-tier, and streaming-change policy
-- `src/services/sdk_bridge.rs` and `bridge/pi-bridge.mjs` - negotiated, versioned, cancellable stdio JSONL SDK bridge for the Phase 11 session gaps and Phase 12 ModelRuntime/settings/auth gaps
+- `src/services/sdk_bridge.rs`, `bridge/pi-bridge.mjs`, and `bridge/protocol.schema.json` - negotiated, versioned, cancellable stdio JSONL SDK sidecar for the Phase 11 session gaps, Phase 12 ModelRuntime/settings/auth gaps, and Phase 15 resource inventory/reload plane
+- `src/resource_center.rs` - secret-free resource inventory contract, trust/load state, package mutation policy, and UI filters
 - `src/services/rpc/` - Pi 0.80.10 wire contract, strict JSONL framing, correlated client, and runtime adapter
 - `src/services/pi_process/` - executable discovery, capability probing, launch policy, and process-tree supervision
 - `src/state/runtime.rs` - normalized owned runtime/transcript state, safe message metadata, stamped inputs, requests, and effects

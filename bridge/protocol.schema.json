@@ -1,0 +1,122 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pi-gui.local/schemas/sdk-bridge-v1.json",
+  "title": "Pi GUI SDK bridge protocol v1",
+  "description": "UTF-8 JSONL records over inherited stdin/stdout. The bridge owns Pi SDK objects; Rust owns process supervision, deadlines, restart, and presentation.",
+  "oneOf": [
+    { "$ref": "#/$defs/request" },
+    { "$ref": "#/$defs/cancel" },
+    { "$ref": "#/$defs/response" },
+    { "$ref": "#/$defs/event" }
+  ],
+  "$defs": {
+    "base": {
+      "type": "object",
+      "required": ["version", "type", "id"],
+      "properties": {
+        "version": { "const": 1 },
+        "type": { "type": "string" },
+        "id": { "type": "string", "minLength": 1 }
+      }
+    },
+    "request": {
+      "allOf": [
+        { "$ref": "#/$defs/base" },
+        {
+          "type": "object",
+          "required": ["command", "params"],
+          "properties": {
+            "type": { "const": "request" },
+            "command": {
+              "enum": [
+                "hello",
+                "navigate_tree",
+                "set_label",
+                "export_jsonl",
+                "import_jsonl",
+                "get_model_runtime",
+                "refresh_models",
+                "login_provider",
+                "auth_respond",
+                "logout_provider",
+                "set_model_defaults",
+                "set_model_scope",
+                "get_resource_inventory",
+                "reload_resources",
+                "set_skill_commands_enabled",
+                "set_resource_theme"
+              ]
+            },
+            "params": { "type": "object" }
+          }
+        }
+      ]
+    },
+    "cancel": {
+      "allOf": [
+        { "$ref": "#/$defs/base" },
+        {
+          "type": "object",
+          "required": ["targetId"],
+          "properties": {
+            "type": { "const": "cancel" },
+            "targetId": { "type": "string", "minLength": 1 }
+          }
+        }
+      ]
+    },
+    "error": {
+      "type": "object",
+      "required": ["code", "message"],
+      "properties": {
+        "code": {
+          "enum": [
+            "incompatible_protocol",
+            "invalid_json",
+            "invalid_request",
+            "operation_failed",
+            "record_too_large",
+            "unsupported_capability",
+            "unsupported_command"
+          ]
+        },
+        "message": { "type": "string", "maxLength": 400 }
+      },
+      "additionalProperties": false
+    },
+    "response": {
+      "allOf": [
+        { "$ref": "#/$defs/base" },
+        {
+          "type": "object",
+          "required": ["ok"],
+          "properties": {
+            "type": { "const": "response" },
+            "ok": { "type": "boolean" },
+            "result": true,
+            "error": { "$ref": "#/$defs/error" }
+          }
+        }
+      ]
+    },
+    "event": {
+      "type": "object",
+      "required": ["version", "type", "event"],
+      "properties": {
+        "version": { "const": 1 },
+        "type": { "const": "event" },
+        "event": {
+          "enum": [
+            "auth_prompt",
+            "auth_info",
+            "auth_url",
+            "auth_device_code",
+            "auth_progress",
+            "resource_progress",
+            "resources_changed"
+          ]
+        }
+      }
+    }
+  }
+}

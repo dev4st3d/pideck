@@ -19,11 +19,14 @@ use crate::command_catalog::{
 use crate::controller::{
     AcceptedSubmission, AcceptedSubmissionKind, BridgeProjection, CatalogProjection, CatalogStatus,
     ComposerRuntime, ConversationProjection, ExtensionUiProjection, HistoryProjection,
-    ModelRuntimeProjection, RuntimeController, SubmissionPreference,
+    ModelRuntimeProjection, ResourceCenterProjection, RuntimeController, SubmissionPreference,
 };
 use crate::model_runtime::{
     AuthMethod, AuthPromptKind, AuthStage, CatalogPhase, ModelCatalogEntry, ModelChangePolicy,
     ModelIdentity, ThinkingLevel,
+};
+use crate::resource_center::{
+    ResourceLoadState, ResourcePhase, ResourceScopeFilter, ResourceStateFilter,
 };
 use crate::state::history::{HistoryBrowser, HistoryFilter};
 use crate::state::runtime::{
@@ -70,6 +73,7 @@ enum ModelSettingsTab {
     Models,
     Thinking,
     Usage,
+    Resources,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -95,6 +99,8 @@ pub struct RootView {
     extension_input_composer: Entity<Composer>,
     extension_editor_composer: Entity<Composer>,
     model_panel: Option<ModelPanel>,
+    resource_scope_filter: ResourceScopeFilter,
+    resource_state_filter: ResourceStateFilter,
     command_palette_open: bool,
     hotkey_help_open: bool,
     command_selection: usize,
@@ -285,6 +291,8 @@ impl RootView {
             extension_input_composer,
             extension_editor_composer,
             model_panel: None,
+            resource_scope_filter: ResourceScopeFilter::All,
+            resource_state_filter: ResourceStateFilter::All,
             command_palette_open: false,
             hotkey_help_open: false,
             command_selection: 0,
@@ -1281,6 +1289,22 @@ impl RootView {
         });
     }
 
+    fn reload_resources(&mut self, cx: &mut Context<Self>) {
+        self.controller.update(cx, |controller, cx| {
+            controller.reload_resources(cx);
+        });
+    }
+
+    fn set_resource_scope_filter(&mut self, filter: ResourceScopeFilter, cx: &mut Context<Self>) {
+        self.resource_scope_filter = filter;
+        cx.notify();
+    }
+
+    fn set_resource_state_filter(&mut self, filter: ResourceStateFilter, cx: &mut Context<Self>) {
+        self.resource_state_filter = filter;
+        cx.notify();
+    }
+
     fn login_provider(&mut self, provider: String, method: AuthMethod, cx: &mut Context<Self>) {
         self.controller.update(cx, |controller, cx| {
             controller.login_provider(provider, method, cx);
@@ -1986,6 +2010,7 @@ impl Render for RootView {
         let history = self.controller.read(cx).history_projection();
         let bridge = self.controller.read(cx).bridge_projection();
         let models = self.controller.read(cx).model_runtime_projection();
+        let resources = self.controller.read(cx).resource_center_projection();
         let command_catalog = self.command_catalog(cx);
         let selection_active = self
             .transcript_texts
@@ -2062,11 +2087,16 @@ impl Render for RootView {
                     })
                     .child(match self.model_panel {
                         Some(ModelPanel::Settings(tab)) => model_settings_panel(
-                            &models,
-                            tab,
-                            &self.model_search_composer,
-                            &self.auth_input_composer,
-                            &self.auth_secret_composer,
+                            ModelSettingsPanelParams {
+                                projection: &models,
+                                resources: &resources,
+                                tab,
+                                resource_scope_filter: self.resource_scope_filter,
+                                resource_state_filter: self.resource_state_filter,
+                                search: &self.model_search_composer,
+                                auth_input: &self.auth_input_composer,
+                                auth_secret: &self.auth_secret_composer,
+                            },
                             cx,
                         )
                         .into_any_element(),
@@ -2902,15 +2932,36 @@ fn history_panel(params: HistoryPanelParams<'_>, cx: &mut Context<RootView>) -> 
         })
 }
 
-fn model_settings_panel(
-    projection: &ModelRuntimeProjection,
+struct ModelSettingsPanelParams<'a> {
+    projection: &'a ModelRuntimeProjection,
+    resources: &'a ResourceCenterProjection,
     tab: ModelSettingsTab,
-    search: &Entity<Composer>,
-    auth_input: &Entity<Composer>,
-    auth_secret: &Entity<Composer>,
+    resource_scope_filter: ResourceScopeFilter,
+    resource_state_filter: ResourceStateFilter,
+    search: &'a Entity<Composer>,
+    auth_input: &'a Entity<Composer>,
+    auth_secret: &'a Entity<Composer>,
+}
+
+fn model_settings_panel(
+    params: ModelSettingsPanelParams<'_>,
     cx: &mut Context<RootView>,
 ) -> impl IntoElement {
-    let refreshing = matches!(projection.phase, CatalogPhase::Refreshing);
+    let ModelSettingsPanelParams {
+        projection,
+        resources,
+        tab,
+        resource_scope_filter,
+        resource_state_filter,
+        search,
+        auth_input,
+        auth_secret,
+    } = params;
+    let refreshing = if tab == ModelSettingsTab::Resources {
+        matches!(resources.phase, ResourcePhase::Refreshing)
+    } else {
+        matches!(projection.phase, CatalogPhase::Refreshing)
+    };
     div()
         .flex_1()
         .min_w_0()
@@ -2946,7 +2997,11 @@ fn model_settings_panel(
                                         .text_size(px(theme::T_UI))
                                         .font_weight(FontWeight::BOLD)
                                         .text_color(theme::bone())
-                                        .child("Model settings"),
+                                        .child(if tab == ModelSettingsTab::Resources {
+                                            "Resource Center"
+                                        } else {
+                                            "Model settings"
+                                        }),
                                 )
                                 .child(
                                     div()
@@ -2954,7 +3009,11 @@ fn model_settings_panel(
                                         .text_size(px(theme::T_TINY))
                                         .text_color(theme::ash())
                                         .child(
-                                            "Providers, defaults, cycle order, and usage. Session model and thinking live in the prompt box.",
+                                            if tab == ModelSettingsTab::Resources {
+                                                "Audited Pi resources, provenance, trust, load state, and active tools."
+                                            } else {
+                                                "Providers, defaults, cycle order, and usage. Session model and thinking live in the prompt box."
+                                            },
                                         ),
                                 ),
                         )
@@ -2969,11 +3028,19 @@ fn model_settings_panel(
                                     "refresh-model-catalog",
                                     if refreshing {
                                         "Refreshing…"
+                                    } else if tab == ModelSettingsTab::Resources {
+                                        "Reload"
                                     } else {
                                         "Refresh"
                                     },
                                     !refreshing,
-                                    Box::new(cx.listener(|view, _, _, cx| view.refresh_models(cx))),
+                                    Box::new(cx.listener(move |view, _, _, cx| {
+                                        if tab == ModelSettingsTab::Resources {
+                                            view.reload_resources(cx);
+                                        } else {
+                                            view.refresh_models(cx);
+                                        }
+                                    })),
                                 ))
                                 .child(controls::quiet_button(
                                     "close-model-settings",
@@ -2992,6 +3059,7 @@ fn model_settings_panel(
                             (ModelSettingsTab::Models, "Models"),
                             (ModelSettingsTab::Thinking, "Thinking"),
                             (ModelSettingsTab::Usage, "Usage"),
+                            (ModelSettingsTab::Resources, "Resources"),
                         ]
                         .into_iter()
                         .map(|(target, label)| {
@@ -3014,12 +3082,27 @@ fn model_settings_panel(
             ModelSettingsTab::Models => models_settings(projection, search, cx).into_any_element(),
             ModelSettingsTab::Thinking => thinking_settings(projection, cx).into_any_element(),
             ModelSettingsTab::Usage => usage_settings(projection).into_any_element(),
+            ModelSettingsTab::Resources => resource_center_settings(
+                resources,
+                resource_scope_filter,
+                resource_state_filter,
+                cx,
+            )
+            .into_any_element(),
         })
-        .when_some(catalog_phase_note(&projection.phase), |panel, note| {
-            panel.child(controls::panel_footer_status(note))
+        .when(tab != ModelSettingsTab::Resources, |panel| {
+            panel
+                .when_some(catalog_phase_note(&projection.phase), |panel, note| {
+                    panel.child(controls::panel_footer_status(note))
+                })
+                .when_some(projection.feedback.clone(), |panel, feedback| {
+                    panel.child(controls::panel_footer_status(feedback))
+                })
         })
-        .when_some(projection.feedback.clone(), |panel, feedback| {
-            panel.child(controls::panel_footer_status(feedback))
+        .when(tab == ModelSettingsTab::Resources, |panel| {
+            panel.when_some(resources.feedback.clone(), |panel, feedback| {
+                panel.child(controls::panel_footer_status(feedback))
+            })
         })
 }
 
@@ -4028,6 +4111,251 @@ fn usage_settings(projection: &ModelRuntimeProjection) -> impl IntoElement {
                 .child(controls::metric_row("Estimated cost", cost)),
         )
         )
+}
+
+fn resource_center_settings(
+    projection: &ResourceCenterProjection,
+    scope_filter: ResourceScopeFilter,
+    state_filter: ResourceStateFilter,
+    cx: &mut Context<RootView>,
+) -> impl IntoElement {
+    let snapshot = projection.snapshot.as_ref();
+    let items = snapshot
+        .map(|snapshot| {
+            snapshot
+                .items
+                .iter()
+                .filter(|item| scope_filter.matches(item) && state_filter.matches(item))
+                .cloned()
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let summary = snapshot.map(|snapshot| {
+        let loaded = snapshot
+            .items
+            .iter()
+            .filter(|item| item.state == ResourceLoadState::Loaded)
+            .count();
+        let disabled = snapshot
+            .items
+            .iter()
+            .filter(|item| item.state == ResourceLoadState::Disabled)
+            .count();
+        let errors = snapshot
+            .items
+            .iter()
+            .filter(|item| item.state == ResourceLoadState::Error)
+            .count();
+        format!(
+            "{} total · {loaded} loaded · {disabled} disabled · {errors} error{}",
+            snapshot.items.len(),
+            if errors == 1 { "" } else { "s" }
+        )
+    });
+
+    div()
+        .id("resource-center-scroll")
+        .flex_1()
+        .min_h_0()
+        .overflow_y_scroll()
+        .child(
+            div()
+                .w_full()
+                .px(px(18.0))
+                .pb(px(22.0))
+                .pt(px(14.0))
+                .flex()
+                .flex_col()
+                .gap(px(12.0))
+                .child(controls::panel_note(
+                    snapshot
+                        .map(|snapshot| snapshot.project_trust_reason.clone())
+                        .unwrap_or_else(|| {
+                            "Loading the capability-gated Pi resource inventory…".to_owned()
+                        }),
+                    controls::ControlTone::Normal,
+                ))
+                .when_some(summary, |panel, summary| {
+                    panel.child(controls::meta_text(summary))
+                })
+                .child(
+                    div().flex().flex_row().flex_wrap().gap(px(6.0)).children(
+                        [
+                            (ResourceScopeFilter::All, "All scopes"),
+                            (ResourceScopeFilter::Global, "Global"),
+                            (ResourceScopeFilter::Project, "Project"),
+                            (ResourceScopeFilter::Package, "Package"),
+                        ]
+                        .into_iter()
+                        .map(|(filter, label)| {
+                            controls::chip_button(
+                                gpui::SharedString::from(format!("resource-scope-{filter:?}")),
+                                label,
+                                scope_filter == filter,
+                                true,
+                                Box::new(cx.listener(move |view, _, _, cx| {
+                                    view.set_resource_scope_filter(filter, cx)
+                                })),
+                            )
+                        }),
+                    ),
+                )
+                .child(
+                    div().flex().flex_row().flex_wrap().gap(px(6.0)).children(
+                        [
+                            (ResourceStateFilter::All, "All states"),
+                            (ResourceStateFilter::Loaded, "Loaded"),
+                            (ResourceStateFilter::Disabled, "Disabled"),
+                            (ResourceStateFilter::Error, "Errors"),
+                        ]
+                        .into_iter()
+                        .map(|(filter, label)| {
+                            controls::chip_button(
+                                gpui::SharedString::from(format!("resource-state-{filter:?}")),
+                                label,
+                                state_filter == filter,
+                                true,
+                                Box::new(cx.listener(move |view, _, _, cx| {
+                                    view.set_resource_state_filter(filter, cx)
+                                })),
+                            )
+                        }),
+                    ),
+                )
+                .when_some(snapshot, |panel, snapshot| {
+                    panel
+                        .child(
+                            controls::divider_list()
+                                .child(controls::metric_row(
+                                    "Skill commands",
+                                    if snapshot.settings.enable_skill_commands {
+                                        "Enabled"
+                                    } else {
+                                        "Disabled"
+                                    },
+                                ))
+                                .child(controls::metric_row(
+                                    "Pi theme",
+                                    snapshot
+                                        .settings
+                                        .theme
+                                        .clone()
+                                        .unwrap_or_else(|| "Default".to_owned()),
+                                ))
+                                .child(controls::metric_row(
+                                    "Default project trust",
+                                    snapshot.settings.default_project_trust.clone(),
+                                )),
+                        )
+                        .child(controls::panel_note(
+                            snapshot.package_mutations.reason.clone(),
+                            controls::ControlTone::Danger,
+                        ))
+                })
+                .when(items.is_empty(), |panel| {
+                    panel.child(controls::empty_list_note(match projection.phase {
+                        ResourcePhase::Loading | ResourcePhase::Refreshing => "Loading resources…",
+                        ResourcePhase::Failed(_) => "Resource inventory unavailable.",
+                        ResourcePhase::Ready => "No resources match these filters.",
+                    }))
+                })
+                .children(items.into_iter().map(resource_center_row))
+                .when_some(snapshot, |panel, snapshot| {
+                    panel.children(snapshot.diagnostics.iter().cloned().map(|diagnostic| {
+                        controls::panel_note(diagnostic, controls::ControlTone::Normal)
+                    }))
+                }),
+        )
+}
+
+fn resource_center_row(item: crate::resource_center::ResourceItem) -> impl IntoElement {
+    let state_color = match item.state {
+        ResourceLoadState::Loaded => theme::live(),
+        ResourceLoadState::Disabled => theme::ash(),
+        ResourceLoadState::Error => theme::error(),
+    };
+    let active = item.active.map(|active| {
+        if active {
+            " · active tool"
+        } else {
+            " · inactive tool"
+        }
+    });
+    let package_flags = match (item.pinned, item.filtered) {
+        (Some(true), Some(true)) => " · pinned · filtered",
+        (Some(true), _) => " · pinned",
+        (_, Some(true)) => " · filtered",
+        _ => "",
+    };
+    let metadata = format!(
+        "{} · {} · {} · {}{}{}",
+        item.kind.label(),
+        item.scope.label(),
+        item.state.label(),
+        item.trust.label(),
+        active.unwrap_or_default(),
+        package_flags
+    );
+    div()
+        .id(gpui::SharedString::from(format!("resource-{}", item.id)))
+        .px(px(12.0))
+        .py(px(10.0))
+        .rounded(px(theme::RADIUS_SM))
+        .border_1()
+        .border_color(theme::edge_soft())
+        .bg(theme::panel())
+        .flex()
+        .flex_col()
+        .gap(px(5.0))
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .justify_between()
+                .gap(px(10.0))
+                .child(
+                    div()
+                        .min_w_0()
+                        .font_family(theme::SANS)
+                        .text_size(px(theme::T_UI_SM))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(theme::bone())
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .whitespace_nowrap()
+                        .child(item.name),
+                )
+                .child(
+                    div()
+                        .flex_shrink_0()
+                        .font_family(theme::MONO)
+                        .text_size(px(theme::T_TINY))
+                        .text_color(state_color)
+                        .child(item.state.label()),
+                ),
+        )
+        .child(controls::meta_text(metadata))
+        .when_some(item.description, |row, description| {
+            row.child(
+                div()
+                    .font_family(theme::SANS)
+                    .text_size(px(theme::T_TINY))
+                    .line_height(gpui::relative(1.4))
+                    .text_color(theme::bone_dim())
+                    .child(description),
+            )
+        })
+        .when_some(item.path, |row, path| row.child(controls::meta_text(path)))
+        .child(controls::meta_text(format!("Source: {}", item.source)))
+        .children(item.diagnostics.into_iter().map(|diagnostic| {
+            div()
+                .font_family(theme::SANS)
+                .text_size(px(theme::T_TINY))
+                .line_height(gpui::relative(1.4))
+                .text_color(theme::error())
+                .child(diagnostic)
+        }))
 }
 
 fn catalog_phase_note(phase: &CatalogPhase) -> Option<String> {

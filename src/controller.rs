@@ -11,13 +11,14 @@ use crate::model_runtime::{
     AuthFlow, AuthMethod, AuthPrompt, CatalogPhase, ModelCatalogSnapshot, ModelChangePolicy,
     ModelIdentity, ModelRuntimeState, ThinkingLevel, model_change_policy,
 };
+use crate::resource_center::{ResourceCenterState, ResourceInventorySnapshot, ResourcePhase};
 use crate::services::rpc::{ConnectionGeneration, RequestId, SessionEpoch};
 use crate::services::runtime_worker::{
     AttemptGeneration, RuntimeService, RuntimeWorkerHandle, WorkerResult,
 };
 use crate::services::sdk_bridge::{
-    BridgeCapabilities, BridgeCommand, BridgeErrorKind, BridgeWorkerResult, SdkBridgeWorker,
-    SensitiveValue,
+    BridgeCapabilities, BridgeCommand, BridgeErrorKind, BridgeEvent, BridgeWorkerResult,
+    ResourceEvent, SdkBridgeWorker, SensitiveValue, decode_resource_snapshot,
 };
 use crate::services::session_catalog::{
     CatalogWorkerResult, CorruptSession, SessionCatalogConfig, SessionCatalogWorker, SessionRoot,
@@ -189,6 +190,13 @@ pub struct ModelRuntimeProjection {
     pub clamp_notice: Option<String>,
     pub model_change_policy: ModelChangePolicy,
     pub usage: UsageProjection,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResourceCenterProjection {
+    pub phase: ResourcePhase,
+    pub snapshot: Option<ResourceInventorySnapshot>,
+    pub feedback: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -927,6 +935,8 @@ pub struct RuntimeController {
     next_bridge_operation: u64,
     model_runtime: ModelRuntimeState,
     model_snapshot_pending: Option<u64>,
+    resource_center: ResourceCenterState,
+    resource_snapshot_pending: Option<u64>,
     requested_thinking: Option<ThinkingLevel>,
     clamp_notice: Option<String>,
     _event_task: Task<()>,
@@ -1003,6 +1013,8 @@ impl RuntimeController {
             next_bridge_operation: 1,
             model_runtime: ModelRuntimeState::default(),
             model_snapshot_pending: None,
+            resource_center: ResourceCenterState::default(),
+            resource_snapshot_pending: None,
             requested_thinking: None,
             clamp_notice: None,
             _event_task: event_task,
@@ -1130,6 +1142,38 @@ impl RuntimeController {
                 pricing_known,
             },
         }
+    }
+
+    pub fn resource_center_projection(&self) -> ResourceCenterProjection {
+        ResourceCenterProjection {
+            phase: self.resource_center.phase.clone(),
+            snapshot: self.resource_center.snapshot.clone(),
+            feedback: self.resource_center.feedback.clone(),
+        }
+    }
+
+    pub fn reload_resources(&mut self, cx: &mut Context<Self>) -> bool {
+        if !self
+            .bridge_capabilities
+            .as_ref()
+            .is_some_and(|capabilities| capabilities.resource_reload)
+        {
+            return false;
+        }
+        let Some(operation) = self.resource_center.begin_refresh() else {
+            return false;
+        };
+        let accepted = self
+            .bridge_worker
+            .execute(operation, BridgeCommand::ReloadResources);
+        if accepted {
+            self.resource_snapshot_pending = Some(operation);
+        } else {
+            self.resource_center
+                .apply_failure("The resource bridge is unavailable.".to_owned());
+        }
+        cx.notify();
+        accepted
     }
 
     pub fn set_active_model(&mut self, identity: ModelIdentity, cx: &mut Context<Self>) -> bool {
@@ -1527,6 +1571,9 @@ impl RuntimeController {
         self.bridge_capabilities = None;
         self.bridge_unavailable = None;
         self.bridge_feedback = Some("Restarting session bridge…".to_owned());
+        self.resource_snapshot_pending = None;
+        self.resource_center.phase = ResourcePhase::Loading;
+        self.resource_center.feedback = Some("Restarting resource bridge…".to_owned());
         let accepted = self.bridge_worker.restart();
         cx.notify();
         accepted
@@ -1686,6 +1733,19 @@ impl RuntimeController {
                         self.model_snapshot_pending = Some(operation);
                     }
                 }
+                if self
+                    .bridge_capabilities
+                    .as_ref()
+                    .is_some_and(|capabilities| capabilities.resource_inventory)
+                {
+                    let operation = self.resource_center.take_operation();
+                    if self
+                        .bridge_worker
+                        .execute(operation, BridgeCommand::GetResourceInventory)
+                    {
+                        self.resource_snapshot_pending = Some(operation);
+                    }
+                }
                 self.bridge_feedback =
                     Some(format!("Session bridge ready · SDK {}", hello.sdk_version));
             }
@@ -1693,15 +1753,24 @@ impl RuntimeController {
                 self.bridge_capabilities = None;
                 self.bridge_unavailable = Some(error.summary);
             }
-            BridgeWorkerResult::Event(event) => {
+            BridgeWorkerResult::Event(BridgeEvent::Auth(event)) => {
                 self.model_runtime.apply_auth_event(event);
             }
+            BridgeWorkerResult::Event(BridgeEvent::Resource(event)) => match event {
+                ResourceEvent::ResourceProgress { message, .. } => {
+                    self.resource_center.feedback = Some(message);
+                }
+                ResourceEvent::ResourcesChanged { .. } => {}
+            },
             BridgeWorkerResult::Completed {
                 id,
                 command,
                 result,
             } => {
                 if self.receive_model_bridge_result(id, &command, &result) {
+                    return;
+                }
+                if self.receive_resource_bridge_result(id, &command, &result) {
                     return;
                 }
                 let Some((pending_id, kind)) = self.bridge_pending else {
@@ -1789,6 +1858,10 @@ impl RuntimeController {
                                 | BridgeCommand::LogoutProvider { .. }
                                 | BridgeCommand::SetModelDefaults { .. }
                                 | BridgeCommand::SetModelScope { .. } => "Model operation",
+                                BridgeCommand::GetResourceInventory
+                                | BridgeCommand::ReloadResources
+                                | BridgeCommand::SetSkillCommandsEnabled { .. }
+                                | BridgeCommand::SetResourceTheme { .. } => "Resource operation",
                             },
                             error.summary
                         ));
@@ -1918,7 +1991,69 @@ impl RuntimeController {
             | BridgeCommand::NavigateTree { .. }
             | BridgeCommand::SetLabel { .. }
             | BridgeCommand::ExportJsonl { .. }
-            | BridgeCommand::ImportJsonl { .. } => false,
+            | BridgeCommand::ImportJsonl { .. }
+            | BridgeCommand::GetResourceInventory
+            | BridgeCommand::ReloadResources
+            | BridgeCommand::SetSkillCommandsEnabled { .. }
+            | BridgeCommand::SetResourceTheme { .. } => false,
+        }
+    }
+
+    fn receive_resource_bridge_result(
+        &mut self,
+        id: u64,
+        command: &BridgeCommand,
+        result: &Result<serde_json::Value, crate::services::sdk_bridge::BridgeError>,
+    ) -> bool {
+        match command {
+            BridgeCommand::GetResourceInventory
+            | BridgeCommand::ReloadResources
+            | BridgeCommand::SetSkillCommandsEnabled { .. }
+            | BridgeCommand::SetResourceTheme { .. } => {
+                if self.resource_snapshot_pending != Some(id)
+                    && matches!(
+                        command,
+                        BridgeCommand::GetResourceInventory | BridgeCommand::ReloadResources
+                    )
+                {
+                    return true;
+                }
+                self.resource_snapshot_pending = None;
+                match result {
+                    Ok(value)
+                        if value.get("cancelled").and_then(serde_json::Value::as_bool)
+                            == Some(true) =>
+                    {
+                        self.resource_center.feedback = Some(
+                            "Resource reload was cancelled; the prior inventory was kept."
+                                .to_owned(),
+                        );
+                        self.resource_center.phase = if self.resource_center.snapshot.is_some() {
+                            ResourcePhase::Ready
+                        } else {
+                            ResourcePhase::Failed("Resource reload was cancelled.".to_owned())
+                        };
+                    }
+                    Ok(value) => match decode_resource_snapshot(value.clone()) {
+                        Ok(snapshot) => self.resource_center.apply_snapshot(snapshot),
+                        Err(error) => self.resource_center.apply_failure(error.summary),
+                    },
+                    Err(error) => self.resource_center.apply_failure(error.summary.clone()),
+                }
+                true
+            }
+            BridgeCommand::Hello
+            | BridgeCommand::NavigateTree { .. }
+            | BridgeCommand::SetLabel { .. }
+            | BridgeCommand::ExportJsonl { .. }
+            | BridgeCommand::ImportJsonl { .. }
+            | BridgeCommand::GetModelRuntime
+            | BridgeCommand::RefreshModels
+            | BridgeCommand::LoginProvider { .. }
+            | BridgeCommand::AuthRespond { .. }
+            | BridgeCommand::LogoutProvider { .. }
+            | BridgeCommand::SetModelDefaults { .. }
+            | BridgeCommand::SetModelScope { .. } => false,
         }
     }
 

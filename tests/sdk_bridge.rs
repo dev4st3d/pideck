@@ -1,5 +1,7 @@
 use std::fs;
+use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::Duration;
@@ -10,6 +12,24 @@ use pi_gui::services::sdk_bridge::{
 };
 
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(1);
+
+#[test]
+fn bridge_schema_covers_resource_requests_responses_events_and_cancellation() {
+    let schema: serde_json::Value =
+        serde_json::from_str(include_str!("../bridge/protocol.schema.json"))
+            .expect("bridge protocol schema must be valid JSON");
+    let encoded = schema.to_string();
+    for required in [
+        "get_resource_inventory",
+        "reload_resources",
+        "resource_progress",
+        "resources_changed",
+        "targetId",
+        "unsupported_capability",
+    ] {
+        assert!(encoded.contains(required), "schema is missing {required}");
+    }
+}
 
 fn temp_dir() -> PathBuf {
     let path = std::env::temp_dir().join(format!(
@@ -40,8 +60,7 @@ fn write_branched_session(path: &Path, cwd: &Path) {
     .expect("write session");
 }
 
-fn fake_bridge_config(root: &Path) -> Option<SdkBridgeConfig> {
-    let real = bridge_config(root)?;
+fn fake_bridge_config(root: &Path) -> SdkBridgeConfig {
     let sdk_root = root.join("fake-sdk");
     fs::create_dir_all(sdk_root.join("dist")).expect("create fake SDK");
     fs::write(sdk_root.join("package.json"), "{\"type\":\"module\"}\n")
@@ -51,6 +70,7 @@ fn fake_bridge_config(root: &Path) -> Option<SdkBridgeConfig> {
         r#"
 class FakeManager {
   static open() { return new FakeManager(); }
+  static inMemory() { return new FakeManager(); }
   appendLabelChange() { return "checkpoint"; }
   getLabel() { return undefined; }
   getLeafId() { return "target"; }
@@ -58,7 +78,28 @@ class FakeManager {
 
 export const SessionManager = FakeManager;
 
-export async function createAgentSession({ sessionManager }) {
+export async function createAgentSession({ sessionManager, resourceLoader }) {
+  if (resourceLoader) {
+    const sourceInfo = {
+      path: `${process.cwd()}/global-extension.js`,
+      source: "global-extension",
+      scope: "user",
+      origin: "top-level",
+    };
+    return {
+      session: {
+        getActiveToolNames() { return ["read", "synthetic_tool"]; },
+        getAllTools() {
+          return [
+            { name: "read", description: "Read files", sourceInfo: { ...sourceInfo, path: "<builtin:read>", source: "builtin" } },
+            { name: "synthetic_tool", description: "Synthetic dynamic tool", sourceInfo },
+          ];
+        },
+        dispose() {},
+      },
+      extensionsResult: resourceLoader.getExtensions(),
+    };
+  }
   let finishNavigation;
   const session = {
     sessionManager,
@@ -141,10 +182,21 @@ export class ModelRuntime {
   async logout() { storedAuth = false; }
 }
 
-export function getAgentDir() { return "."; }
+export function getAgentDir() { return `${process.cwd()}/agent-home`; }
 
 export class SettingsManager {
-  static create() { return new SettingsManager(); }
+  constructor(projectTrusted = false) { this.projectTrusted = projectTrusted; }
+  static create(_cwd, _agentDir, options = {}) { return new SettingsManager(options.projectTrusted === true); }
+  static inMemory() { return new SettingsManager(false); }
+  getGlobalSettings() { return {}; }
+  getProjectSettings() {
+    return this.projectTrusted
+      ? { packages: ["missing-project-package@1.0.0"], extensions: ["project-extension.js"] }
+      : {};
+  }
+  isProjectTrusted() { return this.projectTrusted; }
+  setProjectTrusted(value) { this.projectTrusted = value; }
+  async reload() {}
   getDefaultProvider() { return "synthetic-provider"; }
   getDefaultModel() { return "synthetic-model"; }
   getDefaultThinkingLevel() { return "high"; }
@@ -152,18 +204,149 @@ export class SettingsManager {
   setDefaultModelAndProvider() {}
   setDefaultThinkingLevel() {}
   setEnabledModels() {}
+  getEnableSkillCommands() { return true; }
+  setEnableSkillCommands() {}
+  getThemeSetting() { return "synthetic-theme"; }
+  setTheme() {}
+  getDefaultProjectTrust() { return "never"; }
   async flush() {}
   drainErrors() { return []; }
+}
+
+export class DefaultPackageManager {
+  constructor({ settingsManager }) { this.settingsManager = settingsManager; }
+  async resolve(onMissing) {
+    if (typeof onMissing !== "function") throw new Error("inventory must use the non-installing resolver");
+    const root = process.cwd();
+    const globalMetadata = { source: "global-extension", scope: "user", origin: "top-level" };
+    const projectMetadata = { source: "project-extension", scope: "project", origin: "top-level" };
+    return {
+      extensions: [
+        { path: `${root}/global-extension.js`, enabled: true, metadata: globalMetadata },
+        ...(this.settingsManager.projectTrusted
+          ? [{ path: `${root}/project-extension.js`, enabled: true, metadata: projectMetadata }]
+          : []),
+      ],
+      skills: [{ path: `${root}/SKILL.md`, enabled: true, metadata: globalMetadata }],
+      prompts: [{ path: `${root}/prompt.md`, enabled: true, metadata: globalMetadata }],
+      themes: [{ path: `${root}/theme.json`, enabled: true, metadata: globalMetadata }],
+    };
+  }
+  listConfiguredPackages() {
+    return this.settingsManager.projectTrusted
+      ? [
+          {
+            source: "synthetic-package@1.2.3",
+            scope: "user",
+            filtered: true,
+            installedPath: `${process.cwd()}/installed-package`,
+          },
+          {
+            source: "missing-project-package@1.0.0",
+            scope: "project",
+            filtered: false,
+          },
+        ]
+      : [];
+  }
+}
+
+export class DefaultResourceLoader {
+  constructor() {
+    const root = process.cwd();
+    this.sourceInfo = {
+      path: `${root}/global-extension.js`,
+      source: "global-extension",
+      scope: "user",
+      origin: "top-level",
+    };
+  }
+  async reload() {}
+  getExtensions() {
+    return {
+      extensions: [
+        {
+          path: `${process.cwd()}/global-extension.js`,
+          resolvedPath: `${process.cwd()}/global-extension.js`,
+          sourceInfo: this.sourceInfo,
+        },
+      ],
+      errors: [
+        {
+          path: `${process.cwd()}/broken-extension.js`,
+          error: "TOP_SECRET extension failure",
+        },
+      ],
+      runtime: {
+        pendingProviderRegistrations: [
+          {
+            name: "dynamic-provider",
+            extensionPath: `${process.cwd()}/global-extension.js`,
+          },
+        ],
+      },
+    };
+  }
+  getSkills() {
+    return {
+      skills: [
+        {
+          name: "synthetic-skill",
+          description: "Synthetic skill",
+          filePath: `${process.cwd()}/SKILL.md`,
+          sourceInfo: this.sourceInfo,
+        },
+      ],
+      diagnostics: [
+        {
+          type: "error",
+          message: "TOP_SECRET skill failure",
+          path: `${process.cwd()}/broken-skill.md`,
+        },
+      ],
+    };
+  }
+  getPrompts() {
+    return {
+      prompts: [
+        {
+          name: "synthetic-prompt",
+          description: "Synthetic prompt",
+          filePath: `${process.cwd()}/prompt.md`,
+          sourceInfo: this.sourceInfo,
+        },
+      ],
+      diagnostics: [],
+    };
+  }
+  getThemes() {
+    return {
+      themes: [
+        {
+          name: "synthetic-theme",
+          sourcePath: `${process.cwd()}/theme.json`,
+          sourceInfo: this.sourceInfo,
+        },
+      ],
+      diagnostics: [],
+    };
+  }
+}
+
+export function loadProjectContextFiles() {
+  return [
+    { path: `${process.cwd()}/AGENTS.md`, content: "TOP_SECRET context" },
+  ];
 }
 "#,
     )
     .expect("write fake SDK module");
-    Some(SdkBridgeConfig {
-        node: real.node,
+    SdkBridgeConfig {
+        node: PathBuf::from("node"),
         sdk_root,
-        script: real.script,
+        script: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("bridge/pi-bridge.mjs"),
         working_directory: root.to_path_buf(),
-    })
+    }
 }
 
 #[test]
@@ -182,6 +365,14 @@ fn bridge_negotiates_mutates_through_sdk_exports_imports_and_restarts() {
     let client = SdkBridgeClient::start(config.clone()).expect("start compatible bridge");
     assert!(client.hello().capabilities.navigate_tree);
     assert!(client.hello().capabilities.labels);
+    assert!(client.hello().capabilities.resource_inventory);
+    let inventory = client
+        .call_default(BridgeCommand::GetResourceInventory)
+        .expect("read real SDK resource inventory");
+    let inventory: pi_gui::resource_center::ResourceInventorySnapshot =
+        serde_json::from_value(inventory).expect("decode real SDK resource inventory");
+    assert!(!inventory.project_trusted);
+    assert!(!inventory.package_mutations.install);
 
     client
         .call_default(BridgeCommand::SetLabel {
@@ -299,10 +490,7 @@ fn timed_out_bridge_request_issues_cancellation_without_claiming_success() {
 #[test]
 fn branch_summary_options_are_forwarded_to_the_sdk() {
     let root = temp_dir();
-    let Some(config) = fake_bridge_config(&root) else {
-        let _ = fs::remove_dir_all(root);
-        return;
-    };
+    let config = fake_bridge_config(&root);
     let client = SdkBridgeClient::start(config).expect("start fake bridge");
     let result = client
         .call_default(BridgeCommand::NavigateTree {
@@ -324,10 +512,7 @@ fn branch_summary_options_are_forwarded_to_the_sdk() {
 #[test]
 fn navigation_cancellation_aborts_the_sdk_operation() {
     let root = temp_dir();
-    let Some(config) = fake_bridge_config(&root) else {
-        let _ = fs::remove_dir_all(root);
-        return;
-    };
+    let config = fake_bridge_config(&root);
     let client = SdkBridgeClient::start(config).expect("start fake bridge");
     let caller = client.clone();
     let request = thread::spawn(move || {
@@ -362,10 +547,7 @@ fn navigation_cancellation_aborts_the_sdk_operation() {
 #[test]
 fn model_runtime_auth_flow_is_secret_free_and_logout_reports_environment_fallback() {
     let root = temp_dir();
-    let Some(config) = fake_bridge_config(&root) else {
-        let _ = fs::remove_dir_all(root);
-        return;
-    };
+    let config = fake_bridge_config(&root);
     let client = SdkBridgeClient::start(config).expect("start fake bridge");
     assert!(client.hello().capabilities.model_runtime);
     assert!(client.hello().capabilities.provider_auth);
@@ -395,7 +577,10 @@ fn model_runtime_auth_flow_is_secret_free_and_logout_reports_environment_fallbac
     let events = client.events();
     let prompt = loop {
         let event = events.recv_blocking().expect("authentication event");
-        if let pi_gui::model_runtime::AuthEvent::AuthPrompt { operation, prompt } = event {
+        if let pi_gui::services::sdk_bridge::BridgeEvent::Auth(
+            pi_gui::model_runtime::AuthEvent::AuthPrompt { operation, prompt },
+        ) = event
+        {
             assert_eq!(operation, 42);
             break prompt;
         }
@@ -417,5 +602,111 @@ fn model_runtime_auth_flow_is_secret_free_and_logout_reports_environment_fallbac
         .expect("logout");
     assert_eq!(logged_out["environmentFallback"], true);
     client.stop();
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn resource_inventory_rejects_project_code_tracks_dynamic_state_and_redacts_failures() {
+    let root = temp_dir();
+    let config = fake_bridge_config(&root);
+    let client = SdkBridgeClient::start(config).expect("start fake bridge");
+    assert!(client.hello().capabilities.resource_inventory);
+    assert!(client.hello().capabilities.resource_reload);
+    assert!(client.hello().capabilities.active_tool_state);
+    assert!(client.hello().capabilities.resource_settings);
+    assert!(!client.hello().capabilities.package_mutations);
+    assert_eq!(client.hello().transport, "stdio-jsonl");
+    assert_eq!(client.hello().ownership, "pi-sdk-sidecar");
+
+    let first = client
+        .call_default(BridgeCommand::GetResourceInventory)
+        .expect("read resource inventory");
+    let snapshot: pi_gui::resource_center::ResourceInventorySnapshot =
+        serde_json::from_value(first.clone()).expect("decode resource inventory");
+    assert!(!snapshot.project_trusted);
+    assert!(!snapshot.package_mutations.install);
+    assert!(!snapshot.package_mutations.configure);
+    assert!(snapshot.items.iter().any(|item| {
+        item.kind == pi_gui::resource_center::ResourceKind::Tool
+            && item.name == "synthetic_tool"
+            && item.active == Some(true)
+    }));
+    assert!(snapshot.items.iter().any(|item| {
+        item.kind == pi_gui::resource_center::ResourceKind::Provider
+            && item.name == "dynamic-provider"
+    }));
+    assert!(snapshot.items.iter().any(|item| {
+        item.scope == pi_gui::resource_center::ResourceScope::Project
+            && item.state == pi_gui::resource_center::ResourceLoadState::Disabled
+            && item.trust == pi_gui::resource_center::ResourceTrust::Rejected
+    }));
+    assert!(snapshot.items.iter().any(|item| {
+        item.kind == pi_gui::resource_center::ResourceKind::Package
+            && item.name == "missing-project-package@1.0.0"
+            && item.state == pi_gui::resource_center::ResourceLoadState::Error
+    }));
+    let encoded = first.to_string();
+    assert!(!encoded.contains("TOP_SECRET"));
+
+    client
+        .call_default(BridgeCommand::SetSkillCommandsEnabled { enabled: false })
+        .expect("set targeted skill-command preference");
+    client
+        .call_default(BridgeCommand::SetResourceTheme {
+            theme: "synthetic-theme".to_owned(),
+        })
+        .expect("set targeted resource theme");
+    let reloaded = client
+        .call_default(BridgeCommand::ReloadResources)
+        .expect("reload resources");
+    assert!(reloaded["generation"].as_u64().expect("reload generation") > snapshot.generation);
+    client.stop();
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn bridge_rejects_unknown_protocol_versions_and_exits_on_stdin_close() {
+    let root = temp_dir();
+    let config = fake_bridge_config(&root);
+    let mut child = Command::new(&config.node)
+        .arg(&config.script)
+        .arg(&config.sdk_root)
+        .current_dir(&config.working_directory)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("start raw bridge");
+    let mut stdin = child.stdin.take().expect("bridge stdin");
+    stdin
+        .write_all(
+            b"{\"version\":999,\"type\":\"request\",\"id\":\"future\",\"command\":\"hello\",\"params\":{}}\n",
+        )
+        .expect("write future request");
+    stdin.flush().expect("flush request");
+    let mut reader = BufReader::new(child.stdout.take().expect("bridge stdout"));
+    let mut output = String::new();
+    reader.read_line(&mut output).expect("read rejection");
+    let response: serde_json::Value =
+        serde_json::from_str(&output).expect("decode rejection response");
+    assert_eq!(response["ok"], false);
+    assert_eq!(response["error"]["code"], "incompatible_protocol");
+
+    stdin
+        .write_all(
+            b"{\"version\":1,\"type\":\"request\",\"id\":\"install\",\"command\":\"package_install\",\"params\":{\"source\":\"dangerous-package\"}}\n",
+        )
+        .expect("write disabled package mutation");
+    stdin.flush().expect("flush package request");
+    output.clear();
+    reader
+        .read_line(&mut output)
+        .expect("read capability rejection");
+    let response: serde_json::Value =
+        serde_json::from_str(&output).expect("decode capability rejection");
+    assert_eq!(response["ok"], false);
+    assert_eq!(response["error"]["code"], "unsupported_capability");
+    drop(stdin);
+    assert!(child.wait().expect("wait for clean bridge exit").success());
     let _ = fs::remove_dir_all(root);
 }

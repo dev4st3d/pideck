@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { createInterface } from "node:readline";
-import { dirname, resolve } from "node:path";
+import { basename, dirname, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 
@@ -19,6 +19,33 @@ const CAPABILITIES = Object.freeze({
   modelRuntime: true,
   providerAuth: true,
   modelSettings: true,
+  resourceInventory: true,
+  resourceReload: true,
+  activeToolState: true,
+  resourceSettings: true,
+  packageMutations: false,
+});
+
+const CAPABILITY_BY_COMMAND = Object.freeze({
+  navigate_tree: "navigateTree",
+  set_label: "labels",
+  export_jsonl: "jsonlExport",
+  import_jsonl: "jsonlImport",
+  get_model_runtime: "modelRuntime",
+  refresh_models: "modelRuntime",
+  login_provider: "providerAuth",
+  auth_respond: "providerAuth",
+  logout_provider: "providerAuth",
+  set_model_defaults: "modelSettings",
+  set_model_scope: "modelSettings",
+  get_resource_inventory: "resourceInventory",
+  reload_resources: "resourceReload",
+  set_skill_commands_enabled: "resourceSettings",
+  set_resource_theme: "resourceSettings",
+  package_install: "packageMutations",
+  package_remove: "packageMutations",
+  package_update: "packageMutations",
+  package_configure: "packageMutations",
 });
 
 const sdkRoot = process.argv[2];
@@ -40,6 +67,9 @@ const authPrompts = new Map();
 let modelRuntimePromise;
 let modelRefreshPromise;
 let modelRefreshErrors = new Map();
+let resourceGeneration = 0;
+let resourcePlane;
+let resourceBuildPromise;
 
 function emit(event, value) {
   process.stdout.write(`${JSON.stringify({ version: PROTOCOL_VERSION, type: "event", event, ...value })}\n`);
@@ -171,6 +201,492 @@ async function refreshModels(signal) {
     });
   }
   return modelRefreshPromise;
+}
+
+function normalizedPath(value) {
+  if (typeof value !== "string" || !value) return undefined;
+  const normalized = resolve(value);
+  return process.platform === "win32" ? normalized.toLowerCase() : normalized;
+}
+
+function pathContains(parent, child) {
+  const normalizedParent = normalizedPath(parent);
+  const normalizedChild = normalizedPath(child);
+  if (!normalizedParent || !normalizedChild) return false;
+  return normalizedChild === normalizedParent || normalizedChild.startsWith(`${normalizedParent}${sep}`);
+}
+
+function safePath(value) {
+  return typeof value === "string" && value.length <= 4096 ? value : undefined;
+}
+
+function safeText(value, fallback, max = 240) {
+  if (typeof value !== "string") return fallback;
+  const normalized = value.replace(/[\u0000-\u001f\u007f]/g, " ").trim();
+  return normalized ? normalized.slice(0, max) : fallback;
+}
+
+function resourceScope(sourceInfo = {}) {
+  if (sourceInfo.origin === "package") return "package";
+  if (sourceInfo.scope === "project") return "project";
+  if (sourceInfo.scope === "temporary") return "temporary";
+  return "global";
+}
+
+function resourceTrust(sourceInfo = {}) {
+  return sourceInfo.scope === "project" ? "rejected" : "trusted";
+}
+
+function sourceInfoForResolved(resource) {
+  return {
+    path: resource.path,
+    source: resource.metadata?.source ?? "unknown",
+    scope: resource.metadata?.scope ?? "user",
+    origin: resource.metadata?.origin ?? "top-level",
+    baseDir: resource.metadata?.baseDir,
+  };
+}
+
+function resourceId(kind, path, source, name) {
+  return `${kind}:${normalizedPath(path) ?? source ?? name}`;
+}
+
+function itemFromSource(kind, name, sourceInfo, values = {}) {
+  const path = safePath(values.path ?? sourceInfo?.path);
+  return {
+    id: resourceId(kind, path, sourceInfo?.source, name),
+    kind,
+    name: safeText(name, kind),
+    description:
+      typeof values.description === "string"
+        ? safeText(values.description, undefined, 400)
+        : undefined,
+    state: values.state ?? "loaded",
+    scope: resourceScope(sourceInfo),
+    ownerScope: sourceInfo?.scope,
+    trust: values.trust ?? resourceTrust(sourceInfo),
+    path,
+    source: safeText(sourceInfo?.source, "unknown"),
+    origin: sourceInfo?.origin,
+    active: typeof values.active === "boolean" ? values.active : undefined,
+    pinned: typeof values.pinned === "boolean" ? values.pinned : undefined,
+    filtered: typeof values.filtered === "boolean" ? values.filtered : undefined,
+    diagnostics: Array.isArray(values.diagnostics) ? values.diagnostics : [],
+  };
+}
+
+function safeResourceDiagnostic(diagnostic) {
+  if (diagnostic?.type === "collision" && diagnostic.collision) {
+    return `${safeText(diagnostic.collision.resourceType, "Resource")} collision for ${safeText(
+      diagnostic.collision.name,
+      "an unnamed item",
+    )}.`;
+  }
+  return diagnostic?.type === "warning"
+    ? "Resource validation reported a warning."
+    : "Resource validation reported an error.";
+}
+
+function isPinnedPackage(source) {
+  if (typeof source !== "string") return false;
+  if (/^git\+|^https?:|^ssh:|^[^/]+@[^:]+:/.test(source)) return /#[^#]+$/.test(source);
+  const npmVersion = source.startsWith("@")
+    ? source.indexOf("@", 1) >= 0
+      ? source.slice(source.indexOf("@", 1) + 1)
+      : ""
+    : source.includes("@")
+      ? source.slice(source.lastIndexOf("@") + 1)
+      : "";
+  return /^\d+\.\d+\.\d+(?:[-+].+)?$/.test(npmVersion);
+}
+
+function resourceEntries(resolved) {
+  return [
+    ["extension", resolved.extensions ?? []],
+    ["skill", resolved.skills ?? []],
+    ["prompt", resolved.prompts ?? []],
+    ["theme", resolved.themes ?? []],
+  ];
+}
+
+function findResolvedSource(resolved, kind, path) {
+  const entries = resourceEntries(resolved).find(([candidate]) => candidate === kind)?.[1] ?? [];
+  return entries
+    .map((entry) => sourceInfoForResolved(entry))
+    .filter(
+      (sourceInfo) =>
+        pathContains(sourceInfo.path, path) ||
+        (sourceInfo.baseDir && pathContains(sourceInfo.baseDir, path)),
+    )
+    .sort((left, right) => {
+      const leftExact = normalizedPath(left.path) === normalizedPath(path) ? 0 : 1;
+      const rightExact = normalizedPath(right.path) === normalizedPath(path) ? 0 : 1;
+      if (leftExact !== rightExact) return leftExact - rightExact;
+      const leftPackage = left.origin === "package" ? 0 : 1;
+      const rightPackage = right.origin === "package" ? 0 : 1;
+      return leftPackage - rightPackage;
+    })[0];
+}
+
+function upsertResource(items, item) {
+  const existing = items.findIndex(
+    (candidate) =>
+      candidate.kind === item.kind &&
+      ((candidate.path && item.path && pathContains(candidate.path, item.path)) ||
+        (candidate.path && item.path && pathContains(item.path, candidate.path)) ||
+        candidate.id === item.id),
+  );
+  if (existing < 0) {
+    items.push(item);
+    return;
+  }
+  items[existing] = {
+    ...items[existing],
+    ...item,
+    diagnostics: [...new Set([...(items[existing].diagnostics ?? []), ...(item.diagnostics ?? [])])],
+  };
+}
+
+async function safeResolve(packageManager) {
+  return packageManager.resolve(async () => "skip");
+}
+
+function emptyResolvedPaths() {
+  return { extensions: [], skills: [], prompts: [], themes: [] };
+}
+
+async function buildResourceSnapshot(signal, operation = "inventory") {
+  emit("resource_progress", {
+    operation,
+    phase: "start",
+    message: operation === "reload" ? "Reloading installed resources." : "Inspecting installed resources.",
+  });
+  resourcePlane?.session?.dispose?.();
+  resourcePlane = undefined;
+
+  const cwd = process.cwd();
+  const agentDir = sdk.getAgentDir();
+  const diagnostics = [];
+  const globalSettings = sdk.SettingsManager.create(cwd, agentDir, { projectTrusted: false });
+  const inspectionSettings = sdk.SettingsManager.create(cwd, agentDir, { projectTrusted: true });
+  const globalPackageManager = new sdk.DefaultPackageManager({
+    cwd,
+    agentDir,
+    settingsManager: globalSettings,
+  });
+  const inspectionPackageManager = new sdk.DefaultPackageManager({
+    cwd,
+    agentDir,
+    settingsManager: inspectionSettings,
+  });
+
+  let globalResolved = emptyResolvedPaths();
+  let allResolved = emptyResolvedPaths();
+  try {
+    globalResolved = await safeResolve(globalPackageManager);
+  } catch {
+    diagnostics.push("Global resource discovery failed; prior files were not changed.");
+  }
+  try {
+    allResolved = await safeResolve(inspectionPackageManager);
+  } catch {
+    diagnostics.push("Project resource discovery failed; project code was not loaded.");
+  }
+  if (signal.aborted) return { cancelled: true };
+
+  const additional = Object.fromEntries(
+    resourceEntries(globalResolved).map(([kind, resources]) => [
+      kind,
+      resources.filter((resource) => resource.enabled).map((resource) => resource.path),
+    ]),
+  );
+  const loaderSettings = sdk.SettingsManager.inMemory({}, { projectTrusted: false });
+  const loader = new sdk.DefaultResourceLoader({
+    cwd,
+    agentDir,
+    settingsManager: loaderSettings,
+    additionalExtensionPaths: additional.extension,
+    additionalSkillPaths: additional.skill,
+    additionalPromptTemplatePaths: additional.prompt,
+    additionalThemePaths: additional.theme,
+    noContextFiles: true,
+  });
+
+  try {
+    await loader.reload();
+  } catch {
+    diagnostics.push("Installed resource loading failed. Project resources remained disabled.");
+  }
+  if (signal.aborted) return { cancelled: true };
+
+  const items = [];
+  for (const [kind, resources] of resourceEntries(allResolved)) {
+    for (const resource of resources) {
+      const sourceInfo = sourceInfoForResolved(resource);
+      const projectRejected = sourceInfo.scope === "project";
+      upsertResource(
+        items,
+        itemFromSource(kind, basename(resource.path), sourceInfo, {
+          path: resource.path,
+          state: projectRejected || !resource.enabled ? "disabled" : "loaded",
+          diagnostics: projectRejected
+            ? ["Project trust is rejected; this resource was inventoried but not loaded."]
+            : [],
+        }),
+      );
+    }
+  }
+
+  const extensionsResult = loader.getExtensions();
+  for (const extension of extensionsResult.extensions ?? []) {
+    const sourceInfo =
+      findResolvedSource(allResolved, "extension", extension.resolvedPath ?? extension.path) ??
+      extension.sourceInfo;
+    upsertResource(
+      items,
+      itemFromSource("extension", basename(extension.path), sourceInfo, {
+        path: extension.resolvedPath ?? extension.path,
+      }),
+    );
+  }
+  for (const failure of extensionsResult.errors ?? []) {
+    const sourceInfo =
+      findResolvedSource(allResolved, "extension", failure.path) ?? {
+        path: failure.path,
+        source: "extension",
+        scope: "user",
+        origin: "top-level",
+      };
+    upsertResource(
+      items,
+      itemFromSource("extension", basename(failure.path), sourceInfo, {
+        path: failure.path,
+        state: "error",
+        diagnostics: ["Extension failed to load. Error details were redacted."],
+      }),
+    );
+  }
+
+  const skills = loader.getSkills();
+  for (const skill of skills.skills ?? []) {
+    const sourceInfo =
+      findResolvedSource(allResolved, "skill", skill.filePath) ?? skill.sourceInfo;
+    upsertResource(
+      items,
+      itemFromSource("skill", skill.name, sourceInfo, {
+        path: skill.filePath,
+        description: skill.description,
+      }),
+    );
+  }
+  const prompts = loader.getPrompts();
+  for (const prompt of prompts.prompts ?? []) {
+    const sourceInfo =
+      findResolvedSource(allResolved, "prompt", prompt.filePath) ?? prompt.sourceInfo;
+    upsertResource(
+      items,
+      itemFromSource("prompt", prompt.name, sourceInfo, {
+        path: prompt.filePath,
+        description: prompt.description,
+      }),
+    );
+  }
+  const themes = loader.getThemes();
+  for (const theme of themes.themes ?? []) {
+    const sourceInfo =
+      findResolvedSource(allResolved, "theme", theme.sourcePath) ?? theme.sourceInfo;
+    upsertResource(
+      items,
+      itemFromSource("theme", theme.name ?? basename(theme.sourcePath ?? "theme"), sourceInfo, {
+        path: theme.sourcePath,
+      }),
+    );
+  }
+  for (const [kind, resourceDiagnostics] of [
+    ["skill", skills.diagnostics ?? []],
+    ["prompt", prompts.diagnostics ?? []],
+    ["theme", themes.diagnostics ?? []],
+  ]) {
+    for (const diagnostic of resourceDiagnostics) {
+      const sourceInfo =
+        findResolvedSource(allResolved, kind, diagnostic.path) ?? {
+          path: diagnostic.path,
+          source: kind,
+          scope: "user",
+          origin: "top-level",
+        };
+      upsertResource(
+        items,
+        itemFromSource(kind, basename(diagnostic.path ?? kind), sourceInfo, {
+          path: diagnostic.path,
+          state: diagnostic.type === "warning" ? "loaded" : "error",
+          diagnostics: [safeResourceDiagnostic(diagnostic)],
+        }),
+      );
+    }
+  }
+
+  const dynamicProviders = [
+    ...(extensionsResult.runtime?.pendingProviderRegistrations ?? []),
+  ];
+  let session;
+  try {
+    const resourceRuntime = await sdk.ModelRuntime.create({ allowModelNetwork: false });
+    const created = await sdk.createAgentSession({
+      cwd,
+      agentDir,
+      modelRuntime: resourceRuntime,
+      resourceLoader: loader,
+      sessionManager: sdk.SessionManager.inMemory(cwd),
+      settingsManager: globalSettings,
+    });
+    session = created.session;
+    const activeTools = new Set(session.getActiveToolNames());
+    for (const tool of session.getAllTools()) {
+      const sourceInfo =
+        findResolvedSource(allResolved, "extension", tool.sourceInfo?.path) ?? tool.sourceInfo;
+      upsertResource(
+        items,
+        itemFromSource("tool", tool.name, sourceInfo, {
+          path: tool.sourceInfo?.path,
+          description: tool.description,
+          active: activeTools.has(tool.name),
+        }),
+      );
+    }
+  } catch {
+    diagnostics.push("Tool state could not be initialized; resource files remain inventoried.");
+  }
+
+  for (const provider of dynamicProviders) {
+    const sourceInfo =
+      findResolvedSource(allResolved, "extension", provider.extensionPath) ?? {
+        path: provider.extensionPath,
+        source: "extension",
+        scope: "user",
+        origin: "top-level",
+      };
+    upsertResource(
+      items,
+      itemFromSource("provider", provider.name, sourceInfo, {
+        path: provider.extensionPath,
+        description: "Provider registered dynamically by an extension.",
+      }),
+    );
+  }
+
+  let configuredPackages = [];
+  try {
+    configuredPackages = inspectionPackageManager.listConfiguredPackages();
+  } catch {
+    diagnostics.push("Package configuration could not be inventoried.");
+  }
+  for (const pkg of configuredPackages) {
+    const sourceInfo = {
+      path: pkg.installedPath,
+      source: pkg.source,
+      scope: pkg.scope,
+      origin: "package",
+      baseDir: pkg.installedPath,
+    };
+    const projectRejected = pkg.scope === "project";
+    const installed = typeof pkg.installedPath === "string";
+    items.push(
+      itemFromSource("package", pkg.source, sourceInfo, {
+        path: pkg.installedPath,
+        state: !installed ? "error" : projectRejected ? "disabled" : "loaded",
+        trust: projectRejected ? "rejected" : "trusted",
+        pinned: isPinnedPackage(pkg.source),
+        filtered: pkg.filtered === true,
+        diagnostics: !installed
+          ? ["Package is configured but not installed. Automatic installation is disabled."]
+          : projectRejected
+            ? ["Project trust is rejected; package code was not loaded."]
+            : [],
+      }),
+    );
+  }
+
+  try {
+    for (const context of sdk.loadProjectContextFiles({ cwd, agentDir })) {
+      const global = pathContains(agentDir, context.path);
+      const sourceInfo = {
+        path: context.path,
+        source: global ? "global-context" : "project-context",
+        scope: global ? "user" : "project",
+        origin: "top-level",
+      };
+      items.push(
+        itemFromSource("context", basename(context.path), sourceInfo, {
+          path: context.path,
+          state: "disabled",
+          trust: global ? "trusted" : "rejected",
+          diagnostics: [
+            global
+              ? "Context is inventoried but disabled because the native shell does not consume it."
+              : "Project trust is rejected; context was inventoried but not loaded.",
+          ],
+        }),
+      );
+    }
+  } catch {
+    diagnostics.push("Context-file discovery failed; no file contents were exposed.");
+  }
+
+  diagnostics.push(
+    ...globalSettings.drainErrors().map(() => "A global Pi settings read reported an error."),
+    ...inspectionSettings
+      .drainErrors()
+      .map(() => "A project Pi settings read reported an error; details were redacted."),
+  );
+  items.sort(
+    (left, right) =>
+      left.kind.localeCompare(right.kind) ||
+      left.scope.localeCompare(right.scope) ||
+      left.name.localeCompare(right.name),
+  );
+  resourceGeneration += 1;
+  const snapshot = {
+    generation: resourceGeneration,
+    projectTrusted: false,
+    projectTrustReason:
+      "Pi GUI rejects project trust. Project resources are inventoried without executing project code.",
+    items,
+    diagnostics,
+    settings: {
+      enableSkillCommands: globalSettings.getEnableSkillCommands(),
+      theme: globalSettings.getThemeSetting(),
+      defaultProjectTrust: globalSettings.getDefaultProjectTrust(),
+    },
+    packageMutations: {
+      install: false,
+      remove: false,
+      update: false,
+      configure: false,
+      reason:
+        "Disabled until arbitrary-code confirmation, progress, pin/filter handling, and rollback-safe errors are implemented.",
+    },
+  };
+  resourcePlane = { session, loader, snapshot };
+  emit("resource_progress", {
+    operation,
+    phase: "complete",
+    message: "Installed resource inventory is ready.",
+  });
+  emit("resources_changed", { generation: snapshot.generation });
+  return snapshot;
+}
+
+async function resourceSnapshot(signal, reload = false) {
+  if (!reload && resourcePlane?.snapshot) return resourcePlane.snapshot;
+  if (!resourceBuildPromise) {
+    resourceBuildPromise = buildResourceSnapshot(signal, reload ? "reload" : "inventory").finally(
+      () => {
+        resourceBuildPromise = undefined;
+      },
+    );
+  }
+  return resourceBuildPromise;
 }
 
 function authInteraction(operationId, signal) {
@@ -353,6 +869,8 @@ async function execute(record) {
           protocolVersion: PROTOCOL_VERSION,
           sdkVersion: SDK_VERSION,
           capabilities: CAPABILITIES,
+          transport: "stdio-jsonl",
+          ownership: "pi-sdk-sidecar",
         };
         break;
       case "navigate_tree":
@@ -494,8 +1012,42 @@ async function execute(record) {
         result = await modelSnapshot();
         break;
       }
-      default:
-        throw new Error("Unsupported bridge command");
+      case "get_resource_inventory":
+        result = await resourceSnapshot(token.abortController.signal);
+        break;
+      case "reload_resources":
+        result = await resourceSnapshot(token.abortController.signal, true);
+        break;
+      case "set_skill_commands_enabled": {
+        if (typeof params.enabled !== "boolean") throw new Error("Invalid enabled value");
+        const { settings } = await getModelServices();
+        settings.setEnableSkillCommands(params.enabled);
+        await settings.flush();
+        resourcePlane?.session?.dispose?.();
+        resourcePlane = undefined;
+        result = await resourceSnapshot(token.abortController.signal, true);
+        break;
+      }
+      case "set_resource_theme": {
+        const theme = requireString(params, "theme");
+        const current = await resourceSnapshot(token.abortController.signal);
+        const available = current.items?.some(
+          (item) => item.kind === "theme" && item.state === "loaded" && item.name === theme,
+        );
+        if (!available) throw new Error("Theme is not available");
+        const { settings } = await getModelServices();
+        settings.setTheme(theme);
+        await settings.flush();
+        resourcePlane?.session?.dispose?.();
+        resourcePlane = undefined;
+        result = await resourceSnapshot(token.abortController.signal, true);
+        break;
+      }
+      default: {
+        const unsupported = new Error("Unsupported bridge command");
+        unsupported.bridgeCode = "unsupported_command";
+        throw unsupported;
+      }
     }
     respond(id, true, result);
   } catch (error) {
@@ -507,13 +1059,22 @@ async function execute(record) {
       "logout_provider",
       "set_model_defaults",
       "set_model_scope",
+      "get_resource_inventory",
+      "reload_resources",
+      "set_skill_commands_enabled",
+      "set_resource_theme",
     ].includes(command);
     const message = sensitiveOperation
-      ? "The model or authentication operation failed."
+      ? command.includes("resource") || command.includes("skill")
+        ? "The resource operation failed. Details were redacted."
+        : "The model or authentication operation failed."
       : error instanceof Error
-        ? error.message
+        ? "The bridge operation failed."
         : "Bridge operation failed";
-    respond(id, false, { code: "operation_failed", message: message.slice(0, 400) });
+    respond(id, false, {
+      code: error?.bridgeCode ?? "operation_failed",
+      message: message.slice(0, 400),
+    });
   } finally {
     active.delete(id);
   }
@@ -553,9 +1114,21 @@ input.on("line", (line) => {
     respond(record.id, false, { code: "invalid_request", message: "Invalid bridge request" });
     return;
   }
+  const capability = CAPABILITY_BY_COMMAND[record.command];
+  if (capability && CAPABILITIES[capability] !== true) {
+    respond(record.id, false, {
+      code: "unsupported_capability",
+      message: "The negotiated bridge does not support this operation.",
+    });
+    return;
+  }
   void execute(record);
 });
 
 input.on("close", () => {
-  for (const operation of active.values()) operation.session?.abortBranchSummary();
+  for (const operation of active.values()) {
+    operation.abortController.abort();
+    operation.session?.abortBranchSummary();
+  }
+  resourcePlane?.session?.dispose?.();
 });

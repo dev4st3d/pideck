@@ -1,4 +1,4 @@
-//! Versioned stdio JSONL client for the narrow Pi SDK session bridge.
+//! Versioned stdio JSONL client for the Pi SDK sidecar bridge.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::model_runtime::{AuthEvent, AuthMethod, ModelIdentity, ThinkingLevel};
+use crate::resource_center::ResourceInventorySnapshot;
 
 const PROTOCOL_VERSION: u64 = 1;
 const MAX_RECORD_BYTES: usize = 1024 * 1024;
@@ -71,6 +72,11 @@ pub struct BridgeCapabilities {
     pub model_runtime: bool,
     pub provider_auth: bool,
     pub model_settings: bool,
+    pub resource_inventory: bool,
+    pub resource_reload: bool,
+    pub active_tool_state: bool,
+    pub resource_settings: bool,
+    pub package_mutations: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -79,6 +85,10 @@ pub struct BridgeHello {
     pub protocol_version: u64,
     pub sdk_version: String,
     pub capabilities: BridgeCapabilities,
+    #[serde(default)]
+    pub transport: String,
+    #[serde(default)]
+    pub ownership: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -93,6 +103,7 @@ pub enum BridgeErrorKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BridgeError {
     pub kind: BridgeErrorKind,
+    pub code: Option<String>,
     pub summary: String,
 }
 
@@ -100,6 +111,15 @@ impl BridgeError {
     fn new(kind: BridgeErrorKind, summary: impl Into<String>) -> Self {
         Self {
             kind,
+            code: None,
+            summary: summary.into(),
+        }
+    }
+
+    fn rejected(code: Option<String>, summary: impl Into<String>) -> Self {
+        Self {
+            kind: BridgeErrorKind::Rejected,
+            code,
             summary: summary.into(),
         }
     }
@@ -180,6 +200,38 @@ pub enum BridgeCommand {
     SetModelScope {
         models: Vec<ModelIdentity>,
     },
+    GetResourceInventory,
+    ReloadResources,
+    SetSkillCommandsEnabled {
+        enabled: bool,
+    },
+    SetResourceTheme {
+        theme: String,
+    },
+}
+
+impl BridgeCommand {
+    fn supported_by(&self, capabilities: &BridgeCapabilities) -> bool {
+        match self {
+            Self::Hello => true,
+            Self::NavigateTree { .. } => capabilities.navigate_tree,
+            Self::SetLabel { .. } => capabilities.labels,
+            Self::ExportJsonl { .. } => capabilities.jsonl_export,
+            Self::ImportJsonl { .. } => capabilities.jsonl_import,
+            Self::GetModelRuntime | Self::RefreshModels => capabilities.model_runtime,
+            Self::LoginProvider { .. } | Self::AuthRespond { .. } | Self::LogoutProvider { .. } => {
+                capabilities.provider_auth
+            }
+            Self::SetModelDefaults { .. } | Self::SetModelScope { .. } => {
+                capabilities.model_settings
+            }
+            Self::GetResourceInventory => capabilities.resource_inventory,
+            Self::ReloadResources => capabilities.resource_reload,
+            Self::SetSkillCommandsEnabled { .. } | Self::SetResourceTheme { .. } => {
+                capabilities.resource_settings
+            }
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -215,7 +267,29 @@ struct ResponseRecord {
 
 #[derive(Deserialize)]
 struct BridgeWireError {
+    #[serde(default)]
+    code: Option<String>,
     message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(tag = "event", rename_all = "snake_case")]
+pub enum ResourceEvent {
+    ResourceProgress {
+        operation: String,
+        phase: String,
+        message: String,
+    },
+    ResourcesChanged {
+        generation: u64,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(untagged)]
+pub enum BridgeEvent {
+    Auth(AuthEvent),
+    Resource(ResourceEvent),
 }
 
 struct BridgeInner {
@@ -224,14 +298,14 @@ struct BridgeInner {
     pending: Mutex<HashMap<String, mpsc::Sender<Result<Value, BridgeError>>>>,
     next_id: AtomicU64,
     stopped: AtomicBool,
-    event_sender: Sender<AuthEvent>,
+    event_sender: Sender<BridgeEvent>,
 }
 
 #[derive(Clone)]
 pub struct SdkBridgeClient {
     inner: Arc<BridgeInner>,
     hello: BridgeHello,
-    events: Receiver<AuthEvent>,
+    events: Receiver<BridgeEvent>,
 }
 
 impl SdkBridgeClient {
@@ -293,6 +367,8 @@ impl SdkBridgeClient {
                 protocol_version: 0,
                 sdk_version: String::new(),
                 capabilities: BridgeCapabilities::default(),
+                transport: String::new(),
+                ownership: String::new(),
             },
             events: events.clone(),
         };
@@ -320,7 +396,7 @@ impl SdkBridgeClient {
         &self.hello
     }
 
-    pub fn events(&self) -> Receiver<AuthEvent> {
+    pub fn events(&self) -> Receiver<BridgeEvent> {
         self.events.clone()
     }
 
@@ -342,6 +418,12 @@ impl SdkBridgeClient {
         id: String,
         timeout: Duration,
     ) -> Result<Value, BridgeError> {
+        if !command.supported_by(&self.hello.capabilities) {
+            return Err(BridgeError::rejected(
+                Some("unsupported_capability".to_owned()),
+                "The negotiated bridge does not support this operation.",
+            ));
+        }
         let value = serde_json::to_value(&command).map_err(|_| {
             BridgeError::new(BridgeErrorKind::Protocol, "Bridge request encoding failed.")
         })?;
@@ -485,7 +567,7 @@ fn spawn_reader(stdout: impl std::io::Read + Send + 'static, inner: Arc<BridgeIn
                 continue;
             };
             if value.get("type").and_then(Value::as_str) == Some("event") {
-                if let Ok(event) = serde_json::from_value::<AuthEvent>(value) {
+                if let Ok(event) = serde_json::from_value::<BridgeEvent>(value) {
                     let _ = inner.event_sender.send_blocking(event);
                 }
                 continue;
@@ -505,8 +587,8 @@ fn spawn_reader(stdout: impl std::io::Read + Send + 'static, inner: Arc<BridgeIn
             let result = if response.ok {
                 Ok(response.result.unwrap_or(Value::Null))
             } else {
-                Err(BridgeError::new(
-                    BridgeErrorKind::Rejected,
+                Err(BridgeError::rejected(
+                    response.error.as_ref().and_then(|error| error.code.clone()),
                     response
                         .error
                         .map(|error| error.message)
@@ -537,7 +619,7 @@ fn fail_pending(inner: &BridgeInner, summary: &str) {
 #[derive(Debug, Clone)]
 pub enum BridgeWorkerResult {
     Capabilities(Result<BridgeHello, BridgeError>),
-    Event(AuthEvent),
+    Event(BridgeEvent),
     Completed {
         id: u64,
         command: BridgeCommand,
@@ -709,4 +791,13 @@ fn start_discovered_bridge(
             )
         })?;
     SdkBridgeClient::start(config)
+}
+
+pub fn decode_resource_snapshot(value: Value) -> Result<ResourceInventorySnapshot, BridgeError> {
+    serde_json::from_value(value).map_err(|_| {
+        BridgeError::new(
+            BridgeErrorKind::Protocol,
+            "The bridge returned an invalid resource inventory.",
+        )
+    })
 }
