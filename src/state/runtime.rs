@@ -553,6 +553,12 @@ pub enum CompactionKind {
     Overflow,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PromptImage {
+    pub data: String,
+    pub mime_type: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SubmissionKind {
     Prompt,
@@ -564,6 +570,7 @@ pub enum SubmissionKind {
 pub struct OptimisticUserInput {
     pub request: RequestId,
     pub text: String,
+    pub images: Vec<PromptImage>,
     pub kind: SubmissionKind,
     pub accepted: bool,
     pub authoritative_seen: bool,
@@ -870,6 +877,7 @@ pub enum RuntimeIntent {
     Submit {
         request: RequestId,
         text: String,
+        images: Vec<PromptImage>,
         kind: SubmissionKind,
     },
     InvokeCommand {
@@ -947,6 +955,7 @@ pub enum RuntimeRequest {
     Submit {
         request: RequestId,
         text: String,
+        images: Vec<PromptImage>,
         kind: SubmissionKind,
     },
     InvokeCommand {

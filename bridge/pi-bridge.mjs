@@ -125,7 +125,11 @@ function acceptOrchestrationSocket(socket) {
     else pending.reject(orchestrationError("The Pi orchestration action was rejected."));
   });
   socket.on("close", () => {
-    if (orchestrationSocket === socket) orchestrationSocket = undefined;
+    // Replacing an adapter intentionally closes the previous socket. Ignore that
+    // stale close event so it cannot overwrite the new adapter's live snapshot
+    // with a transient disconnected state.
+    if (orchestrationSocket !== socket) return;
+    orchestrationSocket = undefined;
     failOrchestrationPending("The orchestration adapter disconnected.");
     emit("orchestration_disconnected", {});
   });

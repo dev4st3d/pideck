@@ -61,7 +61,8 @@ fn composer_actions_route_send_newline_follow_up_and_abort(cx: &mut TestAppConte
     assert_eq!(
         events.as_slice(),
         &[ComposerEvent::Accept {
-            text: "hello\nworld".to_owned()
+            text: "hello\nworld".to_owned(),
+            images: Vec::new(),
         }]
     );
 
@@ -84,10 +85,12 @@ fn composer_actions_route_send_newline_follow_up_and_abort(cx: &mut TestAppConte
         events.as_slice(),
         &[
             ComposerEvent::Accept {
-                text: "hello\nworld".to_owned()
+                text: "hello\nworld".to_owned(),
+                images: Vec::new(),
             },
             ComposerEvent::FollowUp {
-                text: "hello\nworld".to_owned()
+                text: "hello\nworld".to_owned(),
+                images: Vec::new(),
             },
             ComposerEvent::Abort,
         ]
@@ -169,6 +172,40 @@ fn composer_input_is_grapheme_safe_and_supports_clipboard_undo(cx: &mut TestAppC
         composer.read_with(cx, |composer, _| composer.draft().to_owned()),
         "👩‍💻one\ntwo"
     );
+}
+
+#[gpui::test]
+fn composer_pastes_clipboard_images_and_submits_them_without_text(cx: &mut TestAppContext) {
+    cx.update(|cx| cx.bind_keys(composer_key_bindings()));
+    let (harness, cx) = cx.add_window_view(ComposerHarness::new);
+    let composer = harness.read_with(cx, |harness, _| harness.composer.clone());
+    let bytes = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+    let image = gpui::Image::from_bytes(gpui::ImageFormat::Png, bytes.clone());
+
+    cx.write_to_clipboard(ClipboardItem::new_image(&image));
+    cx.dispatch_action(ComposerPaste);
+
+    assert_eq!(
+        composer.read_with(cx, |composer, _| composer.draft().to_owned()),
+        ""
+    );
+    let attached = composer.read_with(cx, |composer, _| composer.images().to_vec());
+    assert_eq!(attached.len(), 1);
+    assert_eq!(attached[0].mime_type, "image/png");
+    assert_eq!(attached[0].data, STANDARD.encode(bytes));
+
+    cx.simulate_keystrokes("enter");
+    assert_eq!(
+        harness.read_with(cx, |harness, _| harness.events.borrow().clone()),
+        vec![ComposerEvent::Accept {
+            text: String::new(),
+            images: attached,
+        }]
+    );
+    assert!(composer.update(cx, |composer, cx| {
+        composer.clear_accepted("", SubmissionKind::Prompt, cx)
+    }));
+    assert!(!composer.read_with(cx, |composer, _| composer.has_images()));
 }
 
 #[gpui::test]

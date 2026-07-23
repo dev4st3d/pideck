@@ -32,10 +32,10 @@ use crate::state::reducer::reduce;
 use crate::state::runtime::{
     BashExecution, BashStatus, CommandSource, CompactionState, DialogAnswer, ExtensionDialog,
     ExtensionFailure, ExtensionStatus, ExtensionWidget, FacetStatus, ModelSummary, PromptDelivery,
-    QueueContents, QueueDeliveryMode, RetryState, RuntimeCommand, RuntimeForkMessage, RuntimeInput,
-    RuntimeIntent, RuntimeLifecycle, RuntimeMessage, RuntimeNotification, RuntimeOperation,
-    RuntimeState, RuntimeThinkingLevel, RuntimeTreeNode, SafeError, StampedInput, SubmissionKind,
-    ToolExecution,
+    PromptImage, QueueContents, QueueDeliveryMode, RetryState, RuntimeCommand, RuntimeForkMessage,
+    RuntimeInput, RuntimeIntent, RuntimeLifecycle, RuntimeMessage, RuntimeNotification,
+    RuntimeOperation, RuntimeState, RuntimeThinkingLevel, RuntimeTreeNode, SafeError, StampedInput,
+    SubmissionKind, ToolExecution,
 };
 use crate::state::{ControllerStatus, ShellProjection};
 
@@ -84,6 +84,7 @@ pub struct CommandCatalogProjection {
 pub struct AcceptedUserInput {
     pub request: RequestId,
     pub text: String,
+    pub images: Vec<PromptImage>,
     pub kind: SubmissionKind,
 }
 
@@ -233,17 +234,19 @@ pub enum SubmissionRejection {
     BashRunning,
     Unavailable,
     NotRunning,
+    ImagesUnsupported,
 }
 
 impl SubmissionRejection {
     pub fn message(self) -> &'static str {
         match self {
-            Self::Empty => "Write a prompt first.",
+            Self::Empty => "Write a prompt or attach an image first.",
             Self::EmptyBash => "Write a Bash command after ! or !!.",
             Self::Pending => "The previous acceptance is still pending.",
             Self::BashRunning => "A Bash command is already running.",
             Self::Unavailable => "Pi is not ready. The draft was kept.",
             Self::NotRunning => "Follow-ups can be queued while Pi is running.",
+            Self::ImagesUnsupported => "The current model does not support image input.",
         }
     }
 }
@@ -479,6 +482,7 @@ impl ControllerCore {
                 .map(|input| AcceptedUserInput {
                     request: input.request.clone(),
                     text: input.text.clone(),
+                    images: input.images.clone(),
                     kind: input.kind,
                 })
                 .collect(),
@@ -555,10 +559,38 @@ impl ControllerCore {
         ),
         SubmissionRejection,
     > {
-        if text.trim().is_empty() {
+        self.submit_with_images(text, Vec::new(), preference)
+    }
+
+    pub fn submit_with_images(
+        &mut self,
+        text: String,
+        images: Vec<PromptImage>,
+        preference: SubmissionPreference,
+    ) -> Result<
+        (
+            AcceptedSubmission,
+            Vec<crate::state::runtime::RuntimeEffect>,
+        ),
+        SubmissionRejection,
+    > {
+        if text.trim().is_empty() && images.is_empty() {
             return Err(SubmissionRejection::Empty);
         }
-        if let Some(parsed) = parse_bash_submission(&text) {
+        if !images.is_empty()
+            && self
+                .runtime
+                .session
+                .data
+                .as_ref()
+                .and_then(|session| session.model.as_ref())
+                .is_some_and(|model| !model.supports_images)
+        {
+            return Err(SubmissionRejection::ImagesUnsupported);
+        }
+        if images.is_empty()
+            && let Some(parsed) = parse_bash_submission(&text)
+        {
             let (command, exclude_from_context) = parsed?;
             if self.status != ControllerStatus::Active {
                 return Err(SubmissionRejection::Unavailable);
@@ -621,6 +653,7 @@ impl ControllerCore {
                 input: RuntimeInput::Intent(RuntimeIntent::Submit {
                     request: request.clone(),
                     text,
+                    images,
                     kind,
                 }),
             },
@@ -1428,6 +1461,19 @@ impl RuntimeController {
         cx: &mut Context<Self>,
     ) -> Result<AcceptedSubmission, SubmissionRejection> {
         let (submission, effects) = self.core.submit(text, preference)?;
+        self.send_effects(effects);
+        cx.notify();
+        Ok(submission)
+    }
+
+    pub fn submit_with_images(
+        &mut self,
+        text: String,
+        images: Vec<PromptImage>,
+        preference: SubmissionPreference,
+        cx: &mut Context<Self>,
+    ) -> Result<AcceptedSubmission, SubmissionRejection> {
+        let (submission, effects) = self.core.submit_with_images(text, images, preference)?;
         self.send_effects(effects);
         cx.notify();
         Ok(submission)
@@ -2620,6 +2666,53 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn controller_routes_image_attachments_and_checks_model_support() {
+        use crate::services::rpc::{Command, RpcDispatch, dispatch_for_effect};
+        use crate::state::runtime::PromptImage;
+
+        let image = PromptImage {
+            data: "iVBORw0KGgo=".to_owned(),
+            mime_type: "image/png".to_owned(),
+        };
+        let mut core = ready_core();
+        assert_eq!(
+            core.submit_with_images(
+                String::new(),
+                vec![image.clone()],
+                SubmissionPreference::Default,
+            ),
+            Err(SubmissionRejection::ImagesUnsupported)
+        );
+
+        core.runtime
+            .session
+            .data
+            .as_mut()
+            .and_then(|session| session.model.as_mut())
+            .expect("ready model")
+            .supports_images = true;
+        let (_, effects) = core
+            .submit_with_images(
+                String::new(),
+                vec![image.clone()],
+                SubmissionPreference::Default,
+            )
+            .expect("image prompt");
+        let RpcDispatch::Command(Command::Prompt {
+            message,
+            images: Some(images),
+            ..
+        }) = dispatch_for_effect(&effects[0])
+        else {
+            panic!("expected prompt with image");
+        };
+        assert!(message.is_empty());
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].data, image.data);
+        assert_eq!(images[0].mime_type, image.mime_type);
     }
 
     #[test]

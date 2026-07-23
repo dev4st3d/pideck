@@ -6,10 +6,10 @@ use super::runtime::{
     EffectKind, ErrorKind, ExtensionDialog, ExtensionFailure, FacetStatus, HydrationMode,
     MAX_NOTIFICATIONS, MAX_RETIRED_EXTENSION_DIALOGS, MAX_UNKNOWN_RECORDS, MessageBlock,
     MessageRole, NormalizedEvent, NormalizedResponse, OptimisticUserInput, PromptDelivery,
-    QueueContents, RequestFailureKind, RetryState, RuntimeEffect, RuntimeInput, RuntimeIntent,
-    RuntimeLifecycle, RuntimeMessage, RuntimeOperation, RuntimeRequest, RuntimeState, SafeError,
-    SessionMutation, StampedInput, SubmissionKind, ToolExecution, ToolStatus, UnknownRecord,
-    push_bounded,
+    PromptImage, QueueContents, RequestFailureKind, RetryState, RuntimeEffect, RuntimeInput,
+    RuntimeIntent, RuntimeLifecycle, RuntimeMessage, RuntimeOperation, RuntimeRequest,
+    RuntimeState, SafeError, SessionMutation, StampedInput, SubmissionKind, ToolExecution,
+    ToolStatus, UnknownRecord, push_bounded,
 };
 use crate::services::rpc::{EntryId, RequestId};
 
@@ -116,14 +116,15 @@ fn reduce_intent(
         RuntimeIntent::Submit {
             request,
             text,
+            images,
             kind,
-        } => submit(state, request, text, kind, None),
+        } => submit(state, request, text, images, kind, None),
         RuntimeIntent::InvokeCommand {
             request,
             text,
             kind,
             source,
-        } => submit(state, request, text, kind, Some(source)),
+        } => submit(state, request, text, Vec::new(), kind, Some(source)),
         RuntimeIntent::RefreshCommands => {
             state.commands.loading();
             vec![effect(state, RuntimeRequest::GetCommands)]
@@ -338,14 +339,15 @@ fn submit(
     state: &mut RuntimeState,
     request: RequestId,
     text: String,
+    images: Vec<PromptImage>,
     kind: SubmissionKind,
     dynamic_source: Option<CommandSource>,
 ) -> Vec<RuntimeEffect> {
     if matches!(state.prompt_delivery, PromptDelivery::Pending { .. }) {
         return Vec::new();
     }
-    let rejection = if text.trim().is_empty() {
-        Some("Write a prompt first.".to_owned())
+    let rejection = if text.trim().is_empty() && images.is_empty() {
+        Some("Write a prompt or attach an image first.".to_owned())
     } else if !submission_allowed(state.lifecycle, kind) {
         Some(match kind {
             SubmissionKind::Prompt => "Pi is not idle yet.".to_owned(),
@@ -376,6 +378,7 @@ fn submit(
     state.optimistic_user_inputs.push(OptimisticUserInput {
         request: request.clone(),
         text: text.clone(),
+        images: images.clone(),
         kind,
         accepted: false,
         authoritative_seen: false,
@@ -396,6 +399,7 @@ fn submit(
         None => RuntimeRequest::Submit {
             request,
             text,
+            images,
             kind,
         },
     };

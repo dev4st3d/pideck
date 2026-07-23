@@ -17,7 +17,8 @@ impl Composer {
     }
 
     fn render_field(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        let can_submit = !self.disabled && !self.buffer.text().trim().is_empty();
+        let can_submit =
+            !self.disabled && (!self.buffer.text().trim().is_empty() || !self.images.is_empty());
         let handles_composer_keys = self.availability != ComposerAvailability::Unavailable;
         let field_height = self.field_height();
         let field_padding_y = ((field_height - 22.0) / 2.0).max(0.0);
@@ -183,7 +184,8 @@ impl Composer {
     }
 
     fn render_multiline(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        let can_submit = !self.disabled && !self.buffer.text().trim().is_empty();
+        let can_submit =
+            !self.disabled && (!self.buffer.text().trim().is_empty() || !self.images.is_empty());
         let handles_composer_keys = self.availability != ComposerAvailability::Unavailable;
         let running = self.availability == ComposerAvailability::Running;
         let bash_running = self.availability == ComposerAvailability::BashRunning;
@@ -291,12 +293,17 @@ impl Composer {
             .on_scroll_wheel(cx.listener(Self::on_scroll_wheel))
             .child(ComposerTextElement { input: cx.entity() });
 
+        let attachments = (!self.images.is_empty()).then(|| self.render_attachments(cx));
+
         div()
             .id(self.id_prefix.clone())
             .flex()
             .flex_col()
             .gap(px(if panel { 6.0 } else { 0.0 }))
             .child(input)
+            .when_some(attachments, |composer, attachments| {
+                composer.child(attachments)
+            })
             .child(
                 div()
                     .min_h(px(if panel { 28.0 } else { 36.0 }))
@@ -470,5 +477,103 @@ impl Composer {
                             ),
                     ),
             )
+    }
+
+    fn render_attachments(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let rows = self
+            .images
+            .iter()
+            .enumerate()
+            .map(|(index, image)| {
+                let format = image
+                    .mime_type
+                    .strip_prefix("image/")
+                    .unwrap_or(&image.mime_type)
+                    .to_ascii_uppercase();
+                let bytes = super::decoded_image_len(&image.data);
+                div()
+                    .id(gpui::SharedString::from(format!(
+                        "{}-image-{index}",
+                        self.id_prefix
+                    )))
+                    .w_full()
+                    .min_h(px(28.0))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(12.0))
+                    .child(
+                        div()
+                            .min_w_0()
+                            .flex()
+                            .flex_row()
+                            .items_baseline()
+                            .gap(px(8.0))
+                            .child(
+                                div()
+                                    .font_family(theme::SANS)
+                                    .text_size(px(theme::T_UI_SM))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(theme::bone_dim())
+                                    .child(format!("Image {}", index + 1)),
+                            )
+                            .child(
+                                div()
+                                    .font_family(theme::MONO)
+                                    .text_size(px(theme::T_TINY))
+                                    .text_color(theme::smoke())
+                                    .child(format!("{format} · {}", format_image_bytes(bytes))),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .id(gpui::SharedString::from(format!(
+                                "{}-image-{index}-remove",
+                                self.id_prefix
+                            )))
+                            .tab_index(0)
+                            .cursor_pointer()
+                            .px(px(6.0))
+                            .py(px(3.0))
+                            .font_family(theme::SANS)
+                            .text_size(px(theme::T_TINY))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(theme::ash())
+                            .hover(|button| button.text_color(theme::error()))
+                            .focus(|button| button.text_color(theme::focus()))
+                            .on_key_down(cx.listener(
+                                move |view, event: &gpui::KeyDownEvent, _, cx| {
+                                    if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                                        cx.stop_propagation();
+                                        view.remove_image(index, cx);
+                                    }
+                                },
+                            ))
+                            .on_click(cx.listener(move |view, _, _, cx| {
+                                view.remove_image(index, cx);
+                            }))
+                            .child("Remove"),
+                    )
+            })
+            .collect::<Vec<_>>();
+
+        div()
+            .w_full()
+            .px(px(10.0))
+            .py(px(5.0))
+            .bg(theme::canvas())
+            .flex()
+            .flex_col()
+            .children(rows)
+            .into_any_element()
+    }
+}
+
+fn format_image_bytes(bytes: usize) -> String {
+    if bytes >= 1024 * 1024 {
+        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+    } else {
+        format!("{} KB", bytes.div_ceil(1024))
     }
 }

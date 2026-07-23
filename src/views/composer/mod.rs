@@ -6,10 +6,11 @@ mod tests;
 
 use std::ops::Range;
 
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use gpui::{
-    ClipboardItem, Context, EntityInputHandler, EventEmitter, FocusHandle, Focusable, IntoElement,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Render, ScrollWheelEvent, SharedString,
-    UTF16Selection, Window, px,
+    ClipboardEntry, ClipboardItem, Context, EntityInputHandler, EventEmitter, FocusHandle,
+    Focusable, IntoElement, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Render,
+    ScrollWheelEvent, SharedString, UTF16Selection, Window, px,
 };
 
 use self::buffer::TextBuffer;
@@ -21,7 +22,23 @@ use crate::actions::{
     ComposerSelectLineEnd, ComposerSelectLineStart, ComposerSelectRight, ComposerSelectUp,
     ComposerUndo, ComposerUp, InsertNewline, QueueFollowUp,
 };
-use crate::state::runtime::SubmissionKind;
+use crate::state::runtime::{PromptImage, SubmissionKind};
+
+const MAX_IMAGE_ATTACHMENTS: usize = 4;
+const MAX_IMAGE_BYTES: usize = 5 * 1024 * 1024;
+
+fn decoded_image_len(data: &str) -> usize {
+    let padding = data
+        .as_bytes()
+        .iter()
+        .rev()
+        .take_while(|byte| **byte == b'=')
+        .count();
+    data.len()
+        .saturating_div(4)
+        .saturating_mul(3)
+        .saturating_sub(padding)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ComposerChrome {
@@ -56,8 +73,14 @@ pub enum ComposerFeedback {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ComposerEvent {
-    Accept { text: String },
-    FollowUp { text: String },
+    Accept {
+        text: String,
+        images: Vec<PromptImage>,
+    },
+    FollowUp {
+        text: String,
+        images: Vec<PromptImage>,
+    },
     Abort,
     AbortBash,
     CommandNext,
@@ -72,6 +95,8 @@ pub struct Composer {
     chrome: ComposerChrome,
     pub(super) focus_handle: FocusHandle,
     buffer: TextBuffer,
+    images: Vec<PromptImage>,
+    image_bytes: usize,
     placeholder: SharedString,
     masked: bool,
     /// Optional override for Field chrome input height (defaults to 34).
@@ -95,6 +120,8 @@ impl Composer {
             chrome: ComposerChrome::Full,
             focus_handle: cx.focus_handle(),
             buffer: TextBuffer::default(),
+            images: Vec::new(),
+            image_bytes: 0,
             placeholder: "Message Pi…  @ file  / command  ! shell".into(),
             masked: false,
             field_height: None,
@@ -182,6 +209,14 @@ impl Composer {
         self.buffer.text()
     }
 
+    pub fn images(&self) -> &[PromptImage] {
+        &self.images
+    }
+
+    pub fn has_images(&self) -> bool {
+        !self.images.is_empty()
+    }
+
     pub fn set_draft(&mut self, text: &str, cx: &mut Context<Self>) {
         let length = self.buffer.text().len();
         self.buffer.set_selection(0..length, false);
@@ -253,10 +288,15 @@ impl Composer {
         kind: SubmissionKind,
         cx: &mut Context<Self>,
     ) -> bool {
-        let cleared = self.buffer.clear_if_matches(expected_draft);
+        let draft_matches = self.buffer.text() == expected_draft;
+        let text_cleared = self.buffer.clear_if_matches(expected_draft);
+        let images_cleared = draft_matches && !self.images.is_empty();
+        let cleared = text_cleared || images_cleared;
         self.feedback = ComposerFeedback::Accepted(kind);
         self.update_disabled();
         if cleared {
+            self.images.clear();
+            self.image_bytes = 0;
             self.after_edit(cx);
         } else {
             cx.notify();
@@ -419,12 +459,57 @@ impl Composer {
         if self.disabled {
             return;
         }
-        if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
+        let Some(item) = cx.read_from_clipboard() else {
+            return;
+        };
+        if self.chrome == ComposerChrome::Full
+            && let Some(image) = item.entries().iter().find_map(|entry| match entry {
+                ClipboardEntry::Image(image) => Some(image),
+                ClipboardEntry::String(_) => None,
+            })
+        {
+            self.attach_image(image, cx);
+            return;
+        }
+        if let Some(text) = item.text() {
             let text = self.sanitize_input(&text);
             if self.buffer.replace_selection(&text) {
                 self.after_edit(cx);
             }
         }
+    }
+
+    fn attach_image(&mut self, image: &gpui::Image, cx: &mut Context<Self>) {
+        if image.bytes.is_empty() {
+            self.feedback = ComposerFeedback::Rejected(
+                "The clipboard image is empty and could not be attached.".to_owned(),
+            );
+        } else if self.images.len() >= MAX_IMAGE_ATTACHMENTS {
+            self.feedback = ComposerFeedback::Rejected(format!(
+                "You can attach up to {MAX_IMAGE_ATTACHMENTS} images."
+            ));
+        } else if self.image_bytes.saturating_add(image.bytes.len()) > MAX_IMAGE_BYTES {
+            self.feedback =
+                ComposerFeedback::Rejected("Attached images must total 5 MB or less.".to_owned());
+        } else {
+            self.image_bytes += image.bytes.len();
+            self.images.push(PromptImage {
+                data: STANDARD.encode(&image.bytes),
+                mime_type: image.format.mime_type().to_owned(),
+            });
+        }
+        cx.notify();
+    }
+
+    fn remove_image(&mut self, index: usize, cx: &mut Context<Self>) {
+        if self.disabled || index >= self.images.len() {
+            return;
+        }
+        let image = self.images.remove(index);
+        self.image_bytes = self
+            .image_bytes
+            .saturating_sub(decoded_image_len(&image.data));
+        cx.notify();
     }
 
     fn undo(&mut self, _: &ComposerUndo, _: &mut Window, cx: &mut Context<Self>) {
@@ -481,7 +566,7 @@ impl Composer {
     }
 
     fn emit_accept(&mut self, follow_up: bool, cx: &mut Context<Self>) {
-        if self.command_completion_active {
+        if self.command_completion_active && self.images.is_empty() {
             cx.emit(ComposerEvent::CommandAccept);
             return;
         }
@@ -492,15 +577,16 @@ impl Composer {
         if self.chrome == ComposerChrome::Field && self.action_label.is_empty() {
             return;
         }
-        if self.buffer.text().trim().is_empty() {
+        if self.buffer.text().trim().is_empty() && self.images.is_empty() {
             self.feedback = ComposerFeedback::Rejected(match self.chrome {
-                ComposerChrome::Full => "Write a prompt first.".to_owned(),
+                ComposerChrome::Full => "Write a prompt or attach an image first.".to_owned(),
                 ComposerChrome::Panel | ComposerChrome::Field => "Enter a value first.".to_owned(),
             });
             cx.notify();
             return;
         }
         let text = self.buffer.text().to_owned();
+        let images = self.images.clone();
         if follow_up {
             if self.availability != ComposerAvailability::Running {
                 self.feedback = ComposerFeedback::Rejected(
@@ -509,9 +595,9 @@ impl Composer {
                 cx.notify();
                 return;
             }
-            cx.emit(ComposerEvent::FollowUp { text });
+            cx.emit(ComposerEvent::FollowUp { text, images });
         } else {
-            cx.emit(ComposerEvent::Accept { text });
+            cx.emit(ComposerEvent::Accept { text, images });
         }
     }
 
@@ -686,9 +772,9 @@ impl Composer {
     fn hint_text(&self) -> &'static str {
         match self.availability {
             ComposerAvailability::Running => {
-                "Enter steer · Alt+Enter follow up · Shift+Enter newline · Esc abort"
+                "Enter steer · Alt+Enter follow up · Shift+Enter newline · Ctrl+V image · Esc abort"
             }
-            ComposerAvailability::Idle => "Enter send · Shift+Enter newline",
+            ComposerAvailability::Idle => "Enter send · Shift+Enter newline · Ctrl+V image",
             ComposerAvailability::BashRunning => "Esc aborts Bash only",
             ComposerAvailability::BashCancelling => "Waiting for Bash to stop",
             ComposerAvailability::Unavailable | ComposerAvailability::Cancelling => {

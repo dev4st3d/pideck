@@ -4,7 +4,7 @@ use serde_json::Value;
 
 use super::{
     AgentMessage, AssistantContentBlock, Command, CompactionReason, ExtensionError,
-    ExtensionUiMethod, ExtensionUiResponse, ExtensionUiResponseBody, IncomingRecord,
+    ExtensionUiMethod, ExtensionUiResponse, ExtensionUiResponseBody, ImageContent, IncomingRecord,
     KnownExtensionUiMethod, KnownSessionEntry, Model, ModelInput, NotificationType, QueueMode,
     ResponseResult, RpcClientError, RpcClientErrorKind, RpcEvent, RpcResponse, SessionEntry,
     SessionEpoch, SessionTreeNode, SlashCommand, SlashCommandSource, StopReason, StreamingBehavior,
@@ -15,8 +15,8 @@ use crate::state::runtime::{
     DialogRequest, DirectBashResult, EffectKind, EntryKind, ErrorKind, ExtensionFailure,
     ExtensionStatus, ExtensionWidget, MessageBlock, MessageKey, MessageRole, MessageStopReason,
     MessageUsage, ModelSummary, NormalizedEvent, NormalizedResponse, NormalizedSessionState,
-    NotificationKind, QueueDeliveryMode, RequestFailure, RequestFailureKind, RuntimeCommand,
-    RuntimeEffect, RuntimeEntry, RuntimeForkMessage, RuntimeInput, RuntimeMessage,
+    NotificationKind, PromptImage, QueueDeliveryMode, RequestFailure, RequestFailureKind,
+    RuntimeCommand, RuntimeEffect, RuntimeEntry, RuntimeForkMessage, RuntimeInput, RuntimeMessage,
     RuntimeNotification, RuntimeRequest, RuntimeStats, RuntimeThinkingLevel, RuntimeTreeNode,
     SafeError, SessionMutation, SessionSnapshot, StampedInput, SubmissionKind, ToolImage,
     WidgetPlacement, sanitize_untrusted_text,
@@ -102,6 +102,15 @@ pub fn disconnected_input(error: RpcClientError, epoch: SessionEpoch) -> Stamped
     }
 }
 
+fn image_content(images: &[PromptImage]) -> Option<Vec<ImageContent>> {
+    (!images.is_empty()).then(|| {
+        images
+            .iter()
+            .map(|image| ImageContent::new(image.data.clone(), image.mime_type.clone()))
+            .collect()
+    })
+}
+
 fn command_for_request(request: &RuntimeRequest) -> Command {
     match request {
         RuntimeRequest::GetState => Command::GetState,
@@ -114,21 +123,26 @@ fn command_for_request(request: &RuntimeRequest) -> Command {
         RuntimeRequest::GetModels => Command::GetAvailableModels,
         RuntimeRequest::GetTree { .. } => Command::GetTree,
         RuntimeRequest::GetForkMessages => Command::GetForkMessages,
-        RuntimeRequest::Submit { text, kind, .. } => match kind {
-            SubmissionKind::Prompt => Command::Prompt {
-                message: text.clone(),
-                images: None,
-                streaming_behavior: None,
-            },
-            SubmissionKind::Steer => Command::Steer {
-                message: text.clone(),
-                images: None,
-            },
-            SubmissionKind::FollowUp => Command::FollowUp {
-                message: text.clone(),
-                images: None,
-            },
-        },
+        RuntimeRequest::Submit {
+            text, images, kind, ..
+        } => {
+            let images = image_content(images);
+            match kind {
+                SubmissionKind::Prompt => Command::Prompt {
+                    message: text.clone(),
+                    images,
+                    streaming_behavior: None,
+                },
+                SubmissionKind::Steer => Command::Steer {
+                    message: text.clone(),
+                    images,
+                },
+                SubmissionKind::FollowUp => Command::FollowUp {
+                    message: text.clone(),
+                    images,
+                },
+            }
+        }
         RuntimeRequest::InvokeCommand {
             text, kind, source, ..
         } => Command::Prompt {

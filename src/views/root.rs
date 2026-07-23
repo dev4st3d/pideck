@@ -36,9 +36,9 @@ use crate::resource_center::{
 use crate::state::history::{HistoryBrowser, HistoryFilter};
 use crate::state::runtime::{
     BashStatus, CompactionState, DialogAnswer, DialogRequest, MessageBlock, MessageRole,
-    ModelSummary, NotificationKind, PromptDelivery, QueueContents, QueueDeliveryMode, RetryState,
-    RuntimeLifecycle, RuntimeNotification, RuntimeOperation, SubmissionKind, WidgetPlacement,
-    sanitize_untrusted_text,
+    ModelSummary, NotificationKind, PromptDelivery, PromptImage, QueueContents, QueueDeliveryMode,
+    RetryState, RuntimeLifecycle, RuntimeNotification, RuntimeOperation, SubmissionKind,
+    WidgetPlacement, sanitize_untrusted_text,
 };
 use crate::state::{RecoveryAction, ShellProjection};
 use crate::theme;
@@ -431,12 +431,20 @@ impl RootView {
         cx: &mut Context<Self>,
     ) {
         match event {
-            ComposerEvent::Accept { text } => {
-                self.execute_composer_text(text.clone(), SubmissionPreference::Default, window, cx)
-            }
-            ComposerEvent::FollowUp { text } => {
-                self.execute_composer_text(text.clone(), SubmissionPreference::FollowUp, window, cx)
-            }
+            ComposerEvent::Accept { text, images } => self.execute_composer_text(
+                text.clone(),
+                images.clone(),
+                SubmissionPreference::Default,
+                window,
+                cx,
+            ),
+            ComposerEvent::FollowUp { text, images } => self.execute_composer_text(
+                text.clone(),
+                images.clone(),
+                SubmissionPreference::FollowUp,
+                window,
+                cx,
+            ),
             ComposerEvent::Abort => {
                 if self.hotkey_help_open {
                     self.hotkey_help_open = false;
@@ -480,7 +488,8 @@ impl RootView {
         {
             self.dismissed_slash_draft = None;
         }
-        let active = self.dismissed_slash_draft.as_deref() != Some(draft.as_str())
+        let active = !self.composer.read(cx).has_images()
+            && self.dismissed_slash_draft.as_deref() != Some(draft.as_str())
             && self
                 .command_catalog(cx)
                 .slash_completion(&draft)
@@ -562,10 +571,15 @@ impl RootView {
     fn execute_composer_text(
         &mut self,
         text: String,
+        images: Vec<PromptImage>,
         preference: SubmissionPreference,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if !images.is_empty() {
+            self.submit(text, images, preference, cx);
+            return;
+        }
         let catalog = self.command_catalog(cx);
         match catalog.resolve(&text) {
             InvocationResolution::Command { entry, invocation } => {
@@ -587,7 +601,7 @@ impl RootView {
                     cx,
                 );
             }
-            InvocationResolution::NotACommand => self.submit(text, preference, cx),
+            InvocationResolution::NotACommand => self.submit(text, images, preference, cx),
         }
     }
 
@@ -655,7 +669,13 @@ impl RootView {
         }
     }
 
-    fn submit(&mut self, text: String, preference: SubmissionPreference, cx: &mut Context<Self>) {
+    fn submit(
+        &mut self,
+        text: String,
+        images: Vec<PromptImage>,
+        preference: SubmissionPreference,
+        cx: &mut Context<Self>,
+    ) {
         if self.pending_draft.is_some() {
             self.composer.update(cx, |composer, cx| {
                 composer.set_feedback(
@@ -669,7 +689,7 @@ impl RootView {
         }
 
         let result = self.controller.update(cx, |controller, cx| {
-            controller.submit(text.clone(), preference, cx)
+            controller.submit_with_images(text.clone(), images.clone(), preference, cx)
         });
         match result {
             Ok(AcceptedSubmission {
@@ -806,7 +826,7 @@ impl RootView {
         cx: &mut Context<Self>,
     ) {
         match event {
-            ComposerEvent::Accept { text } => {
+            ComposerEvent::Accept { text, .. } => {
                 let expected = if editor {
                     matches!(
                         self.extension_ui
@@ -1172,7 +1192,7 @@ impl RootView {
     }
 
     fn on_compaction_event(&mut self, event: &ComposerEvent, cx: &mut Context<Self>) {
-        let ComposerEvent::Accept { text } = event else {
+        let ComposerEvent::Accept { text, .. } = event else {
             return;
         };
         let focus = text.trim().to_owned();
@@ -1191,7 +1211,7 @@ impl RootView {
     }
 
     fn on_session_name_event(&mut self, event: &ComposerEvent, cx: &mut Context<Self>) {
-        let ComposerEvent::Accept { text } = event else {
+        let ComposerEvent::Accept { text, .. } = event else {
             return;
         };
         let name = text.trim().to_owned();
@@ -1210,7 +1230,7 @@ impl RootView {
     }
 
     fn on_history_label_event(&mut self, event: &ComposerEvent, cx: &mut Context<Self>) {
-        let ComposerEvent::Accept { text } = event else {
+        let ComposerEvent::Accept { text, .. } = event else {
             return;
         };
         let Some(entry) = self.history.selected().cloned() else {
@@ -1226,7 +1246,7 @@ impl RootView {
     }
 
     fn on_import_path_event(&mut self, event: &ComposerEvent, cx: &mut Context<Self>) {
-        let ComposerEvent::Accept { text } = event else {
+        let ComposerEvent::Accept { text, .. } = event else {
             return;
         };
         let path = text.trim().to_owned();
@@ -1239,7 +1259,7 @@ impl RootView {
     }
 
     fn on_auth_input_event(&mut self, event: &ComposerEvent, secret: bool, cx: &mut Context<Self>) {
-        let ComposerEvent::Accept { text } = event else {
+        let ComposerEvent::Accept { text, .. } = event else {
             return;
         };
         let Some(AuthStage::Prompt(prompt)) = self
@@ -2092,7 +2112,7 @@ impl RootView {
         cx: &mut Context<Self>,
     ) {
         match event {
-            ComposerEvent::Accept { text } if !text.trim().is_empty() => {
+            ComposerEvent::Accept { text, .. } if !text.trim().is_empty() => {
                 let Some(agent_id) = self.selected_subagent_id.clone() else {
                     return;
                 };
@@ -2131,7 +2151,7 @@ impl RootView {
     }
 
     fn on_goal_edit_event(&mut self, event: &ComposerEvent, cx: &mut Context<Self>) {
-        let ComposerEvent::Accept { text } = event else {
+        let ComposerEvent::Accept { text, .. } = event else {
             return;
         };
         let objective = text.trim();

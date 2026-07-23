@@ -349,12 +349,18 @@ pub(super) fn text_fragments(projection: &ConversationProjection) -> Vec<(String
             }
         }
     }
-    fragments.extend(projection.accepted_user_inputs.iter().map(|input| {
-        (
-            format!("optimistic:{}:text", input.request.as_str()),
-            input.text.clone(),
-        )
-    }));
+    fragments.extend(
+        projection
+            .accepted_user_inputs
+            .iter()
+            .filter(|input| !input.text.is_empty())
+            .map(|input| {
+                (
+                    format!("optimistic:{}:text", input.request.as_str()),
+                    input.text.clone(),
+                )
+            }),
+    );
     fragments
 }
 
@@ -542,14 +548,22 @@ fn optimistic_turn(
                     optimistic_status(input.kind).to_owned(),
                     theme::data(),
                 ))
-                .child(selectable(
-                    &key,
-                    texts,
-                    theme::SANS,
-                    theme::T_BODY,
-                    theme::bone(),
-                    FontWeight::MEDIUM,
-                )),
+                .when(!input.text.is_empty(), |turn| {
+                    turn.child(selectable(
+                        &key,
+                        texts,
+                        theme::SANS,
+                        theme::T_BODY,
+                        theme::bone(),
+                        FontWeight::MEDIUM,
+                    ))
+                })
+                .children(
+                    input
+                        .images
+                        .iter()
+                        .map(|image| compact_label(format!("Image · {}", image.mime_type))),
+                ),
         )
 }
 
