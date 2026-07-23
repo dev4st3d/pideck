@@ -1086,6 +1086,7 @@ fn extension_dialogs_errors_statuses_and_widgets_have_replacement_semantics() {
             request: DialogRequest::Confirm {
                 title: "Confirm".to_owned(),
                 message: "Proceed?".to_owned(),
+                timeout_ms: None,
             },
         }),
     );
@@ -1116,7 +1117,7 @@ fn extension_dialogs_errors_statuses_and_widgets_have_replacement_semantics() {
             summary: "Extension execution failed".to_owned(),
         })),
     );
-    assert!(state.dialogs.contains_key(&id));
+    assert!(state.dialogs.iter().any(|dialog| dialog.id == id));
     assert_eq!(state.statuses["ext"].text, "Running");
     assert_eq!(state.extension_errors.len(), 1);
 
@@ -1127,7 +1128,7 @@ fn extension_dialogs_errors_statuses_and_widgets_have_replacement_semantics() {
             answer: DialogAnswer::Confirmed(true),
         }),
     );
-    assert!(!state.dialogs.contains_key(&id));
+    assert!(!state.dialogs.iter().any(|dialog| dialog.id == id));
     assert!(matches!(
         effects[0].effect,
         EffectKind::ExtensionUiResponse { .. }
@@ -1148,6 +1149,316 @@ fn extension_dialogs_errors_statuses_and_widgets_have_replacement_semantics() {
     );
     assert!(state.statuses.is_empty());
     assert!(state.widgets.is_empty());
+}
+
+#[test]
+fn extension_dialogs_are_fifo_and_each_id_can_answer_only_once() {
+    let (mut state, _) = connected_state("s1");
+    let first = RequestId::from("dialog-first");
+    let second = RequestId::from("dialog-second");
+    for (id, title) in [(&first, "First"), (&second, "Second")] {
+        apply(
+            &mut state,
+            RuntimeInput::Event(NormalizedEvent::Dialog {
+                id: id.clone(),
+                request: DialogRequest::Confirm {
+                    title: title.to_owned(),
+                    message: "Continue?".to_owned(),
+                    timeout_ms: None,
+                },
+            }),
+        );
+    }
+    assert_eq!(state.dialogs.front().map(|dialog| &dialog.id), Some(&first));
+
+    let out_of_order = apply(
+        &mut state,
+        RuntimeInput::Intent(RuntimeIntent::AnswerDialog {
+            request: second.clone(),
+            answer: DialogAnswer::Confirmed(true),
+        }),
+    );
+    assert!(out_of_order.is_empty());
+
+    let answered = apply(
+        &mut state,
+        RuntimeInput::Intent(RuntimeIntent::AnswerDialog {
+            request: first.clone(),
+            answer: DialogAnswer::Confirmed(false),
+        }),
+    );
+    assert_eq!(answered.len(), 1);
+    assert_eq!(
+        state.dialogs.front().map(|dialog| &dialog.id),
+        Some(&second)
+    );
+    assert!(state.retired_dialogs.contains(&first));
+
+    assert!(
+        apply(
+            &mut state,
+            RuntimeInput::Intent(RuntimeIntent::AnswerDialog {
+                request: first.clone(),
+                answer: DialogAnswer::Confirmed(true),
+            }),
+        )
+        .is_empty()
+    );
+    apply(
+        &mut state,
+        RuntimeInput::Event(NormalizedEvent::Dialog {
+            id: first,
+            request: DialogRequest::Input {
+                title: "Duplicate".to_owned(),
+                placeholder: None,
+                timeout_ms: None,
+            },
+        }),
+    );
+    assert_eq!(state.dialogs.len(), 1);
+}
+
+#[test]
+fn extension_dialog_timeout_and_user_answer_races_never_emit_a_late_response() {
+    let start = Instant::now();
+    let (mut expired_first, _) = connected_state("s1");
+    let expired_epoch = expired_first.epoch;
+    let id = RequestId::from("timeout-first");
+    reduce(
+        &mut expired_first,
+        StampedInput {
+            generation: GENERATION,
+            epoch: expired_epoch,
+            observed_at: start,
+            input: RuntimeInput::Event(NormalizedEvent::Dialog {
+                id: id.clone(),
+                request: DialogRequest::Input {
+                    title: "Quick input".to_owned(),
+                    placeholder: None,
+                    timeout_ms: Some(5),
+                },
+            }),
+        },
+    );
+    let expiry = reduce(
+        &mut expired_first,
+        StampedInput {
+            generation: GENERATION,
+            epoch: expired_epoch,
+            observed_at: start + std::time::Duration::from_millis(5),
+            input: RuntimeInput::Intent(RuntimeIntent::ExpireDialog {
+                request: id.clone(),
+            }),
+        },
+    );
+    assert!(
+        expiry.is_empty(),
+        "Pi auto-resolves; the host sends nothing"
+    );
+    assert!(
+        apply(
+            &mut expired_first,
+            RuntimeInput::Intent(RuntimeIntent::AnswerDialog {
+                request: id,
+                answer: DialogAnswer::Value("late".to_owned()),
+            }),
+        )
+        .is_empty()
+    );
+
+    let (mut answered_first, _) = connected_state("s1");
+    let answered_epoch = answered_first.epoch;
+    let id = RequestId::from("answer-first");
+    reduce(
+        &mut answered_first,
+        StampedInput {
+            generation: GENERATION,
+            epoch: answered_epoch,
+            observed_at: start,
+            input: RuntimeInput::Event(NormalizedEvent::Dialog {
+                id: id.clone(),
+                request: DialogRequest::Confirm {
+                    title: "Quick confirm".to_owned(),
+                    message: "Continue?".to_owned(),
+                    timeout_ms: Some(5),
+                },
+            }),
+        },
+    );
+    let answer = reduce(
+        &mut answered_first,
+        StampedInput {
+            generation: GENERATION,
+            epoch: answered_epoch,
+            observed_at: start + std::time::Duration::from_millis(4),
+            input: RuntimeInput::Intent(RuntimeIntent::AnswerDialog {
+                request: id.clone(),
+                answer: DialogAnswer::Confirmed(true),
+            }),
+        },
+    );
+    assert_eq!(answer.len(), 1);
+    let late_expiry = reduce(
+        &mut answered_first,
+        StampedInput {
+            generation: GENERATION,
+            epoch: answered_epoch,
+            observed_at: start + std::time::Duration::from_millis(6),
+            input: RuntimeInput::Intent(RuntimeIntent::ExpireDialog { request: id }),
+        },
+    );
+    assert!(late_expiry.is_empty());
+
+    let (mut late_click, _) = connected_state("s1");
+    let late_epoch = late_click.epoch;
+    let id = RequestId::from("late-click");
+    reduce(
+        &mut late_click,
+        StampedInput {
+            generation: GENERATION,
+            epoch: late_epoch,
+            observed_at: start,
+            input: RuntimeInput::Event(NormalizedEvent::Dialog {
+                id: id.clone(),
+                request: DialogRequest::Confirm {
+                    title: "Expired".to_owned(),
+                    message: "Too late?".to_owned(),
+                    timeout_ms: Some(5),
+                },
+            }),
+        },
+    );
+    let late_answer = reduce(
+        &mut late_click,
+        StampedInput {
+            generation: GENERATION,
+            epoch: late_epoch,
+            observed_at: start + std::time::Duration::from_millis(5),
+            input: RuntimeInput::Intent(RuntimeIntent::AnswerDialog {
+                request: id.clone(),
+                answer: DialogAnswer::Confirmed(true),
+            }),
+        },
+    );
+    assert!(late_answer.is_empty());
+    assert!(late_click.retired_dialogs.contains(&id));
+}
+
+#[test]
+fn malformed_dialog_requests_cancel_once_without_exposing_payloads() {
+    let (mut state, _) = connected_state("s1");
+    let id = RequestId::from("malformed-dialog");
+    let effects = apply(
+        &mut state,
+        RuntimeInput::Event(NormalizedEvent::MalformedExtensionRequest {
+            id: id.clone(),
+            method: "select".to_owned(),
+            dialog: true,
+        }),
+    );
+    assert!(matches!(
+        effects.as_slice(),
+        [RuntimeEffect {
+            effect: EffectKind::ExtensionUiResponse {
+                request,
+                answer: DialogAnswer::Cancelled
+            },
+            ..
+        }] if request == &id
+    ));
+    assert!(state.retired_dialogs.contains(&id));
+    assert_eq!(
+        state
+            .extension_errors
+            .back()
+            .map(|error| error.summary.as_str()),
+        Some("Malformed extension UI request")
+    );
+
+    assert!(
+        apply(
+            &mut state,
+            RuntimeInput::Event(NormalizedEvent::MalformedExtensionRequest {
+                id,
+                method: "select".to_owned(),
+                dialog: true,
+            }),
+        )
+        .is_empty()
+    );
+}
+
+#[test]
+fn captured_fake_extension_stream_drives_every_stock_ui_surface() {
+    let fixture = include_bytes!("fixtures/pi_0_80_10_inbound.jsonl");
+    let mut codec = pi_gui::services::rpc::JsonlCodec::default();
+    let records = codec.feed(fixture).expect("fixture decodes");
+    let (mut state, _) = connected_state("s1");
+    for record in records {
+        if !matches!(
+            record,
+            IncomingRecord::ExtensionUiRequest(_) | IncomingRecord::ExtensionError(_)
+        ) {
+            continue;
+        }
+        let input = normalize_tagged_record(
+            TaggedIncomingRecord {
+                generation: GENERATION,
+                record,
+            },
+            state.epoch,
+        )
+        .expect("extension record normalizes");
+        reduce(&mut state, input);
+    }
+
+    assert_eq!(
+        state
+            .dialogs
+            .iter()
+            .map(|dialog| dialog.kind())
+            .collect::<Vec<_>>(),
+        ["select", "confirm", "input", "editor"]
+    );
+    assert_eq!(
+        state.notifications.back().map(|item| item.message.as_str()),
+        Some("Notice")
+    );
+    assert_eq!(state.statuses["fixture"].text, "Ready");
+    assert_eq!(state.widgets["fixture"].lines, ["One", "Two"]);
+    assert_eq!(state.title.as_deref(), Some("Fixture"));
+    assert_eq!(state.requested_editor_text.as_deref(), Some("draft"));
+    assert_eq!(
+        state
+            .extension_errors
+            .back()
+            .map(|error| (error.extension.as_str(), error.event.as_str())),
+        Some(("extension.ts", "tool_call"))
+    );
+
+    let answers = [
+        DialogAnswer::Value("One".to_owned()),
+        DialogAnswer::Confirmed(true),
+        DialogAnswer::Value("input".to_owned()),
+        DialogAnswer::Value("edited".to_owned()),
+    ];
+    let mut response_ids = Vec::new();
+    for answer in answers {
+        let request = state.dialogs.front().expect("queued dialog").id.clone();
+        let effects = apply(
+            &mut state,
+            RuntimeInput::Intent(RuntimeIntent::AnswerDialog {
+                request: request.clone(),
+                answer,
+            }),
+        );
+        assert_eq!(effects.len(), 1);
+        response_ids.push(request);
+    }
+    response_ids.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+    response_ids.dedup();
+    assert_eq!(response_ids.len(), 4);
+    assert!(state.dialogs.is_empty());
 }
 
 #[test]
@@ -1343,13 +1654,16 @@ fn all_session_replacements_increment_epoch_before_emission_and_rehydrate() {
     for mutation in mutations {
         let (mut state, _) = connected_state("s1");
         let old_epoch = state.epoch;
-        state.dialogs.insert(
-            RequestId::from("old-dialog"),
-            DialogRequest::Input {
+        state.dialogs.push_back(ExtensionDialog {
+            id: RequestId::from("old-dialog"),
+            request: DialogRequest::Input {
                 title: "Old".to_owned(),
                 placeholder: None,
+                timeout_ms: None,
             },
-        );
+            received_at: Instant::now(),
+            deadline: None,
+        });
         let effects = apply(
             &mut state,
             RuntimeInput::Intent(RuntimeIntent::ReplaceSession(mutation.clone())),
@@ -1845,13 +2159,16 @@ fn long_streamed_content_is_not_truncated_or_split_into_duplicate_messages() {
 fn process_crash_preserves_last_valid_data_and_invalidates_dialogs() {
     let (mut state, _) = connected_state("s1");
     state.messages.ready(vec![message("a", "saved", true)]);
-    state.dialogs.insert(
-        RequestId::from("dialog"),
-        DialogRequest::Input {
+    state.dialogs.push_back(ExtensionDialog {
+        id: RequestId::from("dialog"),
+        request: DialogRequest::Input {
             title: "Input".to_owned(),
             placeholder: None,
+            timeout_ms: None,
         },
-    );
+        received_at: Instant::now(),
+        deadline: None,
+    });
     apply(
         &mut state,
         RuntimeInput::Disconnected {
@@ -2357,13 +2674,16 @@ fn crash_after_acceptance_preserves_last_durable_transcript_read_only() {
 #[test]
 fn crash_during_switch_invalidates_dialogs_and_requires_explicit_reconnect() {
     let (mut state, _) = connected_state("s1");
-    state.dialogs.insert(
-        RequestId::from("switch-dialog"),
-        DialogRequest::Confirm {
+    state.dialogs.push_back(ExtensionDialog {
+        id: RequestId::from("switch-dialog"),
+        request: DialogRequest::Confirm {
             title: "Continue".to_owned(),
             message: "Switch?".to_owned(),
+            timeout_ms: None,
         },
-    );
+        received_at: Instant::now(),
+        deadline: None,
+    });
     apply(
         &mut state,
         RuntimeInput::Intent(RuntimeIntent::ReplaceSession(SessionMutation::Switch {

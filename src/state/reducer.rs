@@ -1,13 +1,15 @@
 use std::collections::{HashMap, HashSet};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use super::runtime::{
-    BashExecution, BashStatus, CommandSource, CompactionState, EffectKind, ErrorKind, FacetStatus,
-    HydrationMode, MAX_NOTIFICATIONS, MAX_UNKNOWN_RECORDS, MessageBlock, MessageRole,
-    NormalizedEvent, NormalizedResponse, OptimisticUserInput, PromptDelivery, QueueContents,
-    RequestFailureKind, RetryState, RuntimeEffect, RuntimeInput, RuntimeIntent, RuntimeLifecycle,
-    RuntimeMessage, RuntimeOperation, RuntimeRequest, RuntimeState, SafeError, SessionMutation,
-    StampedInput, SubmissionKind, ToolExecution, ToolStatus, UnknownRecord, push_bounded,
+    BashExecution, BashStatus, CommandSource, CompactionState, DialogAnswer, DialogRequest,
+    EffectKind, ErrorKind, ExtensionDialog, ExtensionFailure, FacetStatus, HydrationMode,
+    MAX_NOTIFICATIONS, MAX_RETIRED_EXTENSION_DIALOGS, MAX_UNKNOWN_RECORDS, MessageBlock,
+    MessageRole, NormalizedEvent, NormalizedResponse, OptimisticUserInput, PromptDelivery,
+    QueueContents, RequestFailureKind, RetryState, RuntimeEffect, RuntimeInput, RuntimeIntent,
+    RuntimeLifecycle, RuntimeMessage, RuntimeOperation, RuntimeRequest, RuntimeState, SafeError,
+    SessionMutation, StampedInput, SubmissionKind, ToolExecution, ToolStatus, UnknownRecord,
+    push_bounded,
 };
 use crate::services::rpc::{EntryId, RequestId};
 
@@ -31,10 +33,10 @@ pub fn reduce(state: &mut RuntimeState, stamped: StampedInput) -> Vec<RuntimeEff
         RuntimeInput::Event(event) => {
             if state.replacement_awaiting_state {
                 state.stale_inputs_ignored = state.stale_inputs_ignored.saturating_add(1);
+                Vec::new()
             } else {
-                reduce_event(state, event, stamped.observed_at);
+                reduce_event(state, event, stamped.observed_at)
             }
-            Vec::new()
         }
     }
 }
@@ -57,6 +59,8 @@ fn connect(
         state.replacement_awaiting_state = false;
         state.pending_operation = None;
         invalidate_extension_ui(state);
+        state.retired_dialogs.clear();
+        state.retired_dialog_order.clear();
     }
     if matches!(state.prompt_delivery, PromptDelivery::Pending { .. }) {
         mark_prompt_uncertain(state);
@@ -289,10 +293,43 @@ fn reduce_intent(
         }
         RuntimeIntent::ReplaceSession(mutation) => begin_session_replacement(state, mutation),
         RuntimeIntent::AnswerDialog { request, answer } => {
-            if state.dialogs.remove(&request).is_none() {
+            let Some(index) = state.dialogs.iter().position(|dialog| dialog.id == request) else {
+                return Vec::new();
+            };
+            if index != 0 {
                 return Vec::new();
             }
+            if state.dialogs[index]
+                .deadline
+                .is_some_and(|deadline| observed_at >= deadline)
+            {
+                state.dialogs.remove(index);
+                retire_dialog(state, request);
+                state.bump_revision();
+                return Vec::new();
+            }
+            if !dialog_answer_matches(&state.dialogs[index].request, &answer) {
+                return Vec::new();
+            }
+            state.dialogs.remove(index);
+            retire_dialog(state, request.clone());
+            state.bump_revision();
             vec![extension_response(state, request, answer)]
+        }
+        RuntimeIntent::ExpireDialog { request } => {
+            let Some(index) = state.dialogs.iter().position(|dialog| dialog.id == request) else {
+                return Vec::new();
+            };
+            if state.dialogs[index]
+                .deadline
+                .is_none_or(|deadline| observed_at < deadline)
+            {
+                return Vec::new();
+            }
+            state.dialogs.remove(index);
+            retire_dialog(state, request);
+            state.bump_revision();
+            Vec::new()
         }
     }
 }
@@ -914,7 +951,12 @@ fn apply_state_hydration(
     ]
 }
 
-fn reduce_event(state: &mut RuntimeState, event: NormalizedEvent, observed_at: Instant) {
+fn reduce_event(
+    state: &mut RuntimeState,
+    event: NormalizedEvent,
+    observed_at: Instant,
+) -> Vec<RuntimeEffect> {
+    let mut effects = Vec::new();
     match event {
         NormalizedEvent::AgentStart | NormalizedEvent::TurnStart => {
             state.lifecycle = RuntimeLifecycle::Running;
@@ -1133,7 +1175,71 @@ fn reduce_event(state: &mut RuntimeState, event: NormalizedEvent, observed_at: I
             }
         }
         NormalizedEvent::Dialog { id, request } => {
-            state.dialogs.insert(id, request);
+            if matches!(
+                &request,
+                DialogRequest::Select { options, .. } if options.is_empty()
+            ) {
+                push_bounded(
+                    &mut state.extension_errors,
+                    ExtensionFailure {
+                        extension: "extension".to_owned(),
+                        event: "select".to_owned(),
+                        summary: "Malformed extension UI request".to_owned(),
+                    },
+                    super::runtime::MAX_RUNTIME_ERRORS,
+                );
+                if !state.retired_dialogs.contains(&id) {
+                    retire_dialog(state, id.clone());
+                    effects.push(extension_response(state, id, DialogAnswer::Cancelled));
+                }
+                state.bump_revision();
+            } else if state.retired_dialogs.contains(&id)
+                || state.dialogs.iter().any(|dialog| dialog.id == id)
+            {
+                push_bounded(
+                    &mut state.unknown_records,
+                    UnknownRecord {
+                        record_type: "extension_ui_request:duplicate_id".to_owned(),
+                    },
+                    MAX_UNKNOWN_RECORDS,
+                );
+            } else {
+                let timeout_ms = match &request {
+                    DialogRequest::Select { timeout_ms, .. }
+                    | DialogRequest::Confirm { timeout_ms, .. }
+                    | DialogRequest::Input { timeout_ms, .. } => *timeout_ms,
+                    DialogRequest::Editor { .. } => None,
+                };
+                let deadline = timeout_ms
+                    .filter(|timeout| *timeout > 0)
+                    .and_then(|timeout| observed_at.checked_add(Duration::from_millis(timeout)));
+                state.dialogs.push_back(ExtensionDialog {
+                    id,
+                    request,
+                    received_at: observed_at,
+                    deadline,
+                });
+                state.bump_revision();
+            }
+        }
+        NormalizedEvent::MalformedExtensionRequest { id, method, dialog } => {
+            push_bounded(
+                &mut state.extension_errors,
+                ExtensionFailure {
+                    extension: "extension".to_owned(),
+                    event: method,
+                    summary: "Malformed extension UI request".to_owned(),
+                },
+                super::runtime::MAX_RUNTIME_ERRORS,
+            );
+            if dialog
+                && !state.retired_dialogs.contains(&id)
+                && !state.dialogs.iter().any(|pending| pending.id == id)
+            {
+                retire_dialog(state, id.clone());
+                effects.push(extension_response(state, id, DialogAnswer::Cancelled));
+            }
+            state.bump_revision();
         }
         NormalizedEvent::Notify(notification) => {
             push_bounded(&mut state.notifications, notification, MAX_NOTIFICATIONS);
@@ -1169,6 +1275,7 @@ fn reduce_event(state: &mut RuntimeState, event: NormalizedEvent, observed_at: I
             );
         }
     }
+    effects
 }
 
 fn settle(state: &mut RuntimeState) {
@@ -1222,6 +1329,31 @@ fn invalidate_extension_ui(state: &mut RuntimeState) {
     state.widgets.clear();
     state.title = None;
     state.requested_editor_text = None;
+}
+
+fn dialog_answer_matches(request: &DialogRequest, answer: &DialogAnswer) -> bool {
+    match (request, answer) {
+        (_, DialogAnswer::Cancelled) => true,
+        (DialogRequest::Select { options, .. }, DialogAnswer::Value(value)) => {
+            options.iter().any(|option| option == value)
+        }
+        (DialogRequest::Confirm { .. }, DialogAnswer::Confirmed(_))
+        | (DialogRequest::Input { .. }, DialogAnswer::Value(_))
+        | (DialogRequest::Editor { .. }, DialogAnswer::Value(_)) => true,
+        _ => false,
+    }
+}
+
+fn retire_dialog(state: &mut RuntimeState, request: RequestId) {
+    if !state.retired_dialogs.insert(request.clone()) {
+        return;
+    }
+    if state.retired_dialog_order.len() == MAX_RETIRED_EXTENSION_DIALOGS
+        && let Some(expired) = state.retired_dialog_order.pop_front()
+    {
+        state.retired_dialogs.remove(&expired);
+    }
+    state.retired_dialog_order.push_back(request);
 }
 
 fn mark_prompt_uncertain(state: &mut RuntimeState) {

@@ -65,6 +65,7 @@ pub enum KnownExtensionUiMethod {
 #[derive(Debug, Clone, PartialEq)]
 pub enum ExtensionUiMethod {
     Known(KnownExtensionUiMethod),
+    Malformed { method: String, dialog: bool },
     Unknown { method: String, raw: Value },
 }
 
@@ -82,6 +83,9 @@ impl Serialize for ExtensionUiRequest {
         let mut value = match &self.request {
             ExtensionUiMethod::Known(request) => {
                 serde_json::to_value(request).map_err(serde::ser::Error::custom)?
+            }
+            ExtensionUiMethod::Malformed { method, .. } => {
+                serde_json::json!({ "method": method })
             }
             ExtensionUiMethod::Unknown { raw, .. } => raw.clone(),
         };
@@ -122,13 +126,17 @@ impl<'de> Deserialize<'de> for ExtensionUiRequest {
         let method = object
             .get("method")
             .and_then(Value::as_str)
-            .ok_or_else(|| D::Error::custom("extension UI request requires string `method`"))?;
+            .ok_or_else(|| D::Error::custom("extension UI request requires string `method`"))?
+            .to_owned();
 
-        let request = match method {
+        let request = match method.as_str() {
             "select" | "confirm" | "input" | "editor" | "notify" | "setStatus" | "setWidget"
             | "setTitle" | "set_editor_text" => serde_json::from_value(value)
                 .map(ExtensionUiMethod::Known)
-                .map_err(D::Error::custom)?,
+                .unwrap_or_else(|_| ExtensionUiMethod::Malformed {
+                    method: method.clone(),
+                    dialog: matches!(method.as_str(), "select" | "confirm" | "input" | "editor"),
+                }),
             unknown => ExtensionUiMethod::Unknown {
                 method: unknown.to_owned(),
                 raw: value,

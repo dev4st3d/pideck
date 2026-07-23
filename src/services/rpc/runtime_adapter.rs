@@ -19,7 +19,7 @@ use crate::state::runtime::{
     RuntimeEffect, RuntimeEntry, RuntimeForkMessage, RuntimeInput, RuntimeMessage,
     RuntimeNotification, RuntimeRequest, RuntimeStats, RuntimeThinkingLevel, RuntimeTreeNode,
     SafeError, SessionMutation, SessionSnapshot, StampedInput, SubmissionKind, ToolImage,
-    WidgetPlacement,
+    WidgetPlacement, sanitize_untrusted_text,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -516,35 +516,59 @@ fn normalize_event(event: RpcEvent) -> NormalizedEvent {
 fn normalize_extension_request(request: super::ExtensionUiRequest) -> NormalizedEvent {
     let id = request.id;
     match request.request {
-        ExtensionUiMethod::Known(KnownExtensionUiMethod::Select { title, options, .. }) => {
-            NormalizedEvent::Dialog {
-                id,
-                request: DialogRequest::Select { title, options },
-            }
-        }
-        ExtensionUiMethod::Known(KnownExtensionUiMethod::Confirm { title, message, .. }) => {
-            NormalizedEvent::Dialog {
-                id,
-                request: DialogRequest::Confirm { title, message },
-            }
-        }
-        ExtensionUiMethod::Known(KnownExtensionUiMethod::Input {
-            title, placeholder, ..
+        ExtensionUiMethod::Known(KnownExtensionUiMethod::Select {
+            title,
+            options,
+            timeout,
         }) => NormalizedEvent::Dialog {
             id,
-            request: DialogRequest::Input { title, placeholder },
+            request: DialogRequest::Select {
+                title: sanitize_untrusted_text(&title),
+                options: options
+                    .into_iter()
+                    .map(|option| sanitize_untrusted_text(&option))
+                    .collect(),
+                timeout_ms: timeout,
+            },
+        },
+        ExtensionUiMethod::Known(KnownExtensionUiMethod::Confirm {
+            title,
+            message,
+            timeout,
+        }) => NormalizedEvent::Dialog {
+            id,
+            request: DialogRequest::Confirm {
+                title: sanitize_untrusted_text(&title),
+                message: sanitize_untrusted_text(&message),
+                timeout_ms: timeout,
+            },
+        },
+        ExtensionUiMethod::Known(KnownExtensionUiMethod::Input {
+            title,
+            placeholder,
+            timeout,
+        }) => NormalizedEvent::Dialog {
+            id,
+            request: DialogRequest::Input {
+                title: sanitize_untrusted_text(&title),
+                placeholder: placeholder.map(|value| sanitize_untrusted_text(&value)),
+                timeout_ms: timeout,
+            },
         },
         ExtensionUiMethod::Known(KnownExtensionUiMethod::Editor { title, prefill }) => {
             NormalizedEvent::Dialog {
                 id,
-                request: DialogRequest::Editor { title, prefill },
+                request: DialogRequest::Editor {
+                    title: sanitize_untrusted_text(&title),
+                    prefill: prefill.map(|value| sanitize_untrusted_text(&value)),
+                },
             }
         }
         ExtensionUiMethod::Known(KnownExtensionUiMethod::Notify {
             message,
             notify_type,
         }) => NormalizedEvent::Notify(RuntimeNotification {
-            message,
+            message: sanitize_untrusted_text(&message),
             kind: match notify_type.unwrap_or(NotificationType::Info) {
                 NotificationType::Info => NotificationKind::Info,
                 NotificationType::Warning => NotificationKind::Warning,
@@ -556,7 +580,9 @@ fn normalize_extension_request(request: super::ExtensionUiRequest) -> Normalized
             status_text,
         }) => NormalizedEvent::SetStatus {
             key: status_key,
-            value: status_text.map(|text| ExtensionStatus { text }),
+            value: status_text.map(|text| ExtensionStatus {
+                text: sanitize_untrusted_text(&text),
+            }),
         },
         ExtensionUiMethod::Known(KnownExtensionUiMethod::SetWidget {
             widget_key,
@@ -565,7 +591,10 @@ fn normalize_extension_request(request: super::ExtensionUiRequest) -> Normalized
         }) => NormalizedEvent::SetWidget {
             key: widget_key,
             value: widget_lines.map(|lines| ExtensionWidget {
-                lines,
+                lines: lines
+                    .into_iter()
+                    .map(|line| sanitize_untrusted_text(&line))
+                    .collect(),
                 placement: match widget_placement {
                     Some(super::WidgetPlacement::BelowEditor) => WidgetPlacement::BelowEditor,
                     Some(super::WidgetPlacement::AboveEditor) | None => {
@@ -575,10 +604,17 @@ fn normalize_extension_request(request: super::ExtensionUiRequest) -> Normalized
             }),
         },
         ExtensionUiMethod::Known(KnownExtensionUiMethod::SetTitle { title }) => {
-            NormalizedEvent::SetTitle(title)
+            NormalizedEvent::SetTitle(sanitize_untrusted_text(&title))
         }
         ExtensionUiMethod::Known(KnownExtensionUiMethod::SetEditorText { text }) => {
-            NormalizedEvent::SetEditorText(text)
+            NormalizedEvent::SetEditorText(sanitize_untrusted_text(&text))
+        }
+        ExtensionUiMethod::Malformed { method, dialog } => {
+            NormalizedEvent::MalformedExtensionRequest {
+                id,
+                method: safe_identifier(&method),
+                dialog,
+            }
         }
         ExtensionUiMethod::Unknown { method, .. } => NormalizedEvent::Unknown {
             record_type: format!("extension_ui_request:{}", safe_identifier(&method)),

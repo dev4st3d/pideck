@@ -172,6 +172,30 @@ fn extension_ui_responses_serialize_with_exact_wire_discriminators() {
     }
 }
 
+#[test]
+fn malformed_known_extension_requests_remain_decodable_without_retaining_payloads() {
+    let record = IncomingRecord::from_value(json!({
+        "type":"extension_ui_request",
+        "id":"bad-select",
+        "method":"select",
+        "title":"Missing options",
+        "secretPayload":"must-not-survive"
+    }))
+    .expect("a malformed extension request must not fault the connection");
+    let IncomingRecord::ExtensionUiRequest(request) = record else {
+        panic!("expected extension UI request");
+    };
+    assert_eq!(request.id, RequestId::from("bad-select"));
+    assert!(matches!(
+        request.request,
+        ExtensionUiMethod::Malformed {
+            ref method,
+            dialog: true
+        } if method == "select"
+    ));
+    assert!(!format!("{:?}", request.request).contains("must-not-survive"));
+}
+
 fn model() -> Value {
     json!({
         "id":"synthetic-model",

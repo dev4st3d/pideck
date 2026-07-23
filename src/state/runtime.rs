@@ -10,6 +10,7 @@ use crate::services::rpc::{
 pub const MAX_RUNTIME_ERRORS: usize = 32;
 pub const MAX_UNKNOWN_RECORDS: usize = 32;
 pub const MAX_NOTIFICATIONS: usize = 32;
+pub const MAX_RETIRED_EXTENSION_DIALOGS: usize = 256;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuntimeLifecycle {
@@ -595,14 +596,17 @@ pub enum DialogRequest {
     Select {
         title: String,
         options: Vec<String>,
+        timeout_ms: Option<u64>,
     },
     Confirm {
         title: String,
         message: String,
+        timeout_ms: Option<u64>,
     },
     Input {
         title: String,
         placeholder: Option<String>,
+        timeout_ms: Option<u64>,
     },
     Editor {
         title: String,
@@ -615,6 +619,34 @@ pub enum DialogAnswer {
     Value(String),
     Confirmed(bool),
     Cancelled,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExtensionDialog {
+    pub id: RequestId,
+    pub request: DialogRequest,
+    pub received_at: Instant,
+    pub deadline: Option<Instant>,
+}
+
+impl ExtensionDialog {
+    pub fn title(&self) -> &str {
+        match &self.request {
+            DialogRequest::Select { title, .. }
+            | DialogRequest::Confirm { title, .. }
+            | DialogRequest::Input { title, .. }
+            | DialogRequest::Editor { title, .. } => title,
+        }
+    }
+
+    pub fn kind(&self) -> &'static str {
+        match self.request {
+            DialogRequest::Select { .. } => "select",
+            DialogRequest::Confirm { .. } => "confirm",
+            DialogRequest::Input { .. } => "input",
+            DialogRequest::Editor { .. } => "editor",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -691,7 +723,9 @@ pub struct RuntimeState {
     pub pending_operation: Option<RuntimeOperation>,
     pub context_awaiting_fresh_usage: bool,
     pub auto_retry_enabled: Option<bool>,
-    pub dialogs: HashMap<RequestId, DialogRequest>,
+    pub dialogs: VecDeque<ExtensionDialog>,
+    pub retired_dialogs: HashSet<RequestId>,
+    pub retired_dialog_order: VecDeque<RequestId>,
     pub statuses: BTreeMap<String, ExtensionStatus>,
     pub widgets: BTreeMap<String, ExtensionWidget>,
     pub notifications: VecDeque<RuntimeNotification>,
@@ -741,7 +775,9 @@ impl RuntimeState {
             pending_operation: None,
             context_awaiting_fresh_usage: false,
             auto_retry_enabled: None,
-            dialogs: HashMap::new(),
+            dialogs: VecDeque::new(),
+            retired_dialogs: HashSet::new(),
+            retired_dialog_order: VecDeque::new(),
             statuses: BTreeMap::new(),
             widgets: BTreeMap::new(),
             notifications: VecDeque::new(),
@@ -876,6 +912,9 @@ pub enum RuntimeIntent {
     AnswerDialog {
         request: RequestId,
         answer: DialogAnswer,
+    },
+    ExpireDialog {
+        request: RequestId,
     },
 }
 
@@ -1078,6 +1117,11 @@ pub enum NormalizedEvent {
     Dialog {
         id: RequestId,
         request: DialogRequest,
+    },
+    MalformedExtensionRequest {
+        id: RequestId,
+        method: String,
+        dialog: bool,
     },
     Notify(RuntimeNotification),
     SetStatus {

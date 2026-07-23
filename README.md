@@ -4,7 +4,7 @@ Native Windows-first desktop shell for Pi, built with Rust and GPUI 0.2.2.
 
 ## Current maturity
 
-Phases 9 through 13 complete run-control recovery UX, Pi's persisted session lifecycle, native branch history, the model/provider experience, and the unified command system. Startup, discovery, correlated readiness, hydration, prompt acceptance, message streaming, tools, retries, compaction, session catalog scanning, direct Bash, SDK session/model operations, command discovery, and shutdown all run behind dedicated workers. The GPUI-owned controller observes normalized state and never performs I/O from `render`.
+Phases 9 through 14 complete run-control recovery UX, Pi's persisted session lifecycle, native branch history, the model/provider experience, the unified command system, and the stock RPC extension UI host. Startup, discovery, correlated readiness, hydration, prompt acceptance, message streaming, tools, retries, compaction, session catalog scanning, direct Bash, SDK session/model operations, command discovery, and shutdown all run behind dedicated workers. The GPUI-owned controller observes normalized state and never performs I/O from `render`.
 
 The visible shell now shows only live or explicitly Loading, Awaiting, Unknown, stale, stopped, and error values:
 
@@ -28,6 +28,9 @@ The visible shell now shows only live or explicitly Loading, Awaiting, Unknown, 
 - `/` autocomplete plus a `Ctrl+Shift+P` palette merging native actions with Pi-discovered extension, prompt-template, and skill commands. Results are grouped by kind, retain duplicate/suffixed names, and show installed scope/origin/source/path provenance;
 - native model/session/tree/fork/clone/compact/export/copy/abort/settings/help actions that never round-trip through the model, with argument hints for native commands and a refresh command for retained stale catalogs.
 - native RPC notifications are shown as dismissible in-app notices, while installed TUI-only layout commands such as `/box`, `/rail`, and `/topbar` are omitted and guarded from model delivery.
+- stock `select`, `confirm`, `input`, and `editor` extension dialogs in a deterministic FIFO modal queue, with focus containment, Escape cancellation, answer-type validation, one response per request ID, and timeout/process/session tombstones that prevent late or duplicate answers;
+- keyed `setStatus` and text-line `setWidget` replacement/clear semantics, above/below-composer widget placement, native window `setTitle`, immediate last-write-wins `set_editor_text`, and redacted extension errors that retain only source basename and event context;
+- an explicit RPC capability boundary: `custom()` overlays/components, component-factory widgets, custom editor/header/footer, TUI renderers, themes, and the process-local extension event bus are unsupported. Extension dialogs are untrusted application content, not secure permission prompts, because stock requests carry no verified provenance.
 
 Accepted idle input uses `prompt`. While Pi is running, the primary action uses `steer` and follow-ups use `follow_up`. A composer line beginning with `!` executes the remaining text through Pi's direct `bash` RPC; `!!` does the same with `excludeFromContext=true`. Direct Bash is recorded locally until the authoritative session message reconciles it. Escape and the visible abort action route to `abort_bash` while direct Bash is active, independently from agent `abort`. Empty and rapid duplicate submissions are rejected. Prompt drafts clear only after the matching accepted response; Bash drafts clear when the local execution is recorded. Rejection and uncertain disconnect never trigger replay.
 
@@ -77,6 +80,10 @@ If no model is available, open Settings > Providers, authenticate, refresh catal
 | Queue follow-up while running | `Alt+Enter` |
 | Run direct Bash / exclude it from context | `!command` / `!!command` |
 | Abort active agent run or direct Bash scope | `Escape` |
+| Move within an extension select/confirm dialog | Arrow keys |
+| Accept the highlighted extension choice | `Enter` or `Space` |
+| Cancel an extension dialog | `Escape` |
+| Keep focus inside an extension dialog | `Tab` or `Shift+Tab` |
 | Activate visible recovery action | `Enter` or `Space` |
 | Next focus | `Tab` |
 | Previous focus | `Shift+Tab` |

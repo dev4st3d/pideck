@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -11,9 +12,9 @@ use pi_gui::services::pi_process::{
     DiscoveryError, PiLaunchConfig, ProjectTrust, ResourcePolicy, SessionLaunch, StartError,
 };
 use pi_gui::services::rpc::{
-    Command, ConnectionStatus, ExtensionUiResponse, ExtensionUiResponseBody, IncomingRecord,
-    RequestId, ResponseResult, RpcClient, RpcClientErrorKind, RpcClientStartError, RpcDeadlines,
-    RpcEvent, ThinkingLevel,
+    Command, ConnectionStatus, ExtensionUiMethod, ExtensionUiResponse, ExtensionUiResponseBody,
+    IncomingRecord, KnownExtensionUiMethod, RequestId, ResponseResult, RpcClient,
+    RpcClientErrorKind, RpcClientStartError, RpcDeadlines, RpcEvent, ThinkingLevel,
 };
 
 static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(1);
@@ -584,5 +585,171 @@ fn installed_pi_smoke_is_isolated_offline_and_closes_cleanly() {
         !report.forced,
         "installed Pi should close after stdin closes"
     );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn installed_pi_real_extension_demo_exercises_every_stock_dialog() {
+    let root = std::env::temp_dir().join(format!(
+        "pi-gui-extension-demo-{}-{}",
+        std::process::id(),
+        NEXT_DIRECTORY.fetch_add(1, Ordering::Relaxed)
+    ));
+    let agent_directory = root.join("isolated agent directory");
+    fs::create_dir_all(&agent_directory).expect("create isolated Pi directory");
+    let extension =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/stock_extension_ui_demo.ts");
+    let mut resources = ResourcePolicy::disabled();
+    resources.extensions.push(extension);
+    let mut config = PiLaunchConfig::new(
+        &root,
+        ProjectTrust::Reject,
+        SessionLaunch::Ephemeral,
+        resources,
+    );
+    config.executable_override = std::env::var_os("PI_GUI_TEST_PI").map(PathBuf::from);
+    config.offline = true;
+    config.disable_tools = true;
+    config.environment_overrides.push((
+        OsString::from("PI_CODING_AGENT_DIR"),
+        agent_directory.as_os_str().to_owned(),
+    ));
+    config.probe_timeout = Duration::from_secs(15);
+    config.shutdown_timeout = Duration::from_secs(3);
+
+    let client = match RpcClient::start_with_deadlines(config, RpcDeadlines::default()) {
+        Ok(client) => client,
+        Err(RpcClientStartError::Process(StartError::Discovery(
+            DiscoveryError::MissingFromPath
+            | DiscoveryError::IncompatibleVersion { .. }
+            | DiscoveryError::MissingCapabilities(_),
+        ))) => {
+            let _ = fs::remove_dir_all(root);
+            return;
+        }
+        Err(error) => panic!("installed Pi extension demo failed to start: {error}"),
+    };
+
+    let call = client.request(Command::Prompt {
+        message: "/stock-ui-dialogs".to_owned(),
+        images: None,
+        streaming_behavior: None,
+    });
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut methods = Vec::new();
+    let mut fire_methods = HashSet::new();
+    while methods.len() < 4 && Instant::now() < deadline {
+        let Ok(record) = client.recv_notification_timeout(Duration::from_millis(250)) else {
+            continue;
+        };
+        let IncomingRecord::ExtensionUiRequest(request) = record.record else {
+            continue;
+        };
+        let ExtensionUiMethod::Known(method) = request.request else {
+            continue;
+        };
+        let (name, response) = match method {
+            KnownExtensionUiMethod::Select { options, .. } => {
+                ("select", ExtensionUiResponseBody::Value(options[0].clone()))
+            }
+            KnownExtensionUiMethod::Confirm { .. } => {
+                ("confirm", ExtensionUiResponseBody::Confirmed(true))
+            }
+            KnownExtensionUiMethod::Input { .. } => (
+                "input",
+                ExtensionUiResponseBody::Value("demo input".to_owned()),
+            ),
+            KnownExtensionUiMethod::Editor { .. } => (
+                "editor",
+                ExtensionUiResponseBody::Value("edited\ntext".to_owned()),
+            ),
+            KnownExtensionUiMethod::Notify { .. } => {
+                fire_methods.insert("notify");
+                continue;
+            }
+            KnownExtensionUiMethod::SetStatus { .. } => {
+                fire_methods.insert("setStatus");
+                continue;
+            }
+            KnownExtensionUiMethod::SetWidget { .. } => {
+                fire_methods.insert("setWidget");
+                continue;
+            }
+            KnownExtensionUiMethod::SetTitle { .. } => {
+                fire_methods.insert("setTitle");
+                continue;
+            }
+            KnownExtensionUiMethod::SetEditorText { .. } => {
+                fire_methods.insert("set_editor_text");
+                continue;
+            }
+        };
+        methods.push(name);
+        client
+            .send_extension_ui_response(ExtensionUiResponse {
+                id: request.id,
+                response,
+            })
+            .expect("answer real extension dialog");
+    }
+    assert_eq!(methods, ["select", "confirm", "input", "editor"]);
+    assert_response_command(
+        call.wait().expect("real extension command response").result,
+        "prompt",
+    );
+
+    let replace = client.request(Command::Prompt {
+        message: "/stock-ui-replace-clear".to_owned(),
+        images: None,
+        streaming_behavior: None,
+    });
+    assert_response_command(
+        replace.wait().expect("replacement command response").result,
+        "prompt",
+    );
+    let drain_deadline = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < drain_deadline {
+        let Ok(record) = client.recv_notification_timeout(Duration::from_millis(100)) else {
+            continue;
+        };
+        if let IncomingRecord::ExtensionUiRequest(request) = record.record {
+            match request.request {
+                ExtensionUiMethod::Known(KnownExtensionUiMethod::Notify { .. }) => {
+                    fire_methods.insert("notify");
+                }
+                ExtensionUiMethod::Known(KnownExtensionUiMethod::SetStatus { .. }) => {
+                    fire_methods.insert("setStatus");
+                }
+                ExtensionUiMethod::Known(KnownExtensionUiMethod::SetWidget { .. }) => {
+                    fire_methods.insert("setWidget");
+                }
+                ExtensionUiMethod::Known(KnownExtensionUiMethod::SetTitle { .. }) => {
+                    fire_methods.insert("setTitle");
+                }
+                ExtensionUiMethod::Known(KnownExtensionUiMethod::SetEditorText { ref text })
+                    if text == "Draft supplied by the stock demo extension." =>
+                {
+                    fire_methods.insert("set_editor_text");
+                }
+                _ => {}
+            }
+        }
+        if fire_methods.len() == 5 {
+            break;
+        }
+    }
+    assert_eq!(
+        fire_methods,
+        HashSet::from([
+            "notify",
+            "setStatus",
+            "setWidget",
+            "setTitle",
+            "set_editor_text",
+        ])
+    );
+
+    let report = client.stop().expect("stop installed Pi extension demo");
+    assert!(!report.forced);
     let _ = fs::remove_dir_all(root);
 }

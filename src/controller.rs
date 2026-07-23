@@ -25,11 +25,11 @@ use crate::services::session_catalog::{
 };
 use crate::state::reducer::reduce;
 use crate::state::runtime::{
-    BashExecution, BashStatus, CommandSource, CompactionState, FacetStatus, PromptDelivery,
-    QueueContents, QueueDeliveryMode, RetryState, RuntimeCommand, RuntimeForkMessage, RuntimeInput,
-    RuntimeIntent, RuntimeLifecycle, RuntimeMessage, RuntimeNotification, RuntimeOperation,
-    RuntimeState, RuntimeThinkingLevel, RuntimeTreeNode, SafeError, StampedInput, SubmissionKind,
-    ToolExecution,
+    BashExecution, BashStatus, CommandSource, CompactionState, DialogAnswer, ExtensionDialog,
+    ExtensionFailure, ExtensionStatus, ExtensionWidget, FacetStatus, PromptDelivery, QueueContents,
+    QueueDeliveryMode, RetryState, RuntimeCommand, RuntimeForkMessage, RuntimeInput, RuntimeIntent,
+    RuntimeLifecycle, RuntimeMessage, RuntimeNotification, RuntimeOperation, RuntimeState,
+    RuntimeThinkingLevel, RuntimeTreeNode, SafeError, StampedInput, SubmissionKind, ToolExecution,
 };
 use crate::state::{ControllerStatus, ShellProjection};
 
@@ -111,6 +111,16 @@ pub struct HistoryProjection {
     pub fork_messages: Vec<RuntimeForkMessage>,
     pub lifecycle: RuntimeLifecycle,
     pub switching: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExtensionUiProjection {
+    pub active_dialog: Option<ExtensionDialog>,
+    pub queued_dialogs: usize,
+    pub statuses: Vec<(String, ExtensionStatus)>,
+    pub widgets: Vec<(String, ExtensionWidget)>,
+    pub title: Option<String>,
+    pub errors: Vec<ExtensionFailure>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -491,6 +501,27 @@ impl ControllerCore {
         }
     }
 
+    pub fn extension_ui_projection(&self) -> ExtensionUiProjection {
+        ExtensionUiProjection {
+            active_dialog: self.runtime.dialogs.front().cloned(),
+            queued_dialogs: self.runtime.dialogs.len().saturating_sub(1),
+            statuses: self
+                .runtime
+                .statuses
+                .iter()
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect(),
+            widgets: self
+                .runtime
+                .widgets
+                .iter()
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect(),
+            title: self.runtime.title.clone(),
+            errors: self.runtime.extension_errors.iter().cloned().collect(),
+        }
+    }
+
     pub fn submit(
         &mut self,
         text: String,
@@ -674,6 +705,18 @@ impl ControllerCore {
             return Vec::new();
         }
         self.intent(RuntimeIntent::AbortRetry)
+    }
+
+    pub fn answer_dialog(
+        &mut self,
+        request: RequestId,
+        answer: DialogAnswer,
+    ) -> Vec<crate::state::runtime::RuntimeEffect> {
+        self.intent(RuntimeIntent::AnswerDialog { request, answer })
+    }
+
+    pub fn expire_dialog(&mut self, request: RequestId) {
+        let _ = self.intent(RuntimeIntent::ExpireDialog { request });
     }
 
     pub fn set_steering_mode(
@@ -982,6 +1025,10 @@ impl RuntimeController {
 
     pub fn history_projection(&self) -> HistoryProjection {
         self.core.history_projection()
+    }
+
+    pub fn extension_ui_projection(&self) -> ExtensionUiProjection {
+        self.core.extension_ui_projection()
     }
 
     pub fn command_catalog_projection(&self) -> CommandCatalogProjection {
@@ -1303,6 +1350,20 @@ impl RuntimeController {
 
     pub fn abort_retry(&mut self, cx: &mut Context<Self>) -> bool {
         self.send_core_effects(|core| core.abort_retry(), cx)
+    }
+
+    pub fn answer_dialog(
+        &mut self,
+        request: RequestId,
+        answer: DialogAnswer,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        self.send_core_effects(|core| core.answer_dialog(request, answer), cx)
+    }
+
+    pub fn expire_dialog(&mut self, request: RequestId, cx: &mut Context<Self>) {
+        self.core.expire_dialog(request);
+        cx.notify();
     }
 
     pub fn set_steering_mode(&mut self, mode: QueueDeliveryMode, cx: &mut Context<Self>) -> bool {

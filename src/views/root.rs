@@ -18,8 +18,8 @@ use crate::command_catalog::{
 };
 use crate::controller::{
     AcceptedSubmission, AcceptedSubmissionKind, BridgeProjection, CatalogProjection, CatalogStatus,
-    ComposerRuntime, ConversationProjection, HistoryProjection, ModelRuntimeProjection,
-    RuntimeController, SubmissionPreference,
+    ComposerRuntime, ConversationProjection, ExtensionUiProjection, HistoryProjection,
+    ModelRuntimeProjection, RuntimeController, SubmissionPreference,
 };
 use crate::model_runtime::{
     AuthMethod, AuthPromptKind, AuthStage, CatalogPhase, ModelCatalogEntry, ModelChangePolicy,
@@ -27,9 +27,10 @@ use crate::model_runtime::{
 };
 use crate::state::history::{HistoryBrowser, HistoryFilter};
 use crate::state::runtime::{
-    BashStatus, CompactionState, MessageBlock, MessageRole, NotificationKind, PromptDelivery,
-    QueueContents, QueueDeliveryMode, RetryState, RuntimeLifecycle, RuntimeNotification,
-    RuntimeOperation, SubmissionKind,
+    BashStatus, CompactionState, DialogAnswer, DialogRequest, MessageBlock, MessageRole,
+    NotificationKind, PromptDelivery, QueueContents, QueueDeliveryMode, RetryState,
+    RuntimeLifecycle, RuntimeNotification, RuntimeOperation, SubmissionKind, WidgetPlacement,
+    sanitize_untrusted_text,
 };
 use crate::state::{RecoveryAction, ShellProjection};
 use crate::theme;
@@ -44,6 +45,7 @@ struct PendingDraft {
 }
 
 const MAX_VISIBLE_RUNTIME_NOTIFICATIONS: usize = 3;
+type RootClickHandler = Box<dyn Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum HistoryConfirmation {
@@ -70,6 +72,14 @@ enum ModelSettingsTab {
     Usage,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExtensionDialogKey {
+    Cancel,
+    ContainFocus,
+    Move(isize),
+    AcceptSelection,
+}
+
 pub struct RootView {
     controller: Entity<RuntimeController>,
     composer: Entity<Composer>,
@@ -82,6 +92,8 @@ pub struct RootView {
     command_search_composer: Entity<Composer>,
     auth_input_composer: Entity<Composer>,
     auth_secret_composer: Entity<Composer>,
+    extension_input_composer: Entity<Composer>,
+    extension_editor_composer: Entity<Composer>,
     model_panel: Option<ModelPanel>,
     command_palette_open: bool,
     hotkey_help_open: bool,
@@ -92,6 +104,12 @@ pub struct RootView {
     dismissed_slash_draft: Option<String>,
     last_slash_draft: String,
     active_auth_prompt_id: Option<String>,
+    extension_ui: ExtensionUiProjection,
+    active_extension_dialog_id: Option<crate::services::rpc::RequestId>,
+    extension_dialog_selection: usize,
+    extension_dialog_focus: FocusHandle,
+    extension_dialog_timeout_task: Option<Task<()>>,
+    window_title: String,
     history: HistoryBrowser,
     history_focus: FocusHandle,
     history_open: bool,
@@ -121,6 +139,8 @@ pub struct RootView {
     _command_search_subscription: Subscription,
     _auth_input_subscription: Subscription,
     _auth_secret_subscription: Subscription,
+    _extension_input_subscription: Subscription,
+    _extension_editor_subscription: Subscription,
 }
 
 impl RootView {
@@ -164,8 +184,14 @@ impl RootView {
         let auth_secret_composer = cx.new(|cx| {
             Composer::secret_field("provider-auth-secret", "Credential...", "Continue", cx)
         });
+        let extension_input_composer = cx
+            .new(|cx| Composer::field("extension-dialog-input", "Enter a value...", "Submit", cx));
+        let extension_editor_composer =
+            cx.new(|cx| Composer::scoped("extension-dialog-editor", "Edit text...", "Submit", cx));
         let history_focus = cx.focus_handle();
+        let extension_dialog_focus = cx.focus_handle();
         let conversation = controller.read(cx).conversation_projection();
+        let extension_ui = controller.read(cx).extension_ui_projection();
         let transcript_texts = conversation::text_fragments(&conversation)
             .into_iter()
             .map(|(key, text)| {
@@ -233,6 +259,17 @@ impl RootView {
             cx.subscribe_in(&auth_secret_composer, window, |view, _, event, _, cx| {
                 view.on_auth_input_event(event, true, cx)
             });
+        let extension_input_subscription = cx.subscribe_in(
+            &extension_input_composer,
+            window,
+            |view, _, event, window, cx| view.on_extension_composer_event(event, false, window, cx),
+        );
+        let extension_editor_subscription = cx.subscribe_in(
+            &extension_editor_composer,
+            window,
+            |view, _, event, window, cx| view.on_extension_composer_event(event, true, window, cx),
+        );
+        window.set_window_title("Pi GUI");
         Self {
             controller,
             composer,
@@ -245,6 +282,8 @@ impl RootView {
             command_search_composer,
             auth_input_composer,
             auth_secret_composer,
+            extension_input_composer,
+            extension_editor_composer,
             model_panel: None,
             command_palette_open: false,
             hotkey_help_open: false,
@@ -255,6 +294,12 @@ impl RootView {
             dismissed_slash_draft: None,
             last_slash_draft: String::new(),
             active_auth_prompt_id: None,
+            extension_ui,
+            active_extension_dialog_id: None,
+            extension_dialog_selection: 0,
+            extension_dialog_focus,
+            extension_dialog_timeout_task: None,
+            window_title: "Pi GUI".to_owned(),
             history: HistoryBrowser::default(),
             history_focus,
             history_open: false,
@@ -284,6 +329,8 @@ impl RootView {
             _command_search_subscription: command_search_subscription,
             _auth_input_subscription: auth_input_subscription,
             _auth_secret_subscription: auth_secret_subscription,
+            _extension_input_subscription: extension_input_subscription,
+            _extension_editor_subscription: extension_editor_subscription,
         }
     }
 
@@ -317,6 +364,9 @@ impl RootView {
     }
 
     fn on_abort_run(&mut self, _: &AbortRun, window: &mut Window, cx: &mut Context<Self>) {
+        if self.cancel_extension_dialog(window, cx) {
+            return;
+        }
         let _ = self.execute_native_action(NativeAction::Abort, "", window, cx);
     }
 
@@ -665,6 +715,236 @@ impl RootView {
             }
         }
         cx.notify();
+    }
+
+    fn answer_extension_dialog(
+        &mut self,
+        answer: DialogAnswer,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(dialog) = self.extension_ui.active_dialog.as_ref() else {
+            return;
+        };
+        let request = dialog.id.clone();
+        let answered = self.controller.update(cx, |controller, cx| {
+            controller.answer_dialog(request, answer, cx)
+        });
+        if answered {
+            self.extension_dialog_timeout_task = None;
+            window.focus(&self.composer.read(cx).focus_handle(cx));
+        }
+    }
+
+    fn cancel_extension_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if self.extension_ui.active_dialog.is_none() {
+            return false;
+        }
+        self.answer_extension_dialog(DialogAnswer::Cancelled, window, cx);
+        true
+    }
+
+    fn on_extension_composer_event(
+        &mut self,
+        event: &ComposerEvent,
+        editor: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            ComposerEvent::Accept { text } => {
+                let expected = if editor {
+                    matches!(
+                        self.extension_ui
+                            .active_dialog
+                            .as_ref()
+                            .map(|dialog| &dialog.request),
+                        Some(DialogRequest::Editor { .. })
+                    )
+                } else {
+                    matches!(
+                        self.extension_ui
+                            .active_dialog
+                            .as_ref()
+                            .map(|dialog| &dialog.request),
+                        Some(DialogRequest::Input { .. })
+                    )
+                };
+                if expected {
+                    self.answer_extension_dialog(DialogAnswer::Value(text.clone()), window, cx);
+                }
+            }
+            ComposerEvent::Abort | ComposerEvent::AbortBash => {
+                self.cancel_extension_dialog(window, cx);
+            }
+            ComposerEvent::FollowUp { .. }
+            | ComposerEvent::CommandNext
+            | ComposerEvent::CommandPrevious
+            | ComposerEvent::CommandAccept
+            | ComposerEvent::CommandDismiss => {}
+        }
+    }
+
+    fn move_extension_dialog_selection(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let count = match self
+            .extension_ui
+            .active_dialog
+            .as_ref()
+            .map(|dialog| &dialog.request)
+        {
+            Some(DialogRequest::Select { options, .. }) => options.len(),
+            Some(DialogRequest::Confirm { .. }) => 2,
+            _ => 0,
+        };
+        if count == 0 {
+            return;
+        }
+        self.extension_dialog_selection =
+            (self.extension_dialog_selection as isize + delta).rem_euclid(count as isize) as usize;
+        cx.notify();
+    }
+
+    fn accept_extension_dialog_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let answer = match self
+            .extension_ui
+            .active_dialog
+            .as_ref()
+            .map(|dialog| &dialog.request)
+        {
+            Some(DialogRequest::Select { options, .. }) => options
+                .get(self.extension_dialog_selection)
+                .cloned()
+                .map(DialogAnswer::Value),
+            Some(DialogRequest::Confirm { .. }) => Some(DialogAnswer::Confirmed(
+                self.extension_dialog_selection == 1,
+            )),
+            _ => None,
+        };
+        if let Some(answer) = answer {
+            self.answer_extension_dialog(answer, window, cx);
+        }
+    }
+
+    fn on_extension_dialog_key_down(
+        &mut self,
+        event: &gpui::KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let dialog_kind = self
+            .extension_ui
+            .active_dialog
+            .as_ref()
+            .map(|dialog| dialog.kind());
+        match extension_dialog_key(dialog_kind, event.keystroke.key.as_str()) {
+            Some(ExtensionDialogKey::Cancel) => {
+                cx.stop_propagation();
+                self.cancel_extension_dialog(window, cx);
+            }
+            Some(ExtensionDialogKey::ContainFocus) => {
+                cx.stop_propagation();
+                self.focus_active_extension_dialog(window, cx);
+            }
+            Some(ExtensionDialogKey::Move(delta)) => {
+                cx.stop_propagation();
+                self.move_extension_dialog_selection(delta, cx);
+            }
+            Some(ExtensionDialogKey::AcceptSelection) => {
+                cx.stop_propagation();
+                self.accept_extension_dialog_selection(window, cx);
+            }
+            None => {}
+        }
+    }
+
+    fn focus_active_extension_dialog(&self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(dialog) = self.extension_ui.active_dialog.as_ref() else {
+            return;
+        };
+        match dialog.request {
+            DialogRequest::Input { .. } => {
+                window.focus(&self.extension_input_composer.read(cx).focus_handle(cx));
+            }
+            DialogRequest::Editor { .. } => {
+                window.focus(&self.extension_editor_composer.read(cx).focus_handle(cx));
+            }
+            DialogRequest::Select { .. } | DialogRequest::Confirm { .. } => {
+                window.focus(&self.extension_dialog_focus);
+            }
+        }
+    }
+
+    fn sync_extension_ui(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let projection = self.controller.read(cx).extension_ui_projection();
+        let dialog_id = projection
+            .active_dialog
+            .as_ref()
+            .map(|dialog| dialog.id.clone());
+        let dialog_changed = dialog_id != self.active_extension_dialog_id;
+        self.extension_ui = projection;
+
+        let title = self
+            .extension_ui
+            .title
+            .as_deref()
+            .map(single_line_title)
+            .filter(|title| !title.is_empty())
+            .unwrap_or_else(|| "Pi GUI".to_owned());
+        if title != self.window_title {
+            window.set_window_title(&title);
+            self.window_title = title;
+        }
+
+        if !dialog_changed {
+            return;
+        }
+        self.active_extension_dialog_id = dialog_id;
+        self.extension_dialog_selection = 0;
+        self.extension_dialog_timeout_task = None;
+        let Some(dialog) = self.extension_ui.active_dialog.clone() else {
+            window.focus(&self.composer.read(cx).focus_handle(cx));
+            return;
+        };
+
+        self.command_palette_open = false;
+        self.hotkey_help_open = false;
+        self.model_panel = None;
+        match &dialog.request {
+            DialogRequest::Input { placeholder, .. } => {
+                let placeholder = placeholder
+                    .as_deref()
+                    .filter(|value| !value.is_empty())
+                    .unwrap_or("Enter a value...")
+                    .to_owned();
+                self.extension_input_composer
+                    .update(cx, move |composer, cx| {
+                        composer.set_draft("", cx);
+                        composer.set_placeholder(placeholder, cx);
+                        composer.set_availability(ComposerAvailability::Idle, cx);
+                    });
+            }
+            DialogRequest::Editor { prefill, .. } => {
+                self.extension_editor_composer.update(cx, |composer, cx| {
+                    composer.set_draft(prefill.as_deref().unwrap_or_default(), cx);
+                    composer.set_availability(ComposerAvailability::Idle, cx);
+                });
+            }
+            DialogRequest::Select { .. } | DialogRequest::Confirm { .. } => {}
+        }
+        self.focus_active_extension_dialog(window, cx);
+
+        if let Some(deadline) = dialog.deadline {
+            let request = dialog.id;
+            let delay = deadline.saturating_duration_since(std::time::Instant::now());
+            self.extension_dialog_timeout_task = Some(cx.spawn(async move |view, cx| {
+                cx.background_executor().timer(delay).await;
+                let _ = view.update(cx, |view, cx| {
+                    view.controller.update(cx, |controller, cx| {
+                        controller.expire_dialog(request, cx);
+                    });
+                });
+            }));
+        }
     }
 
     fn execute_native_action(
@@ -1250,6 +1530,7 @@ impl RootView {
 
     fn sync_runtime(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         cx.defer_in(window, |view, _, cx| view.collect_runtime_notifications(cx));
+        self.sync_extension_ui(window, cx);
         let conversation = self.controller.read(cx).conversation_projection();
         let epoch_changed = conversation.epoch != self.conversation.epoch;
         if epoch_changed {
@@ -1259,14 +1540,12 @@ impl RootView {
         let history = self.controller.read(cx).history_projection();
         self.history
             .synchronize(&history.tree, history.leaf_id.as_ref());
-        if epoch_changed {
-            let restored = self
-                .controller
-                .update(cx, |controller, _| controller.take_requested_editor_text());
-            if let Some(text) = restored {
-                self.composer
-                    .update(cx, |composer, cx| composer.set_draft(&text, cx));
-            }
+        let requested_editor_text = self
+            .controller
+            .update(cx, |controller, _| controller.take_requested_editor_text());
+        if let Some(text) = requested_editor_text {
+            self.composer
+                .update(cx, |composer, cx| composer.set_draft(&text, cx));
         }
         let fragments = conversation::text_fragments(&conversation);
         let active = fragments
@@ -1406,7 +1685,8 @@ impl RootView {
         self.composer.update(cx, |composer, cx| {
             composer.set_availability(availability, cx)
         });
-        if self.model_panel.is_none()
+        if self.extension_ui.active_dialog.is_none()
+            && self.model_panel.is_none()
             && !was_available
             && matches!(
                 availability,
@@ -1593,11 +1873,25 @@ impl RootView {
         }
     }
 
-    fn on_focus_next(&mut self, _: &FocusNext, window: &mut Window, _: &mut Context<Self>) {
+    fn on_focus_next(&mut self, _: &FocusNext, window: &mut Window, cx: &mut Context<Self>) {
+        if self.extension_ui.active_dialog.is_some() {
+            // Extension requests are modal: global focus traversal must not escape behind them.
+            self.focus_active_extension_dialog(window, cx);
+            return;
+        }
         window.focus_next();
     }
 
-    fn on_focus_previous(&mut self, _: &FocusPrevious, window: &mut Window, _: &mut Context<Self>) {
+    fn on_focus_previous(
+        &mut self,
+        _: &FocusPrevious,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.extension_ui.active_dialog.is_some() {
+            self.focus_active_extension_dialog(window, cx);
+            return;
+        }
         window.focus_prev();
     }
 
@@ -1607,6 +1901,9 @@ impl RootView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.extension_ui.active_dialog.is_some() {
+            return;
+        }
         if self.command_palette_open {
             self.close_command_palette(window, cx);
         } else {
@@ -1615,6 +1912,9 @@ impl RootView {
     }
 
     fn on_show_hotkeys(&mut self, _: &ShowHotkeys, window: &mut Window, cx: &mut Context<Self>) {
+        if self.extension_ui.active_dialog.is_some() {
+            return;
+        }
         if self.hotkey_help_open {
             self.hotkey_help_open = false;
             window.focus(&self.composer.read(cx).focus_handle(cx));
@@ -1784,6 +2084,7 @@ impl Render for RootView {
                     .child(inspector(
                         &projection,
                         &self.conversation,
+                        &self.extension_ui,
                         &self.compaction_composer,
                         cx,
                     )),
@@ -1804,6 +2105,7 @@ impl Render for RootView {
                             command_scroll: &self.slash_command_scroll,
                             slash_dismissed: self.dismissed_slash_draft.as_deref()
                                 == Some(self.composer.read(cx).draft()),
+                            extension_ui: &self.extension_ui,
                         },
                         cx,
                     ))
@@ -1823,6 +2125,17 @@ impl Render for RootView {
             })
             .when(!self.runtime_notifications.is_empty(), |shell| {
                 shell.child(runtime_notification_stack(&self.runtime_notifications, cx))
+            })
+            .when_some(self.extension_ui.active_dialog.clone(), |shell, dialog| {
+                shell.child(extension_dialog_overlay(
+                    &dialog,
+                    self.extension_ui.queued_dialogs,
+                    self.extension_dialog_selection,
+                    &self.extension_dialog_focus,
+                    &self.extension_input_composer,
+                    &self.extension_editor_composer,
+                    cx,
+                ))
             })
     }
 }
@@ -3989,6 +4302,428 @@ fn runtime_notification_stack(
         .children(cards)
 }
 
+fn extension_widgets(
+    extension_ui: &ExtensionUiProjection,
+    placement: WidgetPlacement,
+) -> impl IntoElement {
+    div()
+        .px(px(12.0))
+        .py(px(8.0))
+        .border_b_1()
+        .border_color(theme::edge_soft())
+        .flex()
+        .flex_col()
+        .gap(px(7.0))
+        .children(
+            extension_ui
+                .widgets
+                .iter()
+                .filter(move |(_, widget)| widget.placement == placement)
+                .map(|(key, widget)| {
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(3.0))
+                        .child(
+                            div()
+                                .font_family(theme::MONO)
+                                .text_size(px(theme::T_TINY))
+                                .text_color(theme::data())
+                                .child(sanitize_untrusted_text(key)),
+                        )
+                        .children(widget.lines.iter().map(|line| {
+                            div()
+                                .font_family(theme::MONO)
+                                .text_size(px(theme::T_MONO_SM))
+                                .line_height(px(17.0))
+                                .text_color(theme::bone_dim())
+                                .child(line.clone())
+                        }))
+                }),
+        )
+}
+
+fn extension_status_bar(extension_ui: &ExtensionUiProjection) -> impl IntoElement {
+    div()
+        .px(px(12.0))
+        .py(px(6.0))
+        .border_t_1()
+        .border_color(theme::edge_soft())
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(12.0))
+        .children(extension_ui.statuses.iter().map(|(key, status)| {
+            div()
+                .min_w_0()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(5.0))
+                .child(
+                    div()
+                        .font_family(theme::MONO)
+                        .text_size(px(theme::T_TINY))
+                        .text_color(theme::data())
+                        .child(sanitize_untrusted_text(key)),
+                )
+                .child(
+                    div()
+                        .min_w_0()
+                        .font_family(theme::SANS)
+                        .text_size(px(theme::T_TINY))
+                        .text_color(theme::ash())
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .whitespace_nowrap()
+                        .child(status.text.clone()),
+                )
+        }))
+}
+
+fn extension_diagnostics_panel(extension_ui: &ExtensionUiProjection) -> impl IntoElement {
+    const UNSUPPORTED: [&str; 6] = [
+        "custom() overlays and components",
+        "component-factory widgets",
+        "custom editor, header, and footer",
+        "TUI message and entry renderers",
+        "theme enumeration and switching",
+        "process-local extension event bus",
+    ];
+
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(8.0))
+        .child(controls::section_label("Extensions"))
+        .when(!extension_ui.errors.is_empty(), |panel| {
+            panel.child(controls::divider_list().children(
+                extension_ui.errors.iter().rev().take(4).map(|error| {
+                    div()
+                        .py(px(6.0))
+                        .flex()
+                        .flex_col()
+                        .gap(px(2.0))
+                        .child(
+                            div()
+                                .font_family(theme::MONO)
+                                .text_size(px(theme::T_TINY))
+                                .text_color(theme::error())
+                                .child(format!("{} · {}", error.extension, error.event)),
+                        )
+                        .child(
+                            div()
+                                .font_family(theme::SANS)
+                                .text_size(px(theme::T_TINY))
+                                .text_color(theme::ash())
+                                .child(error.summary.clone()),
+                        )
+                }),
+            ))
+        })
+        .child(
+            div()
+                .font_family(theme::SANS)
+                .text_size(px(theme::T_TINY))
+                .line_height(px(16.0))
+                .text_color(theme::smoke())
+                .child("Stock RPC support only. Explicitly unsupported:"),
+        )
+        .children(UNSUPPORTED.into_iter().map(|item| {
+            div()
+                .font_family(theme::SANS)
+                .text_size(px(theme::T_TINY))
+                .line_height(px(16.0))
+                .text_color(theme::ash())
+                .child(format!("— {item}"))
+        }))
+}
+
+fn extension_dialog_overlay(
+    dialog: &crate::state::runtime::ExtensionDialog,
+    queued_dialogs: usize,
+    selected: usize,
+    focus: &FocusHandle,
+    input: &Entity<Composer>,
+    editor: &Entity<Composer>,
+    cx: &mut Context<RootView>,
+) -> impl IntoElement {
+    let deadline_copy = dialog.deadline.map(|deadline| {
+        let seconds = deadline
+            .saturating_duration_since(std::time::Instant::now())
+            .as_secs_f32();
+        format!("Auto-closes in {:.1}s", seconds.max(0.0))
+    });
+    let request = dialog.request.clone();
+    let body = match &request {
+        DialogRequest::Select { options, .. } => div()
+            .flex()
+            .flex_col()
+            .gap(px(6.0))
+            .when(options.is_empty(), |list| {
+                list.child(
+                    div()
+                        .text_size(px(theme::T_UI_SM))
+                        .text_color(theme::error())
+                        .child("This request has no selectable options."),
+                )
+            })
+            .children(options.iter().enumerate().map(|(index, option)| {
+                let option_answer = option.clone();
+                div()
+                    .id(("extension-dialog-option", index))
+                    .px(px(12.0))
+                    .py(px(9.0))
+                    .rounded(px(theme::RADIUS_SM))
+                    .border_1()
+                    .border_color(if index == selected {
+                        theme::focus()
+                    } else {
+                        theme::edge_soft()
+                    })
+                    .bg(if index == selected {
+                        theme::panel_hover()
+                    } else {
+                        theme::canvas()
+                    })
+                    .cursor_pointer()
+                    .hover(|row| row.bg(theme::panel_lift()).border_color(theme::edge()))
+                    .on_click(cx.listener(move |view, _, window, cx| {
+                        view.answer_extension_dialog(
+                            DialogAnswer::Value(option_answer.clone()),
+                            window,
+                            cx,
+                        )
+                    }))
+                    .child(
+                        div()
+                            .font_family(theme::SANS)
+                            .text_size(px(theme::T_UI))
+                            .text_color(theme::bone())
+                            .child(option.clone()),
+                    )
+            }))
+            .into_any_element(),
+        DialogRequest::Confirm { message, .. } => div()
+            .flex()
+            .flex_col()
+            .gap(px(14.0))
+            .child(
+                div()
+                    .font_family(theme::SANS)
+                    .text_size(px(theme::T_BODY_SM))
+                    .line_height(px(21.0))
+                    .text_color(theme::bone_dim())
+                    .child(message.clone()),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .justify_end()
+                    .gap(px(8.0))
+                    .child(extension_dialog_button(
+                        "extension-confirm-no",
+                        "No",
+                        selected == 0,
+                        Box::new(cx.listener(|view, _, window, cx| {
+                            view.answer_extension_dialog(DialogAnswer::Confirmed(false), window, cx)
+                        })),
+                    ))
+                    .child(extension_dialog_button(
+                        "extension-confirm-yes",
+                        "Confirm",
+                        selected == 1,
+                        Box::new(cx.listener(|view, _, window, cx| {
+                            view.answer_extension_dialog(DialogAnswer::Confirmed(true), window, cx)
+                        })),
+                    )),
+            )
+            .into_any_element(),
+        DialogRequest::Input { .. } => input.clone().into_any_element(),
+        DialogRequest::Editor { .. } => editor.clone().into_any_element(),
+    };
+
+    div()
+        .absolute()
+        .top_0()
+        .right_0()
+        .bottom_0()
+        .left_0()
+        .occlude()
+        .bg(gpui::rgba(0x0b0a_09e6))
+        .flex()
+        .items_center()
+        .justify_center()
+        .p(px(24.0))
+        .track_focus(focus)
+        .tab_index(0)
+        .on_key_down(cx.listener(RootView::on_extension_dialog_key_down))
+        .child(
+            div()
+                .id("extension-dialog-card")
+                .w_full()
+                .max_w(px(620.0))
+                .max_h(px(620.0))
+                .overflow_y_scroll()
+                .p(px(18.0))
+                .rounded(px(theme::RADIUS))
+                .bg(theme::panel())
+                .border_1()
+                .border_color(theme::edge_hard())
+                .flex()
+                .flex_col()
+                .gap(px(14.0))
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_start()
+                        .justify_between()
+                        .gap(px(12.0))
+                        .child(
+                            div()
+                                .min_w_0()
+                                .flex()
+                                .flex_col()
+                                .gap(px(4.0))
+                                .child(
+                                    div()
+                                        .font_family(theme::MONO)
+                                        .text_size(px(theme::T_TINY))
+                                        .text_color(theme::focus())
+                                        .child(format!(
+                                            "Extension {} · untrusted UI",
+                                            dialog.kind()
+                                        )),
+                                )
+                                .child(
+                                    div()
+                                        .font_family(theme::SANS)
+                                        .text_size(px(theme::T_TITLE))
+                                        .font_weight(FontWeight::BOLD)
+                                        .text_color(theme::bone())
+                                        .child(dialog.title().to_owned()),
+                                ),
+                        )
+                        .child(controls::chrome_action(
+                            "cancel-extension-dialog",
+                            "Cancel · Esc",
+                            true,
+                            Box::new(cx.listener(|view, _, window, cx| {
+                                view.cancel_extension_dialog(window, cx);
+                            })),
+                        )),
+                )
+                .child(
+                    div()
+                        .font_family(theme::SANS)
+                        .text_size(px(theme::T_UI_SM))
+                        .line_height(px(18.0))
+                        .text_color(theme::smoke())
+                        .child(
+                            "This content comes from an extension. It is not a secure permission prompt and has no verified provenance.",
+                        ),
+                )
+                .child(body)
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .justify_between()
+                        .gap(px(10.0))
+                        .child(
+                            div()
+                                .font_family(theme::MONO)
+                                .text_size(px(theme::T_TINY))
+                                .text_color(theme::smoke())
+                                .child(match queued_dialogs {
+                                    0 => "No queued extension dialogs".to_owned(),
+                                    count => format!(
+                                        "{count} queued extension dialog{}",
+                                        plural(count as u64)
+                                    ),
+                                }),
+                        )
+                        .when_some(deadline_copy, |row, deadline| {
+                            row.child(
+                                div()
+                                    .font_family(theme::MONO)
+                                    .text_size(px(theme::T_TINY))
+                                    .text_color(theme::data())
+                                    .child(deadline),
+                            )
+                        }),
+                ),
+        )
+}
+
+fn extension_dialog_button(
+    id: impl Into<gpui::SharedString>,
+    label: impl Into<gpui::SharedString>,
+    selected: bool,
+    on_click: RootClickHandler,
+) -> impl IntoElement {
+    div()
+        .id(id.into())
+        .h(px(32.0))
+        .px(px(14.0))
+        .rounded(px(theme::RADIUS_SM))
+        .border_1()
+        .border_color(if selected {
+            theme::focus()
+        } else {
+            theme::edge()
+        })
+        .bg(if selected {
+            theme::panel_hover()
+        } else {
+            theme::canvas()
+        })
+        .cursor_pointer()
+        .hover(|button| button.bg(theme::panel_lift()).border_color(theme::focus()))
+        .on_click(move |event, window, cx| on_click(event, window, cx))
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(
+            div()
+                .font_family(theme::SANS)
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_size(px(theme::T_UI_SM))
+                .text_color(theme::bone())
+                .child(label.into()),
+        )
+}
+
+fn single_line_title(value: &str) -> String {
+    value
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(160)
+        .collect()
+}
+
+fn extension_dialog_key(kind: Option<&str>, key: &str) -> Option<ExtensionDialogKey> {
+    match key {
+        "escape" => Some(ExtensionDialogKey::Cancel),
+        "tab" => Some(ExtensionDialogKey::ContainFocus),
+        "up" | "left" if matches!(kind, Some("select" | "confirm")) => {
+            Some(ExtensionDialogKey::Move(-1))
+        }
+        "down" | "right" if matches!(kind, Some("select" | "confirm")) => {
+            Some(ExtensionDialogKey::Move(1))
+        }
+        "enter" | "space" if matches!(kind, Some("select" | "confirm")) => {
+            Some(ExtensionDialogKey::AcceptSelection)
+        }
+        _ => None,
+    }
+}
+
 fn command_palette_overlay(
     catalog: &CommandCatalog,
     search: &Entity<Composer>,
@@ -4176,6 +4911,7 @@ struct ComposerBarParams<'a> {
     command_selection: usize,
     command_scroll: &'a ScrollHandle,
     slash_dismissed: bool,
+    extension_ui: &'a ExtensionUiProjection,
 }
 
 fn composer_bar(params: ComposerBarParams<'_>, cx: &mut Context<RootView>) -> impl IntoElement {
@@ -4190,6 +4926,7 @@ fn composer_bar(params: ComposerBarParams<'_>, cx: &mut Context<RootView>) -> im
         command_selection,
         command_scroll,
         slash_dismissed,
+        extension_ui,
     } = params;
     let inset_left =
         theme::SIDE_W + if history_open { theme::HISTORY_W } else { 0.0 } + theme::STREAM_PAD_X;
@@ -4359,7 +5096,32 @@ fn composer_bar(params: ComposerBarParams<'_>, cx: &mut Context<RootView>) -> im
                                     })),
                                 )),
                         )
-                        .child(composer.clone()),
+                        .when(
+                            extension_ui.widgets.iter().any(|(_, widget)| {
+                                widget.placement == WidgetPlacement::AboveEditor
+                            }),
+                            |panel| {
+                                panel.child(extension_widgets(
+                                    extension_ui,
+                                    WidgetPlacement::AboveEditor,
+                                ))
+                            },
+                        )
+                        .child(composer.clone())
+                        .when(
+                            extension_ui.widgets.iter().any(|(_, widget)| {
+                                widget.placement == WidgetPlacement::BelowEditor
+                            }),
+                            |panel| {
+                                panel.child(extension_widgets(
+                                    extension_ui,
+                                    WidgetPlacement::BelowEditor,
+                                ))
+                            },
+                        )
+                        .when(!extension_ui.statuses.is_empty(), |panel| {
+                            panel.child(extension_status_bar(extension_ui))
+                        }),
                 ),
         )
 }
@@ -4430,6 +5192,7 @@ fn compact_label(value: &str, max_chars: usize) -> String {
 fn inspector(
     projection: &ShellProjection,
     conversation: &ConversationProjection,
+    extension_ui: &ExtensionUiProjection,
     compaction_composer: &Entity<Composer>,
     cx: &mut Context<RootView>,
 ) -> impl IntoElement {
@@ -4495,7 +5258,8 @@ fn inspector(
                                 .child(controls::metric_row("Cost", projection.cost.label())),
                         )
                         .child(run_controls(conversation, compaction_composer, cx))
-                        .child(queue_panel(conversation)),
+                        .child(queue_panel(conversation))
+                        .child(extension_diagnostics_panel(extension_ui)),
                 ),
         )
 }
@@ -4900,7 +5664,7 @@ fn lifecycle_color(projection: &ShellProjection) -> gpui::Rgba {
 
 #[cfg(test)]
 mod tests {
-    use super::short_path;
+    use super::{ExtensionDialogKey, extension_dialog_key, short_path};
 
     #[test]
     fn short_path_preserves_short_values_and_truncates_deep_values() {
@@ -4918,5 +5682,34 @@ mod tests {
         assert_eq!(super::context_pct("42%"), Some(0.42));
         assert_eq!(super::context_pct("Awaiting"), None);
         assert_eq!(super::context_pct("1,000 / 2,000 · stale"), Some(0.5));
+    }
+
+    #[test]
+    fn extension_dialog_keyboard_routes_are_modal_and_kind_aware() {
+        assert_eq!(
+            extension_dialog_key(Some("select"), "tab"),
+            Some(ExtensionDialogKey::ContainFocus)
+        );
+        assert_eq!(
+            extension_dialog_key(Some("input"), "tab"),
+            Some(ExtensionDialogKey::ContainFocus)
+        );
+        assert_eq!(
+            extension_dialog_key(Some("editor"), "escape"),
+            Some(ExtensionDialogKey::Cancel)
+        );
+        assert_eq!(
+            extension_dialog_key(Some("select"), "up"),
+            Some(ExtensionDialogKey::Move(-1))
+        );
+        assert_eq!(
+            extension_dialog_key(Some("confirm"), "right"),
+            Some(ExtensionDialogKey::Move(1))
+        );
+        assert_eq!(
+            extension_dialog_key(Some("confirm"), "enter"),
+            Some(ExtensionDialogKey::AcceptSelection)
+        );
+        assert_eq!(extension_dialog_key(Some("input"), "enter"), None);
     }
 }
