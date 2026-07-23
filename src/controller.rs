@@ -25,10 +25,11 @@ use crate::services::session_catalog::{
 };
 use crate::state::reducer::reduce;
 use crate::state::runtime::{
-    BashExecution, BashStatus, CompactionState, FacetStatus, PromptDelivery, QueueContents,
-    QueueDeliveryMode, RetryState, RuntimeForkMessage, RuntimeInput, RuntimeIntent,
-    RuntimeLifecycle, RuntimeMessage, RuntimeOperation, RuntimeState, RuntimeThinkingLevel,
-    RuntimeTreeNode, SafeError, StampedInput, SubmissionKind, ToolExecution,
+    BashExecution, BashStatus, CommandSource, CompactionState, FacetStatus, PromptDelivery,
+    QueueContents, QueueDeliveryMode, RetryState, RuntimeCommand, RuntimeForkMessage, RuntimeInput,
+    RuntimeIntent, RuntimeLifecycle, RuntimeMessage, RuntimeNotification, RuntimeOperation,
+    RuntimeState, RuntimeThinkingLevel, RuntimeTreeNode, SafeError, StampedInput, SubmissionKind,
+    ToolExecution,
 };
 use crate::state::{ControllerStatus, ShellProjection};
 
@@ -65,6 +66,12 @@ pub enum ComposerRuntime {
 pub struct ComposerProjection {
     pub runtime: ComposerRuntime,
     pub delivery: PromptDelivery,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommandCatalogProjection {
+    pub status: FacetStatus,
+    pub commands: Vec<RuntimeCommand>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -352,6 +359,10 @@ impl ControllerCore {
         )
     }
 
+    fn take_runtime_notifications(&mut self) -> Vec<RuntimeNotification> {
+        self.runtime.notifications.drain(..).collect()
+    }
+
     pub fn composer_projection(&self) -> ComposerProjection {
         let has_model = self
             .runtime
@@ -573,6 +584,57 @@ impl ControllerCore {
         ))
     }
 
+    pub fn invoke_dynamic_command(
+        &mut self,
+        text: String,
+        source: CommandSource,
+        preference: SubmissionPreference,
+    ) -> Result<
+        (
+            AcceptedSubmission,
+            Vec<crate::state::runtime::RuntimeEffect>,
+        ),
+        SubmissionRejection,
+    > {
+        if text.trim().is_empty() {
+            return Err(SubmissionRejection::Empty);
+        }
+        if matches!(self.runtime.prompt_delivery, PromptDelivery::Pending { .. }) {
+            return Err(SubmissionRejection::Pending);
+        }
+        let kind = match (self.composer_projection().runtime, preference) {
+            (ComposerRuntime::Idle, SubmissionPreference::Default) => SubmissionKind::Prompt,
+            (ComposerRuntime::Running, SubmissionPreference::Default) => SubmissionKind::Steer,
+            (ComposerRuntime::Running, SubmissionPreference::FollowUp) => SubmissionKind::FollowUp,
+            (_, SubmissionPreference::FollowUp) => return Err(SubmissionRejection::NotRunning),
+            _ => return Err(SubmissionRejection::Unavailable),
+        };
+        let request = self.next_composer_request("command");
+        let effects = self.intent(RuntimeIntent::InvokeCommand {
+            request: request.clone(),
+            text,
+            kind,
+            source,
+        });
+        if effects.is_empty() {
+            return Err(SubmissionRejection::Unavailable);
+        }
+        Ok((
+            AcceptedSubmission {
+                request,
+                kind: AcceptedSubmissionKind::Prompt(kind),
+            },
+            effects,
+        ))
+    }
+
+    pub fn refresh_commands(&mut self) -> Vec<crate::state::runtime::RuntimeEffect> {
+        if self.status != ControllerStatus::Active {
+            return Vec::new();
+        }
+        self.intent(RuntimeIntent::RefreshCommands)
+    }
+
     fn next_composer_request(&mut self, prefix: &str) -> RequestId {
         let request = RequestId::new(format!(
             "{prefix}-{}-{}-{}",
@@ -649,6 +711,9 @@ impl ControllerCore {
     }
 
     pub fn new_session(&mut self) -> Vec<crate::state::runtime::RuntimeEffect> {
+        if self.composer_projection().runtime != ComposerRuntime::Idle {
+            return Vec::new();
+        }
         self.intent(RuntimeIntent::ReplaceSession(
             crate::state::runtime::SessionMutation::New {
                 parent_session: None,
@@ -660,12 +725,18 @@ impl ControllerCore {
         &mut self,
         entry_id: crate::services::rpc::EntryId,
     ) -> Vec<crate::state::runtime::RuntimeEffect> {
+        if self.composer_projection().runtime != ComposerRuntime::Idle {
+            return Vec::new();
+        }
         self.intent(RuntimeIntent::ReplaceSession(
             crate::state::runtime::SessionMutation::Fork { entry_id },
         ))
     }
 
     pub fn clone_current_path(&mut self) -> Vec<crate::state::runtime::RuntimeEffect> {
+        if self.composer_projection().runtime != ComposerRuntime::Idle {
+            return Vec::new();
+        }
         self.intent(RuntimeIntent::ReplaceSession(
             crate::state::runtime::SessionMutation::Clone,
         ))
@@ -695,6 +766,9 @@ impl ControllerCore {
         &mut self,
         session_path: String,
     ) -> Vec<crate::state::runtime::RuntimeEffect> {
+        if self.composer_projection().runtime != ComposerRuntime::Idle {
+            return Vec::new();
+        }
         if self
             .runtime
             .session
@@ -908,6 +982,17 @@ impl RuntimeController {
 
     pub fn history_projection(&self) -> HistoryProjection {
         self.core.history_projection()
+    }
+
+    pub fn command_catalog_projection(&self) -> CommandCatalogProjection {
+        CommandCatalogProjection {
+            status: self.core.runtime.commands.status.clone(),
+            commands: self.core.runtime.commands.data.clone().unwrap_or_default(),
+        }
+    }
+
+    pub fn take_runtime_notifications(&mut self) -> Vec<RuntimeNotification> {
+        self.core.take_runtime_notifications()
     }
 
     pub fn take_requested_editor_text(&mut self) -> Option<String> {
@@ -1177,6 +1262,23 @@ impl RuntimeController {
         self.send_effects(effects);
         cx.notify();
         Ok(submission)
+    }
+
+    pub fn invoke_dynamic_command(
+        &mut self,
+        text: String,
+        source: CommandSource,
+        preference: SubmissionPreference,
+        cx: &mut Context<Self>,
+    ) -> Result<AcceptedSubmission, SubmissionRejection> {
+        let (submission, effects) = self.core.invoke_dynamic_command(text, source, preference)?;
+        self.send_effects(effects);
+        cx.notify();
+        Ok(submission)
+    }
+
+    pub fn refresh_commands(&mut self, cx: &mut Context<Self>) -> bool {
+        self.send_core_effects(ControllerCore::refresh_commands, cx)
     }
 
     pub fn abort(&mut self, cx: &mut Context<Self>) -> bool {
@@ -1861,6 +1963,20 @@ mod tests {
             Path::new("sessions/thread.jsonl"),
             Path::new("sessions/thread.jsonl")
         ));
+    }
+
+    #[test]
+    fn runtime_notifications_are_delivered_once_to_the_native_ui() {
+        let mut core = ControllerCore::new("workspace");
+        core.runtime.notifications.push_back(RuntimeNotification {
+            message: "Binance tools ON".to_owned(),
+            kind: crate::state::runtime::NotificationKind::Info,
+        });
+
+        let delivered = core.take_runtime_notifications();
+        assert_eq!(delivered.len(), 1);
+        assert_eq!(delivered[0].message, "Binance tools ON");
+        assert!(core.take_runtime_notifications().is_empty());
     }
 
     #[cfg(windows)]

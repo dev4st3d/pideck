@@ -90,6 +90,128 @@ fn message(key: &str, text: &str, terminal: bool) -> RuntimeMessage {
     }
 }
 
+fn command_ready_state(lifecycle: RuntimeLifecycle) -> RuntimeState {
+    let mut state = RuntimeState::new(GENERATION);
+    state.lifecycle = lifecycle;
+    state
+        .session
+        .ready(session_state("commands", false, 0).session);
+    state.messages.ready(Vec::new());
+    state.commands.ready(Vec::new());
+    state
+}
+
+#[test]
+fn dynamic_commands_always_use_prompt_with_source_aware_streaming_rules() {
+    let cases = [
+        (
+            RuntimeLifecycle::Ready,
+            SubmissionKind::Prompt,
+            CommandSource::Prompt,
+            None,
+        ),
+        (
+            RuntimeLifecycle::Running,
+            SubmissionKind::Steer,
+            CommandSource::Extension,
+            None,
+        ),
+        (
+            RuntimeLifecycle::Running,
+            SubmissionKind::Steer,
+            CommandSource::Prompt,
+            Some(pi_gui::services::rpc::StreamingBehavior::Steer),
+        ),
+        (
+            RuntimeLifecycle::Running,
+            SubmissionKind::FollowUp,
+            CommandSource::Skill,
+            Some(pi_gui::services::rpc::StreamingBehavior::FollowUp),
+        ),
+    ];
+
+    for (index, (lifecycle, kind, source, expected_behavior)) in cases.into_iter().enumerate() {
+        let mut state = command_ready_state(lifecycle);
+        let effects = apply(
+            &mut state,
+            RuntimeInput::Intent(RuntimeIntent::InvokeCommand {
+                request: RequestId::from(format!("command-{index}")),
+                text: "/deploy   exact args".to_owned(),
+                kind,
+                source,
+            }),
+        );
+        let RpcDispatch::Command(Command::Prompt {
+            message,
+            streaming_behavior,
+            ..
+        }) = dispatch_for_effect(&effects[0])
+        else {
+            panic!("dynamic commands must use prompt RPC");
+        };
+        assert_eq!(message, "/deploy   exact args");
+        assert_eq!(streaming_behavior, expected_behavior);
+    }
+}
+
+#[test]
+fn accepted_extension_command_refreshes_catalog_without_forcing_running_state() {
+    let mut state = command_ready_state(RuntimeLifecycle::Ready);
+    let request = RequestId::from("extension-command");
+    let effects = apply(
+        &mut state,
+        RuntimeInput::Intent(RuntimeIntent::InvokeCommand {
+            request: request.clone(),
+            text: "/reload-resources".to_owned(),
+            kind: SubmissionKind::Prompt,
+            source: CommandSource::Extension,
+        }),
+    );
+    assert_eq!(effects.len(), 1);
+    let refresh = response(
+        &mut state,
+        RuntimeRequest::InvokeCommand {
+            request,
+            text: "/reload-resources".to_owned(),
+            kind: SubmissionKind::Prompt,
+            source: CommandSource::Extension,
+        },
+        Ok(NormalizedResponse::Accepted),
+    );
+    assert_eq!(state.lifecycle, RuntimeLifecycle::Ready);
+    assert_eq!(state.commands.status, FacetStatus::Loading);
+    assert!(matches!(
+        refresh[0].effect,
+        EffectKind::Request(RuntimeRequest::GetCommands)
+    ));
+}
+
+#[test]
+fn command_normalization_retains_complete_installed_source_info() {
+    let mut state = command_ready_state(RuntimeLifecycle::Ready);
+    let effects = apply(
+        &mut state,
+        RuntimeInput::Intent(RuntimeIntent::RefreshCommands),
+    );
+    let record = decode_record(
+        br#"{"type":"response","id":"commands","command":"get_commands","success":true,"data":{"commands":[{"name":"deploy:2","description":"Deploy","source":"extension","sourceInfo":{"path":"C:/project/ext.ts","source":"fixture-package","scope":"project","origin":"package","baseDir":"C:/project"}}]}}"#,
+    )
+    .expect("commands response");
+    let IncomingRecord::Response(response) = record else {
+        panic!("expected response");
+    };
+    let normalized =
+        normalize_call_result(&effects[0], Ok(*response)).expect("normalized response");
+    reduce(&mut state, normalized);
+    let command = &state.commands.data.as_ref().unwrap()[0];
+    assert_eq!(command.name, "deploy:2");
+    assert_eq!(command.provenance.path, "C:/project/ext.ts");
+    assert_eq!(command.provenance.source, "fixture-package");
+    assert_eq!(command.provenance.scope, "project");
+    assert_eq!(command.provenance.origin, "package");
+    assert_eq!(command.provenance.base_dir.as_deref(), Some("C:/project"));
+}
+
 fn user_message(key: &str, text: &str) -> RuntimeMessage {
     RuntimeMessage {
         key: MessageKey(key.to_owned()),

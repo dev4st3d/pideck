@@ -164,7 +164,16 @@ pub struct RuntimeCommand {
     pub name: String,
     pub description: Option<String>,
     pub source: CommandSource,
+    pub provenance: CommandProvenance,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommandProvenance {
+    pub path: String,
+    pub source: String,
     pub scope: String,
+    pub origin: String,
+    pub base_dir: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -826,6 +835,13 @@ pub enum RuntimeIntent {
         text: String,
         kind: SubmissionKind,
     },
+    InvokeCommand {
+        request: RequestId,
+        text: String,
+        kind: SubmissionKind,
+        source: CommandSource,
+    },
+    RefreshCommands,
     ExecuteBash {
         request: RequestId,
         command: String,
@@ -892,6 +908,12 @@ pub enum RuntimeRequest {
         request: RequestId,
         text: String,
         kind: SubmissionKind,
+    },
+    InvokeCommand {
+        request: RequestId,
+        text: String,
+        kind: SubmissionKind,
+        source: CommandSource,
     },
     ExecuteBash {
         request: RequestId,

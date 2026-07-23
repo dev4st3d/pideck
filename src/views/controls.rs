@@ -310,11 +310,7 @@ pub fn compact_select(
                 .font_family(theme::MONO)
                 .text_size(px(9.0))
                 .line_height(px(12.0))
-                .text_color(if open {
-                    theme::data()
-                } else {
-                    theme::smoke()
-                })
+                .text_color(if open { theme::data() } else { theme::smoke() })
                 .opacity(0.9)
                 .flex_shrink_0()
                 .child(if open { "▴" } else { "▾" }),
@@ -342,11 +338,7 @@ pub fn chrome_action(
             button
                 .tab_index(0)
                 .cursor_pointer()
-                .hover(|button| {
-                    button
-                        .bg(theme::canvas())
-                        .text_color(theme::bone_dim())
-                })
+                .hover(|button| button.bg(theme::canvas()).text_color(theme::bone_dim()))
                 .active(|button| button.bg(theme::panel_lift()))
                 .focus(|button| button.border_1().border_color(theme::focus()))
                 .on_click(move |event, window, cx| on_click(event, window, cx))

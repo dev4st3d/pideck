@@ -1,16 +1,20 @@
 //! Live Pi shell with an authoritative streaming conversation.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::Duration;
 
 use gpui::{
-    Context, Entity, FocusHandle, Focusable, FontWeight, IntoElement, Render, ScrollHandle,
-    Subscription, Task, Window, div, prelude::*, px,
+    ClipboardItem, Context, Entity, FocusHandle, Focusable, FontWeight, IntoElement, Render,
+    ScrollHandle, Subscription, Task, Window, div, prelude::*, px,
 };
 
 use crate::actions::{
     AbortRun, ActivateRecovery, Connect, FocusNext, FocusPrevious, HistoryActivate, HistoryFirst,
-    HistoryFold, HistoryLast, HistoryNext, HistoryPrevious, HistoryUnfold, Retry, Stop,
+    HistoryFold, HistoryLast, HistoryNext, HistoryPrevious, HistoryUnfold, OpenCommandPalette,
+    Retry, ShowHotkeys, Stop,
+};
+use crate::command_catalog::{
+    CommandCatalog, CommandEntry, CommandTarget, InvocationResolution, NativeAction,
 };
 use crate::controller::{
     AcceptedSubmission, AcceptedSubmissionKind, BridgeProjection, CatalogProjection, CatalogStatus,
@@ -23,8 +27,9 @@ use crate::model_runtime::{
 };
 use crate::state::history::{HistoryBrowser, HistoryFilter};
 use crate::state::runtime::{
-    BashStatus, CompactionState, PromptDelivery, QueueContents, QueueDeliveryMode, RetryState,
-    RuntimeLifecycle, RuntimeOperation, SubmissionKind,
+    BashStatus, CompactionState, MessageBlock, MessageRole, NotificationKind, PromptDelivery,
+    QueueContents, QueueDeliveryMode, RetryState, RuntimeLifecycle, RuntimeNotification,
+    RuntimeOperation, SubmissionKind,
 };
 use crate::state::{RecoveryAction, ShellProjection};
 use crate::theme;
@@ -37,6 +42,8 @@ struct PendingDraft {
     request: crate::services::rpc::RequestId,
     text: String,
 }
+
+const MAX_VISIBLE_RUNTIME_NOTIFICATIONS: usize = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum HistoryConfirmation {
@@ -72,9 +79,18 @@ pub struct RootView {
     history_label_composer: Entity<Composer>,
     import_path_composer: Entity<Composer>,
     model_search_composer: Entity<Composer>,
+    command_search_composer: Entity<Composer>,
     auth_input_composer: Entity<Composer>,
     auth_secret_composer: Entity<Composer>,
     model_panel: Option<ModelPanel>,
+    command_palette_open: bool,
+    hotkey_help_open: bool,
+    command_selection: usize,
+    command_palette_scroll: ScrollHandle,
+    slash_command_scroll: ScrollHandle,
+    runtime_notifications: VecDeque<RuntimeNotification>,
+    dismissed_slash_draft: Option<String>,
+    last_slash_draft: String,
     active_auth_prompt_id: Option<String>,
     history: HistoryBrowser,
     history_focus: FocusHandle,
@@ -100,6 +116,9 @@ pub struct RootView {
     _history_label_subscription: Subscription,
     _import_path_subscription: Subscription,
     _model_search_observation: Subscription,
+    _composer_observation: Subscription,
+    _command_search_observation: Subscription,
+    _command_search_subscription: Subscription,
     _auth_input_subscription: Subscription,
     _auth_secret_subscription: Subscription,
 }
@@ -130,6 +149,9 @@ impl RootView {
             cx.new(|cx| Composer::field("import-jsonl", "JSONL path to import…", "Import", cx));
         let model_search_composer = cx.new(|cx| {
             Composer::field("model-search", "Search models…", "", cx).with_field_height(30.0)
+        });
+        let command_search_composer = cx.new(|cx| {
+            Composer::field("command-search", "Search commands…", "", cx).with_field_height(34.0)
         });
         let auth_input_composer = cx.new(|cx| {
             Composer::field(
@@ -162,9 +184,10 @@ impl RootView {
         let controller_observation = cx.observe_in(&controller, window, |view, _, window, cx| {
             view.sync_runtime(window, cx)
         });
-        let composer_subscription = cx.subscribe_in(&composer, window, |view, _, event, _, cx| {
-            view.on_composer_event(event, cx)
-        });
+        let composer_subscription =
+            cx.subscribe_in(&composer, window, |view, _, event, window, cx| {
+                view.on_composer_event(event, window, cx)
+            });
         let compaction_subscription =
             cx.subscribe_in(&compaction_composer, window, |view, _, event, _, cx| {
                 view.on_compaction_event(event, cx)
@@ -189,6 +212,19 @@ impl RootView {
             });
         let model_search_observation =
             cx.observe_in(&model_search_composer, window, |_, _, _, cx| cx.notify());
+        let composer_observation = cx.observe_in(&composer, window, |view, _, _, cx| {
+            view.sync_slash_completion(cx)
+        });
+        let command_search_observation =
+            cx.observe_in(&command_search_composer, window, |view, _, _, cx| {
+                view.command_selection = 0;
+                cx.notify();
+            });
+        let command_search_subscription = cx.subscribe_in(
+            &command_search_composer,
+            window,
+            |view, _, event, window, cx| view.on_palette_composer_event(event, window, cx),
+        );
         let auth_input_subscription =
             cx.subscribe_in(&auth_input_composer, window, |view, _, event, _, cx| {
                 view.on_auth_input_event(event, false, cx)
@@ -206,9 +242,18 @@ impl RootView {
             history_label_composer,
             import_path_composer,
             model_search_composer,
+            command_search_composer,
             auth_input_composer,
             auth_secret_composer,
             model_panel: None,
+            command_palette_open: false,
+            hotkey_help_open: false,
+            command_selection: 0,
+            command_palette_scroll: ScrollHandle::new(),
+            slash_command_scroll: ScrollHandle::new(),
+            runtime_notifications: VecDeque::new(),
+            dismissed_slash_draft: None,
+            last_slash_draft: String::new(),
             active_auth_prompt_id: None,
             history: HistoryBrowser::default(),
             history_focus,
@@ -234,6 +279,9 @@ impl RootView {
             _history_label_subscription: history_label_subscription,
             _import_path_subscription: import_path_subscription,
             _model_search_observation: model_search_observation,
+            _composer_observation: composer_observation,
+            _command_search_observation: command_search_observation,
+            _command_search_subscription: command_search_subscription,
             _auth_input_subscription: auth_input_subscription,
             _auth_secret_subscription: auth_secret_subscription,
         }
@@ -268,24 +316,238 @@ impl RootView {
         self.stop(cx);
     }
 
-    fn on_abort_run(&mut self, _: &AbortRun, _: &mut Window, cx: &mut Context<Self>) {
-        match self.controller.read(cx).composer_projection().runtime {
-            ComposerRuntime::BashRunning | ComposerRuntime::BashCancelling => self.abort_bash(cx),
-            ComposerRuntime::Running | ComposerRuntime::Cancelling => self.abort(cx),
-            ComposerRuntime::Unavailable | ComposerRuntime::Idle => {}
+    fn on_abort_run(&mut self, _: &AbortRun, window: &mut Window, cx: &mut Context<Self>) {
+        let _ = self.execute_native_action(NativeAction::Abort, "", window, cx);
+    }
+
+    fn on_composer_event(
+        &mut self,
+        event: &ComposerEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            ComposerEvent::Accept { text } => {
+                self.execute_composer_text(text.clone(), SubmissionPreference::Default, window, cx)
+            }
+            ComposerEvent::FollowUp { text } => {
+                self.execute_composer_text(text.clone(), SubmissionPreference::FollowUp, window, cx)
+            }
+            ComposerEvent::Abort => {
+                if self.hotkey_help_open {
+                    self.hotkey_help_open = false;
+                    window.focus(&self.composer.read(cx).focus_handle(cx));
+                    cx.notify();
+                } else {
+                    let _ = self.execute_native_action(NativeAction::Abort, "", window, cx);
+                }
+            }
+            ComposerEvent::AbortBash => {
+                let _ = self.execute_native_action(NativeAction::Abort, "", window, cx);
+            }
+            ComposerEvent::CommandNext => self.move_command_selection(1, false, cx),
+            ComposerEvent::CommandPrevious => self.move_command_selection(-1, false, cx),
+            ComposerEvent::CommandAccept => self.accept_slash_completion(window, cx),
+            ComposerEvent::CommandDismiss => {
+                self.dismissed_slash_draft = Some(self.composer.read(cx).draft().to_owned());
+                self.composer.update(cx, |composer, cx| {
+                    composer.set_command_completion_active(false, cx)
+                });
+            }
         }
     }
 
-    fn on_composer_event(&mut self, event: &ComposerEvent, cx: &mut Context<Self>) {
-        match event {
-            ComposerEvent::Accept { text } => {
-                self.submit(text.clone(), SubmissionPreference::Default, cx)
+    fn command_catalog(&self, cx: &Context<Self>) -> CommandCatalog {
+        let projection = self.controller.read(cx).command_catalog_projection();
+        CommandCatalog::build(&projection.status, &projection.commands)
+    }
+
+    fn sync_slash_completion(&mut self, cx: &mut Context<Self>) {
+        let draft = self.composer.read(cx).draft().to_owned();
+        if self.last_slash_draft != draft {
+            self.command_selection = 0;
+            self.slash_command_scroll.scroll_to_item(0);
+            self.last_slash_draft.clone_from(&draft);
+        }
+        if self
+            .dismissed_slash_draft
+            .as_deref()
+            .is_some_and(|dismissed| dismissed != draft)
+        {
+            self.dismissed_slash_draft = None;
+        }
+        let active = self.dismissed_slash_draft.as_deref() != Some(draft.as_str())
+            && self
+                .command_catalog(cx)
+                .slash_completion(&draft)
+                .is_some_and(|completion| completion.intercept_enter);
+        if active {
+            let count = self
+                .command_catalog(cx)
+                .slash_completion(&draft)
+                .map_or(0, |completion| completion.matches.len());
+            self.command_selection = self.command_selection.min(count.saturating_sub(1));
+        } else {
+            self.command_selection = 0;
+        }
+        self.composer.update(cx, |composer, cx| {
+            composer.set_command_completion_active(active, cx)
+        });
+        cx.notify();
+    }
+
+    fn move_command_selection(&mut self, delta: isize, palette: bool, cx: &mut Context<Self>) {
+        let count = if palette {
+            let query = self.command_search_composer.read(cx).draft();
+            self.command_catalog(cx).filtered(query).len()
+        } else {
+            let draft = self.composer.read(cx).draft();
+            self.command_catalog(cx)
+                .slash_completion(draft)
+                .map_or(0, |completion| completion.matches.len())
+        };
+        if count == 0 {
+            self.command_selection = 0;
+            return;
+        }
+        self.command_selection =
+            (self.command_selection as isize + delta).rem_euclid(count as isize) as usize;
+        if !palette {
+            self.slash_command_scroll
+                .scroll_to_item(self.command_selection);
+        }
+        cx.notify();
+    }
+
+    fn accept_slash_completion(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let draft = self.composer.read(cx).draft().to_owned();
+        let catalog = self.command_catalog(cx);
+        let Some(completion) = catalog.slash_completion(&draft) else {
+            return;
+        };
+        let Some(entry) = completion
+            .matches
+            .get(self.command_selection)
+            .cloned()
+            .cloned()
+        else {
+            return;
+        };
+        self.choose_command_entry(entry, window, cx);
+    }
+
+    fn choose_command_entry(
+        &mut self,
+        entry: CommandEntry,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if entry.argument_hint.is_some() {
+            self.command_palette_open = false;
+            self.composer.update(cx, |composer, cx| {
+                composer.set_draft(&format!("/{} ", entry.name), cx);
+                composer.set_command_completion_active(false, cx);
+            });
+            self.dismissed_slash_draft = Some(self.composer.read(cx).draft().to_owned());
+            window.focus(&self.composer.read(cx).focus_handle(cx));
+        } else {
+            self.execute_entry(entry, String::new(), window, cx);
+        }
+    }
+
+    fn execute_composer_text(
+        &mut self,
+        text: String,
+        preference: SubmissionPreference,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let catalog = self.command_catalog(cx);
+        match catalog.resolve(&text) {
+            InvocationResolution::Command { entry, invocation } => {
+                let entry = entry.clone();
+                self.execute_entry_with_preference(
+                    entry,
+                    invocation.arguments,
+                    preference,
+                    window,
+                    cx,
+                );
             }
-            ComposerEvent::FollowUp { text } => {
-                self.submit(text.clone(), SubmissionPreference::FollowUp, cx)
+            InvocationResolution::UnsupportedBuiltin(name) => {
+                self.command_error(
+                    format!(
+                        "/{name} is a TUI-only command and cannot run in the native RPC client."
+                    ),
+                    window,
+                    cx,
+                );
             }
-            ComposerEvent::Abort => self.abort(cx),
-            ComposerEvent::AbortBash => self.abort_bash(cx),
+            InvocationResolution::NotACommand => self.submit(text, preference, cx),
+        }
+    }
+
+    fn execute_entry(
+        &mut self,
+        entry: CommandEntry,
+        arguments: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.execute_entry_with_preference(
+            entry,
+            arguments,
+            SubmissionPreference::Default,
+            window,
+            cx,
+        );
+    }
+
+    fn execute_entry_with_preference(
+        &mut self,
+        entry: CommandEntry,
+        arguments: String,
+        preference: SubmissionPreference,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !entry.enabled {
+            self.command_error(
+                entry
+                    .disabled_reason
+                    .unwrap_or_else(|| "That command is unavailable.".to_owned()),
+                window,
+                cx,
+            );
+            return;
+        }
+        self.close_command_palette(window, cx);
+        match entry.target {
+            CommandTarget::Native(action) => {
+                match self.execute_native_action(action, &arguments, window, cx) {
+                    Ok(()) => {
+                        self.composer
+                            .update(cx, |composer, cx| composer.set_draft("", cx));
+                        if !matches!(
+                            action,
+                            NativeAction::Model
+                                | NativeAction::Sessions
+                                | NativeAction::Tree
+                                | NativeAction::Fork
+                                | NativeAction::Clone
+                                | NativeAction::Settings
+                                | NativeAction::Hotkeys
+                        ) {
+                            window.focus(&self.composer.read(cx).focus_handle(cx));
+                        }
+                    }
+                    Err(error) => self.command_error(error, window, cx),
+                }
+            }
+            CommandTarget::Dynamic(source) => {
+                let text = entry.invocation(&arguments);
+                self.submit_dynamic(text, source, preference, window, cx);
+            }
         }
     }
 
@@ -338,16 +600,211 @@ impl RootView {
         }
     }
 
-    fn abort(&mut self, cx: &mut Context<Self>) {
-        self.controller.update(cx, |controller, cx| {
-            controller.abort(cx);
+    fn submit_dynamic(
+        &mut self,
+        text: String,
+        source: crate::state::runtime::CommandSource,
+        preference: SubmissionPreference,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.pending_draft.is_some() {
+            self.command_error(
+                "The previous acceptance is still pending.".to_owned(),
+                window,
+                cx,
+            );
+            return;
+        }
+        let result = self.controller.update(cx, |controller, cx| {
+            controller.invoke_dynamic_command(text.clone(), source, preference, cx)
         });
+        match result {
+            Ok(AcceptedSubmission {
+                request,
+                kind: AcceptedSubmissionKind::Prompt(kind),
+            }) => {
+                self.pending_draft = Some(PendingDraft { request, text });
+                self.composer.update(cx, |composer, cx| {
+                    composer.set_feedback(ComposerFeedback::Pending(kind), cx)
+                });
+            }
+            Ok(AcceptedSubmission {
+                kind: AcceptedSubmissionKind::Bash { .. },
+                ..
+            }) => unreachable!("dynamic commands always use prompt transport"),
+            Err(rejection) => {
+                self.command_error(rejection.message().to_owned(), window, cx);
+            }
+        }
     }
 
-    fn abort_bash(&mut self, cx: &mut Context<Self>) {
-        self.controller.update(cx, |controller, cx| {
-            controller.abort_bash(cx);
+    fn command_error(&mut self, message: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.composer.update(cx, |composer, cx| {
+            composer.set_feedback(ComposerFeedback::Rejected(message), cx)
         });
+        window.focus(&self.composer.read(cx).focus_handle(cx));
+    }
+
+    fn dismiss_runtime_notification(&mut self, index: usize, cx: &mut Context<Self>) {
+        self.runtime_notifications.remove(index);
+        cx.notify();
+    }
+
+    fn collect_runtime_notifications(&mut self, cx: &mut Context<Self>) {
+        let notifications = self
+            .controller
+            .update(cx, |controller, _| controller.take_runtime_notifications());
+        if notifications.is_empty() {
+            return;
+        }
+        for notification in notifications {
+            self.runtime_notifications.push_back(notification);
+            while self.runtime_notifications.len() > MAX_VISIBLE_RUNTIME_NOTIFICATIONS {
+                self.runtime_notifications.pop_front();
+            }
+        }
+        cx.notify();
+    }
+
+    fn execute_native_action(
+        &mut self,
+        action: NativeAction,
+        raw_arguments: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        let arguments = raw_arguments.trim();
+        match action {
+            NativeAction::Model => {
+                self.show_model_panel(ModelPanel::Switcher, window, cx);
+                Ok(())
+            }
+            NativeAction::NewSession => self
+                .controller
+                .update(cx, |controller, cx| controller.new_session(cx))
+                .then_some(())
+                .ok_or_else(|| "A new session cannot start in the current state.".to_owned()),
+            NativeAction::Sessions => {
+                window.focus(&self.session_name_composer.read(cx).focus_handle(cx));
+                Ok(())
+            }
+            NativeAction::Tree => {
+                self.history_open = !self.history_open;
+                self.history_confirmation = None;
+                if self.history_open {
+                    window.focus(&self.history_focus);
+                } else {
+                    window.focus(&self.composer.read(cx).focus_handle(cx));
+                }
+                cx.notify();
+                Ok(())
+            }
+            NativeAction::Fork => {
+                self.history_open = true;
+                self.history_confirmation = None;
+                window.focus(&self.history_focus);
+                cx.notify();
+                Ok(())
+            }
+            NativeAction::Clone => {
+                self.history_open = true;
+                self.history_confirmation = Some(HistoryConfirmation::Clone);
+                window.focus(&self.history_focus);
+                cx.notify();
+                Ok(())
+            }
+            NativeAction::Compact => self
+                .controller
+                .update(cx, |controller, cx| {
+                    controller.compact((!arguments.is_empty()).then(|| arguments.to_owned()), cx)
+                })
+                .then_some(())
+                .ok_or_else(|| "Pi must be idle before compacting context.".to_owned()),
+            NativeAction::ExportHtml => self
+                .controller
+                .update(cx, |controller, cx| {
+                    controller
+                        .export_html((!arguments.is_empty()).then(|| arguments.to_owned()), cx)
+                })
+                .then_some(())
+                .ok_or_else(|| "The current session cannot be exported yet.".to_owned()),
+            NativeAction::ExportJsonl => self
+                .controller
+                .update(cx, |controller, cx| {
+                    controller
+                        .export_jsonl((!arguments.is_empty()).then(|| arguments.to_owned()), cx)
+                })
+                .then_some(())
+                .ok_or_else(|| "JSONL export is unavailable for this session.".to_owned()),
+            NativeAction::CopyLastResponse => {
+                let text = self
+                    .conversation
+                    .messages
+                    .iter()
+                    .rev()
+                    .find(|message| message.role == MessageRole::Assistant)
+                    .map(|message| {
+                        message
+                            .content
+                            .iter()
+                            .filter_map(|block| match block {
+                                MessageBlock::Text { text, .. } => Some(text.as_str()),
+                                _ => None,
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    })
+                    .filter(|text| !text.is_empty())
+                    .ok_or_else(|| "There is no assistant response to copy.".to_owned())?;
+                cx.write_to_clipboard(ClipboardItem::new_string(text));
+                Ok(())
+            }
+            NativeAction::Abort => match self.controller.read(cx).composer_projection().runtime {
+                ComposerRuntime::BashRunning | ComposerRuntime::BashCancelling => self
+                    .controller
+                    .update(cx, |controller, cx| controller.abort_bash(cx))
+                    .then_some(())
+                    .ok_or_else(|| "Bash is not running.".to_owned()),
+                ComposerRuntime::Running | ComposerRuntime::Cancelling => self
+                    .controller
+                    .update(cx, |controller, cx| controller.abort(cx))
+                    .then_some(())
+                    .ok_or_else(|| "Pi is not running.".to_owned()),
+                ComposerRuntime::Unavailable | ComposerRuntime::Idle => {
+                    Err("There is no active run to abort.".to_owned())
+                }
+            },
+            NativeAction::RenameSession => {
+                if arguments.is_empty() {
+                    return Err("Use /name <name> to rename the session.".to_owned());
+                }
+                self.controller
+                    .update(cx, |controller, cx| {
+                        controller.set_session_name(arguments.to_owned(), cx)
+                    })
+                    .then_some(())
+                    .ok_or_else(|| "The current session cannot be renamed yet.".to_owned())
+            }
+            NativeAction::Settings => {
+                self.show_model_panel(
+                    ModelPanel::Settings(ModelSettingsTab::Providers),
+                    window,
+                    cx,
+                );
+                Ok(())
+            }
+            NativeAction::Hotkeys => {
+                self.hotkey_help_open = true;
+                cx.notify();
+                Ok(())
+            }
+            NativeAction::RefreshCommands => self
+                .controller
+                .update(cx, |controller, cx| controller.refresh_commands(cx))
+                .then_some(())
+                .ok_or_else(|| "Command refresh is unavailable while disconnected.".to_owned()),
+        }
     }
 
     fn abort_retry(&mut self, cx: &mut Context<Self>) {
@@ -377,12 +834,6 @@ impl RootView {
     fn set_auto_retry(&mut self, enabled: bool, cx: &mut Context<Self>) {
         self.controller.update(cx, |controller, cx| {
             controller.set_auto_retry(enabled, cx);
-        });
-    }
-
-    fn compact(&mut self, cx: &mut Context<Self>) {
-        self.controller.update(cx, |controller, cx| {
-            controller.compact(None, cx);
         });
     }
 
@@ -785,22 +1236,6 @@ impl RootView {
         });
     }
 
-    fn toggle_history(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.history_open = !self.history_open;
-        if self.history_open {
-            window.focus(&self.history_focus);
-        } else {
-            window.focus(&self.composer.read(cx).focus_handle(cx));
-        }
-        cx.notify();
-    }
-
-    fn new_session(&mut self, cx: &mut Context<Self>) {
-        self.controller.update(cx, |controller, cx| {
-            controller.new_session(cx);
-        });
-    }
-
     fn switch_session(&mut self, path: std::path::PathBuf, cx: &mut Context<Self>) {
         self.controller.update(cx, |controller, cx| {
             controller.switch_session(path, cx);
@@ -813,13 +1248,8 @@ impl RootView {
         });
     }
 
-    fn export_session(&mut self, cx: &mut Context<Self>) {
-        self.controller.update(cx, |controller, cx| {
-            controller.export_html(None, cx);
-        });
-    }
-
     fn sync_runtime(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        cx.defer_in(window, |view, _, cx| view.collect_runtime_notifications(cx));
         let conversation = self.controller.read(cx).conversation_projection();
         let epoch_changed = conversation.epoch != self.conversation.epoch;
         if epoch_changed {
@@ -1170,6 +1600,83 @@ impl RootView {
     fn on_focus_previous(&mut self, _: &FocusPrevious, window: &mut Window, _: &mut Context<Self>) {
         window.focus_prev();
     }
+
+    fn on_open_command_palette(
+        &mut self,
+        _: &OpenCommandPalette,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.command_palette_open {
+            self.close_command_palette(window, cx);
+        } else {
+            self.open_command_palette(window, cx);
+        }
+    }
+
+    fn on_show_hotkeys(&mut self, _: &ShowHotkeys, window: &mut Window, cx: &mut Context<Self>) {
+        if self.hotkey_help_open {
+            self.hotkey_help_open = false;
+            window.focus(&self.composer.read(cx).focus_handle(cx));
+            cx.notify();
+        } else {
+            let _ = self.execute_native_action(NativeAction::Hotkeys, "", window, cx);
+        }
+    }
+
+    fn open_command_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.command_palette_open = true;
+        self.hotkey_help_open = false;
+        self.command_selection = 0;
+        self.command_search_composer.update(cx, |composer, cx| {
+            composer.set_draft("", cx);
+            composer.set_command_completion_active(true, cx);
+        });
+        window.focus(&self.command_search_composer.read(cx).focus_handle(cx));
+        cx.notify();
+    }
+
+    fn close_command_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.command_palette_open {
+            return;
+        }
+        self.command_palette_open = false;
+        self.command_search_composer.update(cx, |composer, cx| {
+            composer.set_command_completion_active(false, cx)
+        });
+        window.focus(&self.composer.read(cx).focus_handle(cx));
+        cx.notify();
+    }
+
+    fn on_palette_composer_event(
+        &mut self,
+        event: &ComposerEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            ComposerEvent::CommandNext => self.move_command_selection(1, true, cx),
+            ComposerEvent::CommandPrevious => self.move_command_selection(-1, true, cx),
+            ComposerEvent::CommandAccept => {
+                let query = self.command_search_composer.read(cx).draft().to_owned();
+                let catalog = self.command_catalog(cx);
+                let Some(entry) = catalog
+                    .filtered(&query)
+                    .get(self.command_selection)
+                    .cloned()
+                    .cloned()
+                else {
+                    return;
+                };
+                self.choose_command_entry(entry, window, cx);
+            }
+            ComposerEvent::CommandDismiss => self.close_command_palette(window, cx),
+            ComposerEvent::Accept { .. }
+            | ComposerEvent::FollowUp { .. }
+            | ComposerEvent::Abort
+            | ComposerEvent::AbortBash => {}
+        }
+    }
 }
 
 impl Render for RootView {
@@ -1179,6 +1686,7 @@ impl Render for RootView {
         let history = self.controller.read(cx).history_projection();
         let bridge = self.controller.read(cx).bridge_projection();
         let models = self.controller.read(cx).model_runtime_projection();
+        let command_catalog = self.command_catalog(cx);
         let selection_active = self
             .transcript_texts
             .values()
@@ -1203,6 +1711,8 @@ impl Render for RootView {
             .on_action(cx.listener(Self::on_activate_recovery))
             .on_action(cx.listener(Self::on_focus_next))
             .on_action(cx.listener(Self::on_focus_previous))
+            .on_action(cx.listener(Self::on_open_command_palette))
+            .on_action(cx.listener(Self::on_show_hotkeys))
             .on_action(cx.listener(Self::on_history_next))
             .on_action(cx.listener(Self::on_history_previous))
             .on_action(cx.listener(Self::on_history_first))
@@ -1211,6 +1721,7 @@ impl Render for RootView {
             .on_action(cx.listener(Self::on_history_unfold))
             .on_action(cx.listener(Self::on_history_activate))
             .size_full()
+            .relative()
             .flex()
             .flex_col()
             .bg(theme::canvas())
@@ -1288,11 +1799,31 @@ impl Render for RootView {
                             projection: &projection,
                             panel: self.model_panel,
                             search: &self.model_search_composer,
+                            command_catalog: &command_catalog,
+                            command_selection: self.command_selection,
+                            command_scroll: &self.slash_command_scroll,
+                            slash_dismissed: self.dismissed_slash_draft.as_deref()
+                                == Some(self.composer.read(cx).draft()),
                         },
                         cx,
                     ))
                 },
             )
+            .when(self.command_palette_open, |shell| {
+                shell.child(command_palette_overlay(
+                    &command_catalog,
+                    &self.command_search_composer,
+                    self.command_selection,
+                    &self.command_palette_scroll,
+                    cx,
+                ))
+            })
+            .when(self.hotkey_help_open, |shell| {
+                shell.child(hotkey_help_overlay(cx))
+            })
+            .when(!self.runtime_notifications.is_empty(), |shell| {
+                shell.child(runtime_notification_stack(&self.runtime_notifications, cx))
+            })
     }
 }
 
@@ -1460,7 +1991,14 @@ fn sessions_panel(params: SessionsPanelParams<'_>, cx: &mut Context<RootView>) -
                             "new-session",
                             "New",
                             session_actions_enabled,
-                            Box::new(cx.listener(|view, _, _, cx| view.new_session(cx))),
+                            Box::new(cx.listener(|view, _, window, cx| {
+                                let _ = view.execute_native_action(
+                                    NativeAction::NewSession,
+                                    "",
+                                    window,
+                                    cx,
+                                );
+                            })),
                         ))
                         .child(controls::quiet_button(
                             "refresh-sessions",
@@ -1472,7 +2010,14 @@ fn sessions_panel(params: SessionsPanelParams<'_>, cx: &mut Context<RootView>) -
                             "export-session",
                             "Export",
                             session_actions_enabled && catalog.current_session_file.is_some(),
-                            Box::new(cx.listener(|view, _, _, cx| view.export_session(cx))),
+                            Box::new(cx.listener(|view, _, window, cx| {
+                                let _ = view.execute_native_action(
+                                    NativeAction::ExportHtml,
+                                    "",
+                                    window,
+                                    cx,
+                                );
+                            })),
                         )),
                 )
                 .child(controls::chip_button(
@@ -1480,7 +2025,9 @@ fn sessions_panel(params: SessionsPanelParams<'_>, cx: &mut Context<RootView>) -
                     "History",
                     history_open,
                     true,
-                    Box::new(cx.listener(|view, _, window, cx| view.toggle_history(window, cx))),
+                    Box::new(cx.listener(|view, _, window, cx| {
+                        let _ = view.execute_native_action(NativeAction::Tree, "", window, cx);
+                    })),
                 )),
         )
         .when(
@@ -2531,9 +3078,7 @@ fn thinking_select_sheet(
                         .when(can_change && !selected, |row| {
                             row.tab_index(0)
                                 .cursor_pointer()
-                                .hover(|row| {
-                                    row.bg(theme::panel_lift()).text_color(theme::bone())
-                                })
+                                .hover(|row| row.bg(theme::panel_lift()).text_color(theme::bone()))
                                 .active(|row| row.bg(theme::panel_hover()))
                                 .focus(|row| row.bg(theme::panel_lift()))
                                 .on_click(cx.listener(move |view, _, window, cx| {
@@ -3246,6 +3791,380 @@ fn conversation_area(
         )
 }
 
+fn command_suggestion_sheet(
+    entries: &[&CommandEntry],
+    selected: usize,
+    scroll: &ScrollHandle,
+    cx: &mut Context<RootView>,
+) -> impl IntoElement {
+    let rows = entries
+        .iter()
+        .enumerate()
+        .map(|(index, entry)| command_row(entry, index == selected, cx))
+        .collect::<Vec<_>>();
+    popup_sheet()
+        .max_w(px(920.0))
+        .max_h(px(310.0))
+        .child(
+            div()
+                .px(px(10.0))
+                .py(px(7.0))
+                .flex()
+                .flex_row()
+                .items_center()
+                .justify_between()
+                .border_b_1()
+                .border_color(theme::edge_soft())
+                .child(controls::section_label("Commands"))
+                .child(
+                    div()
+                        .font_family(theme::MONO)
+                        .text_size(px(theme::T_TINY))
+                        .text_color(theme::smoke())
+                        .child("↑↓ choose · Enter run · Esc close"),
+                ),
+        )
+        .child(
+            div()
+                .id("slash-command-results")
+                .flex_1()
+                .min_h_0()
+                .overflow_y_scroll()
+                .track_scroll(scroll)
+                .scrollbar_width(px(theme::SCROLLBAR))
+                .children(rows),
+        )
+}
+
+fn command_row(
+    entry: &CommandEntry,
+    selected: bool,
+    cx: &mut Context<RootView>,
+) -> gpui::AnyElement {
+    let entry = entry.clone();
+    let click_entry = entry.clone();
+    let provenance = entry.provenance_label();
+    let hint = entry
+        .argument_hint
+        .as_deref()
+        .map(|hint| format!(" {hint}"))
+        .unwrap_or_default();
+    div()
+        .id(gpui::SharedString::from(format!(
+            "command-row-{}",
+            entry.id
+        )))
+        .px(px(10.0))
+        .py(px(7.0))
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(10.0))
+        .border_b_1()
+        .border_color(theme::edge_soft())
+        .when(selected, |row| row.bg(theme::panel_hover()))
+        .when(entry.enabled, |row| {
+            row.cursor_pointer()
+                .hover(|row| row.bg(theme::panel_hover()))
+        })
+        .when(!entry.enabled, |row| row.opacity(0.55))
+        .on_click(cx.listener(move |view, _, window, cx| {
+            view.choose_command_entry(click_entry.clone(), window, cx)
+        }))
+        .child(
+            div()
+                .w(px(76.0))
+                .flex_shrink_0()
+                .font_family(theme::MONO)
+                .text_size(px(theme::T_TINY))
+                .text_color(theme::data())
+                .child(entry.group.label()),
+        )
+        .child(
+            div()
+                .min_w_0()
+                .flex_1()
+                .flex()
+                .flex_col()
+                .gap(px(2.0))
+                .child(
+                    div()
+                        .font_family(theme::MONO)
+                        .text_size(px(theme::T_BODY))
+                        .text_color(theme::bone())
+                        .child(format!("/{}{}", entry.name, hint)),
+                )
+                .child(
+                    div()
+                        .font_family(theme::SANS)
+                        .text_size(px(theme::T_TINY))
+                        .text_color(theme::smoke())
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .whitespace_nowrap()
+                        .child(entry.description.clone()),
+                ),
+        )
+        .child(
+            div()
+                .max_w(px(260.0))
+                .font_family(theme::MONO)
+                .text_size(px(theme::T_TINY))
+                .text_color(theme::ash())
+                .overflow_hidden()
+                .text_ellipsis()
+                .whitespace_nowrap()
+                .child(provenance),
+        )
+        .into_any_element()
+}
+
+fn runtime_notification_stack(
+    notifications: &VecDeque<RuntimeNotification>,
+    cx: &mut Context<RootView>,
+) -> impl IntoElement {
+    let cards = notifications
+        .iter()
+        .enumerate()
+        .map(|(index, notification)| {
+            let (label, color) = match notification.kind {
+                NotificationKind::Info => ("Pi", theme::data()),
+                NotificationKind::Warning => ("Pi warning", theme::focus()),
+                NotificationKind::Error => ("Pi error", theme::error()),
+            };
+            div()
+                .occlude()
+                .w_full()
+                .p(px(10.0))
+                .rounded(px(theme::RADIUS_SM))
+                .border_1()
+                .border_color(color)
+                .bg(theme::panel_lift())
+                .flex()
+                .flex_col()
+                .gap(px(6.0))
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .justify_between()
+                        .gap(px(12.0))
+                        .child(
+                            div()
+                                .font_family(theme::MONO)
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_size(px(theme::T_TINY))
+                                .text_color(color)
+                                .child(label),
+                        )
+                        .child(controls::chrome_action(
+                            format!("dismiss-runtime-notification-{index}"),
+                            "Dismiss",
+                            true,
+                            Box::new(cx.listener(move |view, _, _, cx| {
+                                view.dismiss_runtime_notification(index, cx)
+                            })),
+                        )),
+                )
+                .child(
+                    div()
+                        .font_family(theme::SANS)
+                        .text_size(px(theme::T_UI_SM))
+                        .line_height(px(18.0))
+                        .text_color(theme::bone_dim())
+                        .child(notification.message.clone()),
+                )
+        })
+        .collect::<Vec<_>>();
+
+    div()
+        .absolute()
+        .top(px(theme::TITLE_H + 12.0))
+        .right(px(18.0))
+        .w(px(420.0))
+        .flex()
+        .flex_col()
+        .gap(px(8.0))
+        .children(cards)
+}
+
+fn command_palette_overlay(
+    catalog: &CommandCatalog,
+    search: &Entity<Composer>,
+    selected: usize,
+    scroll: &ScrollHandle,
+    cx: &mut Context<RootView>,
+) -> impl IntoElement {
+    let query = search.read(cx).draft();
+    let matches = catalog.filtered(query);
+    let mut rows = Vec::new();
+    let mut previous_group = None;
+    for (index, entry) in matches.iter().take(60).enumerate() {
+        if previous_group != Some(entry.group) {
+            previous_group = Some(entry.group);
+            rows.push(
+                div()
+                    .px(px(10.0))
+                    .pt(px(10.0))
+                    .pb(px(5.0))
+                    .font_family(theme::SANS)
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_size(px(theme::T_TINY))
+                    .text_color(theme::data())
+                    .child(entry.group.label())
+                    .into_any_element(),
+            );
+        }
+        rows.push(command_row(entry, index == selected, cx).into_any_element());
+    }
+
+    div()
+        .absolute()
+        .top_0()
+        .bottom_0()
+        .left_0()
+        .right_0()
+        .occlude()
+        .bg(theme::canvas())
+        .pt(px(76.0))
+        .items_center()
+        .child(
+            div()
+                .w(px(760.0))
+                .h_full()
+                .max_h(px(620.0))
+                .flex()
+                .flex_col()
+                .rounded(px(theme::RADIUS_SM))
+                .border_1()
+                .border_color(theme::edge_hard())
+                .bg(theme::panel())
+                .overflow_hidden()
+                .child(
+                    div()
+                        .px(px(12.0))
+                        .py(px(10.0))
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .justify_between()
+                        .child(
+                            div()
+                                .font_family(theme::SANS)
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_size(px(theme::T_BODY))
+                                .child("Command palette"),
+                        )
+                        .child(controls::chrome_action(
+                            "close-command-palette",
+                            "Esc",
+                            true,
+                            Box::new(cx.listener(|view, _, window, cx| {
+                                view.close_command_palette(window, cx)
+                            })),
+                        )),
+                )
+                .child(search.clone())
+                .child(
+                    div()
+                        .id("command-palette-results")
+                        .flex_1()
+                        .min_h_0()
+                        .overflow_y_scroll()
+                        .track_scroll(scroll)
+                        .scrollbar_width(px(theme::SCROLLBAR))
+                        .children(rows)
+                        .when(matches.is_empty(), |list| {
+                            list.child(
+                                div()
+                                    .p(px(18.0))
+                                    .text_size(px(theme::T_BODY))
+                                    .text_color(theme::smoke())
+                                    .child("No matching commands."),
+                            )
+                        }),
+                ),
+        )
+}
+
+fn hotkey_help_overlay(cx: &mut Context<RootView>) -> impl IntoElement {
+    let shortcuts = [
+        ("Command palette", "Ctrl+Shift+P"),
+        ("Hotkey help", "Ctrl+/"),
+        ("Send / steer", "Enter"),
+        ("Queue follow-up", "Alt+Enter"),
+        ("Insert newline", "Shift+Enter"),
+        ("Abort run or Bash", "Esc"),
+        ("Move focus", "Tab / Shift+Tab"),
+        ("Copy transcript selection", "Ctrl+C"),
+        ("History navigation", "↑ ↓ ← → Home End"),
+    ];
+    div()
+        .absolute()
+        .top_0()
+        .bottom_0()
+        .left_0()
+        .right_0()
+        .occlude()
+        .bg(theme::canvas())
+        .pt(px(96.0))
+        .items_center()
+        .child(
+            popup_sheet()
+                .w(px(560.0))
+                .child(
+                    div()
+                        .px(px(12.0))
+                        .py(px(10.0))
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .justify_between()
+                        .child(
+                            div()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_size(px(theme::T_BODY))
+                                .child("Native hotkeys"),
+                        )
+                        .child(controls::chrome_action(
+                            "close-hotkey-help",
+                            "Close",
+                            true,
+                            Box::new(cx.listener(|view, _, window, cx| {
+                                view.hotkey_help_open = false;
+                                window.focus(&view.composer.read(cx).focus_handle(cx));
+                                cx.notify();
+                            })),
+                        )),
+                )
+                .children(shortcuts.into_iter().map(|(label, keys)| {
+                    div()
+                        .px(px(12.0))
+                        .py(px(8.0))
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .justify_between()
+                        .border_t_1()
+                        .border_color(theme::edge_soft())
+                        .child(
+                            div()
+                                .text_size(px(theme::T_BODY))
+                                .text_color(theme::bone())
+                                .child(label),
+                        )
+                        .child(
+                            div()
+                                .font_family(theme::MONO)
+                                .text_size(px(theme::T_UI_SM))
+                                .text_color(theme::data())
+                                .child(keys),
+                        )
+                })),
+        )
+}
+
 struct ComposerBarParams<'a> {
     composer: &'a Entity<Composer>,
     history_open: bool,
@@ -3253,6 +4172,10 @@ struct ComposerBarParams<'a> {
     projection: &'a ShellProjection,
     panel: Option<ModelPanel>,
     search: &'a Entity<Composer>,
+    command_catalog: &'a CommandCatalog,
+    command_selection: usize,
+    command_scroll: &'a ScrollHandle,
+    slash_dismissed: bool,
 }
 
 fn composer_bar(params: ComposerBarParams<'_>, cx: &mut Context<RootView>) -> impl IntoElement {
@@ -3263,6 +4186,10 @@ fn composer_bar(params: ComposerBarParams<'_>, cx: &mut Context<RootView>) -> im
         projection,
         panel,
         search,
+        command_catalog,
+        command_selection,
+        command_scroll,
+        slash_dismissed,
     } = params;
     let inset_left =
         theme::SIDE_W + if history_open { theme::HISTORY_W } else { 0.0 } + theme::STREAM_PAD_X;
@@ -3274,6 +4201,9 @@ fn composer_bar(params: ComposerBarParams<'_>, cx: &mut Context<RootView>) -> im
     let catalog_ready = models.catalog.is_some();
     let can_pick_model = catalog_ready;
     let can_pick_thinking = catalog_ready || models.active_thinking.is_some();
+    let slash_completion = (!slash_dismissed)
+        .then(|| command_catalog.slash_completion(composer.read(cx).draft()))
+        .flatten();
 
     div()
         .bg(theme::floor())
@@ -3289,6 +4219,25 @@ fn composer_bar(params: ComposerBarParams<'_>, cx: &mut Context<RootView>) -> im
             div()
                 .w_full()
                 .relative()
+                .when_some(slash_completion, |host, completion| {
+                    host.child(
+                        div()
+                            .absolute()
+                            .left_0()
+                            .right_0()
+                            .bottom_full()
+                            .pb(px(10.0))
+                            .occlude()
+                            .flex()
+                            .justify_center()
+                            .child(command_suggestion_sheet(
+                                &completion.matches,
+                                command_selection,
+                                command_scroll,
+                                cx,
+                            )),
+                    )
+                })
                 .when(model_open || thinking_open, |host| {
                     // Clear gap so popup bottom border never stacks on the prompt top border.
                     host.child(
@@ -3470,7 +4419,10 @@ fn compact_label(value: &str, max_chars: usize) -> String {
     if trimmed.chars().count() <= max_chars {
         return trimmed.to_owned();
     }
-    let mut out = trimmed.chars().take(max_chars.saturating_sub(1)).collect::<String>();
+    let mut out = trimmed
+        .chars()
+        .take(max_chars.saturating_sub(1))
+        .collect::<String>();
     out.push('…');
     out
 }
@@ -3600,7 +4552,9 @@ fn run_controls(
                     },
                     abort_enabled,
                     controls::ControlTone::Danger,
-                    Box::new(cx.listener(|view, _, _, cx| view.abort(cx))),
+                    Box::new(cx.listener(|view, _, window, cx| {
+                        let _ = view.execute_native_action(NativeAction::Abort, "", window, cx);
+                    })),
                 ))
                 .child(controls::action_row(
                     "abort-bash",
@@ -3612,7 +4566,9 @@ fn run_controls(
                     },
                     bash_running,
                     controls::ControlTone::Danger,
-                    Box::new(cx.listener(|view, _, _, cx| view.abort_bash(cx))),
+                    Box::new(cx.listener(|view, _, window, cx| {
+                        let _ = view.execute_native_action(NativeAction::Abort, "", window, cx);
+                    })),
                 ))
                 .child(controls::action_row(
                     "abort-retry",
@@ -3636,7 +4592,9 @@ fn run_controls(
                     },
                     compact_enabled,
                     controls::ControlTone::Normal,
-                    Box::new(cx.listener(|view, _, _, cx| view.compact(cx))),
+                    Box::new(cx.listener(|view, _, window, cx| {
+                        let _ = view.execute_native_action(NativeAction::Compact, "", window, cx);
+                    })),
                 )),
         )
         .child(compaction_composer.clone())

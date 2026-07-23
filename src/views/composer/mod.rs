@@ -60,6 +60,10 @@ pub enum ComposerEvent {
     FollowUp { text: String },
     Abort,
     AbortBash,
+    CommandNext,
+    CommandPrevious,
+    CommandAccept,
+    CommandDismiss,
 }
 
 pub struct Composer {
@@ -80,6 +84,7 @@ pub struct Composer {
     scroll_y: Pixels,
     reveal_cursor: bool,
     last_layout: Option<EditorLayout>,
+    command_completion_active: bool,
 }
 
 impl Composer {
@@ -101,6 +106,7 @@ impl Composer {
             scroll_y: Pixels::ZERO,
             reveal_cursor: true,
             last_layout: None,
+            command_completion_active: false,
         }
     }
 
@@ -204,6 +210,13 @@ impl Composer {
         self.feedback = feedback;
         self.update_disabled();
         cx.notify();
+    }
+
+    pub fn set_command_completion_active(&mut self, active: bool, cx: &mut Context<Self>) {
+        if self.command_completion_active != active {
+            self.command_completion_active = active;
+            cx.notify();
+        }
     }
 
     pub fn clear_bash_accepted(
@@ -314,10 +327,18 @@ impl Composer {
     }
 
     fn up(&mut self, _: &ComposerUp, _: &mut Window, cx: &mut Context<Self>) {
+        if self.command_completion_active {
+            cx.emit(ComposerEvent::CommandPrevious);
+            return;
+        }
         self.move_vertical(-1, false, cx);
     }
 
     fn down(&mut self, _: &ComposerDown, _: &mut Window, cx: &mut Context<Self>) {
+        if self.command_completion_active {
+            cx.emit(ComposerEvent::CommandNext);
+            return;
+        }
         self.move_vertical(1, false, cx);
     }
 
@@ -435,6 +456,10 @@ impl Composer {
     }
 
     fn abort(&mut self, _: &AbortRun, _: &mut Window, cx: &mut Context<Self>) {
+        if self.command_completion_active {
+            cx.emit(ComposerEvent::CommandDismiss);
+            return;
+        }
         match self.availability {
             ComposerAvailability::Running | ComposerAvailability::Cancelling => {
                 cx.emit(ComposerEvent::Abort);
@@ -447,6 +472,10 @@ impl Composer {
     }
 
     fn emit_accept(&mut self, follow_up: bool, cx: &mut Context<Self>) {
+        if self.command_completion_active {
+            cx.emit(ComposerEvent::CommandAccept);
+            return;
+        }
         if self.disabled {
             return;
         }

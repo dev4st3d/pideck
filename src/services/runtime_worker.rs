@@ -110,7 +110,7 @@ impl RpcRuntimeService {
             working_directory,
             ProjectTrust::Reject,
             SessionLaunch::Ephemeral,
-            ResourcePolicy::disabled(),
+            ResourcePolicy::command_sources(),
         );
         config.disable_tools = false;
         config.offline = false;
@@ -125,7 +125,7 @@ impl RpcRuntimeService {
             working_directory,
             ProjectTrust::Reject,
             SessionLaunch::NewInDirectory(session_directory.into()),
-            ResourcePolicy::disabled(),
+            ResourcePolicy::command_sources(),
         );
         config.disable_tools = false;
         config.offline = false;

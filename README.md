@@ -4,7 +4,7 @@ Native Windows-first desktop shell for Pi, built with Rust and GPUI 0.2.2.
 
 ## Current maturity
 
-Phases 9 through 12 complete run-control recovery UX, Pi's persisted session lifecycle, native branch history, and the full model/provider experience. Startup, discovery, correlated readiness, hydration, prompt acceptance, message streaming, tools, retries, compaction, session catalog scanning, direct Bash, SDK session/model operations, and shutdown all run behind dedicated workers. The GPUI-owned controller observes normalized state and never performs I/O from `render`.
+Phases 9 through 13 complete run-control recovery UX, Pi's persisted session lifecycle, native branch history, the model/provider experience, and the unified command system. Startup, discovery, correlated readiness, hydration, prompt acceptance, message streaming, tools, retries, compaction, session catalog scanning, direct Bash, SDK session/model operations, command discovery, and shutdown all run behind dedicated workers. The GPUI-owned controller observes normalized state and never performs I/O from `render`.
 
 The visible shell now shows only live or explicitly Loading, Awaiting, Unknown, stale, stopped, and error values:
 
@@ -25,8 +25,13 @@ The visible shell now shows only live or explicitly Loading, Awaiting, Unknown, 
 - cached-first provider and model catalogs with background refresh, stale/per-provider failures, a searchable model switcher and thinking chips attached to the prompt box, and Providers/Models/Thinking/Usage settings;
 - provider-owned API-key, browser, device-code, text, select, progress, cancel, and logout flows. Secret input is masked and redacted from Rust debug output; catalogs expose no credential values, resolved environment values, headers, base URLs, or raw provider errors;
 - honest separation between the active session model/thinking state (stock RPC) and Pi's persisted defaults/model cycle order (SDK settings), plus nullable current context, lifetime token/cache/reasoning totals, and estimated cost with zero pricing labeled as unpriced rather than free.
+- `/` autocomplete plus a `Ctrl+Shift+P` palette merging native actions with Pi-discovered extension, prompt-template, and skill commands. Results are grouped by kind, retain duplicate/suffixed names, and show installed scope/origin/source/path provenance;
+- native model/session/tree/fork/clone/compact/export/copy/abort/settings/help actions that never round-trip through the model, with argument hints for native commands and a refresh command for retained stale catalogs.
+- native RPC notifications are shown as dismissible in-app notices, while installed TUI-only layout commands such as `/box`, `/rail`, and `/topbar` are omitted and guarded from model delivery.
 
 Accepted idle input uses `prompt`. While Pi is running, the primary action uses `steer` and follow-ups use `follow_up`. A composer line beginning with `!` executes the remaining text through Pi's direct `bash` RPC; `!!` does the same with `excludeFromContext=true`. Direct Bash is recorded locally until the authoritative session message reconciles it. Escape and the visible abort action route to `abort_bash` while direct Bash is active, independently from agent `abort`. Empty and rapid duplicate submissions are rejected. Prompt drafts clear only after the matching accepted response; Bash drafts clear when the local execution is recorded. Rejection and uncertain disconnect never trigger replay.
+
+Discovered extension, prompt-template, and skill commands always invoke through Pi's `prompt` RPC. Prompt/skill commands use `streamingBehavior` while a run is active; extension commands execute immediately as Pi specifies. Exact dynamic-command arguments are preserved. Known TUI-only built-ins such as `/login`, `/logout`, `/resume`, `/share`, and `/theme` are rejected locally instead of becoming ordinary model prompts.
 
 There is no rich Markdown/link rendering, task/subagent view, resource browser, share, or concurrent session process UI. Queue items are authoritative and read-only because stock Pi RPC has no remove/restore operation. Reversible trash stays unavailable until both catalog ownership and a platform trash provider are proven.
 
@@ -49,7 +54,8 @@ The app connects automatically using the canonical current working directory wit
 
 - `ProjectTrust::Reject` (`--no-approve`);
 - a persisted session directory resolved with Pi precedence (`PI_CODING_AGENT_SESSION_DIR`, configured `sessionDir`, then the encoded default under the agent directory);
-- extensions, skills, prompt templates, themes, and context files disabled;
+- installed extensions, skills, and prompt templates discovered for the command catalog under rejected project trust;
+- themes and context files disabled because the native shell does not consume them;
 - built-in Pi tools enabled so generic tool cards can observe their execution;
 - offline mode disabled so Pi can resolve existing Pi-managed credentials and models.
 
@@ -64,6 +70,8 @@ If no model is available, open Settings > Providers, authenticate, refresh catal
 | Connect | `Ctrl+Alt+C` |
 | Retry | `Ctrl+Alt+R` |
 | Stop | `Ctrl+Alt+S` |
+| Open command palette | `Ctrl+Shift+P` |
+| Show native hotkey help | `Ctrl+/` |
 | Send while idle / steer while running | `Enter` |
 | Insert newline | `Shift+Enter` |
 | Queue follow-up while running | `Alt+Enter` |
@@ -79,6 +87,7 @@ The interface preserves the warm-charcoal Switzer/Tanker identity, with Cascadia
 
 - `src/app.rs` - window bootstrap, service injection, keybindings, automatic connection, and send-only window-close shutdown
 - `src/actions.rs` - logical runtime and focus actions
+- `src/command_catalog.rs` - declarative native commands, installed provenance, filtering, duplicate identity, stale state, and TUI-only guards
 - `src/controller.rs` - GPUI-owned controller plus pure attempt/generation gate
 - `src/services/runtime_worker.rs` - injectable GPUI-independent service boundary and responsive worker coordinator
 - `src/services/session_catalog.rs` - strict streaming v1-v3 JSONL metadata scanner, directory precedence, canonical workspace filtering, corruption reporting, and stale-scan worker

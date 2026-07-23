@@ -2,12 +2,12 @@ use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
 use super::runtime::{
-    BashExecution, BashStatus, CompactionState, EffectKind, ErrorKind, FacetStatus, HydrationMode,
-    MAX_NOTIFICATIONS, MAX_UNKNOWN_RECORDS, MessageBlock, MessageRole, NormalizedEvent,
-    NormalizedResponse, OptimisticUserInput, PromptDelivery, QueueContents, RequestFailureKind,
-    RetryState, RuntimeEffect, RuntimeInput, RuntimeIntent, RuntimeLifecycle, RuntimeMessage,
-    RuntimeOperation, RuntimeRequest, RuntimeState, SafeError, SessionMutation, StampedInput,
-    SubmissionKind, ToolExecution, ToolStatus, UnknownRecord, push_bounded,
+    BashExecution, BashStatus, CommandSource, CompactionState, EffectKind, ErrorKind, FacetStatus,
+    HydrationMode, MAX_NOTIFICATIONS, MAX_UNKNOWN_RECORDS, MessageBlock, MessageRole,
+    NormalizedEvent, NormalizedResponse, OptimisticUserInput, PromptDelivery, QueueContents,
+    RequestFailureKind, RetryState, RuntimeEffect, RuntimeInput, RuntimeIntent, RuntimeLifecycle,
+    RuntimeMessage, RuntimeOperation, RuntimeRequest, RuntimeState, SafeError, SessionMutation,
+    StampedInput, SubmissionKind, ToolExecution, ToolStatus, UnknownRecord, push_bounded,
 };
 use crate::services::rpc::{EntryId, RequestId};
 
@@ -113,60 +113,16 @@ fn reduce_intent(
             request,
             text,
             kind,
-        } => {
-            if matches!(state.prompt_delivery, PromptDelivery::Pending { .. }) {
-                return Vec::new();
-            }
-            let rejection = if text.trim().is_empty() {
-                Some("Write a prompt first.".to_owned())
-            } else if !submission_allowed(state.lifecycle, kind) {
-                Some(match kind {
-                    SubmissionKind::Prompt => "Pi is not idle yet.".to_owned(),
-                    SubmissionKind::Steer | SubmissionKind::FollowUp => {
-                        "Pi must be running for queued input.".to_owned()
-                    }
-                })
-            } else {
-                None
-            };
-            if let Some(summary) = rejection {
-                state.prompt_delivery = PromptDelivery::Rejected {
-                    request,
-                    kind,
-                    summary,
-                };
-                return Vec::new();
-            }
-
-            let baseline = state
-                .messages
-                .data
-                .as_ref()
-                .into_iter()
-                .flatten()
-                .map(|message| message.key.clone())
-                .collect();
-            state.optimistic_user_inputs.push(OptimisticUserInput {
-                request: request.clone(),
-                text: text.clone(),
-                kind,
-                accepted: false,
-                authoritative_seen: false,
-                baseline,
-            });
-            state.pending_prompt_settled = false;
-            state.prompt_delivery = PromptDelivery::Pending {
-                request: request.clone(),
-                kind,
-            };
-            vec![effect(
-                state,
-                RuntimeRequest::Submit {
-                    request,
-                    text,
-                    kind,
-                },
-            )]
+        } => submit(state, request, text, kind, None),
+        RuntimeIntent::InvokeCommand {
+            request,
+            text,
+            kind,
+            source,
+        } => submit(state, request, text, kind, Some(source)),
+        RuntimeIntent::RefreshCommands => {
+            state.commands.loading();
+            vec![effect(state, RuntimeRequest::GetCommands)]
         }
         RuntimeIntent::ExecuteBash {
             request,
@@ -341,6 +297,74 @@ fn reduce_intent(
     }
 }
 
+fn submit(
+    state: &mut RuntimeState,
+    request: RequestId,
+    text: String,
+    kind: SubmissionKind,
+    dynamic_source: Option<CommandSource>,
+) -> Vec<RuntimeEffect> {
+    if matches!(state.prompt_delivery, PromptDelivery::Pending { .. }) {
+        return Vec::new();
+    }
+    let rejection = if text.trim().is_empty() {
+        Some("Write a prompt first.".to_owned())
+    } else if !submission_allowed(state.lifecycle, kind) {
+        Some(match kind {
+            SubmissionKind::Prompt => "Pi is not idle yet.".to_owned(),
+            SubmissionKind::Steer | SubmissionKind::FollowUp => {
+                "Pi must be running for queued input.".to_owned()
+            }
+        })
+    } else {
+        None
+    };
+    if let Some(summary) = rejection {
+        state.prompt_delivery = PromptDelivery::Rejected {
+            request,
+            kind,
+            summary,
+        };
+        return Vec::new();
+    }
+
+    let baseline = state
+        .messages
+        .data
+        .as_ref()
+        .into_iter()
+        .flatten()
+        .map(|message| message.key.clone())
+        .collect();
+    state.optimistic_user_inputs.push(OptimisticUserInput {
+        request: request.clone(),
+        text: text.clone(),
+        kind,
+        accepted: false,
+        authoritative_seen: false,
+        baseline,
+    });
+    state.pending_prompt_settled = false;
+    state.prompt_delivery = PromptDelivery::Pending {
+        request: request.clone(),
+        kind,
+    };
+    let request = match dynamic_source {
+        Some(source) => RuntimeRequest::InvokeCommand {
+            request,
+            text,
+            kind,
+            source,
+        },
+        None => RuntimeRequest::Submit {
+            request,
+            text,
+            kind,
+        },
+    };
+    vec![effect(state, request)]
+}
+
 fn begin_session_replacement(
     state: &mut RuntimeState,
     mutation: SessionMutation,
@@ -451,7 +475,72 @@ fn reduce_response(
             }
             Vec::new()
         }
+        (
+            RuntimeRequest::InvokeCommand {
+                request,
+                kind,
+                source,
+                ..
+            },
+            Ok(NormalizedResponse::Accepted),
+        ) => {
+            if prompt_request_matches(&state.prompt_delivery, &request) {
+                state.prompt_delivery = PromptDelivery::Accepted {
+                    request: request.clone(),
+                    kind,
+                };
+                if let Some(input) = state
+                    .optimistic_user_inputs
+                    .iter_mut()
+                    .find(|input| input.request == request)
+                {
+                    input.accepted = true;
+                }
+                reconcile_optimistic_user_inputs(state);
+                state.bump_revision();
+                if source != CommandSource::Extension
+                    && kind == SubmissionKind::Prompt
+                    && !state.pending_prompt_settled
+                {
+                    state.lifecycle = RuntimeLifecycle::Running;
+                }
+                state.pending_prompt_settled = false;
+            }
+            if source == CommandSource::Extension {
+                state.commands.loading();
+                vec![effect(state, RuntimeRequest::GetCommands)]
+            } else {
+                Vec::new()
+            }
+        }
         (RuntimeRequest::Submit { request, kind, .. }, Err(failure)) => {
+            if prompt_request_matches(&state.prompt_delivery, &request) {
+                state.prompt_delivery = if matches!(
+                    failure.kind,
+                    RequestFailureKind::UnknownOutcome | RequestFailureKind::Disconnected
+                ) {
+                    PromptDelivery::Uncertain {
+                        request: request.clone(),
+                        kind,
+                    }
+                } else {
+                    PromptDelivery::Rejected {
+                        request: request.clone(),
+                        kind,
+                        summary: failure.error.summary.clone(),
+                    }
+                };
+            }
+            state
+                .optimistic_user_inputs
+                .retain(|input| input.request != request);
+            if kind == SubmissionKind::Prompt {
+                state.pending_prompt_settled = false;
+            }
+            state.bounded_error(failure.error);
+            Vec::new()
+        }
+        (RuntimeRequest::InvokeCommand { request, kind, .. }, Err(failure)) => {
             if prompt_request_matches(&state.prompt_delivery, &request) {
                 state.prompt_delivery = if matches!(
                     failure.kind,
@@ -1481,6 +1570,7 @@ fn request_name(request: &RuntimeRequest) -> &'static str {
             SubmissionKind::Steer => "steer",
             SubmissionKind::FollowUp => "follow_up",
         },
+        RuntimeRequest::InvokeCommand { .. } => "prompt",
         RuntimeRequest::ExecuteBash { .. } => "bash",
         RuntimeRequest::Abort => "abort",
         RuntimeRequest::AbortBash => "abort_bash",

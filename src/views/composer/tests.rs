@@ -111,6 +111,32 @@ fn escape_routes_bash_abort_separately_from_agent_abort(cx: &mut TestAppContext)
 }
 
 #[gpui::test]
+fn command_completion_owns_arrows_enter_and_escape_without_mutating_draft(cx: &mut TestAppContext) {
+    cx.update(|cx| cx.bind_keys(composer_key_bindings()));
+    let (harness, cx) = cx.add_window_view(ComposerHarness::new);
+    let composer = harness.read_with(cx, |harness, _| harness.composer.clone());
+    cx.simulate_input("/comp");
+    composer.update(cx, |composer, cx| {
+        composer.set_command_completion_active(true, cx)
+    });
+
+    cx.simulate_keystrokes("down up enter escape");
+    assert_eq!(
+        harness.read_with(cx, |harness, _| harness.events.borrow().clone()),
+        vec![
+            ComposerEvent::CommandNext,
+            ComposerEvent::CommandPrevious,
+            ComposerEvent::CommandAccept,
+            ComposerEvent::CommandDismiss,
+        ]
+    );
+    assert_eq!(
+        composer.read_with(cx, |composer, _| composer.draft().to_owned()),
+        "/comp"
+    );
+}
+
+#[gpui::test]
 fn composer_input_is_grapheme_safe_and_supports_clipboard_undo(cx: &mut TestAppContext) {
     cx.update(|cx| cx.bind_keys(composer_key_bindings()));
     let (harness, cx) = cx.add_window_view(ComposerHarness::new);

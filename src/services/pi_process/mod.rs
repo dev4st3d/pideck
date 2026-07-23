@@ -89,6 +89,20 @@ impl ResourcePolicy {
             discover_context_files: false,
         }
     }
+
+    pub fn command_sources() -> Self {
+        Self {
+            discover_extensions: true,
+            extensions: Vec::new(),
+            discover_skills: true,
+            skills: Vec::new(),
+            discover_prompt_templates: true,
+            prompt_templates: Vec::new(),
+            discover_themes: false,
+            themes: Vec::new(),
+            discover_context_files: false,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -965,6 +979,39 @@ mod tests {
         assert!(strings.contains(&"--no-themes".to_owned()));
         assert!(strings.contains(&"--no-context-files".to_owned()));
         assert!(!strings.contains(&"--approve".to_owned()));
+    }
+
+    #[test]
+    fn command_source_profile_discovers_commands_but_keeps_unrelated_resources_disabled() {
+        let installation = PiInstallation {
+            executable: PathBuf::from("pi"),
+            launcher_arguments: Vec::new(),
+            source: ExecutableSource::Explicit,
+            version: SUPPORTED_PI_VERSION.to_owned(),
+            capabilities: PiCapabilities {
+                rpc_mode: true,
+                explicit_trust: true,
+                explicit_session: true,
+                resource_controls: true,
+            },
+        };
+        let config = PiLaunchConfig::new(
+            ".",
+            ProjectTrust::Reject,
+            SessionLaunch::Ephemeral,
+            ResourcePolicy::command_sources(),
+        );
+        let arguments = launch_arguments(&installation, &config)
+            .into_iter()
+            .map(|value| value.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+
+        assert!(!arguments.contains(&"--no-extensions".to_owned()));
+        assert!(!arguments.contains(&"--no-skills".to_owned()));
+        assert!(!arguments.contains(&"--no-prompt-templates".to_owned()));
+        assert!(arguments.contains(&"--no-themes".to_owned()));
+        assert!(arguments.contains(&"--no-context-files".to_owned()));
+        assert!(arguments.contains(&"--no-approve".to_owned()));
     }
 
     #[test]

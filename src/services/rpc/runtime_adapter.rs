@@ -7,18 +7,19 @@ use super::{
     ExtensionUiMethod, ExtensionUiResponse, ExtensionUiResponseBody, IncomingRecord,
     KnownExtensionUiMethod, KnownSessionEntry, Model, ModelInput, NotificationType, QueueMode,
     ResponseResult, RpcClientError, RpcClientErrorKind, RpcEvent, RpcResponse, SessionEntry,
-    SessionEpoch, SessionTreeNode, SlashCommand, SlashCommandSource, StopReason,
+    SessionEpoch, SessionTreeNode, SlashCommand, SlashCommandSource, StopReason, StreamingBehavior,
     TaggedIncomingRecord, ThinkingLevel, UserContent, UserContentBlock,
 };
 use crate::state::runtime::{
-    AssistantMetadata, BlockKey, CommandSource, CompactionKind, DialogAnswer, DialogRequest,
-    DirectBashResult, EffectKind, EntryKind, ErrorKind, ExtensionFailure, ExtensionStatus,
-    ExtensionWidget, MessageBlock, MessageKey, MessageRole, MessageStopReason, MessageUsage,
-    ModelSummary, NormalizedEvent, NormalizedResponse, NormalizedSessionState, NotificationKind,
-    QueueDeliveryMode, RequestFailure, RequestFailureKind, RuntimeCommand, RuntimeEffect,
-    RuntimeEntry, RuntimeForkMessage, RuntimeInput, RuntimeMessage, RuntimeNotification,
-    RuntimeRequest, RuntimeStats, RuntimeThinkingLevel, RuntimeTreeNode, SafeError,
-    SessionMutation, SessionSnapshot, StampedInput, SubmissionKind, ToolImage, WidgetPlacement,
+    AssistantMetadata, BlockKey, CommandProvenance, CommandSource, CompactionKind, DialogAnswer,
+    DialogRequest, DirectBashResult, EffectKind, EntryKind, ErrorKind, ExtensionFailure,
+    ExtensionStatus, ExtensionWidget, MessageBlock, MessageKey, MessageRole, MessageStopReason,
+    MessageUsage, ModelSummary, NormalizedEvent, NormalizedResponse, NormalizedSessionState,
+    NotificationKind, QueueDeliveryMode, RequestFailure, RequestFailureKind, RuntimeCommand,
+    RuntimeEffect, RuntimeEntry, RuntimeForkMessage, RuntimeInput, RuntimeMessage,
+    RuntimeNotification, RuntimeRequest, RuntimeStats, RuntimeThinkingLevel, RuntimeTreeNode,
+    SafeError, SessionMutation, SessionSnapshot, StampedInput, SubmissionKind, ToolImage,
+    WidgetPlacement,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -126,6 +127,17 @@ fn command_for_request(request: &RuntimeRequest) -> Command {
             SubmissionKind::FollowUp => Command::FollowUp {
                 message: text.clone(),
                 images: None,
+            },
+        },
+        RuntimeRequest::InvokeCommand {
+            text, kind, source, ..
+        } => Command::Prompt {
+            message: text.clone(),
+            images: None,
+            streaming_behavior: match (*source, *kind) {
+                (CommandSource::Extension, _) | (_, SubmissionKind::Prompt) => None,
+                (_, SubmissionKind::Steer) => Some(StreamingBehavior::Steer),
+                (_, SubmissionKind::FollowUp) => Some(StreamingBehavior::FollowUp),
             },
         },
         RuntimeRequest::ExecuteBash {
@@ -302,6 +314,7 @@ fn normalize_response(
             },
             ResponseResult::FollowUp,
         )
+        | (RuntimeRequest::InvokeCommand { .. }, ResponseResult::Prompt)
         | (RuntimeRequest::Abort, ResponseResult::Abort)
         | (RuntimeRequest::AbortBash, ResponseResult::AbortBash)
         | (RuntimeRequest::AbortRetry, ResponseResult::AbortRetry)
@@ -1031,7 +1044,17 @@ fn runtime_command(command: SlashCommand) -> RuntimeCommand {
             SlashCommandSource::Prompt => CommandSource::Prompt,
             SlashCommandSource::Skill => CommandSource::Skill,
         },
-        scope: format!("{:?}", command.source_info.scope).to_lowercase(),
+        provenance: CommandProvenance {
+            path: command.source_info.path,
+            source: command.source_info.source,
+            scope: format!("{:?}", command.source_info.scope).to_lowercase(),
+            origin: match command.source_info.origin {
+                super::SourceOrigin::Package => "package",
+                super::SourceOrigin::TopLevel => "top-level",
+            }
+            .to_owned(),
+            base_dir: command.source_info.base_dir,
+        },
     }
 }
 
@@ -1117,6 +1140,7 @@ fn operation_name(request: &RuntimeRequest) -> &'static str {
             SubmissionKind::Steer => "steering delivery",
             SubmissionKind::FollowUp => "follow-up delivery",
         },
+        RuntimeRequest::InvokeCommand { .. } => "command delivery",
         RuntimeRequest::ExecuteBash { .. } => "Bash execution",
         RuntimeRequest::Abort => "abort",
         RuntimeRequest::AbortBash => "Bash cancellation",

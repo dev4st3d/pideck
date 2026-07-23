@@ -37,6 +37,8 @@ actions!(
         AcceptInput,
         QueueFollowUp,
         AbortRun,
+        OpenCommandPalette,
+        ShowHotkeys,
         TranscriptCopy,
         TranscriptSelectAll,
         HistoryNext,
