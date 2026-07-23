@@ -1079,6 +1079,7 @@ fn supported_thinking_levels(model: &Model) -> Vec<RuntimeThinkingLevel> {
     }
 
     let levels = [
+        ("off", RuntimeThinkingLevel::Off),
         ("minimal", RuntimeThinkingLevel::Minimal),
         ("low", RuntimeThinkingLevel::Low),
         ("medium", RuntimeThinkingLevel::Medium),
@@ -1086,19 +1087,22 @@ fn supported_thinking_levels(model: &Model) -> Vec<RuntimeThinkingLevel> {
         ("xhigh", RuntimeThinkingLevel::Xhigh),
         ("max", RuntimeThinkingLevel::Max),
     ];
-    let Some(level_map) = model.thinking_level_map.as_ref() else {
-        return std::iter::once(RuntimeThinkingLevel::Off)
-            .chain(levels.into_iter().map(|(_, level)| level))
-            .collect();
-    };
-
-    std::iter::once(RuntimeThinkingLevel::Off)
-        .chain(
-            levels
-                .into_iter()
-                .filter(|(name, _)| level_map.get(*name).is_some_and(Option::is_some))
-                .map(|(_, level)| level),
-        )
+    let level_map = model.thinking_level_map.as_ref();
+    // Mirror bridge::supportedThinking: base efforts default on unless explicitly
+    // disabled, while extended efforts are opt-in.
+    levels
+        .into_iter()
+        .filter(|(name, _)| {
+            let mapped = level_map.and_then(|map| map.get(*name));
+            if mapped == Some(&None) {
+                return false;
+            }
+            if matches!(*name, "xhigh" | "max") {
+                return mapped.is_some_and(Option::is_some);
+            }
+            true
+        })
+        .map(|(_, level)| level)
         .collect()
 }
 
@@ -1268,20 +1272,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn stock_model_preserves_supported_thinking_efforts() {
+    fn stock_openai_model_uses_default_and_explicit_thinking_efforts() {
         let model: Model = serde_json::from_value(json!({
-            "id": "reasoning-model",
-            "name": "Reasoning Model",
+            "id": "gpt-test",
+            "name": "GPT Test",
             "api": "responses",
-            "provider": "test",
+            "provider": "openai",
             "baseUrl": "https://invalid.example",
             "reasoning": true,
             "thinkingLevelMap": {
-                "off": null,
                 "minimal": null,
-                "low": "low",
-                "medium": "medium",
-                "high": "high"
+                "xhigh": "xhigh",
+                "max": null
             },
             "input": ["text"],
             "cost": {
@@ -1299,6 +1301,20 @@ mod tests {
             supported_thinking_levels(&model),
             vec![
                 RuntimeThinkingLevel::Off,
+                RuntimeThinkingLevel::Low,
+                RuntimeThinkingLevel::Medium,
+                RuntimeThinkingLevel::High,
+                RuntimeThinkingLevel::Xhigh,
+            ]
+        );
+
+        let mut native_levels = model;
+        native_levels.thinking_level_map = None;
+        assert_eq!(
+            supported_thinking_levels(&native_levels),
+            vec![
+                RuntimeThinkingLevel::Off,
+                RuntimeThinkingLevel::Minimal,
                 RuntimeThinkingLevel::Low,
                 RuntimeThinkingLevel::Medium,
                 RuntimeThinkingLevel::High,
