@@ -167,16 +167,13 @@ impl ConversationListModel {
             } => {
                 let texts =
                     super::cached_message_texts(projection, *user_index..body.end, cache, cx);
-                let messages = projection.messages[body.clone()]
-                    .iter()
-                    .map(AsRef::as_ref)
-                    .collect::<Vec<_>>();
+                let messages = &projection.messages[body.clone()];
                 connected_row(
                     super::turn_card(
                         *number,
                         *number == self.turn_count,
                         &projection.messages[*user_index],
-                        &messages,
+                        messages,
                         projection,
                         &texts,
                     )

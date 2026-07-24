@@ -1,6 +1,7 @@
 //! Secret-free model catalog, authentication, and thinking projections.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
@@ -260,7 +261,7 @@ pub enum CatalogPhase {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ModelRuntimeState {
     pub phase: CatalogPhase,
-    pub catalog: Option<ModelCatalogSnapshot>,
+    pub catalog: Option<Arc<ModelCatalogSnapshot>>,
     pub active_refresh: Option<u64>,
     pub next_operation: u64,
     pub auth: Option<AuthFlow>,
@@ -306,7 +307,7 @@ impl ModelRuntimeState {
                     .providers
                     .iter()
                     .any(|provider| provider.refresh_error.is_some());
-                self.catalog = Some(catalog);
+                self.catalog = Some(Arc::new(catalog));
                 self.phase = if has_errors {
                     CatalogPhase::Stale(
                         "Some providers could not refresh; cached models remain available."
@@ -325,7 +326,7 @@ impl ModelRuntimeState {
     }
 
     pub fn apply_snapshot(&mut self, catalog: ModelCatalogSnapshot) {
-        self.catalog = Some(catalog);
+        self.catalog = Some(Arc::new(catalog));
         self.phase = CatalogPhase::Ready;
     }
 

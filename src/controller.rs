@@ -1,6 +1,6 @@
 //! GPUI-owned runtime controller and its pure generation gate.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -96,6 +96,14 @@ fn coalesce_runtime_results(results: Vec<WorkerResult>) -> Vec<WorkerResult> {
     coalesced
 }
 
+fn runtime_batch_delay(elapsed: Duration, replaceable: bool) -> Option<Duration> {
+    if !replaceable || elapsed >= RUNTIME_FRAME_BUDGET {
+        None
+    } else {
+        Some(RUNTIME_FRAME_BUDGET - elapsed)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SubmissionPreference {
     Default,
@@ -121,7 +129,7 @@ pub struct ComposerProjection {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommandCatalogProjection {
     pub status: FacetStatus,
-    pub commands: Vec<RuntimeCommand>,
+    pub commands: Arc<Vec<RuntimeCommand>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -141,9 +149,9 @@ pub struct ConversationProjection {
     pub status: FacetStatus,
     pub messages: Vec<Arc<RuntimeMessage>>,
     pub accepted_user_inputs: Vec<AcceptedUserInput>,
-    pub tools: HashMap<crate::services::rpc::ToolCallId, ToolExecution>,
-    pub bash_executions: Vec<BashExecution>,
-    pub queue: QueueContents,
+    pub tools: Arc<HashMap<crate::services::rpc::ToolCallId, ToolExecution>>,
+    pub bash_executions: Arc<Vec<BashExecution>>,
+    pub queue: Arc<QueueContents>,
     pub steering_mode: Option<QueueDeliveryMode>,
     pub follow_up_mode: Option<QueueDeliveryMode>,
     pub auto_compaction_enabled: Option<bool>,
@@ -158,21 +166,21 @@ pub struct ConversationProjection {
 #[derive(Debug, Clone, PartialEq)]
 pub struct HistoryProjection {
     pub status: FacetStatus,
-    pub tree: Vec<RuntimeTreeNode>,
+    pub tree: Arc<Vec<RuntimeTreeNode>>,
     pub leaf_id: Option<crate::services::rpc::EntryId>,
-    pub fork_messages: Vec<RuntimeForkMessage>,
+    pub fork_messages: Arc<Vec<RuntimeForkMessage>>,
     pub lifecycle: RuntimeLifecycle,
     pub switching: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ExtensionUiProjection {
-    pub active_dialog: Option<ExtensionDialog>,
+    pub active_dialog: Option<Arc<ExtensionDialog>>,
     pub queued_dialogs: usize,
-    pub statuses: Vec<(String, ExtensionStatus)>,
-    pub widgets: Vec<(String, ExtensionWidget)>,
+    pub statuses: Arc<BTreeMap<String, ExtensionStatus>>,
+    pub widgets: Arc<BTreeMap<String, ExtensionWidget>>,
     pub title: Option<String>,
-    pub errors: Vec<ExtensionFailure>,
+    pub errors: Arc<VecDeque<ExtensionFailure>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -187,8 +195,8 @@ pub enum CatalogStatus {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CatalogProjection {
     pub status: CatalogStatus,
-    pub sessions: Vec<SessionSummary>,
-    pub corrupt: Vec<CorruptSession>,
+    pub sessions: Arc<Vec<SessionSummary>>,
+    pub corrupt: Arc<Vec<CorruptSession>>,
     pub root: Option<SessionRoot>,
     pub error: Option<String>,
     pub current_session_id: Option<String>,
@@ -231,8 +239,8 @@ pub struct UsageProjection {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ModelRuntimeProjection {
     pub phase: CatalogPhase,
-    pub catalog: Option<ModelCatalogSnapshot>,
-    pub stock_models: Vec<ModelSummary>,
+    pub catalog: Option<Arc<ModelCatalogSnapshot>>,
+    pub stock_models: Arc<Vec<ModelSummary>>,
     pub auth: Option<AuthFlow>,
     pub feedback: Option<String>,
     pub active_model: Option<ModelIdentity>,
@@ -247,14 +255,14 @@ pub struct ModelRuntimeProjection {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResourceCenterProjection {
     pub phase: ResourcePhase,
-    pub snapshot: Option<ResourceInventorySnapshot>,
+    pub snapshot: Option<Arc<ResourceInventorySnapshot>>,
     pub feedback: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct OrchestrationProjection {
     pub phase: OrchestrationPhase,
-    pub snapshot: Option<OrchestrationSnapshot>,
+    pub snapshot: Option<Arc<OrchestrationSnapshot>>,
     pub feedback: Option<String>,
     pub pending_actions: usize,
 }
@@ -577,20 +585,10 @@ impl ControllerCore {
         ExtensionUiProjection {
             active_dialog: self.runtime.dialogs.front().cloned(),
             queued_dialogs: self.runtime.dialogs.len().saturating_sub(1),
-            statuses: self
-                .runtime
-                .statuses
-                .iter()
-                .map(|(key, value)| (key.clone(), value.clone()))
-                .collect(),
-            widgets: self
-                .runtime
-                .widgets
-                .iter()
-                .map(|(key, value)| (key.clone(), value.clone()))
-                .collect(),
+            statuses: Arc::clone(&self.runtime.statuses),
+            widgets: Arc::clone(&self.runtime.widgets),
             title: self.runtime.title.clone(),
-            errors: self.runtime.extension_errors.iter().cloned().collect(),
+            errors: Arc::clone(&self.runtime.extension_errors),
         }
     }
 
@@ -1016,8 +1014,8 @@ pub struct RuntimeController {
     catalog_worker: SessionCatalogWorker,
     catalog_generation: u64,
     catalog_status: CatalogStatus,
-    catalog_sessions: Vec<SessionSummary>,
-    catalog_corrupt: Vec<CorruptSession>,
+    catalog_sessions: Arc<Vec<SessionSummary>>,
+    catalog_corrupt: Arc<Vec<CorruptSession>>,
     catalog_root: Option<SessionRoot>,
     catalog_error: Option<String>,
     bridge_worker: SdkBridgeWorker,
@@ -1064,8 +1062,16 @@ impl RuntimeController {
         let worker = RuntimeWorkerHandle::spawn(Arc::clone(&service));
         let results = worker.results();
         let event_task = cx.spawn(async move |controller, cx| {
+            let mut last_dispatch = Instant::now()
+                .checked_sub(RUNTIME_FRAME_BUDGET)
+                .unwrap_or_else(Instant::now);
             while let Ok(first) = results.recv().await {
-                cx.background_executor().timer(RUNTIME_FRAME_BUDGET).await;
+                if let Some(delay) = runtime_batch_delay(
+                    last_dispatch.elapsed(),
+                    replaceable_runtime_update(&first).is_some(),
+                ) {
+                    cx.background_executor().timer(delay).await;
+                }
                 let mut batch = vec![first];
                 while batch.len() < MAX_RUNTIME_BATCH {
                     let Ok(result) = results.try_recv() else {
@@ -1083,6 +1089,7 @@ impl RuntimeController {
                 if updated.is_err() {
                     break;
                 }
+                last_dispatch = Instant::now();
             }
         });
         let catalog_worker = SessionCatalogWorker::spawn(catalog_config);
@@ -1108,8 +1115,8 @@ impl RuntimeController {
             catalog_worker,
             catalog_generation,
             catalog_status: CatalogStatus::Loading,
-            catalog_sessions: Vec::new(),
-            catalog_corrupt: Vec::new(),
+            catalog_sessions: Arc::new(Vec::new()),
+            catalog_corrupt: Arc::new(Vec::new()),
             catalog_root: None,
             catalog_error: None,
             bridge_worker,
@@ -1211,16 +1218,8 @@ impl RuntimeController {
                     || model.pricing.tiers.iter().any(|tier| !tier.rates.is_zero())
             });
         let stats = self.core.runtime.stats.data.as_ref();
-        let reasoning = self
-            .core
-            .runtime
-            .messages
-            .data
-            .as_deref()
-            .unwrap_or_default()
-            .iter()
-            .filter_map(|message| message.assistant.as_ref()?.usage.reasoning)
-            .reduce(u64::saturating_add);
+        let reasoning = (self.core.runtime.reasoning_message_count > 0)
+            .then_some(self.core.runtime.reasoning_tokens);
         ModelRuntimeProjection {
             phase: self.model_runtime.phase.clone(),
             catalog: self.model_runtime.catalog.clone(),
@@ -1902,8 +1901,8 @@ impl RuntimeController {
                 } else {
                     CatalogStatus::Ready
                 };
-                self.catalog_sessions = scan.sessions;
-                self.catalog_corrupt = scan.corrupt;
+                self.catalog_sessions = Arc::new(scan.sessions);
+                self.catalog_corrupt = Arc::new(scan.corrupt);
                 self.catalog_root = Some(scan.root);
                 self.catalog_error = None;
             }
@@ -2463,8 +2462,12 @@ impl RuntimeController {
         operation: impl FnOnce(&mut ControllerCore) -> Vec<crate::state::runtime::RuntimeEffect>,
         cx: &mut Context<Self>,
     ) -> bool {
+        let revision = self.core.runtime.revision;
         let effects = operation(&mut self.core);
         if effects.is_empty() {
+            if self.core.runtime.revision != revision {
+                cx.notify();
+            }
             return false;
         }
         self.send_effects(effects);
@@ -2494,6 +2497,20 @@ impl Drop for RuntimeController {
 mod tests {
     use super::*;
     use crate::services::runtime_worker::{RuntimeStartFailure, RuntimeStartFailureKind};
+
+    #[test]
+    fn runtime_batching_does_not_delay_first_or_control_events() {
+        assert_eq!(runtime_batch_delay(RUNTIME_FRAME_BUDGET, true), None);
+        assert_eq!(runtime_batch_delay(Duration::ZERO, false), None);
+    }
+
+    #[test]
+    fn runtime_batching_waits_only_for_the_remaining_frame_budget() {
+        assert_eq!(
+            runtime_batch_delay(Duration::from_millis(3), true),
+            Some(Duration::from_millis(4))
+        );
+    }
 
     #[test]
     fn identical_session_paths_are_not_reopened() {

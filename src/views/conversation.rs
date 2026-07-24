@@ -1,8 +1,10 @@
 //! Live, turn-grouped conversation presentation and read-only selectable text.
 
+use std::borrow::Borrow;
 use std::collections::{HashMap, HashSet};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::ops::Range;
+use std::sync::Arc;
 
 use gpui::{
     AnyElement, App, ClipboardItem, Context, CursorStyle, Entity, FocusHandle, Focusable,
@@ -461,7 +463,7 @@ fn turn_card(
     index: usize,
     is_last: bool,
     user: &RuntimeMessage,
-    messages: &[&RuntimeMessage],
+    messages: &[Arc<RuntimeMessage>],
     projection: &ConversationProjection,
     texts: &HashMap<String, Entity<TranscriptText>>,
 ) -> impl IntoElement {
@@ -644,13 +646,16 @@ type PersistedToolResult<'a> = (
     bool,
 );
 
-fn split_turn<'a>(
-    messages: &[&'a RuntimeMessage],
+fn split_turn<'a, M>(
+    messages: &'a [M],
     projection: &ConversationProjection,
-) -> (Vec<ActivityStep<'a>>, Option<&'a RuntimeMessage>) {
+) -> (Vec<ActivityStep<'a>>, Option<&'a RuntimeMessage>)
+where
+    M: Borrow<RuntimeMessage>,
+{
     let call_ids = messages
         .iter()
-        .flat_map(|message| &message.content)
+        .flat_map(|message| &message.borrow().content)
         .filter_map(|block| match block {
             MessageBlock::ToolCall { id, .. } => Some(id.clone()),
             _ => None,
@@ -658,7 +663,7 @@ fn split_turn<'a>(
         .collect::<HashSet<_>>();
     let persisted_results = messages
         .iter()
-        .flat_map(|message| &message.content)
+        .flat_map(|message| &message.borrow().content)
         .filter_map(|block| match block {
             MessageBlock::ToolResult {
                 id,
@@ -681,21 +686,21 @@ fn split_turn<'a>(
         .collect::<HashMap<_, _>>();
     let reply_index = messages
         .iter()
-        .rposition(|message| is_final_assistant_reply(message));
+        .rposition(|message| is_final_assistant_reply(message.borrow()));
 
     let mut activity = Vec::new();
     for (index, message) in messages.iter().enumerate() {
         let is_reply = reply_index == Some(index);
         push_message_activity(
             &mut activity,
-            message,
+            message.borrow(),
             projection,
             &call_ids,
             &persisted_results,
             is_reply,
         );
     }
-    let reply = reply_index.map(|index| messages[index]);
+    let reply = reply_index.map(|index| messages[index].borrow());
     (activity, reply)
 }
 
@@ -1147,7 +1152,8 @@ fn preamble(
 ) -> AnyElement {
     match message.role {
         MessageRole::Assistant if is_final_assistant_reply(message) => {
-            let (activity, _) = split_turn(&[message], projection);
+            let messages = [message];
+            let (activity, _) = split_turn(&messages, projection);
             if activity.is_empty() {
                 assistant_reply(message, texts).into_any_element()
             } else {
@@ -1172,7 +1178,8 @@ fn preamble(
         | MessageRole::BranchSummary
         | MessageRole::CompactionSummary
         | MessageRole::Unknown => {
-            let (activity, _) = split_turn(&[message], projection);
+            let messages = [message];
+            let (activity, _) = split_turn(&messages, projection);
             if activity.is_empty() {
                 return div().into_any_element();
             }
@@ -1640,11 +1647,11 @@ mod tests {
             ],
             accepted_user_inputs: Vec::new(),
             tools: Default::default(),
-            bash_executions: Vec::new(),
-            queue: crate::state::runtime::QueueContents::Known {
+            bash_executions: Arc::new(Vec::new()),
+            queue: Arc::new(crate::state::runtime::QueueContents::Known {
                 steering: Vec::new(),
                 follow_up: Vec::new(),
-            },
+            }),
             steering_mode: None,
             follow_up_mode: None,
             auto_compaction_enabled: None,
@@ -1657,8 +1664,7 @@ mod tests {
         };
         assert!(!is_final_assistant_reply(&assistant_tools));
         assert!(is_final_assistant_reply(&assistant_reply));
-        let messages = vec![&assistant_tools, &assistant_reply];
-        let (activity, reply) = split_turn(&messages, &projection);
+        let (activity, reply) = split_turn(&projection.messages, &projection);
         assert_eq!(activity.len(), 3);
         assert!(matches!(activity[0], ActivityStep::Thinking { .. }));
         assert!(matches!(activity[1], ActivityStep::Text { .. }));

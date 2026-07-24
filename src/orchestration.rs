@@ -1,6 +1,7 @@
 //! Typed snapshots and guarded actions for Pi-owned task, subagent, and goal state.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -245,7 +246,7 @@ pub struct GoalItemSnapshot {
 pub struct OrchestrationState {
     pub phase: OrchestrationPhase,
     pub expected_session_id: Option<String>,
-    pub snapshot: Option<OrchestrationSnapshot>,
+    pub snapshot: Option<Arc<OrchestrationSnapshot>>,
     pub feedback: Option<String>,
 }
 
@@ -298,7 +299,7 @@ impl OrchestrationState {
             OrchestrationPhase::Ready
         };
         self.feedback = None;
-        self.snapshot = Some(snapshot);
+        self.snapshot = Some(Arc::new(snapshot));
         true
     }
 

@@ -723,29 +723,38 @@ pub fn divider_list() -> gpui::Div {
         .bg(theme::canvas())
 }
 
-pub fn session_usage(
-    context: impl Into<SharedString>,
-    pct: Option<f32>,
-    model: impl Into<SharedString>,
-    thinking: impl Into<SharedString>,
-    cost: impl Into<SharedString>,
-    tokens_in: impl Into<SharedString>,
-    tokens_out: impl Into<SharedString>,
-    cache_read: impl Into<SharedString>,
-    cache_write: impl Into<SharedString>,
-    tooltip_visible: bool,
-    tooltip_hovered: bool,
-    tooltip_epoch: u64,
-    on_hover: HoverHandler,
-) -> impl IntoElement {
-    let context = context.into();
-    let model = model.into();
-    let thinking = thinking.into();
-    let cost = cost.into();
-    let tokens_in = tokens_in.into();
-    let tokens_out = tokens_out.into();
-    let cache_read = cache_read.into();
-    let cache_write = cache_write.into();
+pub struct SessionUsageParams {
+    pub context: SharedString,
+    pub pct: Option<f32>,
+    pub model: SharedString,
+    pub thinking: SharedString,
+    pub cost: SharedString,
+    pub tokens_in: SharedString,
+    pub tokens_out: SharedString,
+    pub cache_read: SharedString,
+    pub cache_write: SharedString,
+    pub tooltip_visible: bool,
+    pub tooltip_hovered: bool,
+    pub tooltip_epoch: u64,
+    pub on_hover: HoverHandler,
+}
+
+pub fn session_usage(params: SessionUsageParams) -> impl IntoElement {
+    let SessionUsageParams {
+        context,
+        pct,
+        model,
+        thinking,
+        cost,
+        tokens_in,
+        tokens_out,
+        cache_read,
+        cache_write,
+        tooltip_visible,
+        tooltip_hovered,
+        tooltip_epoch,
+        on_hover,
+    } = params;
     let pct = pct.unwrap_or(0.0).clamp(0.0, 1.0);
     let fill_color = usage_fill(pct);
     let tooltip = SessionUsageTooltip {

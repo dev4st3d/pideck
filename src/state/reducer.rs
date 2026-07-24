@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -90,15 +90,29 @@ fn disconnect(
     if matches!(state.prompt_delivery, PromptDelivery::Pending { .. }) {
         mark_prompt_uncertain(state);
     }
-    for execution in &mut state.bash_executions {
-        if execution.status.is_active() {
+    if state
+        .bash_executions
+        .iter()
+        .any(|execution| execution.status.is_active())
+    {
+        for execution in Arc::make_mut(&mut state.bash_executions) {
+            if !execution.status.is_active() {
+                continue;
+            }
             execution.status = BashStatus::Uncertain;
             execution.finished_at = Some(observed_at);
             execution.error = Some("Pi disconnected during Bash execution".to_owned());
         }
     }
-    for tool in state.tools.values_mut() {
-        if matches!(tool.status, ToolStatus::Pending | ToolStatus::Running) {
+    if state
+        .tools
+        .values()
+        .any(|tool| matches!(tool.status, ToolStatus::Pending | ToolStatus::Running))
+    {
+        for tool in Arc::make_mut(&mut state.tools).values_mut() {
+            if !matches!(tool.status, ToolStatus::Pending | ToolStatus::Running) {
+                continue;
+            }
             tool.status = ToolStatus::Uncertain;
             tool.finished_at = Some(observed_at);
         }
@@ -146,7 +160,7 @@ fn reduce_intent(
                 return Vec::new();
             }
             let (baseline_message_count, baseline_message_key) = message_baseline(state);
-            state.bash_executions.push(BashExecution {
+            Arc::make_mut(&mut state.bash_executions).push(BashExecution {
                 request: request.clone(),
                 command: command.clone(),
                 exclude_from_context,
@@ -178,15 +192,14 @@ fn reduce_intent(
             vec![effect(state, RuntimeRequest::Abort)]
         }
         RuntimeIntent::AbortBash => {
-            let Some(execution) = state
+            let Some(index) = state
                 .bash_executions
-                .iter_mut()
-                .rev()
-                .find(|execution| execution.status == BashStatus::Running)
+                .iter()
+                .rposition(|execution| execution.status == BashStatus::Running)
             else {
                 return Vec::new();
             };
-            execution.status = BashStatus::Cancelling;
+            Arc::make_mut(&mut state.bash_executions)[index].status = BashStatus::Cancelling;
             state.bump_revision();
             vec![effect(state, RuntimeRequest::AbortBash)]
         }
@@ -433,7 +446,11 @@ fn reduce_response(
                 .into_iter()
                 .filter(|message| state.live_message_keys.contains(&message.key))
                 .collect();
-            state.messages.ready(merge_messages(messages, live));
+            let messages = merge_messages(messages, live);
+            let (reasoning_tokens, reasoning_message_count) = reasoning_usage(&messages);
+            state.messages.ready(messages);
+            state.reasoning_tokens = reasoning_tokens;
+            state.reasoning_message_count = reasoning_message_count;
             state.message_structure_revision = state.message_structure_revision.saturating_add(1);
             state.live_message_keys.clear();
             reconcile_optimistic_user_inputs(state);
@@ -463,11 +480,11 @@ fn reduce_response(
             Vec::new()
         }
         (RuntimeRequest::GetCommands, Ok(NormalizedResponse::Commands(commands))) => {
-            state.commands.ready(commands);
+            state.commands.ready(Arc::new(commands));
             Vec::new()
         }
         (RuntimeRequest::GetModels, Ok(NormalizedResponse::Models(models))) => {
-            state.models.ready(models);
+            state.models.ready(Arc::new(models));
             Vec::new()
         }
         (
@@ -476,14 +493,14 @@ fn reduce_response(
         ) => {
             state.tree_leaf_id = leaf_id;
             if state.revision == base_revision || state.tree.data.is_none() {
-                state.tree.ready(tree);
+                state.tree.ready(Arc::new(tree));
             } else {
                 state.tree.status = FacetStatus::Ready;
             }
             Vec::new()
         }
         (RuntimeRequest::GetForkMessages, Ok(NormalizedResponse::ForkMessages(messages))) => {
-            state.fork_messages.ready(messages);
+            state.fork_messages.ready(Arc::new(messages));
             Vec::new()
         }
         (RuntimeRequest::Submit { request, kind, .. }, Ok(NormalizedResponse::Accepted)) => {
@@ -601,11 +618,12 @@ fn reduce_response(
             Vec::new()
         }
         (RuntimeRequest::ExecuteBash { request, .. }, Ok(NormalizedResponse::Bash(result))) => {
-            if let Some(execution) = state
+            if let Some(index) = state
                 .bash_executions
-                .iter_mut()
-                .find(|execution| execution.request == request)
+                .iter()
+                .position(|execution| execution.request == request)
             {
+                let execution = &mut Arc::make_mut(&mut state.bash_executions)[index];
                 execution.output = result.output;
                 execution.exit_code = result.exit_code;
                 execution.cancelled = result.cancelled;
@@ -629,11 +647,12 @@ fn reduce_response(
             )]
         }
         (RuntimeRequest::ExecuteBash { request, .. }, Err(failure)) => {
-            if let Some(execution) = state
+            if let Some(index) = state
                 .bash_executions
-                .iter_mut()
-                .find(|execution| execution.request == request)
+                .iter()
+                .position(|execution| execution.request == request)
             {
+                let execution = &mut Arc::make_mut(&mut state.bash_executions)[index];
                 execution.status = if matches!(
                     failure.kind,
                     RequestFailureKind::UnknownOutcome | RequestFailureKind::Disconnected
@@ -773,12 +792,12 @@ fn reduce_response(
         }
         (RuntimeRequest::AbortBash, Ok(NormalizedResponse::Accepted)) => Vec::new(),
         (RuntimeRequest::AbortBash, Err(failure)) => {
-            if let Some(execution) = state
+            if let Some(index) = state
                 .bash_executions
-                .iter_mut()
-                .rev()
-                .find(|execution| execution.status == BashStatus::Cancelling)
+                .iter()
+                .rposition(|execution| execution.status == BashStatus::Cancelling)
             {
+                let execution = &mut Arc::make_mut(&mut state.bash_executions)[index];
                 execution.status = BashStatus::Running;
                 execution.error = Some(failure.error.summary.clone());
                 state.bump_revision();
@@ -907,9 +926,9 @@ fn apply_state_hydration(
         .then(|| state.durable_cursor.clone())
         .flatten();
 
-    state.queue = QueueContents::Unknown {
+    state.queue = Arc::new(QueueContents::Unknown {
         pending_count: snapshot.pending_message_count,
-    };
+    });
     state.lifecycle = if snapshot.is_streaming {
         RuntimeLifecycle::Running
     } else {
@@ -984,19 +1003,21 @@ fn reduce_event(
             upsert_messages(state, vec![message], MessagePhase::Terminal)
         }
         NormalizedEvent::BashUpdate { request, delta } => {
-            let execution = if let Some(request) = request {
+            let index = if let Some(request) = request.as_ref() {
                 state
                     .bash_executions
-                    .iter_mut()
-                    .find(|execution| execution.request == request)
+                    .iter()
+                    .position(|execution| &execution.request == request)
             } else {
                 state
                     .bash_executions
-                    .iter_mut()
-                    .rev()
-                    .find(|execution| execution.status.is_active())
+                    .iter()
+                    .rposition(|execution| execution.status.is_active())
             };
-            if let Some(execution) = execution.filter(|execution| execution.status.is_active()) {
+            if let Some(index) =
+                index.filter(|index| state.bash_executions[*index].status.is_active())
+            {
+                let execution = &mut Arc::make_mut(&mut state.bash_executions)[index];
                 execution.output.push_str(&delta);
                 if execution.output.len() > MAX_LIVE_BASH_OUTPUT_BYTES {
                     let mut remove = execution.output.len() - MAX_LIVE_BASH_OUTPUT_BYTES;
@@ -1014,22 +1035,25 @@ fn reduce_event(
             name,
             arguments,
         } => {
-            let sequence = state.next_tool_sequence;
-            let tool = state
+            if !state
                 .tools
-                .entry(id.clone())
-                .or_insert_with(|| ToolExecution {
-                    id,
-                    name: name.clone(),
-                    arguments: arguments.clone(),
-                    result: None,
-                    status: ToolStatus::Pending,
-                    authoritative_end: false,
-                    sequence,
-                    started_at: observed_at,
-                    finished_at: None,
-                });
-            if !tool.status.is_terminal() {
+                .get(&id)
+                .is_some_and(|tool| tool.status.is_terminal())
+            {
+                let sequence = state.next_tool_sequence;
+                let tool = Arc::make_mut(&mut state.tools)
+                    .entry(id.clone())
+                    .or_insert_with(|| ToolExecution {
+                        id,
+                        name: name.clone(),
+                        arguments: arguments.clone(),
+                        result: None,
+                        status: ToolStatus::Pending,
+                        authoritative_end: false,
+                        sequence,
+                        started_at: observed_at,
+                        finished_at: None,
+                    });
                 tool.name = name;
                 tool.arguments = arguments;
                 tool.status = ToolStatus::Running;
@@ -1044,22 +1068,25 @@ fn reduce_event(
             arguments,
             accumulated,
         } => {
-            let sequence = state.next_tool_sequence;
-            let tool = state
+            if !state
                 .tools
-                .entry(id.clone())
-                .or_insert_with(|| ToolExecution {
-                    id,
-                    name: name.clone(),
-                    arguments: arguments.clone(),
-                    result: None,
-                    status: ToolStatus::Pending,
-                    authoritative_end: false,
-                    sequence,
-                    started_at: observed_at,
-                    finished_at: None,
-                });
-            if !tool.status.is_terminal() {
+                .get(&id)
+                .is_some_and(|tool| tool.status.is_terminal())
+            {
+                let sequence = state.next_tool_sequence;
+                let tool = Arc::make_mut(&mut state.tools)
+                    .entry(id.clone())
+                    .or_insert_with(|| ToolExecution {
+                        id,
+                        name: name.clone(),
+                        arguments: arguments.clone(),
+                        result: None,
+                        status: ToolStatus::Pending,
+                        authoritative_end: false,
+                        sequence,
+                        started_at: observed_at,
+                        finished_at: None,
+                    });
                 tool.name = name;
                 tool.arguments = arguments;
                 // Pi sends the full accumulated partial result, not an append-only delta.
@@ -1076,25 +1103,26 @@ fn reduce_event(
             is_error,
             cancelled,
         } => {
-            let sequence = state.next_tool_sequence;
-            let tool = state
-                .tools
-                .entry(id.clone())
-                .or_insert_with(|| ToolExecution {
-                    id,
-                    name: name.clone(),
-                    arguments: serde_json::Value::Null,
-                    result: None,
-                    status: ToolStatus::Pending,
-                    authoritative_end: false,
-                    sequence,
-                    started_at: observed_at,
-                    finished_at: None,
-                });
-            if !tool.status.is_terminal()
-                || (matches!(tool.status, ToolStatus::Cancelled | ToolStatus::Uncertain)
-                    && !tool.authoritative_end)
-            {
+            let should_apply = state.tools.get(&id).is_none_or(|tool| {
+                !tool.status.is_terminal()
+                    || (matches!(tool.status, ToolStatus::Cancelled | ToolStatus::Uncertain)
+                        && !tool.authoritative_end)
+            });
+            if should_apply {
+                let sequence = state.next_tool_sequence;
+                let tool = Arc::make_mut(&mut state.tools)
+                    .entry(id.clone())
+                    .or_insert_with(|| ToolExecution {
+                        id,
+                        name: name.clone(),
+                        arguments: serde_json::Value::Null,
+                        result: None,
+                        status: ToolStatus::Pending,
+                        authoritative_end: false,
+                        sequence,
+                        started_at: observed_at,
+                        finished_at: None,
+                    });
                 tool.name = name;
                 tool.result = Some(result);
                 tool.status = if cancelled {
@@ -1114,11 +1142,14 @@ fn reduce_event(
             steering,
             follow_up,
         } => {
-            state.queue = QueueContents::Known {
+            let queue = QueueContents::Known {
                 steering,
                 follow_up,
             };
-            state.bump_revision();
+            if state.queue.as_ref() != &queue {
+                state.queue = Arc::new(queue);
+                state.bump_revision();
+            }
         }
         NormalizedEvent::CompactionStart { reason } => {
             state.compaction = CompactionState::Running { reason };
@@ -1204,7 +1235,7 @@ fn reduce_event(
                 DialogRequest::Select { options, .. } if options.is_empty()
             ) {
                 push_bounded(
-                    &mut state.extension_errors,
+                    Arc::make_mut(&mut state.extension_errors),
                     ExtensionFailure {
                         extension: "extension".to_owned(),
                         event: "select".to_owned(),
@@ -1237,18 +1268,18 @@ fn reduce_event(
                 let deadline = timeout_ms
                     .filter(|timeout| *timeout > 0)
                     .and_then(|timeout| observed_at.checked_add(Duration::from_millis(timeout)));
-                state.dialogs.push_back(ExtensionDialog {
+                state.dialogs.push_back(Arc::new(ExtensionDialog {
                     id,
                     request,
                     received_at: observed_at,
                     deadline,
-                });
+                }));
                 state.bump_revision();
             }
         }
         NormalizedEvent::MalformedExtensionRequest { id, method, dialog } => {
             push_bounded(
-                &mut state.extension_errors,
+                Arc::make_mut(&mut state.extension_errors),
                 ExtensionFailure {
                     extension: "extension".to_owned(),
                     event: method,
@@ -1268,25 +1299,29 @@ fn reduce_event(
         NormalizedEvent::Notify(notification) => {
             push_bounded(&mut state.notifications, notification, MAX_NOTIFICATIONS);
         }
-        NormalizedEvent::SetStatus { key, value } => {
-            if let Some(value) = value {
-                state.statuses.insert(key, value);
-            } else {
-                state.statuses.remove(&key);
+        NormalizedEvent::SetStatus { key, value } => match value {
+            Some(value) if state.statuses.get(&key) != Some(&value) => {
+                Arc::make_mut(&mut state.statuses).insert(key, value);
             }
-        }
-        NormalizedEvent::SetWidget { key, value } => {
-            if let Some(value) = value {
-                state.widgets.insert(key, value);
-            } else {
-                state.widgets.remove(&key);
+            None if state.statuses.contains_key(&key) => {
+                Arc::make_mut(&mut state.statuses).remove(&key);
             }
-        }
+            Some(_) | None => {}
+        },
+        NormalizedEvent::SetWidget { key, value } => match value {
+            Some(value) if state.widgets.get(&key) != Some(&value) => {
+                Arc::make_mut(&mut state.widgets).insert(key, value);
+            }
+            None if state.widgets.contains_key(&key) => {
+                Arc::make_mut(&mut state.widgets).remove(&key);
+            }
+            Some(_) | None => {}
+        },
         NormalizedEvent::SetTitle(title) => state.title = Some(title),
         NormalizedEvent::SetEditorText(text) => state.requested_editor_text = Some(text),
         NormalizedEvent::ExtensionError(error) => {
             push_bounded(
-                &mut state.extension_errors,
+                Arc::make_mut(&mut state.extension_errors),
                 error,
                 super::runtime::MAX_RUNTIME_ERRORS,
             );
@@ -1315,8 +1350,15 @@ fn settle(state: &mut RuntimeState) {
     if matches!(state.retry, RetryState::Cancelling) {
         state.retry = RetryState::Idle;
     }
-    for tool in state.tools.values_mut() {
-        if matches!(tool.status, ToolStatus::Pending | ToolStatus::Running) {
+    if state
+        .tools
+        .values()
+        .any(|tool| matches!(tool.status, ToolStatus::Pending | ToolStatus::Running))
+    {
+        for tool in Arc::make_mut(&mut state.tools).values_mut() {
+            if !matches!(tool.status, ToolStatus::Pending | ToolStatus::Running) {
+                continue;
+            }
             tool.status = ToolStatus::Cancelled;
         }
     }
@@ -1325,15 +1367,17 @@ fn settle(state: &mut RuntimeState) {
 
 fn clear_session_scoped_state(state: &mut RuntimeState) {
     state.messages.data = None;
+    state.reasoning_tokens = 0;
+    state.reasoning_message_count = 0;
     state.entries.data = None;
     state.stats.data = None;
     state.tree.data = None;
     state.tree_leaf_id = None;
     state.entries_leaf_id = None;
     state.fork_messages.data = None;
-    state.tools.clear();
-    state.bash_executions.clear();
-    state.queue = QueueContents::default();
+    state.tools = Arc::new(HashMap::new());
+    state.bash_executions = Arc::new(Vec::new());
+    state.queue = Arc::new(QueueContents::default());
     state.retry = RetryState::Idle;
     state.compaction = CompactionState::Idle;
     state.pending_operation = None;
@@ -1349,8 +1393,8 @@ fn clear_session_scoped_state(state: &mut RuntimeState) {
 
 fn invalidate_extension_ui(state: &mut RuntimeState) {
     state.dialogs.clear();
-    state.statuses.clear();
-    state.widgets.clear();
+    state.statuses = Arc::new(BTreeMap::new());
+    state.widgets = Arc::new(BTreeMap::new());
     state.title = None;
     state.requested_editor_text = None;
 }
@@ -1522,12 +1566,12 @@ fn rebuild_tree_from_entries(state: &mut RuntimeState) {
     }
 
     state.tree_leaf_id = state.entries_leaf_id.clone();
-    state.tree.ready(
+    state.tree.ready(Arc::new(
         roots
             .into_iter()
             .map(|root| build_node(root, entries, &children, &labels))
             .collect(),
-    );
+    ));
 }
 
 fn dedup_entries(
@@ -1567,29 +1611,44 @@ fn upsert_messages(state: &mut RuntimeState, messages: Vec<RuntimeMessage>, phas
     let transcript = state.messages.data.get_or_insert_with(Vec::new);
     let mut changed = false;
     let mut structure_changed = false;
+    let mut reasoning_tokens = state.reasoning_tokens;
+    let mut reasoning_message_count = state.reasoning_message_count;
     let mut persisted_tool_results = Vec::new();
     for message in messages {
-        structure_changed |= transcript
+        let existing = transcript
             .iter()
             .rev()
-            .find(|existing| existing.key == message.key)
-            .is_none_or(|existing| {
-                existing.role != message.role || existing.visible != message.visible
-            });
+            .find(|existing| existing.key == message.key);
+        structure_changed |= existing.is_none_or(|existing| {
+            existing.role != message.role || existing.visible != message.visible
+        });
+        let previous_reasoning = existing.and_then(|message| message_reasoning(message));
+        let next_reasoning = message_reasoning(&message);
         persisted_tool_results.extend(message.content.iter().filter_map(|block| match block {
             MessageBlock::ToolResult { id, .. } => Some(id.clone()),
             _ => None,
         }));
         state.live_message_keys.insert(message.key.clone());
-        changed |= upsert_message(transcript, message, phase);
+        let message_changed = upsert_message(transcript, message, phase);
+        changed |= message_changed;
+        if message_changed {
+            update_reasoning_usage(
+                &mut reasoning_tokens,
+                &mut reasoning_message_count,
+                previous_reasoning,
+                next_reasoning,
+            );
+        }
     }
+    state.reasoning_tokens = reasoning_tokens;
+    state.reasoning_message_count = reasoning_message_count;
     for id in persisted_tool_results {
         if state
             .tools
             .get(&id)
             .is_some_and(|tool| tool.status.is_terminal())
         {
-            state.tools.remove(&id);
+            Arc::make_mut(&mut state.tools).remove(&id);
         }
     }
     state.messages.status = FacetStatus::Ready;
@@ -1601,6 +1660,35 @@ fn upsert_messages(state: &mut RuntimeState, messages: Vec<RuntimeMessage>, phas
         }
         state.bump_revision();
     }
+}
+
+fn message_reasoning(message: &RuntimeMessage) -> Option<u64> {
+    message.assistant.as_ref()?.usage.reasoning
+}
+
+fn update_reasoning_usage(
+    total: &mut u64,
+    count: &mut usize,
+    previous: Option<u64>,
+    next: Option<u64>,
+) {
+    if let Some(previous) = previous {
+        *total = total.saturating_sub(previous);
+        *count = count.saturating_sub(1);
+    }
+    if let Some(next) = next {
+        *total = total.saturating_add(next);
+        *count = count.saturating_add(1);
+    }
+}
+
+fn reasoning_usage(messages: &[Arc<RuntimeMessage>]) -> (u64, usize) {
+    messages
+        .iter()
+        .filter_map(|message| message_reasoning(message))
+        .fold((0_u64, 0_usize), |(total, count), reasoning| {
+            (total.saturating_add(reasoning), count.saturating_add(1))
+        })
 }
 
 fn merge_messages(
@@ -1681,36 +1769,46 @@ fn reconcile_optimistic_user_inputs(state: &mut RuntimeState) {
 
 fn reconcile_bash_executions(state: &mut RuntimeState) {
     let messages = state.messages.data.as_deref().unwrap_or_default();
-    for execution in &mut state.bash_executions {
-        if execution.reconciled || execution.status.is_active() {
-            continue;
-        }
-        execution.reconciled = messages_after_baseline(
-            messages,
-            execution.baseline_message_count,
-            execution.baseline_message_key.as_ref(),
-        )
-        .any(|message| {
-            message.content.iter().any(|block| match block {
-                MessageBlock::Bash {
-                    command,
-                    output,
-                    cancelled,
-                    exclude_from_context,
-                    ..
-                } => {
-                    command == &execution.command
-                        && output == &execution.output
-                        && cancelled == &execution.cancelled
-                        && exclude_from_context == &execution.exclude_from_context
-                }
-                _ => false,
-            })
-        });
+    let should_prune = state.bash_executions.iter().any(|execution| {
+        execution.reconciled
+            || (!execution.status.is_active() && bash_execution_is_persisted(execution, messages))
+    });
+    if !should_prune {
+        return;
     }
-    state
-        .bash_executions
-        .retain(|execution| !execution.reconciled);
+
+    Arc::make_mut(&mut state.bash_executions).retain(|execution| {
+        !execution.reconciled
+            && (execution.status.is_active() || !bash_execution_is_persisted(execution, messages))
+    });
+}
+
+fn bash_execution_is_persisted(
+    execution: &BashExecution,
+    messages: &[Arc<RuntimeMessage>],
+) -> bool {
+    messages_after_baseline(
+        messages,
+        execution.baseline_message_count,
+        execution.baseline_message_key.as_ref(),
+    )
+    .any(|message| {
+        message.content.iter().any(|block| match block {
+            MessageBlock::Bash {
+                command,
+                output,
+                cancelled,
+                exclude_from_context,
+                ..
+            } => {
+                command == &execution.command
+                    && output == &execution.output
+                    && cancelled == &execution.cancelled
+                    && exclude_from_context == &execution.exclude_from_context
+            }
+            _ => false,
+        })
+    })
 }
 
 fn message_baseline(state: &RuntimeState) -> (usize, Option<super::runtime::MessageKey>) {

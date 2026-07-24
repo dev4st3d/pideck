@@ -365,6 +365,8 @@ fn format_cost(cost: f64) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
     use crate::services::rpc::{ConnectionGeneration, SessionId};
 
@@ -420,7 +422,7 @@ mod tests {
             auto_compaction_enabled: true,
             message_count: 0,
         });
-        runtime.models.ready(Vec::new());
+        runtime.models.ready(Arc::new(Vec::new()));
         runtime.lifecycle = RuntimeLifecycle::Ready;
 
         let projection =

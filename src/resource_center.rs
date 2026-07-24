@@ -1,5 +1,7 @@
 //! UI-independent resource inventory and Resource Center filtering.
 
+use std::sync::Arc;
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -157,7 +159,7 @@ pub enum ResourcePhase {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResourceCenterState {
     pub phase: ResourcePhase,
-    pub snapshot: Option<ResourceInventorySnapshot>,
+    pub snapshot: Option<Arc<ResourceInventorySnapshot>>,
     pub feedback: Option<String>,
     next_operation: u64,
 }
@@ -192,7 +194,7 @@ impl ResourceCenterState {
 
     pub fn apply_snapshot(&mut self, snapshot: ResourceInventorySnapshot) {
         self.phase = ResourcePhase::Ready;
-        self.snapshot = Some(snapshot);
+        self.snapshot = Some(Arc::new(snapshot));
         self.feedback = None;
     }
 

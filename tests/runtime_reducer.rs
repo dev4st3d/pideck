@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::time::Instant;
 
 use pi_gui::services::rpc::{
@@ -91,6 +92,36 @@ fn message(key: &str, text: &str, terminal: bool) -> RuntimeMessage {
     }
 }
 
+fn message_with_reasoning(
+    key: &str,
+    text: &str,
+    terminal: bool,
+    reasoning: Option<u64>,
+) -> RuntimeMessage {
+    let mut message = message(key, text, terminal);
+    message.assistant = Some(AssistantMetadata {
+        api: "synthetic-api".to_owned(),
+        provider: "synthetic-provider".to_owned(),
+        model: "synthetic-model".to_owned(),
+        response_model: None,
+        usage: MessageUsage {
+            input: 0,
+            output: 0,
+            cache_read: 0,
+            cache_write: 0,
+            cache_write_1h: None,
+            reasoning,
+            total_tokens: reasoning.unwrap_or_default(),
+            input_cost: 0.0,
+            output_cost: 0.0,
+            cache_read_cost: 0.0,
+            cache_write_cost: 0.0,
+            total_cost: 0.0,
+        },
+    });
+    message
+}
+
 fn command_ready_state(lifecycle: RuntimeLifecycle) -> RuntimeState {
     let mut state = RuntimeState::new(GENERATION);
     state.lifecycle = lifecycle;
@@ -98,7 +129,7 @@ fn command_ready_state(lifecycle: RuntimeLifecycle) -> RuntimeState {
         .session
         .ready(session_state("commands", false, 0).session);
     state.messages.ready(Vec::new());
-    state.commands.ready(Vec::new());
+    state.commands.ready(Arc::new(Vec::new()));
     state
 }
 
@@ -293,7 +324,10 @@ fn happy_path_hydrates_in_required_order_and_settles() {
             .all(|request| !matches!(request, RuntimeRequest::GetTree { .. }))
     );
     assert_eq!(state.lifecycle, RuntimeLifecycle::Running);
-    assert_eq!(state.queue, QueueContents::Unknown { pending_count: 3 });
+    assert_eq!(
+        state.queue.as_ref(),
+        &QueueContents::Unknown { pending_count: 3 }
+    );
 
     apply(
         &mut state,
@@ -307,8 +341,8 @@ fn happy_path_hydrates_in_required_order_and_settles() {
         RuntimeInput::Event(NormalizedEvent::AgentSettled),
     );
     assert_eq!(
-        state.queue,
-        QueueContents::Known {
+        state.queue.as_ref(),
+        &QueueContents::Known {
             steering: Vec::new(),
             follow_up: Vec::new()
         }
@@ -755,6 +789,8 @@ fn late_tool_starts_and_updates_cannot_erase_newer_or_terminal_state() {
         }),
     );
     let terminal = state.tools[&id].clone();
+    let shared_tools = Arc::clone(&state.tools);
+    let terminal_revision = state.revision;
     apply(
         &mut state,
         RuntimeInput::Event(NormalizedEvent::ToolStart {
@@ -773,6 +809,25 @@ fn late_tool_starts_and_updates_cannot_erase_newer_or_terminal_state() {
         }),
     );
     assert_eq!(state.tools[&id], terminal);
+    assert!(Arc::ptr_eq(&state.tools, &shared_tools));
+    assert_eq!(state.revision, terminal_revision);
+}
+
+#[test]
+fn identical_queue_updates_reuse_the_shared_snapshot() {
+    let mut state = RuntimeState::new(GENERATION);
+    let update = || NormalizedEvent::QueueUpdate {
+        steering: vec!["steer".to_owned()],
+        follow_up: vec!["follow".to_owned()],
+    };
+
+    apply(&mut state, RuntimeInput::Event(update()));
+    let shared_queue = Arc::clone(&state.queue);
+    let revision = state.revision;
+    apply(&mut state, RuntimeInput::Event(update()));
+
+    assert!(Arc::ptr_eq(&state.queue, &shared_queue));
+    assert_eq!(state.revision, revision);
 }
 
 #[test]
@@ -1088,6 +1143,77 @@ fn partial_messages_replace_text_and_thinking_blocks_in_place() {
         state.messages.data.as_ref().unwrap()[0].as_ref(),
         &accumulated
     );
+}
+
+#[test]
+fn reasoning_usage_is_updated_incrementally_with_message_replacements() {
+    let mut state = RuntimeState::new(GENERATION);
+
+    apply(
+        &mut state,
+        RuntimeInput::Event(NormalizedEvent::MessageStart(message_with_reasoning(
+            "reasoning-a",
+            "draft",
+            false,
+            Some(2),
+        ))),
+    );
+    assert_eq!(state.reasoning_tokens, 2);
+    assert_eq!(state.reasoning_message_count, 1);
+
+    apply(
+        &mut state,
+        RuntimeInput::Event(NormalizedEvent::MessageUpdate(message_with_reasoning(
+            "reasoning-a",
+            "updated",
+            false,
+            Some(5),
+        ))),
+    );
+    assert_eq!(state.reasoning_tokens, 5);
+    assert_eq!(state.reasoning_message_count, 1);
+
+    apply(
+        &mut state,
+        RuntimeInput::Event(NormalizedEvent::MessageEnd(message_with_reasoning(
+            "reasoning-b",
+            "second",
+            true,
+            Some(3),
+        ))),
+    );
+    assert_eq!(state.reasoning_tokens, 8);
+    assert_eq!(state.reasoning_message_count, 2);
+
+    apply(
+        &mut state,
+        RuntimeInput::Event(NormalizedEvent::MessageUpdate(message_with_reasoning(
+            "reasoning-a",
+            "usage unavailable",
+            false,
+            None,
+        ))),
+    );
+    assert_eq!(state.reasoning_tokens, 3);
+    assert_eq!(state.reasoning_message_count, 1);
+}
+
+#[test]
+fn reasoning_usage_is_rebuilt_from_hydrated_messages() {
+    let mut state = RuntimeState::new(GENERATION);
+
+    response(
+        &mut state,
+        RuntimeRequest::GetMessages { base_revision: 0 },
+        Ok(NormalizedResponse::Messages(vec![
+            message_with_reasoning("reasoning-a", "first", true, Some(7)),
+            message_with_reasoning("reasoning-b", "second", true, None),
+            message_with_reasoning("reasoning-c", "third", true, Some(11)),
+        ])),
+    );
+
+    assert_eq!(state.reasoning_tokens, 18);
+    assert_eq!(state.reasoning_message_count, 2);
 }
 
 #[test]
@@ -1799,7 +1925,7 @@ fn all_session_replacements_increment_epoch_before_emission_and_rehydrate() {
     for mutation in mutations {
         let (mut state, _) = connected_state("s1");
         let old_epoch = state.epoch;
-        state.dialogs.push_back(ExtensionDialog {
+        state.dialogs.push_back(Arc::new(ExtensionDialog {
             id: RequestId::from("old-dialog"),
             request: DialogRequest::Input {
                 title: "Old".to_owned(),
@@ -1808,7 +1934,7 @@ fn all_session_replacements_increment_epoch_before_emission_and_rehydrate() {
             },
             received_at: Instant::now(),
             deadline: None,
-        });
+        }));
         let effects = apply(
             &mut state,
             RuntimeInput::Intent(RuntimeIntent::ReplaceSession(mutation.clone())),
@@ -2310,7 +2436,7 @@ fn process_crash_preserves_last_valid_data_and_invalidates_dialogs() {
     state
         .messages
         .ready(vec![message("a", "saved", true).into()]);
-    state.dialogs.push_back(ExtensionDialog {
+    state.dialogs.push_back(Arc::new(ExtensionDialog {
         id: RequestId::from("dialog"),
         request: DialogRequest::Input {
             title: "Input".to_owned(),
@@ -2319,7 +2445,7 @@ fn process_crash_preserves_last_valid_data_and_invalidates_dialogs() {
         },
         received_at: Instant::now(),
         deadline: None,
-    });
+    }));
     apply(
         &mut state,
         RuntimeInput::Disconnected {
@@ -2417,7 +2543,7 @@ fn optional_stats_models_and_unknown_context_fail_honestly_without_data_loss() {
         context_percent: None,
     };
     state.stats.ready(stats.clone());
-    state.models.ready(vec![ModelSummary {
+    state.models.ready(Arc::new(vec![ModelSummary {
         provider: "test".to_owned(),
         id: "m".to_owned(),
         name: "M".to_owned(),
@@ -2426,7 +2552,7 @@ fn optional_stats_models_and_unknown_context_fail_honestly_without_data_loss() {
         context_window: 100_000,
         max_tokens: 4_096,
         supports_images: false,
-    }]);
+    }]));
 
     response(
         &mut state,
@@ -2441,7 +2567,10 @@ fn optional_stats_models_and_unknown_context_fail_honestly_without_data_loss() {
     assert!(matches!(state.stats.status, FacetStatus::Failed(_)));
     assert_eq!(state.stats.data, Some(stats));
     assert!(matches!(state.models.status, FacetStatus::Failed(_)));
-    assert_eq!(state.models.data.as_ref().map(Vec::len), Some(1));
+    assert_eq!(
+        state.models.data.as_ref().map(|models| models.len()),
+        Some(1)
+    );
 }
 
 #[test]
@@ -2727,7 +2856,7 @@ fn cancellation_scopes_do_not_cross_target_operations() {
         delay_ms: 1_000,
         started_at: Instant::now(),
     };
-    state.bash_executions.push(BashExecution {
+    Arc::make_mut(&mut state.bash_executions).push(BashExecution {
         request: RequestId::from("bash-scope"),
         command: "sleep 30".to_owned(),
         exclude_from_context: false,
@@ -2841,7 +2970,7 @@ fn crash_after_acceptance_preserves_last_durable_transcript_read_only() {
 #[test]
 fn crash_during_switch_invalidates_dialogs_and_requires_explicit_reconnect() {
     let (mut state, _) = connected_state("s1");
-    state.dialogs.push_back(ExtensionDialog {
+    state.dialogs.push_back(Arc::new(ExtensionDialog {
         id: RequestId::from("switch-dialog"),
         request: DialogRequest::Confirm {
             title: "Continue".to_owned(),
@@ -2850,7 +2979,7 @@ fn crash_during_switch_invalidates_dialogs_and_requires_explicit_reconnect() {
         },
         received_at: Instant::now(),
         deadline: None,
-    });
+    }));
     apply(
         &mut state,
         RuntimeInput::Intent(RuntimeIntent::ReplaceSession(SessionMutation::Switch {
