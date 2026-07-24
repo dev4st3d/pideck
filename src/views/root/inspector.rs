@@ -47,7 +47,7 @@ pub(super) fn inspector(
                 .border_color(theme::edge_soft())
                 .child(
                     div()
-                        .font_family(theme::SANS)
+                        .font_family(theme::sans())
                         .text_size(px(theme::T_UI_SM))
                         .font_weight(FontWeight::BOLD)
                         .text_color(theme::bone_dim())
@@ -208,7 +208,7 @@ fn orchestration_panel(
                 .when(orchestration.pending_actions > 0, |row| {
                     row.child(
                         div()
-                            .font_family(theme::MONO)
+                            .font_family(theme::mono())
                             .text_size(px(theme::T_TINY))
                             .text_color(theme::data())
                             .child(format!("{} pending", orchestration.pending_actions)),
@@ -235,7 +235,7 @@ fn orchestration_state_note(
         .gap(px(8.0))
         .child(
             div()
-                .font_family(theme::SANS)
+                .font_family(theme::sans())
                 .text_size(px(theme::T_UI_SM))
                 .line_height(gpui::relative(1.4))
                 .text_color(color)
@@ -276,7 +276,7 @@ fn task_list(
                 .child(controls::section_label("Tasks"))
                 .child(
                     div()
-                        .font_family(theme::MONO)
+                        .font_family(theme::mono())
                         .text_size(px(theme::T_TINY))
                         .text_color(theme::smoke())
                         .child(format!("{}/{}", completed.len(), tasks.len())),
@@ -406,7 +406,7 @@ fn task_row(
                             div()
                                 .min_w_0()
                                 .flex_1()
-                                .font_family(theme::SANS)
+                                .font_family(theme::sans())
                                 .text_size(px(theme::T_UI_SM))
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .text_color(theme::bone())
@@ -424,7 +424,7 @@ fn task_row(
                 )
                 .child(
                     div()
-                        .font_family(theme::MONO)
+                        .font_family(theme::mono())
                         .text_size(px(theme::T_TINY))
                         .text_color(theme::smoke())
                         .child(format!(
@@ -446,7 +446,7 @@ fn task_row(
                     .gap(px(8.0))
                     .child(
                         div()
-                            .font_family(theme::SANS)
+                            .font_family(theme::sans())
                             .text_size(px(theme::T_UI_SM))
                             .line_height(gpui::relative(1.45))
                             .text_color(theme::bone_dim())
@@ -464,7 +464,7 @@ fn task_row(
                                 .p(px(8.0))
                                 .rounded(px(theme::RADIUS_SM))
                                 .bg(theme::canvas())
-                                .font_family(theme::MONO)
+                                .font_family(theme::mono())
                                 .text_size(px(theme::T_TINY))
                                 .text_color(theme::ash())
                                 .child(output),
@@ -479,7 +479,7 @@ fn task_row(
                         |detail| {
                             detail.child(
                                 div()
-                                    .font_family(theme::MONO)
+                                    .font_family(theme::mono())
                                     .text_size(px(theme::T_TINY))
                                     .text_color(theme::smoke())
                                     .child(task.metadata.to_string()),
@@ -529,7 +529,7 @@ fn subagent_list(agents: &[SubagentSnapshot], cx: &mut Context<RootView>) -> imp
                 .child(controls::section_label("Subagents"))
                 .child(
                     div()
-                        .font_family(theme::MONO)
+                        .font_family(theme::mono())
                         .text_size(px(theme::T_TINY))
                         .text_color(theme::smoke())
                         .child(agents.len().to_string()),
@@ -571,7 +571,7 @@ fn subagent_list(agents: &[SubagentSnapshot], cx: &mut Context<RootView>) -> imp
                                 .gap(px(8.0))
                                 .child(
                                     div()
-                                        .font_family(theme::SANS)
+                                        .font_family(theme::sans())
                                         .text_size(px(theme::T_UI_SM))
                                         .font_weight(FontWeight::BOLD)
                                         .text_color(agent_type_color(&agent.agent_type))
@@ -579,7 +579,7 @@ fn subagent_list(agents: &[SubagentSnapshot], cx: &mut Context<RootView>) -> imp
                                 )
                                 .child(
                                     div()
-                                        .font_family(theme::SANS)
+                                        .font_family(theme::sans())
                                         .text_size(px(theme::T_TINY))
                                         .font_weight(FontWeight::SEMIBOLD)
                                         .text_color(subagent_status_color(agent.status))
@@ -588,7 +588,7 @@ fn subagent_list(agents: &[SubagentSnapshot], cx: &mut Context<RootView>) -> imp
                         )
                         .child(
                             div()
-                                .font_family(theme::SANS)
+                                .font_family(theme::sans())
                                 .text_size(px(theme::T_UI_SM))
                                 .line_height(gpui::relative(1.4))
                                 .text_color(theme::bone_dim())
@@ -596,7 +596,7 @@ fn subagent_list(agents: &[SubagentSnapshot], cx: &mut Context<RootView>) -> imp
                         )
                         .child(
                             div()
-                                .font_family(theme::MONO)
+                                .font_family(theme::mono())
                                 .text_size(px(theme::T_TINY))
                                 .text_color(theme::smoke())
                                 .child(match agent.queue_position {
@@ -671,7 +671,7 @@ fn goal_panel(
                 .child(controls::section_label("Goal"))
                 .child(
                     div()
-                        .font_family(theme::MONO)
+                        .font_family(theme::mono())
                         .text_size(px(theme::T_TINY))
                         .text_color(goal_status_color(&active.status))
                         .child(active.status.clone()),
@@ -689,7 +689,7 @@ fn goal_panel(
                 .gap(px(7.0))
                 .child(
                     div()
-                        .font_family(theme::SANS)
+                        .font_family(theme::sans())
                         .text_size(px(theme::T_UI))
                         .font_weight(FontWeight::SEMIBOLD)
                         .line_height(gpui::relative(1.45))
@@ -769,7 +769,7 @@ fn goal_metrics(goal: &GoalItemSnapshot, queued: usize) -> impl IntoElement {
         .map(|budget| format!("{} / {} tokens", goal.tokens_used, budget))
         .unwrap_or_else(|| format!("{} tokens", goal.tokens_used));
     div()
-        .font_family(theme::MONO)
+        .font_family(theme::mono())
         .text_size(px(theme::T_TINY))
         .text_color(theme::ash())
         .child(format!(
@@ -980,7 +980,7 @@ pub(super) fn subagent_dialog(
                                         .gap(px(9.0))
                                         .child(
                                             div()
-                                                .font_family(theme::SANS)
+                                                .font_family(theme::sans())
                                                 .text_size(px(theme::T_TITLE))
                                                 .font_weight(FontWeight::BOLD)
                                                 .text_color(agent_type_color(&header.0))
@@ -988,7 +988,7 @@ pub(super) fn subagent_dialog(
                                         )
                                         .child(
                                             div()
-                                                .font_family(theme::MONO)
+                                                .font_family(theme::mono())
                                                 .text_size(px(theme::T_TINY))
                                                 .text_color(theme::smoke())
                                                 .child(requested_id.to_owned()),
@@ -996,7 +996,7 @@ pub(super) fn subagent_dialog(
                                 )
                                 .child(
                                     div()
-                                        .font_family(theme::SANS)
+                                        .font_family(theme::sans())
                                         .text_size(px(theme::T_UI_SM))
                                         .text_color(theme::ash())
                                         .overflow_hidden()
@@ -1083,7 +1083,7 @@ pub(super) fn subagent_dialog(
                                                 .when(agent.transcript_truncated, |transcript| {
                                                     transcript.child(
                                                         div()
-                                                            .font_family(theme::MONO)
+                                                            .font_family(theme::mono())
                                                             .text_size(px(theme::T_TINY))
                                                             .text_color(theme::smoke())
                                                             .child(
@@ -1133,7 +1133,7 @@ fn subagent_transcript_entry(
                 .gap(px(8.0))
                 .child(
                     div()
-                        .font_family(theme::MONO)
+                        .font_family(theme::mono())
                         .text_size(px(theme::T_TINY))
                         .font_weight(FontWeight::BOLD)
                         .text_color(if entry.is_error {
@@ -1146,7 +1146,7 @@ fn subagent_transcript_entry(
                 .when_some(entry.tool_name.clone(), |row, tool| {
                     row.child(
                         div()
-                            .font_family(theme::MONO)
+                            .font_family(theme::mono())
                             .text_size(px(theme::T_TINY))
                             .text_color(theme::smoke())
                             .child(tool),
@@ -1165,9 +1165,9 @@ fn subagent_transcript_entry(
                     theme::edge_soft()
                 })
                 .font_family(if entry.role == TranscriptRole::ToolResult {
-                    theme::MONO
+                    theme::mono()
                 } else {
-                    theme::SANS
+                    theme::sans()
                 })
                 .text_size(px(theme::T_UI))
                 .line_height(gpui::relative(1.5))
@@ -1212,7 +1212,7 @@ fn subagent_metadata_panel(agent: &SubagentSnapshot) -> impl IntoElement {
                     .child(controls::section_label("Output"))
                     .child(
                         div()
-                            .font_family(theme::MONO)
+                            .font_family(theme::mono())
                             .text_size(px(theme::T_TINY))
                             .text_color(theme::ash())
                             .child(short_path(&output)),
@@ -1228,7 +1228,7 @@ fn subagent_metadata_panel(agent: &SubagentSnapshot) -> impl IntoElement {
                     .child(controls::section_label("Worktree"))
                     .child(
                         div()
-                            .font_family(theme::MONO)
+                            .font_family(theme::mono())
                             .text_size(px(theme::T_TINY))
                             .text_color(theme::ash())
                             .child(format!(
@@ -1240,7 +1240,7 @@ fn subagent_metadata_panel(agent: &SubagentSnapshot) -> impl IntoElement {
                     .when_some(agent.worktree_result.as_ref(), |detail, result| {
                         detail.child(
                             div()
-                                .font_family(theme::SANS)
+                                .font_family(theme::sans())
                                 .text_size(px(theme::T_UI_SM))
                                 .text_color(if result.has_changes {
                                     theme::live()
@@ -1265,7 +1265,7 @@ fn subagent_metadata_panel(agent: &SubagentSnapshot) -> impl IntoElement {
                     .child(controls::section_label("Memory"))
                     .child(
                         div()
-                            .font_family(theme::MONO)
+                            .font_family(theme::mono())
                             .text_size(px(theme::T_TINY))
                             .text_color(theme::ash())
                             .child(match memory.path.as_deref() {
@@ -1284,7 +1284,7 @@ fn subagent_metadata_panel(agent: &SubagentSnapshot) -> impl IntoElement {
                     .child(controls::section_label("Result"))
                     .child(
                         div()
-                            .font_family(theme::SANS)
+                            .font_family(theme::sans())
                             .text_size(px(theme::T_UI_SM))
                             .line_height(gpui::relative(1.4))
                             .text_color(theme::bone_dim())
@@ -1295,7 +1295,7 @@ fn subagent_metadata_panel(agent: &SubagentSnapshot) -> impl IntoElement {
         .when_some(agent.error.clone(), |panel, error| {
             panel.child(
                 div()
-                    .font_family(theme::SANS)
+                    .font_family(theme::sans())
                     .text_size(px(theme::T_UI_SM))
                     .line_height(gpui::relative(1.4))
                     .text_color(theme::error())
@@ -1345,7 +1345,7 @@ fn run_controls(
                 .child(
                     div()
                         .min_w_0()
-                        .font_family(theme::MONO)
+                        .font_family(theme::mono())
                         .text_size(px(theme::T_TINY))
                         .text_color(if conversation.pending_operation.is_some() {
                             theme::data()
@@ -1424,7 +1424,7 @@ fn run_controls(
                         .child(controls::section_label("Delivery"))
                         .child(
                             div()
-                                .font_family(theme::MONO)
+                                .font_family(theme::mono())
                                 .text_size(px(theme::T_TINY))
                                 .text_color(theme::smoke())
                                 .child("All"),
@@ -1453,7 +1453,7 @@ fn run_controls(
                 )
                 .child(
                     div()
-                        .font_family(theme::SANS)
+                        .font_family(theme::sans())
                         .text_size(px(theme::T_TINY))
                         .line_height(gpui::relative(1.35))
                         .text_color(theme::smoke())
@@ -1558,7 +1558,7 @@ fn queue_panel(conversation: &ConversationProjection) -> impl IntoElement {
                 .when(conversation.context_awaiting_fresh_usage, |row| {
                     row.child(
                         div()
-                            .font_family(theme::MONO)
+                            .font_family(theme::mono())
                             .text_size(px(theme::T_TINY))
                             .text_color(theme::data())
                             .child("awaiting usage"),
@@ -1617,7 +1617,7 @@ pub(super) fn runtime_error_notice(projection: &ShellProjection) -> impl IntoEle
         .gap(px(4.0))
         .child(
             div()
-                .font_family(theme::SANS)
+                .font_family(theme::sans())
                 .text_size(px(theme::T_UI))
                 .font_weight(FontWeight::BOLD)
                 .text_color(theme::error())
@@ -1625,7 +1625,7 @@ pub(super) fn runtime_error_notice(projection: &ShellProjection) -> impl IntoEle
         )
         .child(
             div()
-                .font_family(theme::SANS)
+                .font_family(theme::sans())
                 .text_size(px(theme::T_UI_SM))
                 .line_height(gpui::relative(1.4))
                 .text_color(theme::bone_dim())

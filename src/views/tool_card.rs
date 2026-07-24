@@ -78,7 +78,7 @@ pub(super) fn render_tool_presentation(
                         .overflow_hidden()
                         .text_ellipsis()
                         .whitespace_nowrap()
-                        .font_family(theme::MONO)
+                        .font_family(theme::mono())
                         .text_size(px(theme::T_MONO))
                         .font_weight(FontWeight::BOLD)
                         .text_color(theme::bone())
@@ -98,7 +98,7 @@ pub(super) fn render_tool_presentation(
                         })
                         .child(
                             div()
-                                .font_family(theme::MONO)
+                                .font_family(theme::mono())
                                 .text_size(px(theme::T_TINY))
                                 .text_color(marker)
                                 .child(status_label(status)),
@@ -123,7 +123,7 @@ pub(super) fn render_tool_presentation(
                         .overflow_hidden()
                         .text_ellipsis()
                         .whitespace_nowrap()
-                        .font_family(theme::MONO)
+                        .font_family(theme::mono())
                         .text_size(px(theme::T_MONO_SM))
                         .line_height(relative(1.4))
                         .text_color(theme::ash())
@@ -133,7 +133,7 @@ pub(super) fn render_tool_presentation(
                     line.child(
                         div()
                             .flex_shrink_0()
-                            .font_family(theme::MONO)
+                            .font_family(theme::mono())
                             .text_size(px(theme::T_TINY))
                             .text_color(theme::smoke())
                             .child(format!("- {detail}")),
@@ -143,7 +143,7 @@ pub(super) fn render_tool_presentation(
         .when_some(error.map(str::to_owned), |card, error| {
             card.child(
                 div()
-                    .font_family(theme::SANS)
+                    .font_family(theme::sans())
                     .text_size(px(theme::T_UI_SM))
                     .text_color(theme::error())
                     .child(sanitize_untrusted_text(&error)),
@@ -176,7 +176,7 @@ fn worse_status(a: CardStatus, b: CardStatus) -> CardStatus {
 
 fn meta_text(text: String) -> impl IntoElement {
     div()
-        .font_family(theme::MONO)
+        .font_family(theme::mono())
         .text_size(px(theme::T_TINY))
         .text_color(theme::smoke())
         .child(text)

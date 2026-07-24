@@ -58,9 +58,20 @@ impl Render for RootView {
             .flex()
             .flex_col()
             .bg(theme::canvas())
-            .font_family(theme::SANS)
+            .font_family(theme::sans())
             .text_color(theme::bone())
-            .child(titlebar(projection, cx))
+            .child(titlebar(
+                projection,
+                &self.session_name_composer,
+                self.session_rename_open,
+                matches!(
+                    self.conversation.lifecycle,
+                    RuntimeLifecycle::Ready | RuntimeLifecycle::Settled
+                ) && self.conversation.pending_operation.is_none()
+                    && catalog.current_session_file.is_some()
+                    && !catalog.switching,
+                cx,
+            ))
             .child(
                 div()
                     .flex_1()
@@ -72,8 +83,8 @@ impl Render for RootView {
                             catalog,
                             projection,
                             conversation: &self.conversation,
-                            name_composer: &self.session_name_composer,
                             history_open: self.history_open,
+                            menu_open: self.session_menu_open,
                         },
                         cx,
                     ))
@@ -102,6 +113,10 @@ impl Render for RootView {
                                 resource_scope_filter: self.resource_scope_filter,
                                 resource_state_filter: self.resource_state_filter,
                                 search: &self.model_search_composer,
+                                font_search: &self.font_search_composer,
+                                font_catalog: &self.font_catalog,
+                                font_role: self.font_role,
+                                font_feedback: self.font_feedback.as_deref(),
                                 auth_input: &self.auth_input_composer,
                                 auth_secret: &self.auth_secret_composer,
                             },

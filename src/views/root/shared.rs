@@ -31,7 +31,7 @@ pub(super) fn popup_sheet_header(
         .border_color(theme::panel_hover())
         .child(
             div()
-                .font_family(theme::SANS)
+                .font_family(theme::sans())
                 .text_size(px(theme::T_TINY))
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(theme::ash())

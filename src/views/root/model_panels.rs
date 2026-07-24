@@ -8,6 +8,10 @@ pub(super) struct ModelSettingsPanelParams<'a> {
     pub(super) resource_scope_filter: ResourceScopeFilter,
     pub(super) resource_state_filter: ResourceStateFilter,
     pub(super) search: &'a Entity<Composer>,
+    pub(super) font_search: &'a Entity<Composer>,
+    pub(super) font_catalog: &'a FontCatalog,
+    pub(super) font_role: FontRole,
+    pub(super) font_feedback: Option<&'a str>,
     pub(super) auth_input: &'a Entity<Composer>,
     pub(super) auth_secret: &'a Entity<Composer>,
 }
@@ -23,6 +27,10 @@ pub(super) fn model_settings_panel(
         resource_scope_filter,
         resource_state_filter,
         search,
+        font_search,
+        font_catalog,
+        font_role,
+        font_feedback,
         auth_input,
         auth_secret,
     } = params;
@@ -62,24 +70,28 @@ pub(super) fn model_settings_panel(
                                 .gap(px(2.0))
                                 .child(
                                     div()
-                                        .font_family(theme::SANS)
+                                        .font_family(theme::sans())
                                         .text_size(px(theme::T_UI))
                                         .font_weight(FontWeight::BOLD)
                                         .text_color(theme::bone())
                                         .child(if tab == ModelSettingsTab::Resources {
                                             "Resource Center"
+                                        } else if tab == ModelSettingsTab::Typography {
+                                            "Typography"
                                         } else {
                                             "Model settings"
                                         }),
                                 )
                                 .child(
                                     div()
-                                        .font_family(theme::SANS)
+                                        .font_family(theme::sans())
                                         .text_size(px(theme::T_TINY))
                                         .text_color(theme::ash())
                                         .child(
                                             if tab == ModelSettingsTab::Resources {
                                                 "Audited Pi resources, provenance, trust, load state, and active tools."
+                                            } else if tab == ModelSettingsTab::Typography {
+                                                "Choose any installed system font for the app's three text roles."
                                             } else {
                                                 "Providers, defaults, cycle order, and usage. Session model and thinking live in the prompt box."
                                             },
@@ -93,24 +105,26 @@ pub(super) fn model_settings_panel(
                                 .items_center()
                                 .gap(px(6.0))
                                 .flex_shrink_0()
-                                .child(controls::quiet_button(
-                                    "refresh-model-catalog",
-                                    if refreshing {
-                                        "Refreshing…"
-                                    } else if tab == ModelSettingsTab::Resources {
-                                        "Reload"
-                                    } else {
-                                        "Refresh"
-                                    },
-                                    !refreshing,
-                                    Box::new(cx.listener(move |view, _, _, cx| {
-                                        if tab == ModelSettingsTab::Resources {
-                                            view.reload_resources(cx);
+                                .when(tab != ModelSettingsTab::Typography, |actions| {
+                                    actions.child(controls::quiet_button(
+                                        "refresh-model-catalog",
+                                        if refreshing {
+                                            "Refreshing…"
+                                        } else if tab == ModelSettingsTab::Resources {
+                                            "Reload"
                                         } else {
-                                            view.refresh_models(cx);
-                                        }
-                                    })),
-                                ))
+                                            "Refresh"
+                                        },
+                                        !refreshing,
+                                        Box::new(cx.listener(move |view, _, _, cx| {
+                                            if tab == ModelSettingsTab::Resources {
+                                                view.reload_resources(cx);
+                                            } else {
+                                                view.refresh_models(cx);
+                                            }
+                                        })),
+                                    ))
+                                })
                                 .child(controls::quiet_button(
                                     "close-model-settings",
                                     "Done",
@@ -128,6 +142,7 @@ pub(super) fn model_settings_panel(
                             (ModelSettingsTab::Models, "Models"),
                             (ModelSettingsTab::Thinking, "Thinking"),
                             (ModelSettingsTab::Usage, "Usage"),
+                            (ModelSettingsTab::Typography, "Type"),
                             (ModelSettingsTab::Resources, "Resources"),
                         ]
                         .into_iter()
@@ -136,8 +151,8 @@ pub(super) fn model_settings_panel(
                                 gpui::SharedString::from(format!("model-tab-{label}")),
                                 label,
                                 tab == target,
-                                Box::new(cx.listener(move |view, _, _, cx| {
-                                    view.set_model_settings_tab(target, cx)
+                                Box::new(cx.listener(move |view, _, window, cx| {
+                                    view.set_model_settings_tab(target, window, cx)
                                 })),
                             )
                         }),
@@ -151,6 +166,13 @@ pub(super) fn model_settings_panel(
             ModelSettingsTab::Models => models_settings(projection, search, cx).into_any_element(),
             ModelSettingsTab::Thinking => thinking_settings(projection, cx).into_any_element(),
             ModelSettingsTab::Usage => usage_settings(projection).into_any_element(),
+            ModelSettingsTab::Typography => typography_settings(
+                font_catalog,
+                font_role,
+                font_search,
+                cx,
+            )
+            .into_any_element(),
             ModelSettingsTab::Resources => resource_center_settings(
                 resources,
                 resource_scope_filter,
@@ -159,20 +181,230 @@ pub(super) fn model_settings_panel(
             )
             .into_any_element(),
         })
-        .when(tab != ModelSettingsTab::Resources, |panel| {
-            panel
+        .when(
+            tab != ModelSettingsTab::Resources && tab != ModelSettingsTab::Typography,
+            |panel| {
+                panel
                 .when_some(catalog_phase_note(&projection.phase), |panel, note| {
                     panel.child(controls::panel_footer_status(note))
                 })
                 .when_some(projection.feedback.clone(), |panel, feedback| {
                     panel.child(controls::panel_footer_status(feedback))
                 })
+            },
+        )
+        .when(tab == ModelSettingsTab::Typography, |panel| {
+            panel.when_some(font_feedback.map(str::to_owned), |panel, feedback| {
+                panel.child(controls::panel_footer_status(feedback))
+            })
         })
         .when(tab == ModelSettingsTab::Resources, |panel| {
             panel.when_some(resources.feedback.clone(), |panel, feedback| {
                 panel.child(controls::panel_footer_status(feedback))
             })
         })
+}
+
+fn typography_settings(
+    catalog: &FontCatalog,
+    active_role: FontRole,
+    search: &Entity<Composer>,
+    cx: &mut Context<RootView>,
+) -> impl IntoElement {
+    let query = search.read(cx).draft().trim().to_lowercase();
+    let families = catalog
+        .families
+        .iter()
+        .filter(|family| query.is_empty() || family.to_lowercase().contains(&query))
+        .cloned()
+        .collect::<Vec<_>>();
+    let count = families.len();
+    let selected_family = catalog.preferences.family(active_role).to_owned();
+
+    div()
+        .flex_1()
+        .min_h_0()
+        .flex()
+        .flex_col()
+        .child(
+            div()
+                .px(px(18.0))
+                .py(px(12.0))
+                .flex()
+                .flex_col()
+                .gap(px(10.0))
+                .border_b_1()
+                .border_color(theme::edge_soft())
+                .child(div().flex().flex_row().gap(px(8.0)).children(
+                    FontRole::ALL.into_iter().map(|role| {
+                        let selected = role == active_role;
+                        let family = catalog.preferences.family(role).to_owned();
+                        div()
+                            .id(gpui::SharedString::from(format!(
+                                "font-role-{}",
+                                role.label().to_lowercase()
+                            )))
+                            .flex_1()
+                            .min_w_0()
+                            .p(px(10.0))
+                            .rounded(px(theme::RADIUS_SM))
+                            .bg(if selected {
+                                theme::panel_lift()
+                            } else {
+                                theme::panel()
+                            })
+                            .border_1()
+                            .border_color(if selected {
+                                theme::focus()
+                            } else {
+                                theme::edge_soft()
+                            })
+                            .tab_index(0)
+                            .cursor_pointer()
+                            .hover(|card| card.bg(theme::panel_hover()))
+                            .focus(|card| card.border_color(theme::focus()))
+                            .on_click(
+                                cx.listener(move |view, _, _, cx| view.set_font_role(role, cx)),
+                            )
+                            .on_key_down(cx.listener(
+                                move |view, event: &gpui::KeyDownEvent, _, cx| {
+                                    if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                                        cx.stop_propagation();
+                                        view.set_font_role(role, cx);
+                                    }
+                                },
+                            ))
+                            .child(
+                                div()
+                                    .font_family(theme::main())
+                                    .text_size(px(theme::T_UI_SM))
+                                    .font_weight(FontWeight::BOLD)
+                                    .text_color(if selected {
+                                        theme::bone()
+                                    } else {
+                                        theme::bone_dim()
+                                    })
+                                    .child(role.label()),
+                            )
+                            .child(
+                                div()
+                                    .mt(px(2.0))
+                                    .font_family(family.clone())
+                                    .text_size(px(theme::T_UI_SM))
+                                    .text_color(theme::ash())
+                                    .overflow_hidden()
+                                    .text_ellipsis()
+                                    .whitespace_nowrap()
+                                    .child(family),
+                            )
+                            .child(
+                                div()
+                                    .mt(px(3.0))
+                                    .font_family(theme::sans())
+                                    .text_size(px(theme::T_TINY))
+                                    .text_color(theme::smoke())
+                                    .child(role.description()),
+                            )
+                    }),
+                ))
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(10.0))
+                        .child(div().flex_1().min_w_0().child(search.clone()))
+                        .child(
+                            div()
+                                .flex_shrink_0()
+                                .font_family(theme::mono())
+                                .text_size(px(theme::T_TINY))
+                                .text_color(theme::smoke())
+                                .child(format!("{count} fonts")),
+                        ),
+                ),
+        )
+        .child(
+            div()
+                .id("system-font-list")
+                .flex_1()
+                .min_h_0()
+                .overflow_y_scroll()
+                .scrollbar_width(px(theme::SCROLLBAR))
+                .when(families.is_empty(), |list| {
+                    list.child(
+                        div()
+                            .px(px(18.0))
+                            .py(px(16.0))
+                            .font_family(theme::sans())
+                            .text_size(px(theme::T_UI_SM))
+                            .text_color(theme::smoke())
+                            .child("No installed fonts match this search."),
+                    )
+                })
+                .children(families.into_iter().map(|family| {
+                    let selected = family == selected_family;
+                    let keyboard_family = family.clone();
+                    let click_family = family.clone();
+                    div()
+                        .id(gpui::SharedString::from(format!(
+                            "font-{}-{}",
+                            active_role.label().to_lowercase(),
+                            family
+                        )))
+                        .min_h(px(46.0))
+                        .px(px(18.0))
+                        .py(px(8.0))
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .justify_between()
+                        .gap(px(16.0))
+                        .border_b_1()
+                        .border_color(theme::edge_soft())
+                        .bg(if selected {
+                            theme::panel_lift()
+                        } else {
+                            theme::canvas()
+                        })
+                        .tab_index(0)
+                        .cursor_pointer()
+                        .hover(|row| row.bg(theme::panel_hover()))
+                        .focus(|row| row.border_color(theme::focus()))
+                        .on_click(cx.listener(move |view, _, _, cx| {
+                            view.select_font(active_role, click_family.clone(), cx)
+                        }))
+                        .on_key_down(cx.listener(move |view, event: &gpui::KeyDownEvent, _, cx| {
+                            if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                                cx.stop_propagation();
+                                view.select_font(active_role, keyboard_family.clone(), cx);
+                            }
+                        }))
+                        .child(
+                            div()
+                                .min_w_0()
+                                .flex_1()
+                                .font_family(family.clone())
+                                .text_size(px(theme::T_BODY))
+                                .text_color(theme::bone_dim())
+                                .overflow_hidden()
+                                .text_ellipsis()
+                                .whitespace_nowrap()
+                                .child(family),
+                        )
+                        .when(selected, |row| {
+                            row.child(
+                                div()
+                                    .flex_shrink_0()
+                                    .font_family(theme::main())
+                                    .text_size(px(theme::T_TINY))
+                                    .font_weight(FontWeight::BOLD)
+                                    .text_color(theme::focus())
+                                    .child("Selected"),
+                            )
+                        })
+                })),
+        )
 }
 
 pub(super) fn model_switcher_sheet(
@@ -201,7 +433,7 @@ pub(super) fn model_switcher_sheet(
                 .border_color(theme::edge_soft())
                 .child(
                     div()
-                        .font_family(theme::SANS)
+                        .font_family(theme::sans())
                         .text_size(px(theme::T_LABEL))
                         .font_weight(FontWeight::BOLD)
                         .text_color(theme::bone_dim())
@@ -224,7 +456,7 @@ pub(super) fn model_switcher_sheet(
                     .bg(theme::panel())
                     .border_b_1()
                     .border_color(theme::panel_hover())
-                    .font_family(theme::SANS)
+                    .font_family(theme::sans())
                     .text_size(px(theme::T_TINY))
                     .text_color(theme::smoke())
                     .child("Settle stream to change"),
@@ -243,7 +475,7 @@ pub(super) fn model_switcher_sheet(
                         div()
                             .px(px(12.0))
                             .py(px(18.0))
-                            .font_family(theme::SANS)
+                            .font_family(theme::sans())
                             .text_size(px(theme::T_UI_SM))
                             .text_color(theme::smoke())
                             .child(match projection.phase {
@@ -322,7 +554,7 @@ pub(super) fn model_switcher_sheet(
                                 } else {
                                     theme::canvas()
                                 })
-                                .font_family(theme::SANS)
+                                .font_family(theme::sans())
                                 .text_size(px(theme::T_LABEL))
                                 .font_weight(FontWeight::BOLD)
                                 .text_color(if selected {
@@ -341,7 +573,7 @@ pub(super) fn model_switcher_sheet(
                                 .gap(px(1.0))
                                 .child(
                                     div()
-                                        .font_family(theme::SANS)
+                                        .font_family(theme::sans())
                                         .text_size(px(theme::T_UI_SM))
                                         .font_weight(if selected {
                                             FontWeight::BOLD
@@ -360,7 +592,7 @@ pub(super) fn model_switcher_sheet(
                                 )
                                 .child(
                                     div()
-                                        .font_family(theme::MONO)
+                                        .font_family(theme::mono())
                                         .text_size(px(10.0))
                                         .text_color(theme::smoke())
                                         .overflow_hidden()
@@ -371,7 +603,7 @@ pub(super) fn model_switcher_sheet(
                         )
                         .child(
                             div()
-                                .font_family(theme::MONO)
+                                .font_family(theme::mono())
                                 .text_size(px(10.0))
                                 .font_weight(FontWeight::MEDIUM)
                                 .text_color(theme::ash())
@@ -385,7 +617,7 @@ pub(super) fn model_switcher_sheet(
                                     .py(px(3.0))
                                     .rounded(px(theme::RADIUS_SM))
                                     .bg(theme::data_wash())
-                                    .font_family(theme::SANS)
+                                    .font_family(theme::sans())
                                     .text_size(px(9.0))
                                     .font_weight(FontWeight::BOLD)
                                     .text_color(theme::data())
@@ -403,7 +635,7 @@ pub(super) fn model_switcher_sheet(
                     .bg(theme::panel())
                     .border_t_1()
                     .border_color(theme::panel_hover())
-                    .font_family(theme::MONO)
+                    .font_family(theme::mono())
                     .text_size(px(theme::T_TINY))
                     .text_color(theme::smoke())
                     .overflow_hidden()
@@ -483,7 +715,7 @@ pub(super) fn thinking_select_sheet(
                     .bg(theme::panel())
                     .border_b_1()
                     .border_color(theme::panel_hover())
-                    .font_family(theme::SANS)
+                    .font_family(theme::sans())
                     .text_size(px(theme::T_TINY))
                     .text_color(theme::smoke())
                     .child("Settle stream to change"),
@@ -536,7 +768,7 @@ pub(super) fn thinking_select_sheet(
                         })
                         .child(
                             div()
-                                .font_family(theme::CONTROL)
+                                .font_family(theme::main())
                                 .text_size(px(theme::T_TINY))
                                 .font_weight(if selected {
                                     FontWeight::SEMIBOLD
@@ -661,7 +893,7 @@ fn providers_settings(
                                 .gap(px(10.0))
                                 .child(
                                     div()
-                                        .font_family(theme::SANS)
+                                        .font_family(theme::sans())
                                         .text_size(px(theme::T_UI_SM))
                                         .font_weight(FontWeight::SEMIBOLD)
                                         .text_color(theme::bone())
@@ -959,7 +1191,7 @@ fn model_settings_row(
                         .gap(px(2.0))
                         .child(
                             div()
-                                .font_family(theme::SANS)
+                                .font_family(theme::sans())
                                 .text_size(px(theme::T_UI_SM))
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .text_color(theme::bone())
@@ -1406,7 +1638,7 @@ fn resource_center_row(item: crate::resource_center::ResourceItem) -> impl IntoE
                 .child(
                     div()
                         .min_w_0()
-                        .font_family(theme::SANS)
+                        .font_family(theme::sans())
                         .text_size(px(theme::T_UI_SM))
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(theme::bone())
@@ -1418,7 +1650,7 @@ fn resource_center_row(item: crate::resource_center::ResourceItem) -> impl IntoE
                 .child(
                     div()
                         .flex_shrink_0()
-                        .font_family(theme::MONO)
+                        .font_family(theme::mono())
                         .text_size(px(theme::T_TINY))
                         .text_color(state_color)
                         .child(item.state.label()),
@@ -1428,7 +1660,7 @@ fn resource_center_row(item: crate::resource_center::ResourceItem) -> impl IntoE
         .when_some(item.description, |row, description| {
             row.child(
                 div()
-                    .font_family(theme::SANS)
+                    .font_family(theme::sans())
                     .text_size(px(theme::T_TINY))
                     .line_height(gpui::relative(1.4))
                     .text_color(theme::bone_dim())
@@ -1439,7 +1671,7 @@ fn resource_center_row(item: crate::resource_center::ResourceItem) -> impl IntoE
         .child(controls::meta_text(format!("Source: {}", item.source)))
         .children(item.diagnostics.into_iter().map(|diagnostic| {
             div()
-                .font_family(theme::SANS)
+                .font_family(theme::sans())
                 .text_size(px(theme::T_TINY))
                 .line_height(gpui::relative(1.4))
                 .text_color(theme::error())

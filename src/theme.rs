@@ -1,11 +1,20 @@
 //! Shared visual tokens for the harness desk.
 
-use gpui::{Rgba, rgb, rgba};
+use gpui::{Rgba, SharedString, rgb, rgba};
 
-pub const SANS: &str = "Switzer";
-pub const DISPLAY: &str = "Bonny";
-pub const CONTROL: &str = DISPLAY;
-pub const MONO: &str = "Cascadia Mono";
+use crate::fonts::{self, FontRole};
+
+pub fn main() -> SharedString {
+    fonts::family(FontRole::Main)
+}
+
+pub fn sans() -> SharedString {
+    fonts::family(FontRole::Sans)
+}
+
+pub fn mono() -> SharedString {
+    fonts::family(FontRole::Mono)
+}
 
 // Layout
 pub const SIDE_W: f32 = 236.0;

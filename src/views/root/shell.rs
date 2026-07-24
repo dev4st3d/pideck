@@ -3,6 +3,9 @@ use super::*;
 
 pub(super) fn titlebar(
     projection: &ShellProjection,
+    name_composer: &Entity<Composer>,
+    rename_open: bool,
+    rename_enabled: bool,
     cx: &mut Context<RootView>,
 ) -> impl IntoElement {
     let action = projection.action;
@@ -27,7 +30,7 @@ pub(super) fn titlebar(
                 .flex_1()
                 .child(
                     div()
-                        .font_family(theme::DISPLAY)
+                        .font_family(theme::main())
                         .text_size(px(theme::T_WORDMARK))
                         .font_weight(FontWeight::NORMAL)
                         .text_color(theme::bone())
@@ -43,20 +46,56 @@ pub(super) fn titlebar(
                 )
                 .child(
                     div()
+                        .relative()
                         .min_w_0()
-                        .font_family(theme::SANS)
-                        .text_size(px(theme::T_TITLE))
-                        .font_weight(FontWeight::BOLD)
-                        .text_color(theme::bone())
-                        .overflow_hidden()
-                        .text_ellipsis()
-                        .whitespace_nowrap()
-                        .child(projection.session.label()),
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(4.0))
+                        .child(
+                            div()
+                                .min_w_0()
+                                .font_family(theme::sans())
+                                .text_size(px(theme::T_TITLE))
+                                .font_weight(FontWeight::BOLD)
+                                .text_color(theme::bone())
+                                .overflow_hidden()
+                                .text_ellipsis()
+                                .whitespace_nowrap()
+                                .child(projection.session.label()),
+                        )
+                        .child(controls::icon_button(
+                            "rename-session",
+                            "✎",
+                            rename_open,
+                            rename_enabled,
+                            Box::new(cx.listener(|view, _, window, cx| {
+                                view.toggle_session_rename(window, cx)
+                            })),
+                        ))
+                        .when(rename_open, |title| {
+                            title.child(deferred(
+                                div()
+                                    .id("rename-session-popup")
+                                    .absolute()
+                                    .top(px(32.0))
+                                    .left_0()
+                                    .w(px(theme::SIDE_W))
+                                    .p(px(10.0))
+                                    .occlude()
+                                    .rounded(px(theme::RADIUS_SM))
+                                    .border_1()
+                                    .border_color(theme::edge_hard())
+                                    .bg(theme::panel_lift())
+                                    .child(controls::section_label("Rename current session"))
+                                    .child(div().mt(px(7.0)).child(name_composer.clone())),
+                            ))
+                        }),
                 )
                 .when(projection.has_stale_values, |row| {
                     row.child(
                         div()
-                            .font_family(theme::MONO)
+                            .font_family(theme::mono())
                             .text_size(px(theme::T_TINY))
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(theme::smoke())
@@ -96,8 +135,8 @@ pub(super) struct SessionsPanelParams<'a> {
     pub(super) catalog: &'a CatalogProjection,
     pub(super) projection: &'a ShellProjection,
     pub(super) conversation: &'a ConversationProjection,
-    pub(super) name_composer: &'a Entity<Composer>,
     pub(super) history_open: bool,
+    pub(super) menu_open: bool,
 }
 
 pub(super) fn sessions_panel(
@@ -108,8 +147,8 @@ pub(super) fn sessions_panel(
         catalog,
         projection,
         conversation,
-        name_composer,
         history_open,
+        menu_open,
     } = params;
     let session_actions_enabled = matches!(
         conversation.lifecycle,
@@ -133,44 +172,61 @@ pub(super) fn sessions_panel(
         .h_full()
         .flex()
         .flex_col()
+        .relative()
         .bg(theme::floor())
         .border_r_1()
         .border_color(theme::edge_hard())
         .child(
             div()
+                .h(px(42.0))
                 .px(px(14.0))
-                .pt(px(14.0))
-                .pb(px(10.0))
                 .flex()
                 .flex_row()
-                .items_baseline()
+                .items_center()
                 .justify_between()
                 .child(controls::section_label("Sessions"))
-                .child(
-                    div()
-                        .font_family(theme::MONO)
-                        .text_size(px(theme::T_TINY))
-                        .text_color(theme::smoke())
-                        .child(state_copy),
-                ),
-        )
-        .child(
-            div()
-                .px(px(10.0))
-                .pb(px(8.0))
-                .flex()
-                .flex_col()
-                .gap(px(6.0))
                 .child(
                     div()
                         .flex()
                         .flex_row()
                         .items_center()
-                        .gap(px(4.0))
-                        .child(controls::quiet_button(
+                        .gap(px(2.0))
+                        .child(
+                            div()
+                                .min_w(px(20.0))
+                                .font_family(theme::mono())
+                                .text_size(px(theme::T_TINY))
+                                .text_color(theme::smoke())
+                                .text_align(gpui::TextAlign::Right)
+                                .child(state_copy),
+                        )
+                        .child(controls::icon_button(
+                            "refresh-sessions",
+                            "↻",
+                            false,
+                            catalog.status != CatalogStatus::Loading,
+                            Box::new(cx.listener(|view, _, _, cx| view.refresh_sessions(cx))),
+                        )),
+                ),
+        )
+        .child(
+            div()
+                .px(px(10.0))
+                .pb(px(10.0))
+                .flex()
+                .flex_col()
+                .gap(px(4.0))
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(6.0))
+                        .child(controls::tone_button(
                             "new-session",
-                            "New",
+                            "New session",
                             session_actions_enabled,
+                            controls::ControlTone::Normal,
                             Box::new(cx.listener(|view, _, window, cx| {
                                 let _ = view.execute_native_action(
                                     NativeAction::NewSession,
@@ -180,35 +236,68 @@ pub(super) fn sessions_panel(
                                 );
                             })),
                         ))
-                        .child(controls::quiet_button(
-                            "refresh-sessions",
-                            "Refresh",
-                            catalog.status != CatalogStatus::Loading,
-                            Box::new(cx.listener(|view, _, _, cx| view.refresh_sessions(cx))),
-                        ))
-                        .child(controls::quiet_button(
-                            "export-session",
-                            "Export",
-                            session_actions_enabled && catalog.current_session_file.is_some(),
-                            Box::new(cx.listener(|view, _, window, cx| {
-                                let _ = view.execute_native_action(
-                                    NativeAction::ExportHtml,
-                                    "",
-                                    window,
-                                    cx,
-                                );
-                            })),
-                        )),
-                )
-                .child(controls::chip_button(
-                    "toggle-history",
-                    "History",
-                    history_open,
-                    true,
-                    Box::new(cx.listener(|view, _, window, cx| {
-                        let _ = view.execute_native_action(NativeAction::Tree, "", window, cx);
-                    })),
-                )),
+                        .child(
+                            div()
+                                .relative()
+                                .flex_1()
+                                .min_w_0()
+                                .child(controls::tone_button(
+                                    "session-tools",
+                                    "History / export",
+                                    true,
+                                    controls::ControlTone::Normal,
+                                    Box::new(
+                                        cx.listener(|view, _, _, cx| view.toggle_session_menu(cx)),
+                                    ),
+                                ))
+                                .when(menu_open, |host| {
+                                    host.child(deferred(
+                                        div()
+                                            .id("session-tools-popup")
+                                            .absolute()
+                                            .top(px(32.0))
+                                            .right_0()
+                                            .w(px(172.0))
+                                            .py(px(4.0))
+                                            .occlude()
+                                            .rounded(px(theme::RADIUS_SM))
+                                            .border_1()
+                                            .border_color(theme::edge_hard())
+                                            .bg(theme::panel_lift())
+                                            .child(controls::action_row(
+                                                "toggle-history",
+                                                if history_open {
+                                                    "Hide history"
+                                                } else {
+                                                    "Show history"
+                                                },
+                                                "Conversation tree",
+                                                true,
+                                                controls::ControlTone::Normal,
+                                                Box::new(cx.listener(|view, _, window, cx| {
+                                                    let _ = view.execute_native_action(
+                                                        NativeAction::Tree,
+                                                        "",
+                                                        window,
+                                                        cx,
+                                                    );
+                                                })),
+                                            ))
+                                            .child(controls::action_row(
+                                                "export-session",
+                                                "Export HTML",
+                                                "Save this session",
+                                                session_actions_enabled
+                                                    && catalog.current_session_file.is_some(),
+                                                controls::ControlTone::Normal,
+                                                Box::new(cx.listener(|view, _, window, cx| {
+                                                    view.export_session_from_menu(window, cx)
+                                                })),
+                                            )),
+                                    ))
+                                }),
+                        ),
+                ),
         )
         .when(
             matches!(
@@ -226,7 +315,7 @@ pub(super) fn sessions_panel(
                         .bg(theme::panel())
                         .border_1()
                         .border_color(theme::edge_soft())
-                        .font_family(theme::SANS)
+                        .font_family(theme::sans())
                         .text_size(px(theme::T_TINY))
                         .line_height(gpui::relative(1.4))
                         .text_color(theme::bone_dim())
@@ -250,7 +339,7 @@ pub(super) fn sessions_panel(
                     .bg(theme::panel())
                     .border_1()
                     .border_color(theme::error())
-                    .font_family(theme::SANS)
+                    .font_family(theme::sans())
                     .text_size(px(theme::T_TINY))
                     .line_height(gpui::relative(1.4))
                     .text_color(theme::bone_dim())
@@ -260,9 +349,6 @@ pub(super) fn sessions_panel(
                         if catalog.corrupt.len() == 1 { "" } else { "s" }
                     )),
             )
-        })
-        .when(catalog.current_session_file.is_some(), |panel| {
-            panel.child(div().px(px(10.0)).pb(px(8.0)).child(name_composer.clone()))
         })
         .child(
             div()
@@ -317,7 +403,7 @@ pub(super) fn sessions_panel(
                 .child(
                     div()
                         .mt(px(5.0))
-                        .font_family(theme::MONO)
+                        .font_family(theme::mono())
                         .text_size(px(theme::T_TINY))
                         .line_height(gpui::relative(1.4))
                         .font_weight(FontWeight::MEDIUM)
@@ -402,7 +488,7 @@ pub(super) fn history_panel(
                 .child(controls::section_label("History"))
                 .child(
                     div()
-                        .font_family(theme::MONO)
+                        .font_family(theme::mono())
                         .text_size(px(theme::T_TINY))
                         .text_color(theme::smoke())
                         .child(format!("{}", rows.len())),
@@ -503,7 +589,7 @@ pub(super) fn history_panel(
                             .child(
                                 div()
                                     .w(px(10.0))
-                                    .font_family(theme::MONO)
+                                    .font_family(theme::mono())
                                     .text_size(px(theme::T_TINY))
                                     .text_color(if row.active_path {
                                         theme::signal_hot()
@@ -553,7 +639,7 @@ pub(super) fn history_panel(
                     .gap(px(4.0))
                     .child(
                         div()
-                            .font_family(theme::MONO)
+                            .font_family(theme::mono())
                             .text_size(px(theme::T_TINY))
                             .text_color(theme::data())
                             .child(format!(
@@ -708,7 +794,7 @@ pub(super) fn history_panel(
                     .gap(px(8.0))
                     .child(
                         div()
-                            .font_family(theme::SANS)
+                            .font_family(theme::sans())
                             .text_size(px(theme::T_UI_SM))
                             .font_weight(FontWeight::BOLD)
                             .text_color(theme::bone())

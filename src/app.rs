@@ -30,7 +30,7 @@ pub fn run() {
     ));
 
     Application::new().run(move |cx: &mut App| {
-        fonts::register(cx);
+        let font_catalog = fonts::initialize(cx);
         cx.bind_keys([
             KeyBinding::new("ctrl-alt-c", Connect, None),
             KeyBinding::new("ctrl-alt-r", Retry, None),
@@ -51,6 +51,7 @@ pub fn run() {
         let bounds = Bounds::centered(None, size(px(WINDOW_WIDTH), px(WINDOW_HEIGHT)), cx);
         let workspace = workspace.clone();
         let service = Arc::clone(&service);
+        let font_catalog = font_catalog.clone();
 
         cx.open_window(
             WindowOptions {
@@ -78,7 +79,8 @@ pub fn run() {
                 })
                 .detach();
 
-                let root = cx.new(|cx| RootView::new(window, controller.clone(), cx));
+                let root = cx
+                    .new(|cx| RootView::new(window, controller.clone(), font_catalog.clone(), cx));
                 controller.update(cx, |controller, cx| controller.connect(cx));
                 root
             },

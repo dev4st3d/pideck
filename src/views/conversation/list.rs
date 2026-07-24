@@ -208,7 +208,7 @@ fn header(turn_count: usize) -> impl IntoElement {
             .border_color(theme::edge_soft())
             .child(
                 div()
-                    .font_family(theme::SANS)
+                    .font_family(theme::sans())
                     .text_size(px(theme::T_UI_SM))
                     .font_weight(FontWeight::BOLD)
                     .text_color(theme::ash())
@@ -216,7 +216,7 @@ fn header(turn_count: usize) -> impl IntoElement {
             )
             .child(
                 div()
-                    .font_family(theme::MONO)
+                    .font_family(theme::mono())
                     .text_size(px(theme::T_TINY))
                     .text_color(theme::smoke())
                     .child(format!(

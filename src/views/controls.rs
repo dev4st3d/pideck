@@ -25,7 +25,7 @@ pub enum ControlTone {
 
 pub fn meta_text(text: impl Into<SharedString>) -> impl IntoElement {
     div()
-        .font_family(theme::MONO)
+        .font_family(theme::mono())
         .text_size(px(theme::T_MONO_SM))
         .font_weight(FontWeight::MEDIUM)
         .text_color(theme::ash())
@@ -45,7 +45,7 @@ pub fn meta_sep() -> impl IntoElement {
 
 pub fn section_label(text: impl Into<SharedString>) -> impl IntoElement {
     div()
-        .font_family(theme::CONTROL)
+        .font_family(theme::main())
         .text_size(px(theme::T_LABEL))
         .font_weight(FontWeight::SEMIBOLD)
         .text_color(theme::ash())
@@ -71,7 +71,7 @@ pub fn status_pill(label: impl Into<SharedString>, color: gpui::Rgba) -> impl In
         )
         .child(
             div()
-                .font_family(theme::CONTROL)
+                .font_family(theme::main())
                 .text_size(px(theme::T_UI_SM))
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(color)
@@ -132,18 +132,67 @@ pub fn recovery_button(
         })
         .child(
             div()
-                .font_family(theme::CONTROL)
+                .font_family(theme::main())
                 .text_size(px(theme::T_UI_SM))
                 .font_weight(FontWeight::BOLD)
                 .child(label),
         )
         .child(
             div()
-                .font_family(theme::MONO)
+                .font_family(theme::mono())
                 .text_size(px(theme::T_TINY))
                 .font_weight(FontWeight::MEDIUM)
                 .opacity(if enabled { 0.72 } else { 0.5 })
                 .child(shortcut),
+        )
+}
+
+pub fn icon_button(
+    id: impl Into<SharedString>,
+    glyph: impl Into<SharedString>,
+    selected: bool,
+    enabled: bool,
+    on_click: ClickHandler,
+) -> impl IntoElement {
+    div()
+        .id(id.into())
+        .size(px(28.0))
+        .rounded(px(theme::RADIUS_SM))
+        .flex()
+        .items_center()
+        .justify_center()
+        .bg(if selected {
+            theme::panel_lift()
+        } else {
+            clear()
+        })
+        .border_1()
+        .border_color(if selected {
+            theme::edge_hard()
+        } else {
+            clear()
+        })
+        .text_color(if enabled {
+            theme::bone_dim()
+        } else {
+            theme::smoke()
+        })
+        .when(enabled, |button| {
+            button
+                .tab_index(0)
+                .cursor_pointer()
+                .hover(|button| button.bg(theme::panel()).text_color(theme::bone()))
+                .active(|button| button.bg(theme::panel_lift()))
+                .focus(|button| button.border_color(theme::focus()))
+                .on_click(move |event, window, cx| on_click(event, window, cx))
+        })
+        .child(
+            div()
+                .font_family(theme::sans())
+                .text_size(px(16.0))
+                .line_height(gpui::relative(1.0))
+                .font_weight(FontWeight::MEDIUM)
+                .child(glyph.into()),
         )
 }
 
@@ -177,7 +226,7 @@ pub fn quiet_button(
         })
         .child(
             div()
-                .font_family(theme::CONTROL)
+                .font_family(theme::main())
                 .text_size(px(theme::T_UI_SM))
                 .font_weight(FontWeight::SEMIBOLD)
                 .child(label.into()),
@@ -249,7 +298,7 @@ pub fn tone_button(
         })
         .child(
             div()
-                .font_family(theme::CONTROL)
+                .font_family(theme::main())
                 .text_size(px(theme::T_TINY))
                 .font_weight(FontWeight::SEMIBOLD)
                 .child(label.into()),
@@ -278,7 +327,7 @@ pub fn setting_row(
                 .gap(px(1.0))
                 .child(
                     div()
-                        .font_family(theme::SANS)
+                        .font_family(theme::sans())
                         .text_size(px(theme::T_UI_SM))
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(theme::bone_dim())
@@ -290,7 +339,7 @@ pub fn setting_row(
                 .when_some(detail, |col, detail| {
                     col.child(
                         div()
-                            .font_family(theme::MONO)
+                            .font_family(theme::mono())
                             .text_size(px(theme::T_TINY))
                             .text_color(theme::smoke())
                             .overflow_hidden()
@@ -353,7 +402,7 @@ pub fn chip_button(
         })
         .child(
             div()
-                .font_family(theme::CONTROL)
+                .font_family(theme::main())
                 .text_size(px(theme::T_TINY))
                 .font_weight(if selected {
                     FontWeight::BOLD
@@ -420,7 +469,7 @@ pub fn compact_select(
             div()
                 .min_w_0()
                 .flex_1()
-                .font_family(theme::CONTROL)
+                .font_family(theme::main())
                 .text_size(px(theme::T_TINY))
                 .font_weight(FontWeight::MEDIUM)
                 .overflow_hidden()
@@ -430,7 +479,7 @@ pub fn compact_select(
         )
         .child(
             div()
-                .font_family(theme::MONO)
+                .font_family(theme::mono())
                 .text_size(px(9.0))
                 .line_height(px(12.0))
                 .text_color(if open { theme::data() } else { theme::smoke() })
@@ -468,7 +517,7 @@ pub fn chrome_action(
         })
         .child(
             div()
-                .font_family(theme::CONTROL)
+                .font_family(theme::main())
                 .text_size(px(10.0))
                 .font_weight(FontWeight::MEDIUM)
                 .child(label.into()),
@@ -536,7 +585,7 @@ pub fn tab_button(
         .on_click(move |event, window, cx| on_click(event, window, cx))
         .child(
             div()
-                .font_family(theme::CONTROL)
+                .font_family(theme::main())
                 .text_size(px(theme::T_TINY))
                 .font_weight(if selected {
                     FontWeight::BOLD
@@ -559,7 +608,7 @@ pub fn panel_note(text: impl Into<SharedString>, tone: ControlTone) -> impl Into
         .bg(theme::panel())
         .border_1()
         .border_color(border)
-        .font_family(theme::SANS)
+        .font_family(theme::sans())
         .text_size(px(theme::T_TINY))
         .line_height(relative(1.4))
         .text_color(color)
@@ -572,7 +621,7 @@ pub fn panel_footer_status(text: impl Into<SharedString>) -> impl IntoElement {
         .py(px(8.0))
         .border_t_1()
         .border_color(theme::edge_soft())
-        .font_family(theme::MONO)
+        .font_family(theme::mono())
         .text_size(px(theme::T_TINY))
         .line_height(relative(1.35))
         .text_color(theme::smoke())
@@ -618,7 +667,7 @@ pub fn action_row(
                 .gap(px(2.0))
                 .child(
                     div()
-                        .font_family(theme::SANS)
+                        .font_family(theme::sans())
                         .text_size(px(theme::T_UI_SM))
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(label_color)
@@ -629,7 +678,7 @@ pub fn action_row(
                 )
                 .child(
                     div()
-                        .font_family(theme::SANS)
+                        .font_family(theme::sans())
                         .text_size(px(theme::T_TINY))
                         .text_color(detail_color)
                         .overflow_hidden()
@@ -679,7 +728,7 @@ pub fn session_row(
         .gap(px(2.0))
         .child(
             div()
-                .font_family(theme::SANS)
+                .font_family(theme::sans())
                 .text_size(px(theme::T_UI))
                 .font_weight(if active {
                     FontWeight::BOLD
@@ -698,7 +747,7 @@ pub fn session_row(
         )
         .child(
             div()
-                .font_family(theme::MONO)
+                .font_family(theme::mono())
                 .text_size(px(theme::T_TINY))
                 .text_color(if active {
                     theme::signal()
@@ -807,7 +856,7 @@ pub fn session_usage(params: SessionUsageParams) -> impl IntoElement {
                 .child(
                     div()
                         .min_w_0()
-                        .font_family(theme::MONO)
+                        .font_family(theme::mono())
                         .text_size(px(theme::T_TINY))
                         .font_weight(FontWeight::MEDIUM)
                         .text_color(theme::bone_dim())
@@ -843,7 +892,7 @@ pub fn session_usage(params: SessionUsageParams) -> impl IntoElement {
                     div()
                         .min_w_0()
                         .flex_1()
-                        .font_family(theme::SANS)
+                        .font_family(theme::sans())
                         .text_size(px(theme::T_TINY))
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(theme::bone_dim())
@@ -855,7 +904,7 @@ pub fn session_usage(params: SessionUsageParams) -> impl IntoElement {
                 .child(
                     div()
                         .flex_shrink_0()
-                        .font_family(theme::MONO)
+                        .font_family(theme::mono())
                         .text_size(px(theme::T_TINY))
                         .font_weight(FontWeight::MEDIUM)
                         .text_color(theme::ash())
@@ -929,7 +978,7 @@ impl SessionUsageTooltip {
                     .gap(px(12.0))
                     .child(
                         div()
-                            .font_family(theme::CONTROL)
+                            .font_family(theme::main())
                             .text_size(px(theme::T_UI_SM))
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(theme::bone())
@@ -938,7 +987,7 @@ impl SessionUsageTooltip {
                     .child(
                         div()
                             .min_w_0()
-                            .font_family(theme::MONO)
+                            .font_family(theme::mono())
                             .text_size(px(theme::T_TINY))
                             .text_color(theme::ash())
                             .overflow_hidden()
@@ -957,7 +1006,7 @@ impl SessionUsageTooltip {
                         div()
                             .min_w_0()
                             .flex_1()
-                            .font_family(theme::SANS)
+                            .font_family(theme::sans())
                             .text_size(px(theme::T_UI_SM))
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(theme::bone_dim())
@@ -969,7 +1018,7 @@ impl SessionUsageTooltip {
                     .child(
                         div()
                             .flex_shrink_0()
-                            .font_family(theme::MONO)
+                            .font_family(theme::mono())
                             .text_size(px(theme::T_TINY))
                             .text_color(theme::ash())
                             .child(format!("{} · {}", self.thinking, self.cost)),
@@ -1009,7 +1058,7 @@ fn usage_stat(label: &'static str, value: SharedString) -> impl IntoElement {
         .gap(px(2.0))
         .child(
             div()
-                .font_family(theme::SANS)
+                .font_family(theme::sans())
                 .text_size(px(theme::T_TINY))
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(theme::ash())
@@ -1017,7 +1066,7 @@ fn usage_stat(label: &'static str, value: SharedString) -> impl IntoElement {
         )
         .child(
             div()
-                .font_family(theme::MONO)
+                .font_family(theme::mono())
                 .text_size(px(theme::T_MONO_SM))
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(theme::bone_dim())
@@ -1041,7 +1090,7 @@ pub fn metric_row(label: &'static str, value: impl Into<SharedString>) -> impl I
         .border_color(theme::edge_soft())
         .child(
             div()
-                .font_family(theme::SANS)
+                .font_family(theme::sans())
                 .text_size(px(theme::T_UI_SM))
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(theme::ash())
@@ -1051,7 +1100,7 @@ pub fn metric_row(label: &'static str, value: impl Into<SharedString>) -> impl I
             div()
                 .min_w_0()
                 .flex_1()
-                .font_family(theme::MONO)
+                .font_family(theme::mono())
                 .text_size(px(theme::T_MONO_SM))
                 .line_height(relative(1.3))
                 .font_weight(FontWeight::MEDIUM)
@@ -1077,7 +1126,7 @@ pub fn queue_row(
         .gap(px(10.0))
         .child(
             div()
-                .font_family(theme::MONO)
+                .font_family(theme::mono())
                 .text_size(px(theme::T_TINY))
                 .font_weight(FontWeight::BOLD)
                 .text_color(theme::data())
@@ -1087,7 +1136,7 @@ pub fn queue_row(
             div()
                 .flex_1()
                 .min_w_0()
-                .font_family(theme::SANS)
+                .font_family(theme::sans())
                 .text_size(px(theme::T_UI_SM))
                 .line_height(relative(1.45))
                 .text_color(theme::bone_dim())
@@ -1099,7 +1148,7 @@ pub fn empty_list_note(text: impl Into<SharedString>) -> impl IntoElement {
     div()
         .px(px(11.0))
         .py(px(10.0))
-        .font_family(theme::SANS)
+        .font_family(theme::sans())
         .text_size(px(theme::T_UI_SM))
         .text_color(theme::smoke())
         .child(text.into())

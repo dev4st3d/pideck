@@ -354,7 +354,7 @@ fn markdown_runs(
         }
         let mut style = default_style.clone().highlight(highlight);
         if markdown_style_for_range(document, &range).table {
-            style.font_family = theme::MONO.into();
+            style.font_family = theme::mono();
             style.font_size = px(theme::T_UI_SM).into();
         }
         runs.push(style.to_run(range.len()));
@@ -577,7 +577,7 @@ fn optimistic_turn(
                     turn.child(selectable(
                         &key,
                         texts,
-                        theme::SANS,
+                        theme::sans(),
                         theme::T_BODY,
                         theme::bone(),
                         FontWeight::MEDIUM,
@@ -618,7 +618,7 @@ fn user_prompt(
             MessageBlock::Text { .. } => Some(selectable(
                 &fragment_key(message, block),
                 texts,
-                theme::SANS,
+                theme::sans(),
                 theme::T_BODY,
                 theme::bone(),
                 FontWeight::MEDIUM,
@@ -651,7 +651,7 @@ fn prompt_header(
                 .gap(px(8.0))
                 .child(
                     div()
-                        .font_family(theme::MONO)
+                        .font_family(theme::mono())
                         .text_size(px(theme::T_TINY))
                         .font_weight(FontWeight::BOLD)
                         .text_color(marker)
@@ -659,7 +659,7 @@ fn prompt_header(
                 )
                 .child(
                     div()
-                        .font_family(theme::SANS)
+                        .font_family(theme::sans())
                         .text_size(px(theme::T_UI_SM))
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(theme::ash())
@@ -668,7 +668,7 @@ fn prompt_header(
         )
         .child(
             div()
-                .font_family(theme::MONO)
+                .font_family(theme::mono())
                 .text_size(px(theme::T_TINY))
                 .text_color(theme::smoke())
                 .child(detail),
@@ -1000,7 +1000,7 @@ fn activity_disclosure(
                                 .flex()
                                 .items_center()
                                 .justify_center()
-                                .font_family(theme::MONO)
+                                .font_family(theme::mono())
                                 .text_size(px(theme::T_UI_SM))
                                 .font_weight(FontWeight::BOLD)
                                 .child(if expanded { "−" } else { "+" }),
@@ -1011,7 +1011,7 @@ fn activity_disclosure(
                                 .overflow_hidden()
                                 .text_ellipsis()
                                 .whitespace_nowrap()
-                                .font_family(theme::SANS)
+                                .font_family(theme::sans())
                                 .text_size(px(theme::T_UI_SM))
                                 .font_weight(FontWeight::MEDIUM)
                                 .child("Earlier activity"),
@@ -1020,7 +1020,7 @@ fn activity_disclosure(
                 .child(
                     div()
                         .flex_shrink_0()
-                        .font_family(theme::MONO)
+                        .font_family(theme::mono())
                         .text_size(px(theme::T_TINY))
                         .font_weight(FontWeight::MEDIUM)
                         .text_color(theme::smoke())
@@ -1081,7 +1081,7 @@ fn render_activity_step(
             is_last,
             theme::smoke(),
             div()
-                .font_family(theme::SANS)
+                .font_family(theme::sans())
                 .text_size(px(theme::T_UI_SM))
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(theme::smoke())
@@ -1101,7 +1101,7 @@ fn render_activity_step(
                 .gap(px(4.0))
                 .child(
                     div()
-                        .font_family(theme::MONO)
+                        .font_family(theme::mono())
                         .text_size(px(theme::T_TINY))
                         .font_weight(FontWeight::MEDIUM)
                         .text_color(theme::smoke())
@@ -1110,7 +1110,7 @@ fn render_activity_step(
                 .child(selectable(
                     key,
                     texts,
-                    theme::SANS,
+                    theme::sans(),
                     theme::T_UI,
                     theme::bone_dim(),
                     FontWeight::NORMAL,
@@ -1123,7 +1123,7 @@ fn render_activity_step(
             selectable(
                 key,
                 texts,
-                theme::SANS,
+                theme::sans(),
                 theme::T_UI,
                 theme::bone_dim(),
                 FontWeight::NORMAL,
@@ -1151,7 +1151,7 @@ fn render_activity_step(
                 .gap(px(4.0))
                 .child(
                     div()
-                        .font_family(theme::SANS)
+                        .font_family(theme::sans())
                         .text_size(px(theme::T_UI_SM))
                         .font_weight(FontWeight::MEDIUM)
                         .text_color(theme::bone_dim())
@@ -1160,7 +1160,7 @@ fn render_activity_step(
                 .child(selectable(
                     key,
                     texts,
-                    theme::SANS,
+                    theme::sans(),
                     theme::T_UI,
                     theme::bone_dim(),
                     FontWeight::NORMAL,
@@ -1178,7 +1178,7 @@ fn render_activity_step(
                 .child(selectable(
                     key,
                     texts,
-                    theme::SANS,
+                    theme::sans(),
                     theme::T_UI,
                     theme::bone_dim(),
                     FontWeight::NORMAL,
@@ -1199,7 +1199,7 @@ fn render_activity_step(
                 theme::smoke()
             },
             div()
-                .font_family(theme::SANS)
+                .font_family(theme::sans())
                 .text_size(px(theme::T_UI_SM))
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(if *error {
@@ -1280,7 +1280,7 @@ fn assistant_reply(
                 .gap(px(12.0))
                 .child(
                     div()
-                        .font_family(theme::SANS)
+                        .font_family(theme::sans())
                         .text_size(px(theme::T_UI_SM))
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(theme::ash())
@@ -1292,7 +1292,7 @@ fn assistant_reply(
                         .overflow_hidden()
                         .text_ellipsis()
                         .whitespace_nowrap()
-                        .font_family(theme::MONO)
+                        .font_family(theme::mono())
                         .text_size(px(theme::T_TINY))
                         .text_color(theme::smoke())
                         .child(metadata),
@@ -1302,7 +1302,7 @@ fn assistant_reply(
             MessageBlock::Text { .. } => Some(selectable(
                 &fragment_key(message, block),
                 texts,
-                theme::SANS,
+                theme::sans(),
                 theme::T_BODY_SM,
                 theme::bone(),
                 FontWeight::NORMAL,
@@ -1318,7 +1318,7 @@ fn assistant_reply(
         .when_some(stop_label(message), |reply, stop| {
             reply.child(
                 div()
-                    .font_family(theme::SANS)
+                    .font_family(theme::sans())
                     .text_size(px(theme::T_UI_SM))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(stop_color(message.stop_reason))
@@ -1430,7 +1430,7 @@ fn tail_activity(
 fn selectable(
     key: &str,
     texts: &HashMap<String, Entity<TranscriptText>>,
-    font: &'static str,
+    font: gpui::SharedString,
     size: f32,
     color: gpui::Rgba,
     weight: FontWeight,
@@ -1451,7 +1451,7 @@ fn selectable(
 
 fn compact_label(text: String) -> AnyElement {
     div()
-        .font_family(theme::MONO)
+        .font_family(theme::mono())
         .text_size(px(theme::T_TINY))
         .font_weight(FontWeight::MEDIUM)
         .text_color(theme::smoke())
@@ -1659,7 +1659,7 @@ fn system_notice(id: &str, title: &str, body: &str, error: bool) -> AnyElement {
         .gap(px(3.0))
         .child(
             div()
-                .font_family(theme::SANS)
+                .font_family(theme::sans())
                 .text_size(px(theme::T_UI_SM))
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(if error {
@@ -1671,7 +1671,7 @@ fn system_notice(id: &str, title: &str, body: &str, error: bool) -> AnyElement {
         )
         .child(
             div()
-                .font_family(theme::SANS)
+                .font_family(theme::sans())
                 .text_size(px(theme::T_UI_SM))
                 .line_height(relative(1.45))
                 .text_color(theme::smoke())
@@ -1682,7 +1682,7 @@ fn system_notice(id: &str, title: &str, body: &str, error: bool) -> AnyElement {
 
 fn error_text(error: String) -> impl IntoElement {
     div()
-        .font_family(theme::SANS)
+        .font_family(theme::sans())
         .text_size(px(theme::T_UI_SM))
         .font_weight(FontWeight::SEMIBOLD)
         .text_color(theme::error())
@@ -1711,7 +1711,7 @@ fn empty_state(projection: &ConversationProjection) -> impl IntoElement {
         .gap(px(8.0))
         .child(
             div()
-                .font_family(theme::SANS)
+                .font_family(theme::sans())
                 .text_size(px(theme::T_TITLE))
                 .font_weight(FontWeight::BOLD)
                 .text_color(theme::bone_dim())
@@ -1719,7 +1719,7 @@ fn empty_state(projection: &ConversationProjection) -> impl IntoElement {
         )
         .child(
             div()
-                .font_family(theme::SANS)
+                .font_family(theme::sans())
                 .text_size(px(theme::T_UI))
                 .text_color(theme::smoke())
                 .child(body),

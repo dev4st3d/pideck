@@ -163,7 +163,7 @@ impl Composer {
                                             view.emit_accept(false, cx);
                                         }))
                                 })
-                                .font_family(theme::CONTROL)
+                                .font_family(theme::main())
                                 .text_size(px(theme::T_TINY))
                                 .font_weight(FontWeight::BOLD)
                                 .child(self.action_label.clone()),
@@ -173,7 +173,7 @@ impl Composer {
             .when(show_status, |col| {
                 col.child(
                     div()
-                        .font_family(theme::SANS)
+                        .font_family(theme::sans())
                         .text_size(px(theme::T_TINY))
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(status_color)
@@ -332,7 +332,7 @@ impl Composer {
                             .when(show_status, |col| {
                                 col.child(
                                     div()
-                                        .font_family(theme::SANS)
+                                        .font_family(theme::sans())
                                         .text_size(px(theme::T_UI_SM))
                                         .font_weight(FontWeight::SEMIBOLD)
                                         .text_color(status_color)
@@ -345,7 +345,7 @@ impl Composer {
                             .when(!panel, |col| {
                                 col.child(
                                     div()
-                                        .font_family(theme::MONO)
+                                        .font_family(theme::mono())
                                         .text_size(px(theme::T_TINY))
                                         .text_color(theme::smoke())
                                         .overflow_hidden()
@@ -377,7 +377,7 @@ impl Composer {
                                             .rounded(px(theme::RADIUS_SM))
                                             .flex()
                                             .items_center()
-                                            .font_family(theme::CONTROL)
+                                            .font_family(theme::main())
                                             .text_size(px(theme::T_UI_SM))
                                             .font_weight(FontWeight::SEMIBOLD)
                                             .text_color(theme::bone_dim())
@@ -410,7 +410,7 @@ impl Composer {
                                                 .rounded(px(theme::RADIUS_SM))
                                                 .flex()
                                                 .items_center()
-                                                .font_family(theme::CONTROL)
+                                                .font_family(theme::main())
                                                 .text_size(px(theme::T_UI_SM))
                                                 .font_weight(FontWeight::SEMIBOLD)
                                                 .text_color(if can_submit {
@@ -474,7 +474,7 @@ impl Composer {
                                                 view.emit_accept(false, cx);
                                             }))
                                     })
-                                    .font_family(theme::CONTROL)
+                                    .font_family(theme::main())
                                     .text_size(px(theme::T_UI_SM))
                                     .font_weight(FontWeight::BOLD)
                                     .child(primary_label),
@@ -516,7 +516,7 @@ impl Composer {
                             .gap(px(8.0))
                             .child(
                                 div()
-                                    .font_family(theme::SANS)
+                                    .font_family(theme::sans())
                                     .text_size(px(theme::T_UI_SM))
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .text_color(theme::bone_dim())
@@ -524,7 +524,7 @@ impl Composer {
                             )
                             .child(
                                 div()
-                                    .font_family(theme::MONO)
+                                    .font_family(theme::mono())
                                     .text_size(px(theme::T_TINY))
                                     .text_color(theme::smoke())
                                     .child(format!("{format} · {}", format_image_bytes(bytes))),
@@ -565,7 +565,7 @@ impl Composer {
                                     }))
                                     .child(
                                         div()
-                                            .font_family(theme::CONTROL)
+                                            .font_family(theme::main())
                                             .text_size(px(theme::T_TINY))
                                             .font_weight(FontWeight::SEMIBOLD)
                                             .child("View"),
@@ -600,7 +600,7 @@ impl Composer {
                                     }))
                                     .child(
                                         div()
-                                            .font_family(theme::CONTROL)
+                                            .font_family(theme::main())
                                             .text_size(px(theme::T_TINY))
                                             .font_weight(FontWeight::SEMIBOLD)
                                             .child("Remove"),

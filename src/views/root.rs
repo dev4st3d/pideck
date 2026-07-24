@@ -11,8 +11,8 @@ use gpui::{
     Animation, AnimationExt, Bounds, ClipboardItem, Context, DispatchPhase, Entity, FocusHandle,
     Focusable, FontWeight, Image, ImageFormat, IntoElement, ListAlignment, ListOffset, ListState,
     MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit, PathBuilder, Pixels,
-    Render, ScrollHandle, ScrollWheelEvent, StyledImage, Subscription, Task, Window, canvas, div,
-    fill, img, list, point, prelude::*, px, size,
+    Render, ScrollHandle, ScrollWheelEvent, StyledImage, Subscription, Task, Window, canvas,
+    deferred, div, fill, img, list, point, prelude::*, px, size,
 };
 
 use crate::actions::{
@@ -30,6 +30,7 @@ use crate::controller::{
     HistoryProjection, ModelRuntimeProjection, OrchestrationProjection, ResourceCenterProjection,
     RuntimeController, SubmissionPreference,
 };
+use crate::fonts::{self, FontCatalog, FontRole};
 use crate::model_runtime::{
     AuthMethod, AuthPromptKind, AuthStage, CatalogPhase, ModelCatalogEntry, ModelChangePolicy,
     ModelIdentity, ThinkingLevel,
@@ -159,6 +160,7 @@ enum ModelSettingsTab {
     Models,
     Thinking,
     Usage,
+    Typography,
     Resources,
 }
 
@@ -211,6 +213,7 @@ pub struct RootView {
     history_label_composer: Entity<Composer>,
     import_path_composer: Entity<Composer>,
     model_search_composer: Entity<Composer>,
+    font_search_composer: Entity<Composer>,
     command_search_composer: Entity<Composer>,
     auth_input_composer: Entity<Composer>,
     auth_secret_composer: Entity<Composer>,
@@ -221,6 +224,10 @@ pub struct RootView {
     model_panel: Option<ModelPanel>,
     resource_scope_filter: ResourceScopeFilter,
     resource_state_filter: ResourceStateFilter,
+    font_catalog: FontCatalog,
+    font_role: FontRole,
+    font_feedback: Option<String>,
+    font_save_generation: u64,
     command_palette_open: bool,
     hotkey_help_open: bool,
     compaction_modal_open: bool,
@@ -261,6 +268,8 @@ pub struct RootView {
     history: HistoryBrowser,
     history_focus: FocusHandle,
     history_open: bool,
+    session_rename_open: bool,
+    session_menu_open: bool,
     history_confirmation: Option<HistoryConfirmation>,
     summarize_navigation: bool,
     conversation: Arc<ConversationProjection>,
@@ -286,6 +295,7 @@ pub struct RootView {
     _history_label_subscription: Subscription,
     _import_path_subscription: Subscription,
     _model_search_observation: Subscription,
+    _font_search_observation: Subscription,
     _composer_observation: Subscription,
     _command_search_observation: Subscription,
     _command_search_subscription: Subscription,
@@ -301,6 +311,7 @@ impl RootView {
     pub fn new(
         window: &mut Window,
         controller: Entity<RuntimeController>,
+        font_catalog: FontCatalog,
         cx: &mut Context<Self>,
     ) -> Self {
         let focus_handle = cx.focus_handle();
@@ -324,6 +335,9 @@ impl RootView {
             cx.new(|cx| Composer::field("import-jsonl", "JSONL path to import…", "Import", cx));
         let model_search_composer = cx.new(|cx| {
             Composer::field("model-search", "Search models…", "", cx).with_field_height(30.0)
+        });
+        let font_search_composer = cx.new(|cx| {
+            Composer::field("font-search", "Search system fonts…", "", cx).with_field_height(30.0)
         });
         let command_search_composer = cx.new(|cx| {
             Composer::field("command-search", "Search commands…", "", cx).with_field_height(34.0)
@@ -410,10 +424,11 @@ impl RootView {
             window,
             |view, _, event, window, cx| view.on_compaction_event(event, window, cx),
         );
-        let session_name_subscription =
-            cx.subscribe_in(&session_name_composer, window, |view, _, event, _, cx| {
-                view.on_session_name_event(event, cx)
-            });
+        let session_name_subscription = cx.subscribe_in(
+            &session_name_composer,
+            window,
+            |view, _, event, window, cx| view.on_session_name_event(event, window, cx),
+        );
         let history_search_observation =
             cx.observe_in(&history_search_composer, window, |view, _, _, cx| {
                 let query = view.history_search_composer.read(cx).draft().to_owned();
@@ -430,6 +445,8 @@ impl RootView {
             });
         let model_search_observation =
             cx.observe_in(&model_search_composer, window, |_, _, _, cx| cx.notify());
+        let font_search_observation =
+            cx.observe_in(&font_search_composer, window, |_, _, _, cx| cx.notify());
         let composer_observation = cx.observe_in(&composer, window, |view, _, _, cx| {
             view.sync_slash_completion(cx)
         });
@@ -481,6 +498,7 @@ impl RootView {
             history_label_composer,
             import_path_composer,
             model_search_composer,
+            font_search_composer,
             command_search_composer,
             auth_input_composer,
             auth_secret_composer,
@@ -491,6 +509,10 @@ impl RootView {
             model_panel: None,
             resource_scope_filter: ResourceScopeFilter::All,
             resource_state_filter: ResourceStateFilter::All,
+            font_feedback: font_catalog.load_warning.clone(),
+            font_catalog,
+            font_role: FontRole::Sans,
+            font_save_generation: 0,
             command_palette_open: false,
             hotkey_help_open: false,
             compaction_modal_open: false,
@@ -530,6 +552,8 @@ impl RootView {
             history: HistoryBrowser::default(),
             history_focus,
             history_open: false,
+            session_rename_open: false,
+            session_menu_open: false,
             history_confirmation: None,
             summarize_navigation: false,
             conversation: Arc::new(conversation),
@@ -555,6 +579,7 @@ impl RootView {
             _history_label_subscription: history_label_subscription,
             _import_path_subscription: import_path_subscription,
             _model_search_observation: model_search_observation,
+            _font_search_observation: font_search_observation,
             _composer_observation: composer_observation,
             _command_search_observation: command_search_observation,
             _command_search_subscription: command_search_subscription,
@@ -1445,16 +1470,20 @@ impl RootView {
                 self.show_model_panel(ModelPanel::Switcher, window, cx);
                 Ok(())
             }
-            NativeAction::NewSession => self
-                .controller
-                .update(cx, |controller, cx| controller.new_session(cx))
-                .then_some(())
-                .ok_or_else(|| "A new session cannot start in the current state.".to_owned()),
+            NativeAction::NewSession => {
+                self.session_rename_open = false;
+                self.session_menu_open = false;
+                self.controller
+                    .update(cx, |controller, cx| controller.new_session(cx))
+                    .then_some(())
+                    .ok_or_else(|| "A new session cannot start in the current state.".to_owned())
+            }
             NativeAction::Sessions => {
-                window.focus(&self.session_name_composer.read(cx).focus_handle(cx));
+                self.open_session_rename(window, cx);
                 Ok(())
             }
             NativeAction::Tree => {
+                self.session_menu_open = false;
                 self.history_open = !self.history_open;
                 self.history_confirmation = None;
                 if self.history_open {
@@ -1657,22 +1686,89 @@ impl RootView {
         }
     }
 
-    fn on_session_name_event(&mut self, event: &ComposerEvent, cx: &mut Context<Self>) {
-        let ComposerEvent::Accept { text, .. } = event else {
-            return;
-        };
-        let name = text.trim().to_owned();
-        if name.is_empty() || self.pending_session_name.is_some() {
+    fn open_session_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self
+            .render_projections
+            .catalog
+            .current_session_file
+            .is_none()
+        {
             return;
         }
-        let accepted = self.controller.update(cx, |controller, cx| {
-            controller.set_session_name(name.clone(), cx)
-        });
-        if accepted {
-            self.pending_session_name = Some(name);
-            self.session_name_composer.update(cx, |composer, cx| {
-                composer.set_feedback(ComposerFeedback::Pending(SubmissionKind::Prompt), cx)
-            });
+        self.session_menu_open = false;
+        if !self.session_rename_open {
+            let current_name = self
+                .render_projections
+                .catalog
+                .current_session_name
+                .clone()
+                .unwrap_or_default();
+            self.session_name_composer
+                .update(cx, |composer, cx| composer.set_draft(&current_name, cx));
+            self.session_rename_open = true;
+        }
+        window.focus(&self.session_name_composer.read(cx).focus_handle(cx));
+        cx.notify();
+    }
+
+    fn toggle_session_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.session_rename_open {
+            self.session_rename_open = false;
+            window.focus(&self.focus_handle);
+            cx.notify();
+        } else {
+            self.open_session_rename(window, cx);
+        }
+    }
+
+    fn toggle_session_menu(&mut self, cx: &mut Context<Self>) {
+        self.session_rename_open = false;
+        self.session_menu_open = !self.session_menu_open;
+        cx.notify();
+    }
+
+    fn export_session_from_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.session_menu_open = false;
+        let _ = self.execute_native_action(NativeAction::ExportHtml, "", window, cx);
+        cx.notify();
+    }
+
+    fn on_session_name_event(
+        &mut self,
+        event: &ComposerEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            ComposerEvent::Accept { text, .. } => {
+                let name = text.trim().to_owned();
+                if name.is_empty() || self.pending_session_name.is_some() {
+                    return;
+                }
+                let accepted = self.controller.update(cx, |controller, cx| {
+                    controller.set_session_name(name.clone(), cx)
+                });
+                if accepted {
+                    self.pending_session_name = Some(name);
+                    self.session_rename_open = false;
+                    self.session_name_composer.update(cx, |composer, cx| {
+                        composer.set_feedback(ComposerFeedback::Pending(SubmissionKind::Prompt), cx)
+                    });
+                    window.focus(&self.focus_handle);
+                    cx.notify();
+                }
+            }
+            ComposerEvent::Abort | ComposerEvent::AbortBash => {
+                self.session_rename_open = false;
+                window.focus(&self.focus_handle);
+                cx.notify();
+            }
+            ComposerEvent::FollowUp { .. }
+            | ComposerEvent::CommandNext
+            | ComposerEvent::CommandPrevious
+            | ComposerEvent::CommandAccept
+            | ComposerEvent::CommandDismiss
+            | ComposerEvent::PreviewImage(_) => {}
         }
     }
 
@@ -1741,6 +1837,9 @@ impl RootView {
             ModelPanel::Switcher | ModelPanel::Settings(ModelSettingsTab::Models) => {
                 window.focus(&self.model_search_composer.read(cx).focus_handle(cx));
             }
+            ModelPanel::Settings(ModelSettingsTab::Typography) => {
+                window.focus(&self.font_search_composer.read(cx).focus_handle(cx));
+            }
             ModelPanel::Thinking | ModelPanel::Settings(_) => {}
         }
         cx.notify();
@@ -1765,8 +1864,61 @@ impl RootView {
         cx.notify();
     }
 
-    fn set_model_settings_tab(&mut self, tab: ModelSettingsTab, cx: &mut Context<Self>) {
+    fn set_model_settings_tab(
+        &mut self,
+        tab: ModelSettingsTab,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.model_panel = Some(ModelPanel::Settings(tab));
+        if tab == ModelSettingsTab::Models {
+            window.focus(&self.model_search_composer.read(cx).focus_handle(cx));
+        } else if tab == ModelSettingsTab::Typography {
+            window.focus(&self.font_search_composer.read(cx).focus_handle(cx));
+        }
+        cx.notify();
+    }
+
+    fn set_font_role(&mut self, role: FontRole, cx: &mut Context<Self>) {
+        self.font_role = role;
+        cx.notify();
+    }
+
+    fn select_font(&mut self, role: FontRole, family: String, cx: &mut Context<Self>) {
+        if !self
+            .font_catalog
+            .families
+            .iter()
+            .any(|available| available == &family)
+            || self.font_catalog.preferences.family(role) == family
+        {
+            return;
+        }
+
+        self.font_catalog.preferences.set(role, family);
+        fonts::install(self.font_catalog.preferences.clone());
+        self.font_feedback = Some("Saving typography…".to_owned());
+        self.font_save_generation = self.font_save_generation.wrapping_add(1);
+        let generation = self.font_save_generation;
+        let path = self.font_catalog.settings_path.clone();
+        let preferences = self.font_catalog.preferences.clone();
+        let save = cx
+            .background_executor()
+            .spawn(async move { fonts::save(&path, &preferences) });
+        cx.spawn(async move |view, cx| {
+            let result = save.await;
+            let _ = view.update(cx, |view, cx| {
+                if view.font_save_generation != generation {
+                    return;
+                }
+                view.font_feedback = Some(match result {
+                    Ok(()) => "Typography saved".to_owned(),
+                    Err(error) => format!("Typography could not be saved: {error}"),
+                });
+                cx.notify();
+            });
+        })
+        .detach();
         cx.notify();
     }
 
@@ -2209,6 +2361,12 @@ impl RootView {
         let bridge = &render_projections.bridge;
         let rename_available =
             compact_available && catalog.current_session_file.is_some() && !catalog.switching;
+        if !rename_available {
+            self.session_rename_open = false;
+        }
+        if catalog.switching {
+            self.session_menu_open = false;
+        }
         self.session_name_composer.update(cx, |composer, cx| {
             composer.set_availability(
                 if rename_available {
