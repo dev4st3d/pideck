@@ -171,14 +171,17 @@ impl ConversationListModel {
                     .iter()
                     .map(AsRef::as_ref)
                     .collect::<Vec<_>>();
-                row(super::turn_card(
-                    *number,
-                    &projection.messages[*user_index],
-                    &messages,
-                    projection,
-                    &texts,
+                connected_row(
+                    super::turn_card(
+                        *number,
+                        *number == self.turn_count,
+                        &projection.messages[*user_index],
+                        &messages,
+                        projection,
+                        &texts,
+                    )
+                    .into_any_element(),
                 )
-                .into_any_element())
             }
             ConversationItem::Trailing => {
                 let texts = super::cached_optimistic_texts(projection, cache, cx);
@@ -225,6 +228,10 @@ fn row(content: AnyElement) -> AnyElement {
         .pb(px(16.0))
         .child(content)
         .into_any_element()
+}
+
+fn connected_row(content: AnyElement) -> AnyElement {
+    stream_gutter().child(content).into_any_element()
 }
 
 /// Keep stream chrome clear of the side rails. Padding lives on each list item

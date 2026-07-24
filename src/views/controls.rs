@@ -1,13 +1,17 @@
 //! Shared pier-style controls for the live desk shell.
 
+use std::{rc::Rc, time::Duration};
+
 use gpui::{
-    ClickEvent, FontWeight, IntoElement, SharedString, Window, div, prelude::*, px, relative, rgba,
+    Animation, AnimationExt, ClickEvent, FontWeight, IntoElement, SharedString, Window, deferred,
+    div, ease_out_quint, prelude::*, px, relative, rgba,
 };
 
 use crate::actions::RECOVERY_BUTTON_CONTEXT;
 use crate::theme;
 
 type ClickHandler = Box<dyn Fn(&ClickEvent, &mut Window, &mut gpui::App) + 'static>;
+pub type HoverHandler = Rc<dyn Fn(&bool, &mut Window, &mut gpui::App) + 'static>;
 
 fn clear() -> gpui::Rgba {
     rgba(0x0000_0000)
@@ -719,37 +723,78 @@ pub fn divider_list() -> gpui::Div {
         .bg(theme::canvas())
 }
 
-pub fn context_block(
-    label: impl Into<SharedString>,
-    detail: impl Into<SharedString>,
+pub fn session_usage(
+    context: impl Into<SharedString>,
     pct: Option<f32>,
+    model: impl Into<SharedString>,
+    thinking: impl Into<SharedString>,
+    cost: impl Into<SharedString>,
     tokens_in: impl Into<SharedString>,
     tokens_out: impl Into<SharedString>,
     cache_read: impl Into<SharedString>,
     cache_write: impl Into<SharedString>,
+    tooltip_visible: bool,
+    tooltip_hovered: bool,
+    tooltip_epoch: u64,
+    on_hover: HoverHandler,
 ) -> impl IntoElement {
+    let context = context.into();
+    let model = model.into();
+    let thinking = thinking.into();
+    let cost = cost.into();
+    let tokens_in = tokens_in.into();
+    let tokens_out = tokens_out.into();
+    let cache_read = cache_read.into();
+    let cache_write = cache_write.into();
     let pct = pct.unwrap_or(0.0).clamp(0.0, 1.0);
-    let fill_color = if pct > 0.85 {
-        theme::signal()
-    } else if pct > 0.0 {
-        theme::live()
-    } else {
-        theme::edge_hard()
+    let fill_color = usage_fill(pct);
+    let tooltip = SessionUsageTooltip {
+        context: context.clone(),
+        model: model.clone(),
+        thinking: thinking.clone(),
+        cost: cost.clone(),
+        tokens_in,
+        tokens_out,
+        cache_read,
+        cache_write,
     };
 
+    let tooltip_animation = Animation::new(Duration::from_millis(if tooltip_hovered {
+        110
+    } else {
+        90
+    }))
+    .with_easing(ease_out_quint());
+    let summary_hover = Rc::clone(&on_hover);
+    let tooltip_hover = Rc::clone(&on_hover);
+
     div()
+        .id("session-usage")
+        .relative()
+        .w_full()
+        .px(px(10.0))
+        .py(px(9.0))
+        .rounded(px(theme::RADIUS))
+        .bg(theme::panel())
+        .border_1()
+        .border_color(theme::edge_soft())
+        .hover(|summary| {
+            summary
+                .bg(theme::panel_lift())
+                .border_color(theme::edge_hard())
+        })
+        .on_hover(move |hovered, window, cx| (summary_hover)(hovered, window, cx))
         .flex()
         .flex_col()
-        .gap(px(10.0))
-        .px(px(2.0))
+        .gap(px(7.0))
         .child(
             div()
                 .flex()
                 .flex_row()
                 .items_baseline()
                 .justify_between()
-                .gap(px(8.0))
-                .child(section_label(label))
+                .gap(px(10.0))
+                .child(section_label("Context"))
                 .child(
                     div()
                         .min_w_0()
@@ -760,12 +805,12 @@ pub fn context_block(
                         .overflow_hidden()
                         .text_ellipsis()
                         .whitespace_nowrap()
-                        .child(detail.into()),
+                        .child(context),
                 ),
         )
         .child(
             div()
-                .h(px(4.0))
+                .h(px(3.0))
                 .w_full()
                 .rounded(px(2.0))
                 .bg(theme::canvas())
@@ -775,48 +820,191 @@ pub fn context_block(
                         .h_full()
                         .w(relative(pct))
                         .when(pct > 0.0, |fill| fill.min_w(px(2.0)))
+                        .rounded(px(2.0))
                         .bg(fill_color),
                 ),
         )
-        // Two equal pairs so long cache figures never crush in/out.
         .child(
             div()
                 .flex()
-                .flex_col()
+                .flex_row()
+                .items_center()
                 .gap(px(8.0))
                 .child(
                     div()
-                        .flex()
-                        .flex_row()
-                        .gap(px(12.0))
-                        .child(stat("in", tokens_in))
-                        .child(stat("out", tokens_out)),
+                        .min_w_0()
+                        .flex_1()
+                        .font_family(theme::SANS)
+                        .text_size(px(theme::T_TINY))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(theme::bone_dim())
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .whitespace_nowrap()
+                        .child(model),
                 )
                 .child(
                     div()
-                        .flex()
-                        .flex_row()
-                        .gap(px(12.0))
-                        .child(stat("cache read", cache_read))
-                        .child(stat("cache write", cache_write)),
+                        .flex_shrink_0()
+                        .font_family(theme::MONO)
+                        .text_size(px(theme::T_TINY))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(theme::ash())
+                        .child(format!("{thinking} · {cost}")),
                 ),
         )
+        .when(tooltip_visible, |summary| {
+            let appearing = tooltip_hovered;
+            summary.child(deferred(
+                tooltip
+                    .element()
+                    .id("session-usage-tooltip-surface")
+                    .absolute()
+                    .top(relative(1.0))
+                    .left_0()
+                    .right_0()
+                    .mt(px(6.0))
+                    .occlude()
+                    .on_hover(move |hovered, window, cx| (tooltip_hover)(hovered, window, cx))
+                    .with_animation(
+                        ("session-usage-tooltip", tooltip_epoch),
+                        tooltip_animation,
+                        move |tooltip, progress| {
+                            tooltip.opacity(if appearing { progress } else { 1.0 - progress })
+                        },
+                    ),
+            ))
+        })
 }
 
-fn stat(k: &'static str, v: impl Into<SharedString>) -> impl IntoElement {
+fn usage_fill(pct: f32) -> gpui::Rgba {
+    if pct > 0.85 {
+        theme::signal()
+    } else if pct > 0.0 {
+        theme::live()
+    } else {
+        theme::edge_hard()
+    }
+}
+
+#[derive(Clone)]
+struct SessionUsageTooltip {
+    context: SharedString,
+    model: SharedString,
+    thinking: SharedString,
+    cost: SharedString,
+    tokens_in: SharedString,
+    tokens_out: SharedString,
+    cache_read: SharedString,
+    cache_write: SharedString,
+}
+
+impl SessionUsageTooltip {
+    fn element(&self) -> gpui::Div {
+        div()
+            .w_full()
+            .p(px(12.0))
+            .rounded(px(theme::RADIUS))
+            .bg(theme::panel_lift())
+            .border_1()
+            .border_color(theme::edge_hard())
+            .flex()
+            .flex_col()
+            .gap(px(11.0))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_baseline()
+                    .justify_between()
+                    .gap(px(12.0))
+                    .child(
+                        div()
+                            .font_family(theme::CONTROL)
+                            .text_size(px(theme::T_UI_SM))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(theme::bone())
+                            .child("Session usage"),
+                    )
+                    .child(
+                        div()
+                            .min_w_0()
+                            .font_family(theme::MONO)
+                            .text_size(px(theme::T_TINY))
+                            .text_color(theme::ash())
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .whitespace_nowrap()
+                            .child(self.context.clone()),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(8.0))
+                    .child(
+                        div()
+                            .min_w_0()
+                            .flex_1()
+                            .font_family(theme::SANS)
+                            .text_size(px(theme::T_UI_SM))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(theme::bone_dim())
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .whitespace_nowrap()
+                            .child(self.model.clone()),
+                    )
+                    .child(
+                        div()
+                            .flex_shrink_0()
+                            .font_family(theme::MONO)
+                            .text_size(px(theme::T_TINY))
+                            .text_color(theme::ash())
+                            .child(format!("{} · {}", self.thinking, self.cost)),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(8.0))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .gap(px(8.0))
+                            .child(usage_stat("Input", self.tokens_in.clone()))
+                            .child(usage_stat("Output", self.tokens_out.clone())),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .gap(px(8.0))
+                            .child(usage_stat("Cache read", self.cache_read.clone()))
+                            .child(usage_stat("Cache write", self.cache_write.clone())),
+                    ),
+            )
+    }
+}
+
+fn usage_stat(label: &'static str, value: SharedString) -> impl IntoElement {
     div()
         .min_w_0()
         .flex_1()
         .flex()
         .flex_col()
-        .gap(px(3.0))
+        .gap(px(2.0))
         .child(
             div()
                 .font_family(theme::SANS)
                 .text_size(px(theme::T_TINY))
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(theme::ash())
-                .child(k),
+                .child(label),
         )
         .child(
             div()
@@ -827,7 +1015,7 @@ fn stat(k: &'static str, v: impl Into<SharedString>) -> impl IntoElement {
                 .overflow_hidden()
                 .text_ellipsis()
                 .whitespace_nowrap()
-                .child(v.into()),
+                .child(value),
         )
 }
 

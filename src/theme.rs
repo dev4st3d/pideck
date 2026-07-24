@@ -104,6 +104,10 @@ pub fn live() -> Rgba {
     rgb(0xc5d2a8)
 }
 
+pub fn working() -> Rgba {
+    rgb(0x78a9d1)
+}
+
 pub fn data() -> Rgba {
     rgb(0xe0b07a)
 }

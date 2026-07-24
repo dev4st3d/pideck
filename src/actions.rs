@@ -49,7 +49,10 @@ actions!(
         HistoryFold,
         HistoryUnfold,
         HistoryActivate,
-        OrchestrationActivate
+        OrchestrationActivate,
+        ImagePreviewPrevious,
+        ImagePreviewNext,
+        ImagePreviewClose
     ]
 );
 
@@ -80,6 +83,15 @@ pub(crate) fn history_key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("right", HistoryUnfold, context),
         KeyBinding::new("enter", HistoryActivate, context),
         KeyBinding::new("space", HistoryActivate, context),
+    ]
+}
+
+pub(crate) fn image_preview_key_bindings() -> Vec<KeyBinding> {
+    let context = Some("ImagePreview");
+    vec![
+        KeyBinding::new("left", ImagePreviewPrevious, context),
+        KeyBinding::new("right", ImagePreviewNext, context),
+        KeyBinding::new("escape", ImagePreviewClose, context),
     ]
 }
 

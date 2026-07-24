@@ -532,32 +532,80 @@ impl Composer {
                     )
                     .child(
                         div()
-                            .id(gpui::SharedString::from(format!(
-                                "{}-image-{index}-remove",
-                                self.id_prefix
-                            )))
-                            .tab_index(0)
-                            .cursor_pointer()
-                            .px(px(6.0))
-                            .py(px(3.0))
-                            .font_family(theme::CONTROL)
-                            .text_size(px(theme::T_TINY))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(theme::ash())
-                            .hover(|button| button.text_color(theme::error()))
-                            .focus(|button| button.text_color(theme::focus()))
-                            .on_key_down(cx.listener(
-                                move |view, event: &gpui::KeyDownEvent, _, cx| {
-                                    if matches!(event.keystroke.key.as_str(), "enter" | "space") {
-                                        cx.stop_propagation();
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(4.0))
+                            .child(
+                                div()
+                                    .id(gpui::SharedString::from(format!(
+                                        "{}-image-{index}-preview",
+                                        self.id_prefix
+                                    )))
+                                    .tab_index(0)
+                                    .cursor_pointer()
+                                    .px(px(6.0))
+                                    .py(px(3.0))
+                                    .text_color(theme::bone_dim())
+                                    .hover(|button| button.text_color(theme::bone()))
+                                    .focus(|button| button.text_color(theme::focus()))
+                                    .on_key_down(cx.listener(
+                                        move |view, event: &gpui::KeyDownEvent, _, cx| {
+                                            if matches!(
+                                                event.keystroke.key.as_str(),
+                                                "enter" | "space"
+                                            ) {
+                                                cx.stop_propagation();
+                                                view.preview_image(index, cx);
+                                            }
+                                        },
+                                    ))
+                                    .on_click(cx.listener(move |view, _, _, cx| {
+                                        view.preview_image(index, cx);
+                                    }))
+                                    .child(
+                                        div()
+                                            .font_family(theme::CONTROL)
+                                            .text_size(px(theme::T_TINY))
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .child("View"),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .id(gpui::SharedString::from(format!(
+                                        "{}-image-{index}-remove",
+                                        self.id_prefix
+                                    )))
+                                    .tab_index(0)
+                                    .cursor_pointer()
+                                    .px(px(6.0))
+                                    .py(px(3.0))
+                                    .text_color(theme::ash())
+                                    .hover(|button| button.text_color(theme::error()))
+                                    .focus(|button| button.text_color(theme::focus()))
+                                    .on_key_down(cx.listener(
+                                        move |view, event: &gpui::KeyDownEvent, _, cx| {
+                                            if matches!(
+                                                event.keystroke.key.as_str(),
+                                                "enter" | "space"
+                                            ) {
+                                                cx.stop_propagation();
+                                                view.remove_image(index, cx);
+                                            }
+                                        },
+                                    ))
+                                    .on_click(cx.listener(move |view, _, _, cx| {
                                         view.remove_image(index, cx);
-                                    }
-                                },
-                            ))
-                            .on_click(cx.listener(move |view, _, _, cx| {
-                                view.remove_image(index, cx);
-                            }))
-                            .child("Remove"),
+                                    }))
+                                    .child(
+                                        div()
+                                            .font_family(theme::CONTROL)
+                                            .text_size(px(theme::T_TINY))
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .child("Remove"),
+                                    ),
+                            ),
                     )
             })
             .collect::<Vec<_>>();

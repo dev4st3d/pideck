@@ -209,6 +209,29 @@ fn composer_pastes_clipboard_images_and_submits_them_without_text(cx: &mut TestA
 }
 
 #[gpui::test]
+fn composer_emits_preview_for_an_attached_image_only(cx: &mut TestAppContext) {
+    cx.update(|cx| cx.bind_keys(composer_key_bindings()));
+    let (harness, cx) = cx.add_window_view(ComposerHarness::new);
+    let composer = harness.read_with(cx, |harness, _| harness.composer.clone());
+    let image = gpui::Image::from_bytes(
+        gpui::ImageFormat::Png,
+        vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a],
+    );
+
+    cx.write_to_clipboard(ClipboardItem::new_image(&image));
+    cx.dispatch_action(ComposerPaste);
+    composer.update(cx, |composer, cx| {
+        composer.preview_image(0, cx);
+        composer.preview_image(1, cx);
+    });
+
+    assert_eq!(
+        harness.read_with(cx, |harness, _| harness.events.borrow().clone()),
+        vec![ComposerEvent::PreviewImage(0)]
+    );
+}
+
+#[gpui::test]
 fn composer_ime_uses_utf16_ranges_and_retains_disabled_draft(cx: &mut TestAppContext) {
     let (harness, cx) = cx.add_window_view(ComposerHarness::new);
     let composer = harness.read_with(cx, |harness, _| harness.composer.clone());

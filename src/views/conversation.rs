@@ -459,6 +459,7 @@ fn transcript_block_text(block: &MessageBlock) -> Option<&str> {
 
 fn turn_card(
     index: usize,
+    is_last: bool,
     user: &RuntimeMessage,
     messages: &[&RuntimeMessage],
     projection: &ConversationProjection,
@@ -470,7 +471,14 @@ fn turn_card(
         .w_full()
         .flex()
         .flex_col()
-        .rounded(px(theme::RADIUS))
+        .when(index == 1, |turn| {
+            turn.rounded_tl(px(theme::RADIUS))
+                .rounded_tr(px(theme::RADIUS))
+        })
+        .when(is_last, |turn| {
+            turn.rounded_bl(px(theme::RADIUS))
+                .rounded_br(px(theme::RADIUS))
+        })
         .overflow_hidden()
         .bg(theme::floor())
         .border_1()

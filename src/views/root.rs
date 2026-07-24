@@ -6,16 +6,19 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use gpui::{
-    ClipboardItem, Context, DispatchPhase, Entity, FocusHandle, Focusable, FontWeight, IntoElement,
-    ListAlignment, ListOffset, ListState, Render, ScrollHandle, ScrollWheelEvent, Subscription,
-    Task, Window, canvas, div, list, prelude::*, px,
+    Animation, AnimationExt, ClipboardItem, Context, DispatchPhase, Entity, FocusHandle, Focusable,
+    FontWeight, Image, ImageFormat, IntoElement, ListAlignment, ListOffset, ListState, ObjectFit,
+    Render, ScrollHandle, ScrollWheelEvent, StyledImage, Subscription, Task, Window, canvas, div,
+    img, list, prelude::*, px,
 };
 
 use crate::actions::{
     AbortRun, ActivateRecovery, Connect, FocusNext, FocusPrevious, HistoryActivate, HistoryFirst,
-    HistoryFold, HistoryLast, HistoryNext, HistoryPrevious, HistoryUnfold,
-    ORCHESTRATION_ROW_CONTEXT, OpenCommandPalette, OrchestrationActivate, Retry, ShowHotkeys, Stop,
+    HistoryFold, HistoryLast, HistoryNext, HistoryPrevious, HistoryUnfold, ImagePreviewClose,
+    ImagePreviewNext, ImagePreviewPrevious, ORCHESTRATION_ROW_CONTEXT, OpenCommandPalette,
+    OrchestrationActivate, Retry, ShowHotkeys, Stop,
 };
 use crate::command_catalog::{
     CommandCatalog, CommandEntry, CommandTarget, InvocationResolution, NativeAction,
@@ -123,6 +126,7 @@ pub struct RootView {
     command_palette_open: bool,
     hotkey_help_open: bool,
     compaction_modal_open: bool,
+    pasted_image_preview: Option<usize>,
     command_selection: usize,
     command_palette_scroll: ScrollHandle,
     slash_command_scroll: ScrollHandle,
@@ -139,6 +143,9 @@ pub struct RootView {
     selected_subagent_id: Option<String>,
     /// Inspector edits one queue delivery mode at a time (steering or follow-up).
     delivery_focus: DeliveryFocus,
+    usage_tooltip_hovered: bool,
+    usage_tooltip_visible: bool,
+    usage_tooltip_epoch: u64,
     subagent_dialog_focus: FocusHandle,
     subagent_dialog_scroll: ScrollHandle,
     window_title: String,
@@ -358,6 +365,7 @@ impl RootView {
             command_palette_open: false,
             hotkey_help_open: false,
             compaction_modal_open: false,
+            pasted_image_preview: None,
             command_selection: 0,
             command_palette_scroll: ScrollHandle::new(),
             slash_command_scroll: ScrollHandle::new(),
@@ -373,6 +381,9 @@ impl RootView {
             selected_task_id: None,
             selected_subagent_id: None,
             delivery_focus: DeliveryFocus::Steering,
+            usage_tooltip_hovered: false,
+            usage_tooltip_visible: false,
+            usage_tooltip_epoch: 0,
             subagent_dialog_focus,
             subagent_dialog_scroll: ScrollHandle::new(),
             window_title: "Pi GUI".to_owned(),
@@ -430,6 +441,35 @@ impl RootView {
         }
     }
 
+    fn set_usage_tooltip_hovered(&mut self, hovered: bool, cx: &mut Context<Self>) {
+        if self.usage_tooltip_hovered == hovered {
+            return;
+        }
+
+        self.usage_tooltip_hovered = hovered;
+        self.usage_tooltip_epoch = self.usage_tooltip_epoch.wrapping_add(1);
+        let epoch = self.usage_tooltip_epoch;
+        if hovered {
+            self.usage_tooltip_visible = true;
+            cx.notify();
+            return;
+        }
+
+        cx.notify();
+        cx.spawn(async move |view, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(90))
+                .await;
+            let _ = view.update(cx, |view, cx| {
+                if !view.usage_tooltip_hovered && view.usage_tooltip_epoch == epoch {
+                    view.usage_tooltip_visible = false;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
     fn on_connect(&mut self, _: &Connect, _: &mut Window, cx: &mut Context<Self>) {
         self.connect(cx);
     }
@@ -443,6 +483,10 @@ impl RootView {
     }
 
     fn on_abort_run(&mut self, _: &AbortRun, window: &mut Window, cx: &mut Context<Self>) {
+        if self.pasted_image_preview.is_some() {
+            self.close_pasted_image(window, cx);
+            return;
+        }
         if self.cancel_extension_dialog(window, cx) {
             return;
         }
@@ -456,20 +500,26 @@ impl RootView {
         cx: &mut Context<Self>,
     ) {
         match event {
-            ComposerEvent::Accept { text, images } => self.execute_composer_text(
-                text.clone(),
-                images.clone(),
-                SubmissionPreference::Default,
-                window,
-                cx,
-            ),
-            ComposerEvent::FollowUp { text, images } => self.execute_composer_text(
-                text.clone(),
-                images.clone(),
-                SubmissionPreference::FollowUp,
-                window,
-                cx,
-            ),
+            ComposerEvent::Accept { text, images } => {
+                self.pasted_image_preview = None;
+                self.execute_composer_text(
+                    text.clone(),
+                    images.clone(),
+                    SubmissionPreference::Default,
+                    window,
+                    cx,
+                )
+            }
+            ComposerEvent::FollowUp { text, images } => {
+                self.pasted_image_preview = None;
+                self.execute_composer_text(
+                    text.clone(),
+                    images.clone(),
+                    SubmissionPreference::FollowUp,
+                    window,
+                    cx,
+                )
+            }
             ComposerEvent::Abort => {
                 if self.hotkey_help_open {
                     self.hotkey_help_open = false;
@@ -491,7 +541,64 @@ impl RootView {
                     composer.set_command_completion_active(false, cx)
                 });
             }
+            ComposerEvent::PreviewImage(index) => self.open_pasted_image(*index, window, cx),
         }
+    }
+
+    fn open_pasted_image(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if index >= self.composer.read(cx).images().len() {
+            return;
+        }
+        self.command_palette_open = false;
+        self.hotkey_help_open = false;
+        self.pasted_image_preview = Some(index);
+        window.focus(&self.focus_handle);
+        cx.notify();
+    }
+
+    fn close_pasted_image(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.pasted_image_preview.take().is_some() {
+            window.focus(&self.composer.read(cx).focus_handle(cx));
+            cx.notify();
+        }
+    }
+
+    fn move_pasted_image(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let Some(current) = self.pasted_image_preview else {
+            return;
+        };
+        let count = self.composer.read(cx).images().len();
+        if count > 1 {
+            self.pasted_image_preview = Some(wrapped_index(current, count, delta));
+            cx.notify();
+        }
+    }
+
+    fn on_image_preview_previous(
+        &mut self,
+        _: &ImagePreviewPrevious,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.move_pasted_image(-1, cx);
+    }
+
+    fn on_image_preview_next(
+        &mut self,
+        _: &ImagePreviewNext,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.move_pasted_image(1, cx);
+    }
+
+    fn on_image_preview_close(
+        &mut self,
+        _: &ImagePreviewClose,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.close_pasted_image(window, cx);
     }
 
     fn command_catalog(&self, cx: &Context<Self>) -> CommandCatalog {
@@ -880,7 +987,8 @@ impl RootView {
             | ComposerEvent::CommandNext
             | ComposerEvent::CommandPrevious
             | ComposerEvent::CommandAccept
-            | ComposerEvent::CommandDismiss => {}
+            | ComposerEvent::CommandDismiss
+            | ComposerEvent::PreviewImage(_) => {}
         }
     }
 
@@ -1263,7 +1371,8 @@ impl RootView {
             | ComposerEvent::CommandNext
             | ComposerEvent::CommandPrevious
             | ComposerEvent::CommandAccept
-            | ComposerEvent::CommandDismiss => {}
+            | ComposerEvent::CommandDismiss
+            | ComposerEvent::PreviewImage(_) => {}
         }
     }
 
@@ -2102,6 +2211,10 @@ impl RootView {
     }
 
     fn on_focus_next(&mut self, _: &FocusNext, window: &mut Window, cx: &mut Context<Self>) {
+        if self.pasted_image_preview.is_some() {
+            window.focus(&self.focus_handle);
+            return;
+        }
         if self.extension_ui.active_dialog.is_some() {
             // Extension requests are modal: global focus traversal must not escape behind them.
             self.focus_active_extension_dialog(window, cx);
@@ -2120,6 +2233,10 @@ impl RootView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.pasted_image_preview.is_some() {
+            window.focus(&self.focus_handle);
+            return;
+        }
         if self.extension_ui.active_dialog.is_some() {
             self.focus_active_extension_dialog(window, cx);
             return;
@@ -2137,7 +2254,7 @@ impl RootView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.extension_ui.active_dialog.is_some() {
+        if self.pasted_image_preview.is_some() || self.extension_ui.active_dialog.is_some() {
             return;
         }
         if self.command_palette_open {
@@ -2148,7 +2265,7 @@ impl RootView {
     }
 
     fn on_show_hotkeys(&mut self, _: &ShowHotkeys, window: &mut Window, cx: &mut Context<Self>) {
-        if self.extension_ui.active_dialog.is_some() {
+        if self.pasted_image_preview.is_some() || self.extension_ui.active_dialog.is_some() {
             return;
         }
         if self.hotkey_help_open {
@@ -2210,7 +2327,8 @@ impl RootView {
             ComposerEvent::Accept { .. }
             | ComposerEvent::FollowUp { .. }
             | ComposerEvent::Abort
-            | ComposerEvent::AbortBash => {}
+            | ComposerEvent::AbortBash
+            | ComposerEvent::PreviewImage(_) => {}
         }
     }
 
@@ -2292,7 +2410,8 @@ impl RootView {
             | ComposerEvent::CommandNext
             | ComposerEvent::CommandPrevious
             | ComposerEvent::CommandAccept
-            | ComposerEvent::CommandDismiss => {}
+            | ComposerEvent::CommandDismiss
+            | ComposerEvent::PreviewImage(_) => {}
         }
     }
 
@@ -2345,6 +2464,13 @@ impl Render for RootView {
         let resources = self.controller.read(cx).resource_center_projection();
         let orchestration = self.controller.read(cx).orchestration_projection();
         let command_catalog = self.command_catalog(cx);
+        let pasted_image_preview = self.pasted_image_preview.and_then(|index| {
+            let images = self.composer.read(cx).images();
+            images
+                .get(index)
+                .cloned()
+                .map(|image| (image, index, images.len()))
+        });
 
         div()
             .id("runtime-shell")
@@ -2358,6 +2484,9 @@ impl Render for RootView {
             .on_action(cx.listener(Self::on_focus_previous))
             .on_action(cx.listener(Self::on_open_command_palette))
             .on_action(cx.listener(Self::on_show_hotkeys))
+            .on_action(cx.listener(Self::on_image_preview_previous))
+            .on_action(cx.listener(Self::on_image_preview_next))
+            .on_action(cx.listener(Self::on_image_preview_close))
             .on_action(cx.listener(Self::on_history_next))
             .on_action(cx.listener(Self::on_history_previous))
             .on_action(cx.listener(Self::on_history_first))
@@ -2365,6 +2494,9 @@ impl Render for RootView {
             .on_action(cx.listener(Self::on_history_fold))
             .on_action(cx.listener(Self::on_history_unfold))
             .on_action(cx.listener(Self::on_history_activate))
+            .when(pasted_image_preview.is_some(), |shell| {
+                shell.key_context("ImagePreview")
+            })
             .size_full()
             .relative()
             .flex()
@@ -2462,10 +2594,16 @@ impl Render for RootView {
                             selected_task_id: self.selected_task_id.as_deref(),
                             goal_edit_composer: &self.goal_edit_composer,
                             delivery_focus: self.delivery_focus,
+                            usage_tooltip_hovered: self.usage_tooltip_hovered,
+                            usage_tooltip_visible: self.usage_tooltip_visible,
+                            usage_tooltip_epoch: self.usage_tooltip_epoch,
                         },
                         cx,
                     )),
             )
+            .when_some(pasted_image_preview, |shell, (image, index, count)| {
+                shell.child(pasted_image_overlay(&image, index, count, cx))
+            })
             .when(self.compaction_modal_open, |shell| {
                 shell.child(compaction_dialog(&self.compaction_composer, cx))
             })
@@ -5426,6 +5564,232 @@ fn extension_dialog_key(kind: Option<&str>, key: &str) -> Option<ExtensionDialog
     }
 }
 
+fn wrapped_index(current: usize, count: usize, delta: isize) -> usize {
+    if count == 0 {
+        return 0;
+    }
+    (current as isize + delta).rem_euclid(count as isize) as usize
+}
+
+fn pasted_image_source(image: &PromptImage) -> Option<Arc<Image>> {
+    let format = ImageFormat::from_mime_type(&image.mime_type)?;
+    let bytes = STANDARD.decode(&image.data).ok()?;
+    (!bytes.is_empty()).then(|| Arc::new(Image::from_bytes(format, bytes)))
+}
+
+fn pasted_image_overlay(
+    prompt_image: &PromptImage,
+    index: usize,
+    count: usize,
+    cx: &mut Context<RootView>,
+) -> gpui::AnyElement {
+    let image = pasted_image_source(prompt_image);
+    let image_missing = image.is_none();
+    let format = prompt_image
+        .mime_type
+        .strip_prefix("image/")
+        .unwrap_or(&prompt_image.mime_type)
+        .to_ascii_uppercase();
+
+    div()
+        .absolute()
+        .top_0()
+        .right_0()
+        .bottom_0()
+        .left_0()
+        .occlude()
+        .bg(gpui::rgba(0x0807_06f2))
+        .p(px(28.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(
+            div()
+                .id("pasted-image-viewer")
+                .w_full()
+                .h_full()
+                .max_w(px(1040.0))
+                .max_h(px(720.0))
+                .min_h_0()
+                .flex()
+                .flex_col()
+                .rounded(px(theme::RADIUS_SM))
+                .bg(theme::panel())
+                .overflow_hidden()
+                .child(
+                    div()
+                        .h(px(48.0))
+                        .px(px(14.0))
+                        .flex_shrink_0()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .child(
+                            div()
+                                .font_family(theme::SANS)
+                                .text_size(px(theme::T_UI_SM))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(theme::bone_dim())
+                                .child(if count > 1 {
+                                    format!("Image {} of {} · {format}", index + 1, count)
+                                } else {
+                                    format!("Image 1 · {format}")
+                                }),
+                        )
+                        .child(
+                            div()
+                                .id("pasted-image-close")
+                                .tab_index(0)
+                                .cursor_pointer()
+                                .px(px(8.0))
+                                .py(px(5.0))
+                                .text_color(theme::bone_dim())
+                                .hover(|button| {
+                                    button.bg(theme::panel_lift()).text_color(theme::bone())
+                                })
+                                .focus(|button| button.text_color(theme::focus()))
+                                .on_key_down(cx.listener(
+                                    |view, event: &gpui::KeyDownEvent, window, cx| {
+                                        if matches!(event.keystroke.key.as_str(), "enter" | "space")
+                                        {
+                                            cx.stop_propagation();
+                                            view.close_pasted_image(window, cx);
+                                        }
+                                    },
+                                ))
+                                .on_click(cx.listener(|view, _, window, cx| {
+                                    view.close_pasted_image(window, cx)
+                                }))
+                                .child(
+                                    div()
+                                        .font_family(theme::CONTROL)
+                                        .text_size(px(theme::T_UI_SM))
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .child("Close · Esc"),
+                                ),
+                        ),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_h_0()
+                        .mx(px(14.0))
+                        .bg(theme::canvas())
+                        .overflow_hidden()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .when_some(image, |frame, source| {
+                            frame.child(img(source).size_full().object_fit(ObjectFit::ScaleDown))
+                        })
+                        .when(image_missing, |frame| {
+                            frame.child(
+                                div()
+                                    .px(px(24.0))
+                                    .text_size(px(theme::T_BODY))
+                                    .text_color(theme::error())
+                                    .child("This pasted image could not be decoded."),
+                            )
+                        }),
+                )
+                .child(
+                    div()
+                        .h(px(54.0))
+                        .px(px(14.0))
+                        .flex_shrink_0()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .when(count > 1, |footer| {
+                            footer.child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(14.0))
+                                    .child(
+                                        div()
+                                            .id("pasted-image-previous")
+                                            .tab_index(0)
+                                            .cursor_pointer()
+                                            .w(px(44.0))
+                                            .h(px(32.0))
+                                            .rounded(px(theme::RADIUS_SM))
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .bg(theme::panel_lift())
+                                            .font_family(theme::SANS)
+                                            .text_size(px(theme::T_BODY))
+                                            .text_color(theme::bone())
+                                            .hover(|button| button.bg(theme::panel_hover()))
+                                            .focus(|button| {
+                                                button.border_1().border_color(theme::focus())
+                                            })
+                                            .on_key_down(cx.listener(
+                                                |view, event: &gpui::KeyDownEvent, _, cx| {
+                                                    if matches!(
+                                                        event.keystroke.key.as_str(),
+                                                        "enter" | "space"
+                                                    ) {
+                                                        cx.stop_propagation();
+                                                        view.move_pasted_image(-1, cx);
+                                                    }
+                                                },
+                                            ))
+                                            .on_click(cx.listener(|view, _, _, cx| {
+                                                view.move_pasted_image(-1, cx)
+                                            }))
+                                            .child("←"),
+                                    )
+                                    .child(
+                                        div()
+                                            .font_family(theme::MONO)
+                                            .text_size(px(theme::T_TINY))
+                                            .text_color(theme::smoke())
+                                            .child(format!("{} / {}", index + 1, count)),
+                                    )
+                                    .child(
+                                        div()
+                                            .id("pasted-image-next")
+                                            .tab_index(0)
+                                            .cursor_pointer()
+                                            .w(px(44.0))
+                                            .h(px(32.0))
+                                            .rounded(px(theme::RADIUS_SM))
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .bg(theme::panel_lift())
+                                            .font_family(theme::SANS)
+                                            .text_size(px(theme::T_BODY))
+                                            .text_color(theme::bone())
+                                            .hover(|button| button.bg(theme::panel_hover()))
+                                            .focus(|button| {
+                                                button.border_1().border_color(theme::focus())
+                                            })
+                                            .on_key_down(cx.listener(
+                                                |view, event: &gpui::KeyDownEvent, _, cx| {
+                                                    if matches!(
+                                                        event.keystroke.key.as_str(),
+                                                        "enter" | "space"
+                                                    ) {
+                                                        cx.stop_propagation();
+                                                        view.move_pasted_image(1, cx);
+                                                    }
+                                                },
+                                            ))
+                                            .on_click(cx.listener(|view, _, _, cx| {
+                                                view.move_pasted_image(1, cx)
+                                            }))
+                                            .child("→"),
+                                    ),
+                            )
+                        }),
+                ),
+        )
+        .into_any_element()
+}
+
 fn compaction_dialog(composer: &Entity<Composer>, cx: &mut Context<RootView>) -> impl IntoElement {
     div()
         .absolute()
@@ -5951,6 +6315,9 @@ struct InspectorParams<'a> {
     selected_task_id: Option<&'a str>,
     goal_edit_composer: &'a Entity<Composer>,
     delivery_focus: DeliveryFocus,
+    usage_tooltip_hovered: bool,
+    usage_tooltip_visible: bool,
+    usage_tooltip_epoch: u64,
 }
 
 fn inspector(params: InspectorParams<'_>, cx: &mut Context<RootView>) -> impl IntoElement {
@@ -5961,6 +6328,9 @@ fn inspector(params: InspectorParams<'_>, cx: &mut Context<RootView>) -> impl In
         selected_task_id,
         goal_edit_composer,
         delivery_focus,
+        usage_tooltip_hovered,
+        usage_tooltip_visible,
+        usage_tooltip_epoch,
     } = params;
     div()
         .w(px(theme::INSPECT_W))
@@ -5991,6 +6361,8 @@ fn inspector(params: InspectorParams<'_>, cx: &mut Context<RootView>) -> impl In
         .child(
             div()
                 .id("inspector-scroll")
+                .w_full()
+                .min_w_0()
                 .flex_1()
                 .min_h_0()
                 .overflow_y_scroll()
@@ -6004,34 +6376,38 @@ fn inspector(params: InspectorParams<'_>, cx: &mut Context<RootView>) -> impl In
                         .flex()
                         .flex_col()
                         .gap(px(18.0))
-                        .child(controls::context_block(
-                            "Context",
+                        .child(controls::session_usage(
                             projection.context.label(),
                             context_pct(&projection.context.label()),
+                            projection.model.label(),
+                            projection.thinking.label(),
+                            projection.cost.label(),
                             projection.input_tokens.label(),
                             projection.output_tokens.label(),
                             projection.cache_read.label(),
                             projection.cache_write.label(),
+                            usage_tooltip_visible,
+                            usage_tooltip_hovered,
+                            usage_tooltip_epoch,
+                            Rc::new(cx.listener(|view, hovered, _, cx| {
+                                view.set_usage_tooltip_hovered(*hovered, cx)
+                            })),
                         ))
                         .child(
                             div()
+                                .w_full()
                                 .flex()
                                 .flex_col()
-                                .child(controls::metric_row("Model", projection.model.label()))
-                                .child(controls::metric_row(
-                                    "Thinking",
-                                    projection.thinking.label(),
+                                .gap(px(18.0))
+                                .child(orchestration_panel(
+                                    orchestration,
+                                    selected_task_id,
+                                    goal_edit_composer,
+                                    cx,
                                 ))
-                                .child(controls::metric_row("Cost", projection.cost.label())),
-                        )
-                        .child(orchestration_panel(
-                            orchestration,
-                            selected_task_id,
-                            goal_edit_composer,
-                            cx,
-                        ))
-                        .child(run_controls(conversation, delivery_focus, cx))
-                        .child(queue_panel(conversation)),
+                                .child(run_controls(conversation, delivery_focus, cx))
+                                .child(queue_panel(conversation)),
+                        ),
                 ),
         )
 }
@@ -6195,7 +6571,7 @@ fn task_list(
     div()
         .flex()
         .flex_col()
-        .gap(px(7.0))
+        .gap(px(9.0))
         .child(
             div()
                 .flex()
@@ -6207,11 +6583,17 @@ fn task_list(
                         .font_family(theme::MONO)
                         .text_size(px(theme::T_TINY))
                         .text_color(theme::smoke())
-                        .child(tasks.len().to_string()),
+                        .child(format!("{}/{}", completed.len(), tasks.len())),
                 ),
         )
         .child(
-            controls::divider_list()
+            div()
+                .flex()
+                .flex_col()
+                // Keep the former bordered list's footprint without boxing the tasks in.
+                .px(px(4.0))
+                .pt(px(3.0))
+                .pb(px(6.0))
                 .when(tasks.is_empty(), |list| {
                     list.child(controls::empty_list_note("No tasks in this session."))
                 })
@@ -6220,6 +6602,7 @@ fn task_list(
                         index,
                         task,
                         selected_task_id == Some(task.id.as_str()),
+                        index + 1 == tasks.len(),
                         task.blocked_by
                             .iter()
                             .filter(|id| !completed.contains(id.as_str()))
@@ -6234,6 +6617,7 @@ fn task_row(
     index: usize,
     task: &TaskSnapshot,
     selected: bool,
+    is_last: bool,
     open_blockers: usize,
     cx: &mut Context<RootView>,
 ) -> gpui::AnyElement {
@@ -6244,12 +6628,11 @@ fn task_row(
     let can_execute = task.status == TaskStatus::Pending && open_blockers == 0;
     let can_stop = task.status == TaskStatus::InProgress;
     div()
+        .relative()
+        // Reserve a two-pixel structural inset for the connector rail.
         .border_l_2()
-        .border_color(if selected {
-            theme::signal()
-        } else {
-            gpui::rgba(0x0000_0000)
-        })
+        .border_color(gpui::rgba(0x0000_0000))
+        .rounded(px(theme::RADIUS_SM))
         .bg(if selected {
             theme::panel_lift()
         } else {
@@ -6257,15 +6640,46 @@ fn task_row(
         })
         .child(
             div()
+                .absolute()
+                .left(px(1.0))
+                .top_0()
+                .when(is_last, |line| line.h(px(20.0)))
+                .when(!is_last, |line| line.bottom_0())
+                .w(px(1.0))
+                .bg(theme::smoke())
+                .opacity(0.48),
+        )
+        .child(
+            div()
+                .absolute()
+                .left(px(1.0))
+                .top(px(19.0))
+                .w(px(6.0))
+                .h(px(2.0))
+                .rounded(px(1.0))
+                .bg(theme::smoke())
+                .opacity(0.48),
+        )
+        .child(
+            div()
+                .absolute()
+                .left(px(7.0))
+                .top(px(18.0))
+                .size(px(4.0))
+                .bg(theme::ash()),
+        )
+        .child(
+            div()
                 .id(("task-row", index))
                 .tab_index(0)
                 .key_context(ORCHESTRATION_ROW_CONTEXT)
                 .cursor_pointer()
-                .px(px(10.0))
-                .py(px(9.0))
+                .pl(px(14.0))
+                .pr(px(12.0))
+                .py(px(11.0))
                 .flex()
                 .flex_col()
-                .gap(px(3.0))
+                .gap(px(4.0))
                 .hover(|row| row.bg(theme::panel_hover()))
                 .focus(|row| row.border_1().border_color(theme::focus()))
                 .on_click(cx.listener(move |view, _, _, cx| {
@@ -6287,15 +6701,17 @@ fn task_row(
                 }))
                 .child(
                     div()
+                        .h(px(18.0))
                         .flex()
-                        .items_baseline()
+                        .items_center()
                         .justify_between()
                         .gap(px(8.0))
                         .child(
                             div()
                                 .min_w_0()
+                                .flex_1()
                                 .font_family(theme::SANS)
-                                .text_size(px(theme::T_UI))
+                                .text_size(px(theme::T_UI_SM))
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .text_color(theme::bone())
                                 .overflow_hidden()
@@ -6303,19 +6719,12 @@ fn task_row(
                                 .whitespace_nowrap()
                                 .child(task.subject.clone()),
                         )
-                        .child(
-                            div()
-                                .flex_shrink_0()
-                                .font_family(theme::SANS)
-                                .text_size(px(theme::T_TINY))
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(status_color)
-                                .child(if open_blockers > 0 {
-                                    "Blocked".to_owned()
-                                } else {
-                                    task.status.label().to_owned()
-                                }),
-                        ),
+                        .child(task_status_widget(
+                            index,
+                            task.status,
+                            open_blockers,
+                            status_color,
+                        )),
                 )
                 .child(
                     div()
@@ -6333,7 +6742,8 @@ fn task_row(
             let task_id = action_id.clone();
             row.child(
                 div()
-                    .px(px(10.0))
+                    .pl(px(14.0))
+                    .pr(px(12.0))
                     .pb(px(10.0))
                     .flex()
                     .flex_col()
@@ -6675,14 +7085,80 @@ fn goal_metrics(goal: &GoalItemSnapshot, queued: usize) -> impl IntoElement {
         ))
 }
 
+fn task_status_widget(
+    index: usize,
+    status: TaskStatus,
+    blockers: usize,
+    color: gpui::Rgba,
+) -> gpui::AnyElement {
+    if blockers > 0 || status == TaskStatus::Completed {
+        return div()
+            .relative()
+            .flex_shrink_0()
+            .size(px(8.0))
+            .child(
+                div()
+                    .absolute()
+                    .left(px(1.0))
+                    .top(px(1.0))
+                    .size(px(6.0))
+                    .bg(color),
+            )
+            .into_any_element();
+    }
+
+    let cycle = match status {
+        TaskStatus::Pending => Duration::from_millis(1_100),
+        TaskStatus::InProgress => Duration::from_millis(720),
+        TaskStatus::Completed => unreachable!(),
+    };
+    div()
+        .relative()
+        .flex_shrink_0()
+        .size(px(8.0))
+        .children([
+            task_status_dot(index, 0, px(0.0), px(0.0), cycle, color),
+            task_status_dot(index, 1, px(6.0), px(0.0), cycle, color),
+            task_status_dot(index, 2, px(6.0), px(6.0), cycle, color),
+            task_status_dot(index, 3, px(0.0), px(6.0), cycle, color),
+        ])
+        .into_any_element()
+}
+
+fn task_status_dot(
+    task_index: usize,
+    dot_index: usize,
+    left: gpui::Pixels,
+    top: gpui::Pixels,
+    cycle: Duration,
+    color: gpui::Rgba,
+) -> gpui::AnyElement {
+    div()
+        .absolute()
+        .left(left)
+        .top(top)
+        .size(px(2.0))
+        .bg(color)
+        .with_animation(
+            ("task-status", task_index * 4 + dot_index),
+            Animation::new(cycle).repeat(),
+            move |dot, progress| {
+                let target = dot_index as f32 * 0.25;
+                let distance = ((progress - target + 0.5).rem_euclid(1.0) - 0.5).abs();
+                dot.opacity(0.28 + (1.0 - distance / 0.25).max(0.0) * 0.72)
+            },
+        )
+        .into_any_element()
+}
+
 fn task_status_color(status: TaskStatus, blockers: usize) -> gpui::Rgba {
     if blockers > 0 {
-        return theme::signal();
+        return theme::error();
     }
     match status {
-        TaskStatus::Pending => theme::ash(),
-        TaskStatus::InProgress => theme::live(),
-        TaskStatus::Completed => theme::smoke(),
+        TaskStatus::Pending => theme::data(),
+        TaskStatus::InProgress => theme::working(),
+        TaskStatus::Completed => theme::live(),
     }
 }
 
@@ -7537,6 +8013,7 @@ fn lifecycle_color(projection: &ShellProjection) -> gpui::Rgba {
 mod tests {
     use super::{
         ExtensionDialogKey, extension_dialog_key, model_choices, short_path, thinking_choices,
+        wrapped_index,
     };
     use crate::controller::{ModelRuntimeProjection, UsageProjection};
     use crate::model_runtime::{CatalogPhase, ModelChangePolicy, ModelIdentity, ThinkingLevel};
@@ -7614,6 +8091,14 @@ mod tests {
             thinking_choices(&projection),
             vec![ThinkingLevel::Off, ThinkingLevel::Low, ThinkingLevel::High]
         );
+    }
+
+    #[test]
+    fn pasted_image_navigation_wraps_in_both_directions() {
+        assert_eq!(wrapped_index(0, 4, -1), 3);
+        assert_eq!(wrapped_index(3, 4, 1), 0);
+        assert_eq!(wrapped_index(1, 4, 1), 2);
+        assert_eq!(wrapped_index(0, 0, 1), 0);
     }
 
     #[test]

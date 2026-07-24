@@ -7,7 +7,7 @@ use gpui::{
 use crate::actions::{
     ActivateRecovery, Connect, FocusNext, FocusPrevious, OpenCommandPalette,
     RECOVERY_BUTTON_CONTEXT, Retry, ShowHotkeys, Stop, composer_key_bindings, history_key_bindings,
-    orchestration_key_bindings, transcript_key_bindings,
+    image_preview_key_bindings, orchestration_key_bindings, transcript_key_bindings,
 };
 use crate::controller::RuntimeController;
 use crate::services::runtime_worker::{RpcRuntimeService, RuntimeService};
@@ -46,6 +46,7 @@ pub fn run() {
         cx.bind_keys(transcript_key_bindings());
         cx.bind_keys(history_key_bindings());
         cx.bind_keys(orchestration_key_bindings());
+        cx.bind_keys(image_preview_key_bindings());
 
         let bounds = Bounds::centered(None, size(px(WINDOW_WIDTH), px(WINDOW_HEIGHT)), cx);
         let workspace = workspace.clone();

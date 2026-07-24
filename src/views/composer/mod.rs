@@ -87,6 +87,7 @@ pub enum ComposerEvent {
     CommandPrevious,
     CommandAccept,
     CommandDismiss,
+    PreviewImage(usize),
 }
 
 pub struct Composer {
@@ -506,6 +507,12 @@ impl Composer {
             });
         }
         cx.notify();
+    }
+
+    fn preview_image(&mut self, index: usize, cx: &mut Context<Self>) {
+        if index < self.images.len() {
+            cx.emit(ComposerEvent::PreviewImage(index));
+        }
     }
 
     fn remove_image(&mut self, index: usize, cx: &mut Context<Self>) {
