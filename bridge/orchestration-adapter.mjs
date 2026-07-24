@@ -1,4 +1,4 @@
-import { readFileSync, statSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync, statSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
@@ -42,7 +42,10 @@ function taskStorePath(ctx) {
   if (override?.startsWith(".")) return resolve(ctx.cwd, override);
   if (override && isAbsolute(override)) return override;
   if (override) return override;
-  const config = readJson(join(ctx.cwd, ".pi", "tasks-config.json"), {});
+  const config = {
+    ...readJson(join(AGENT_DIR, "tasks-config.json"), {}),
+    ...readJson(join(ctx.cwd, ".pi", "tasks-config.json"), {}),
+  };
   if (config.taskScope === "memory") return undefined;
   if (config.taskScope === "project") return join(ctx.cwd, ".pi", "tasks", "tasks.json");
   return join(ctx.cwd, ".pi", "tasks", `tasks-${ctx.sessionManager.getSessionId()}.json`);
@@ -68,12 +71,26 @@ async function agentMemory(type, cwd) {
     agentTypesModule ??= await importInstalled("@tintinweb/pi-subagents/dist/agent-types.js");
     const config = agentTypesModule.getAgentConfig(type);
     if (!config?.memory) return undefined;
-    const path =
-      config.memory === "user"
-        ? join(homedir(), ".pi", "agent-memory", type)
-        : config.memory === "local"
+    let path;
+    if (config.memory === "user") {
+      const currentPath = join(AGENT_DIR, "agent-memory", type);
+      const legacyPath = join(homedir(), ".pi", "agent-memory", type);
+      try {
+        path =
+          !existsSync(currentPath) &&
+          existsSync(legacyPath) &&
+          !lstatSync(legacyPath).isSymbolicLink()
+            ? legacyPath
+            : currentPath;
+      } catch {
+        path = currentPath;
+      }
+    } else {
+      path =
+        config.memory === "local"
           ? join(cwd, ".pi", "agent-memory-local", type)
           : join(cwd, ".pi", "agent-memory", type);
+    }
     return { scope: config.memory, path };
   } catch {
     return undefined;

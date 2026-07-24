@@ -11,7 +11,7 @@
 
 ## Cancellation and restart
 
-Cancellation is correlated by request ID. Operations with an SDK abort surface receive an `AbortSignal`; branch summaries also call Pi's abort API. Resource loading is not synchronously interruptible in Pi 0.80.10, so cancellation marks its result stale and Rust keeps the prior valid inventory. Restart is the recovery boundary for an extension that does not return: Rust closes/kills the sidecar, rejects pending requests, starts a fresh process, renegotiates hello, and reloads snapshots. No prompt or session operation is replayed automatically.
+Cancellation is correlated by request ID. Operations with an SDK abort surface receive an `AbortSignal`; branch summaries also call Pi's abort API. Resource loading is not synchronously interruptible in Pi 0.82.0, so cancellation marks its result stale and Rust keeps the prior valid inventory. Restart is the recovery boundary for an extension that does not return: Rust closes/kills the sidecar, rejects pending requests, starts a fresh process, renegotiates hello, and reloads snapshots. No prompt or session operation is replayed automatically.
 
 Closing stdin aborts active controllers, aborts an active branch summary, disposes the resource-plane session, and lets Node exit. Rust also waits after forced termination, so the sidecar cannot outlive its owner during normal shutdown.
 
@@ -25,7 +25,7 @@ The last valid snapshot remains visible as stale after adapter loss. Bridge rest
 
 ## Resource and trust policy
 
-The resource plane uses only Pi 0.80.10 public SDK exports. Already-installed global resources are loaded into a disposable in-memory SDK session so tool inventory and active-tool state come from `getAllTools()` and `getActiveToolNames()`. Project settings are inspected through `SettingsManager` and `DefaultPackageManager` only to build provenance; project extensions and package code are never passed to the loader because Pi GUI fixes project trust to rejected.
+The resource plane uses only Pi 0.82.0 public SDK exports. Already-installed global resources are loaded into a disposable in-memory SDK session so tool inventory and active-tool state come from `getAllTools()` and `getActiveToolNames()`. Project settings are inspected through `SettingsManager` and `DefaultPackageManager` only to build provenance; project extensions and package code are never passed to the loader because Pi GUI fixes project trust to rejected.
 
 Every package resolution supplies Pi's explicit `skip` callback for missing sources. Therefore inventory and reload cannot install a package. Package install, remove, update, and configuration commands are capability-gated off until the GUI has explicit arbitrary-code confirmation, progress, pin/filter handling, and rollback-safe errors.
 

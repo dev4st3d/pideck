@@ -440,6 +440,9 @@ fn normalize_event(event: RpcEvent) -> NormalizedEvent {
             NormalizedEvent::MessageUpdate(runtime_message(*message))
         }
         RpcEvent::MessageEnd { message } => NormalizedEvent::MessageEnd(runtime_message(message)),
+        RpcEvent::BashExecutionUpdate { id, delta } => {
+            NormalizedEvent::BashUpdate { request: id, delta }
+        }
         RpcEvent::ToolExecutionStart {
             tool_call_id,
             tool_name,

@@ -71,6 +71,12 @@ pub enum RpcEvent {
     },
     #[serde(rename = "message_end")]
     MessageEnd { message: AgentMessage },
+    #[serde(rename = "bash_execution_update")]
+    BashExecutionUpdate {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        id: Option<super::RequestId>,
+        delta: String,
+    },
     #[serde(rename = "tool_execution_start")]
     ToolExecutionStart {
         #[serde(rename = "toolCallId")]
@@ -157,6 +163,7 @@ pub(crate) fn is_known_event(record_type: &str) -> bool {
             | "message_start"
             | "message_update"
             | "message_end"
+            | "bash_execution_update"
             | "tool_execution_start"
             | "tool_execution_update"
             | "tool_execution_end"

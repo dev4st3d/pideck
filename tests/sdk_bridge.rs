@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use pi_gui::services::pi_process::discover_and_probe;
 use pi_gui::services::sdk_bridge::{
-    BridgeCommand, BridgeErrorKind, SdkBridgeClient, SdkBridgeConfig,
+    BridgeCommand, BridgeErrorKind, ORCHESTRATION_PIPE_ENV, SdkBridgeClient, SdkBridgeConfig,
 };
 
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(1);
@@ -67,8 +67,11 @@ fn write_branched_session(path: &Path, cwd: &Path) {
 fn fake_bridge_config(root: &Path) -> SdkBridgeConfig {
     let sdk_root = root.join("fake-sdk");
     fs::create_dir_all(sdk_root.join("dist")).expect("create fake SDK");
-    fs::write(sdk_root.join("package.json"), "{\"type\":\"module\"}\n")
-        .expect("write fake SDK package");
+    fs::write(
+        sdk_root.join("package.json"),
+        "{\"type\":\"module\",\"version\":\"0.82.0\"}\n",
+    )
+    .expect("write fake SDK package");
     fs::write(
         sdk_root.join("dist/index.js"),
         r#"
@@ -367,6 +370,7 @@ fn bridge_negotiates_mutates_through_sdk_exports_imports_and_restarts() {
     let session = sessions.join("source.jsonl");
     write_branched_session(&session, &workspace);
     let client = SdkBridgeClient::start(config.clone()).expect("start compatible bridge");
+    assert_eq!(client.hello().sdk_version, "0.82.0");
     assert!(client.hello().capabilities.navigate_tree);
     assert!(client.hello().capabilities.labels);
     assert!(client.hello().capabilities.resource_inventory);
@@ -669,12 +673,35 @@ fn resource_inventory_rejects_project_code_tracks_dynamic_state_and_redacts_fail
 }
 
 #[test]
+fn bridge_rejects_mismatched_sdk_versions() {
+    let root = temp_dir();
+    let config = fake_bridge_config(&root);
+    fs::write(
+        config.sdk_root.join("package.json"),
+        "{\"type\":\"module\",\"version\":\"0.81.1\"}\n",
+    )
+    .expect("write incompatible fake SDK package");
+
+    let error = match SdkBridgeClient::start(config) {
+        Ok(client) => {
+            client.stop();
+            panic!("mismatched SDK version should be rejected");
+        }
+        Err(error) => error,
+    };
+    assert_eq!(error.kind, BridgeErrorKind::Protocol);
+    assert_eq!(error.summary, "The Pi SDK bridge version is incompatible.");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn bridge_rejects_unknown_protocol_versions_and_exits_on_stdin_close() {
     let root = temp_dir();
     let config = fake_bridge_config(&root);
     let mut child = Command::new(&config.node)
         .arg(&config.script)
         .arg(&config.sdk_root)
+        .env_remove(ORCHESTRATION_PIPE_ENV)
         .current_dir(&config.working_directory)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

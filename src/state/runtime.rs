@@ -1080,6 +1080,10 @@ pub enum NormalizedEvent {
     MessageStart(RuntimeMessage),
     MessageUpdate(RuntimeMessage),
     MessageEnd(RuntimeMessage),
+    BashUpdate {
+        request: Option<RequestId>,
+        delta: String,
+    },
     ToolStart {
         id: ToolCallId,
         name: String,

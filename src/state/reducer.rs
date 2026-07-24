@@ -14,6 +14,8 @@ use super::runtime::{
 };
 use crate::services::rpc::{EntryId, RequestId};
 
+const MAX_LIVE_BASH_OUTPUT_BYTES: usize = 256 * 1024;
+
 pub fn reduce(state: &mut RuntimeState, stamped: StampedInput) -> Vec<RuntimeEffect> {
     if let RuntimeInput::Connected { recovery } = stamped.input {
         return connect(state, stamped.generation, stamped.epoch, recovery);
@@ -980,6 +982,32 @@ fn reduce_event(
         }
         NormalizedEvent::MessageEnd(message) => {
             upsert_messages(state, vec![message], MessagePhase::Terminal)
+        }
+        NormalizedEvent::BashUpdate { request, delta } => {
+            let execution = if let Some(request) = request {
+                state
+                    .bash_executions
+                    .iter_mut()
+                    .find(|execution| execution.request == request)
+            } else {
+                state
+                    .bash_executions
+                    .iter_mut()
+                    .rev()
+                    .find(|execution| execution.status.is_active())
+            };
+            if let Some(execution) = execution.filter(|execution| execution.status.is_active()) {
+                execution.output.push_str(&delta);
+                if execution.output.len() > MAX_LIVE_BASH_OUTPUT_BYTES {
+                    let mut remove = execution.output.len() - MAX_LIVE_BASH_OUTPUT_BYTES;
+                    while !execution.output.is_char_boundary(remove) {
+                        remove += 1;
+                    }
+                    execution.output.drain(..remove);
+                    execution.truncated = true;
+                }
+                state.bump_revision();
+            }
         }
         NormalizedEvent::ToolStart {
             id,

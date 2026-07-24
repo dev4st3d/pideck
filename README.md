@@ -21,7 +21,7 @@ The visible shell now shows only live or explicitly Loading, Awaiting, Unknown, 
 - a real workspace-filtered v1-v3 JSONL session catalog with loading, empty, inaccessible, corrupt, refreshing/stale, and active-switch states;
 - atomic new/switch/rename/export operations that retain the old transcript read-only until Pi confirms a replacement and never replay an uncertain prompt.
 - a searchable, foldable, filterable session tree with the authoritative active leaf, keyboard navigation, entry details, stock fork-before-message and clone-path actions, and explicit same-file/new-file confirmations;
-- a negotiated Pi SDK 0.80.10 stdio JSONL bridge for same-file navigation, optional branch summaries, labels, active-path JSONL export, and safe import into a new session file. Unsupported bridge actions stay hidden.
+- a negotiated Pi SDK 0.82.0 stdio JSONL bridge for same-file navigation, optional branch summaries, labels, active-path JSONL export, and safe import into a new session file. Unsupported bridge actions stay hidden.
 - cached-first provider and model catalogs with background refresh, stale/per-provider failures, a searchable model switcher and thinking chips attached to the prompt box, and Providers/Models/Thinking/Usage settings;
 - provider-owned API-key, browser, device-code, text, select, progress, cancel, and logout flows. Secret input is masked and redacted from Rust debug output; catalogs expose no credential values, resolved environment values, headers, base URLs, or raw provider errors;
 - honest separation between the active session model/thinking state (stock RPC) and Pi's persisted defaults/model cycle order (SDK settings), plus nullable current context, lifetime token/cache/reasoning totals, and estimated cost with zero pricing labeled as unpriced rather than free.
@@ -48,7 +48,7 @@ Rendered Markdown links are styled but not yet clickable. There is no share or c
 Install the tested Pi package. Existing Pi credentials are detected automatically, and providers can also be configured from the app's Providers settings:
 
 ```powershell
-npm install -g @earendil-works/pi-coding-agent@0.80.10
+npm install -g @earendil-works/pi-coding-agent@0.82.0
 cargo run
 ```
 
@@ -109,7 +109,7 @@ The interface preserves the warm-charcoal Switzer/Bonny identity, with Cascadia 
 - `src/services/sdk_bridge.rs`, `bridge/pi-bridge.mjs`, and `bridge/protocol.schema.json` - negotiated, versioned, cancellable stdio JSONL SDK sidecar for the Phase 11 session gaps, Phase 12 ModelRuntime/settings/auth gaps, Phase 15 resource inventory/reload plane, and Phase 16 orchestration adapter transport
 - `src/orchestration.rs`, `bridge/orchestration-adapter.mjs`, and `bridge/orchestration-core.mjs` - typed task/subagent/goal snapshots, stale/session guards, Pi event-bus actions, task DAG checks, schedule restoration, and bounded live subagent transcripts
 - `src/resource_center.rs` - secret-free resource inventory contract, trust/load state, package mutation policy, and UI filters
-- `src/services/rpc/` - Pi 0.80.10 wire contract, strict JSONL framing, correlated client, and runtime adapter
+- `src/services/rpc/` - Pi 0.82.0 wire contract, strict JSONL framing, correlated client, and runtime adapter
 - `src/services/pi_process/` - executable discovery, capability probing, launch policy, and process-tree supervision
 - `src/state/runtime.rs` - normalized owned runtime/transcript state, safe message metadata, stamped inputs, requests, and effects
 - `src/state/reducer.rs` - pure lifecycle, hydration, streaming reconciliation, tool, queue, and extension reducer

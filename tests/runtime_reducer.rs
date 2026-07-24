@@ -916,6 +916,72 @@ fn direct_bash_records_results_reconciles_and_cancels_separately() {
 }
 
 #[test]
+fn direct_bash_stream_updates_live_output_before_final_response() {
+    let (mut state, _) = connected_state("s1");
+    let request = RequestId::from("bash-stream-1");
+    apply(
+        &mut state,
+        RuntimeInput::Intent(RuntimeIntent::ExecuteBash {
+            request: request.clone(),
+            command: "printf live".to_owned(),
+            exclude_from_context: false,
+        }),
+    );
+
+    let record =
+        decode_record(br#"{"type":"bash_execution_update","id":"bash-stream-1","delta":"live "}"#)
+            .expect("bash update");
+    let input = normalize_tagged_record(
+        TaggedIncomingRecord {
+            generation: state.generation,
+            record,
+        },
+        state.epoch,
+    )
+    .expect("normalized bash update");
+    reduce(&mut state, input);
+    assert_eq!(state.bash_executions[0].output, "live ");
+    assert_eq!(state.bash_executions[0].status, BashStatus::Running);
+
+    apply(
+        &mut state,
+        RuntimeInput::Event(NormalizedEvent::BashUpdate {
+            request: Some(request.clone()),
+            delta: "output".to_owned(),
+        }),
+    );
+    assert_eq!(state.bash_executions[0].output, "live output");
+
+    apply(
+        &mut state,
+        RuntimeInput::Event(NormalizedEvent::BashUpdate {
+            request: Some(request.clone()),
+            delta: format!("é{}", "x".repeat(300_000)),
+        }),
+    );
+    assert!(state.bash_executions[0].output.len() <= 256 * 1024);
+    assert!(state.bash_executions[0].truncated);
+
+    response(
+        &mut state,
+        RuntimeRequest::ExecuteBash {
+            request,
+            command: "printf live".to_owned(),
+            exclude_from_context: false,
+        },
+        Ok(NormalizedResponse::Bash(DirectBashResult {
+            output: "live output".to_owned(),
+            exit_code: Some(0),
+            cancelled: false,
+            truncated: false,
+            full_output_path: None,
+        })),
+    );
+    assert_eq!(state.bash_executions[0].output, "live output");
+    assert_eq!(state.bash_executions[0].status, BashStatus::Succeeded);
+}
+
+#[test]
 fn streaming_uses_accumulated_replacement_and_terminal_events_are_idempotent() {
     let (mut state, _) = connected_state("s1");
     apply(

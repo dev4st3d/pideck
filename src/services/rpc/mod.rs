@@ -1,4 +1,4 @@
-//! UI-independent compatibility boundary for Pi 0.80.10 RPC.
+//! UI-independent compatibility boundary for Pi 0.82.0 RPC.
 
 mod client;
 mod codec;

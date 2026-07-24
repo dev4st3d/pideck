@@ -3,12 +3,11 @@
 import { createInterface } from "node:readline";
 import { basename, dirname, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
-import { existsSync, mkdirSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 
 const PROTOCOL_VERSION = 1;
 const MAX_LINE_BYTES = 1024 * 1024;
-const SDK_VERSION = "0.80.10";
 const SESSION_VERSION = 3;
 const ORCHESTRATION_ENDPOINT = process.env.PI_GUI_ORCHESTRATION_PIPE;
 const CAPABILITIES = Object.freeze({
@@ -60,7 +59,13 @@ if (!sdkRoot) {
 }
 
 let sdk;
+let sdkVersion;
 try {
+  const manifest = JSON.parse(readFileSync(resolve(sdkRoot, "package.json"), "utf8"));
+  if (typeof manifest.version !== "string" || manifest.version.length === 0) {
+    throw new Error("missing SDK version");
+  }
+  sdkVersion = manifest.version;
   sdk = await import(pathToFileURL(resolve(sdkRoot, "dist", "index.js")).href);
 } catch {
   process.stderr.write("pi-gui bridge could not load the compatible Pi SDK\n");
@@ -627,7 +632,13 @@ async function buildResourceSnapshot(signal, operation = "inventory") {
 
   const dynamicProviders = [
     ...(extensionsResult.runtime?.pendingProviderRegistrations ?? []),
-  ];
+    ...(extensionsResult.runtime?.pendingNativeProviderRegistrations ?? []).map(
+      ({ provider, extensionPath }) => ({
+        name: provider?.id ?? provider?.name,
+        extensionPath,
+      }),
+    ),
+  ].filter((provider) => typeof provider.name === "string" && provider.name.length > 0);
   let session;
   try {
     const resourceRuntime = await sdk.ModelRuntime.create({ allowModelNetwork: false });
@@ -966,7 +977,7 @@ async function execute(record) {
       case "hello":
         result = {
           protocolVersion: PROTOCOL_VERSION,
-          sdkVersion: SDK_VERSION,
+          sdkVersion,
           capabilities: CAPABILITIES,
           transport: "stdio-jsonl",
           ownership: "pi-sdk-sidecar",

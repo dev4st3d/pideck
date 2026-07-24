@@ -187,7 +187,13 @@ impl RuntimeConnection for RpcRuntimeConnection {
     fn execute(&self, effect: RuntimeEffect) -> Option<StampedInput> {
         match dispatch_for_effect(&effect) {
             RpcDispatch::Command(command) => {
-                normalize_call_result(&effect, self.client.request(command).wait())
+                let call = match &effect.effect {
+                    crate::state::runtime::EffectKind::Request(
+                        crate::state::runtime::RuntimeRequest::ExecuteBash { request, .. },
+                    ) => self.client.request_with_id(request.clone(), command),
+                    _ => self.client.request(command),
+                };
+                normalize_call_result(&effect, call.wait())
             }
             RpcDispatch::ExtensionUiResponse(response) => {
                 let _ = self.client.send_extension_ui_response(response);

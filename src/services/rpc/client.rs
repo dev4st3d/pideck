@@ -291,6 +291,22 @@ impl RpcClient {
         connection.submit(command)
     }
 
+    pub(crate) fn request_with_id(&self, id: RequestId, command: Command) -> RpcCall {
+        let generation = self.generation();
+        let Some(connection) = self.inner.active_connection() else {
+            return failed_call(
+                id,
+                generation,
+                RpcClientError::new(
+                    RpcClientErrorKind::Stopped,
+                    generation,
+                    command_name(&command),
+                ),
+            );
+        };
+        connection.submit_with_id(id, command)
+    }
+
     pub fn send_extension_ui_response(
         &self,
         response: ExtensionUiResponse,
@@ -608,7 +624,10 @@ impl Connection {
     }
 
     fn submit(&self, command: Command) -> RpcCall {
-        let id = self.next_id();
+        self.submit_with_id(self.next_id(), command)
+    }
+
+    fn submit_with_id(&self, id: RequestId, command: Command) -> RpcCall {
         let deadline = self.deadlines.for_command(&command);
         match command_class(&command) {
             CommandClass::Mutation => {

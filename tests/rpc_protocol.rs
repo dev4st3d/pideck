@@ -389,6 +389,44 @@ fn captured_inbound_fixture_decodes_all_record_classes() {
 }
 
 #[test]
+fn pi_0_82_captured_state_and_bash_stream_decode() {
+    let fixture = include_bytes!("fixtures/pi_0_82_inbound.jsonl");
+    let mut codec = JsonlCodec::default();
+    let records = codec.feed(fixture).expect("0.82 fixture should decode");
+    assert!(codec.finish().unwrap().is_none());
+    assert_eq!(records.len(), 3);
+    assert!(matches!(
+        &records[1],
+        IncomingRecord::Event(event)
+            if matches!(event.as_ref(), RpcEvent::BashExecutionUpdate { .. })
+    ));
+    assert!(matches!(
+        &records[2],
+        IncomingRecord::Response(response) if matches!(response.result, ResponseResult::Bash(_))
+    ));
+}
+
+#[test]
+fn direct_bash_stream_updates_decode_with_correlation() {
+    let record = IncomingRecord::from_value(json!({
+        "type": "bash_execution_update",
+        "id": "bash-1",
+        "delta": "first line\n"
+    }))
+    .expect("bash stream update should decode");
+
+    assert!(matches!(
+        record,
+        IncomingRecord::Event(event)
+            if matches!(
+                event.as_ref(),
+                RpcEvent::BashExecutionUpdate { id: Some(id), delta }
+                    if id.as_str() == "bash-1" && delta == "first line\n"
+            )
+    ));
+}
+
+#[test]
 fn every_assistant_streaming_variant_decodes() {
     let assistant = json!({
         "role":"assistant","content":[],"api":"synthetic-api","provider":"synthetic-provider",

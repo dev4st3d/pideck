@@ -17,6 +17,7 @@ use serde_json::Value;
 use crate::model_runtime::{AuthEvent, AuthMethod, ModelIdentity, ThinkingLevel};
 use crate::orchestration::{OrchestrationActionRequest, OrchestrationSnapshot};
 use crate::resource_center::ResourceInventorySnapshot;
+use crate::services::pi_process::SUPPORTED_PI_VERSION;
 
 const PROTOCOL_VERSION: u64 = 1;
 const MAX_RECORD_BYTES: usize = 1024 * 1024;
@@ -450,6 +451,13 @@ impl SdkBridgeClient {
             return Err(BridgeError::new(
                 BridgeErrorKind::Protocol,
                 "The Pi SDK bridge protocol is incompatible.",
+            ));
+        }
+        if hello.sdk_version != SUPPORTED_PI_VERSION {
+            provisional.stop();
+            return Err(BridgeError::new(
+                BridgeErrorKind::Protocol,
+                "The Pi SDK bridge version is incompatible.",
             ));
         }
         Ok(Self {
