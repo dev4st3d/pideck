@@ -1,7 +1,9 @@
-import { readFileSync } from "node:fs";
+import { closeSync, fstatSync, openSync, readSync } from "node:fs";
 
-export const MAX_TRANSCRIPT_ENTRIES = 200;
-export const MAX_TRANSCRIPT_BYTES = 512 * 1024;
+export const MAX_TRANSCRIPT_ENTRIES = 80;
+export const MAX_TRANSCRIPT_BYTES = 48 * 1024;
+const MAX_TRANSCRIPT_SOURCE_ENTRIES = MAX_TRANSCRIPT_ENTRIES * 2;
+const MAX_TRANSCRIPT_FILE_READ_BYTES = 256 * 1024;
 
 export function isRecord(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -143,7 +145,11 @@ export function transcriptEntry(message, timestamp) {
         : message.role === "toolResult"
           ? "tool_result"
           : "system";
-  const content = contentText(message.content);
+  const rawContent = contentText(message.content);
+  const content =
+    rawContent.length > MAX_TRANSCRIPT_BYTES
+      ? `…${rawContent.slice(-MAX_TRANSCRIPT_BYTES)}`
+      : rawContent;
   if (!content && role === "system") return undefined;
   return {
     role,
@@ -156,20 +162,44 @@ export function transcriptEntry(message, timestamp) {
 
 export function transcriptFromMessages(messages) {
   const entries = [];
-  for (const message of Array.isArray(messages) ? messages : []) {
+  const source = Array.isArray(messages) ? messages : [];
+  const start = Math.max(0, source.length - MAX_TRANSCRIPT_SOURCE_ENTRIES);
+  for (const message of source.slice(start)) {
     const entry = transcriptEntry(message);
     if (entry) entries.push(entry);
   }
-  return boundTranscript(entries);
+  const bounded = boundTranscript(entries);
+  bounded.truncated ||= start > 0;
+  return bounded;
 }
 
 export function transcriptFromFile(path) {
   if (typeof path !== "string" || !path) return { entries: [], truncated: false };
-  let text;
+  let descriptor;
+  let text = "";
+  let sourceTruncated = false;
   try {
-    text = readFileSync(path, "utf8");
+    descriptor = openSync(path, "r");
+    const size = fstatSync(descriptor).size;
+    const start = Math.max(0, size - MAX_TRANSCRIPT_FILE_READ_BYTES);
+    const bytes = Buffer.allocUnsafe(size - start);
+    const read = readSync(descriptor, bytes, 0, bytes.length, start);
+    text = bytes.subarray(0, read).toString("utf8");
+    sourceTruncated = start > 0;
+    if (sourceTruncated) {
+      const firstRecordEnd = text.indexOf("\n");
+      text = firstRecordEnd >= 0 ? text.slice(firstRecordEnd + 1) : "";
+    }
   } catch {
     return { entries: [], truncated: false };
+  } finally {
+    if (descriptor !== undefined) {
+      try {
+        closeSync(descriptor);
+      } catch {
+        // The read result is already bounded and usable.
+      }
+    }
   }
   const entries = [];
   for (const line of text.split("\n")) {
@@ -182,7 +212,84 @@ export function transcriptFromFile(path) {
       // A concurrently appended trailing record may be incomplete.
     }
   }
-  return boundTranscript(entries);
+  const bounded = boundTranscript(entries);
+  bounded.truncated ||= sourceTruncated;
+  return bounded;
+}
+
+export function fitSnapshotRecord(snapshot, maxBytes) {
+  const fitted = {
+    ...snapshot,
+    tasks: (snapshot.tasks ?? []).map((task) => ({
+      ...task,
+      subject: boundedText(task.subject, 1024),
+      description: boundedText(task.description, 4096),
+      output: boundedOptionalText(task.output, 8192),
+      metadata: boundedMetadata(task.metadata),
+    })),
+    subagents: (snapshot.subagents ?? []).map((agent) => ({
+      ...agent,
+      description: boundedText(agent.description, 2048),
+      result: boundedOptionalText(agent.result, 16 * 1024),
+      error: boundedOptionalText(agent.error, 4096),
+      transcript: [...(agent.transcript ?? [])],
+    })),
+    diagnostics: (snapshot.diagnostics ?? []).map((message) => boundedText(message, 2048)),
+  };
+
+  const encode = () => JSON.stringify({ type: "snapshot", snapshot: fitted });
+  let encoded = encode();
+  for (let index = fitted.subagents.length - 1; encodedBytes(encoded) > maxBytes && index >= 0; index--) {
+    const agent = fitted.subagents[index];
+    if (agent.transcript.length === 0) continue;
+    agent.transcript = [];
+    agent.transcriptTruncated = true;
+    encoded = encode();
+  }
+  if (encodedBytes(encoded) > maxBytes) {
+    for (const task of fitted.tasks) {
+      task.output = undefined;
+      task.metadata = {};
+    }
+    encoded = encode();
+  }
+  if (encodedBytes(encoded) > maxBytes) {
+    for (const agent of fitted.subagents) agent.result = undefined;
+    encoded = encode();
+  }
+  while (encodedBytes(encoded) > maxBytes) {
+    const index = fitted.subagents.findLastIndex(
+      (agent) => agent.status !== "running" && agent.status !== "queued",
+    );
+    if (index < 0) break;
+    fitted.subagents.splice(index, 1);
+    encoded = encode();
+  }
+  while (encodedBytes(encoded) > maxBytes) {
+    const index = fitted.tasks.findLastIndex((task) => task.status === "completed");
+    if (index < 0) break;
+    fitted.tasks.splice(index, 1);
+    encoded = encode();
+  }
+  if (encodedBytes(encoded) > maxBytes) {
+    fitted.schedules = [];
+    fitted.diagnostics = ["Some orchestration details were omitted to keep the connection responsive."];
+    encoded = encode();
+  }
+  if (encodedBytes(encoded) > maxBytes) {
+    fitted.tasks = fitted.tasks.filter((task) => task.status === "in_progress").slice(0, 32);
+    fitted.subagents = fitted.subagents
+      .filter((agent) => agent.status === "running" || agent.status === "queued")
+      .slice(0, 32);
+    encoded = encode();
+  }
+  if (encodedBytes(encoded) > maxBytes) {
+    fitted.tasks = [];
+    fitted.subagents = [];
+    fitted.goal = undefined;
+    encoded = encode();
+  }
+  return { snapshot: fitted, encoded };
 }
 
 function boundTranscript(entries) {
@@ -197,6 +304,32 @@ function boundTranscript(entries) {
   }
   selected.reverse();
   return { entries: selected, truncated: selected.length < entries.length };
+}
+
+function boundedText(value, maxCharacters) {
+  const text = String(value ?? "");
+  return text.length <= maxCharacters ? text : `${text.slice(0, maxCharacters)}…`;
+}
+
+function boundedOptionalText(value, maxCharacters) {
+  return typeof value === "string" ? boundedText(value, maxCharacters) : undefined;
+}
+
+function boundedMetadata(metadata) {
+  if (!isRecord(metadata)) return {};
+  const encoded = JSON.stringify(metadata);
+  if (encoded.length <= 4096) return metadata;
+  return {
+    ...(typeof metadata.agentId === "string" ? { agentId: metadata.agentId } : {}),
+    ...(typeof metadata.agentType === "string" ? { agentType: metadata.agentType } : {}),
+    ...(typeof metadata.lastError === "string"
+      ? { lastError: boundedText(metadata.lastError, 2048) }
+      : {}),
+  };
+}
+
+function encodedBytes(value) {
+  return Buffer.byteLength(value, "utf8");
 }
 
 export function goalCommand(action) {

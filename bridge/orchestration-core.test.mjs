@@ -5,6 +5,7 @@ import {
   MAX_TRANSCRIPT_ENTRIES,
   agentQueuePositions,
   cascadeReadyTasks,
+  fitSnapshotRecord,
   goalCommand,
   latestGoalState,
   normalizeSchedules,
@@ -156,4 +157,38 @@ test("live subagent transcript keeps conversation roles, failures, and a bounded
   assert.equal(transcript.entries[0].content, "message 5");
   assert.equal(transcript.entries.at(-1).isError, true);
   assert.equal(transcript.entries.at(-1).role, "user");
+});
+
+test("oversized snapshots shed old transcript payloads instead of breaking the connection", () => {
+  const snapshot = {
+    sessionId: "session",
+    generation: 1,
+    capturedAt: 1,
+    tasks: [],
+    subagents: Array.from({ length: 12 }, (_, index) => ({
+      id: `agent-${index}`,
+      type: "worker",
+      description: "Worker",
+      status: index === 0 ? "running" : "completed",
+      transcript: [
+        {
+          role: "assistant",
+          content: "x".repeat(32 * 1024),
+          isError: false,
+        },
+      ],
+      transcriptTruncated: false,
+    })),
+    schedules: [],
+    diagnostics: [],
+  };
+
+  const fitted = fitSnapshotRecord(snapshot, 64 * 1024);
+  assert.ok(Buffer.byteLength(fitted.encoded, "utf8") <= 64 * 1024);
+  assert.equal(fitted.snapshot.subagents[0].id, "agent-0");
+  assert.ok(
+    fitted.snapshot.subagents.some(
+      (agent) => agent.transcript.length === 0 && agent.transcriptTruncated,
+    ),
+  );
 });

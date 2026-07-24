@@ -1,13 +1,11 @@
 mod data;
 
-use gpui::{
-    Context, FontWeight, IntoElement, Render, SharedString, Window, div, prelude::*, px, relative,
-};
+use gpui::{FontWeight, IntoElement, div, prelude::*, px, relative};
 use serde_json::Value;
 
 pub(super) use self::data::{
-    ToolPresentation, cards_for_projection, has_tool_call, presentation_for_bash_block,
-    presentation_for_standalone_result, presentation_for_tool_call, tail_presentations,
+    ToolPresentation, presentation_for_bash_block, presentation_for_standalone_result,
+    presentation_for_tool_call, tail_presentations,
 };
 use crate::state::runtime::sanitize_untrusted_text;
 use crate::theme;
@@ -41,53 +39,6 @@ pub struct ToolPayload {
     pub truncated: bool,
     pub truncation_note: Option<String>,
     pub full_output_path: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct ToolCardData {
-    pub key: String,
-    pub name: String,
-    pub status: CardStatus,
-    pub arguments: Option<Value>,
-    pub payload: ToolPayload,
-    pub elapsed_ms: Option<u128>,
-    pub context_excluded: bool,
-    pub error: Option<String>,
-}
-
-pub struct ToolCard {
-    data: ToolCardData,
-}
-
-impl ToolCard {
-    pub fn new(data: ToolCardData) -> Self {
-        Self { data }
-    }
-
-    pub fn set_data(&mut self, data: ToolCardData, cx: &mut Context<Self>) {
-        if self.data == data {
-            return;
-        }
-        self.data = data;
-        cx.notify();
-    }
-}
-
-impl Render for ToolCard {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        let presentation = ToolPresentation::from_card(&self.data);
-        let card_id = SharedString::from(format!("tool-card:{}", self.data.key));
-        div()
-            .id(card_id)
-            .w_full()
-            .min_w_0()
-            .child(render_tool_presentation(
-                std::slice::from_ref(&presentation),
-                self.data.elapsed_ms,
-                self.data.context_excluded,
-                self.data.error.as_deref(),
-            ))
-    }
 }
 
 pub(super) fn render_tool_presentation(

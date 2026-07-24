@@ -426,7 +426,7 @@ fn every_assistant_streaming_variant_decodes() {
 }
 
 #[test]
-fn tool_call_end_round_trips_required_tool_call_discriminator() {
+fn unused_assistant_stream_payload_is_not_retained() {
     let assistant = json!({
         "role":"assistant","content":[],"api":"synthetic-api","provider":"synthetic-provider",
         "model":"synthetic-model","usage":{"input":0,"output":0,"cacheRead":0,
@@ -443,7 +443,9 @@ fn tool_call_end_round_trips_required_tool_call_discriminator() {
         }
     });
     let record = IncomingRecord::from_value(value.clone()).unwrap();
-    assert_eq!(serde_json::to_value(record).unwrap(), value);
+    let serialized = serde_json::to_value(record).unwrap();
+    assert_eq!(serialized["message"], value["message"]);
+    assert!(serialized["assistantMessageEvent"].is_null());
 }
 
 #[test]

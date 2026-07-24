@@ -1,11 +1,15 @@
 //! Live Pi shell with an authoritative streaming conversation.
 
-use std::collections::{HashMap, HashSet, VecDeque};
-use std::time::Duration;
+use std::cell::Cell;
+use std::collections::{HashSet, VecDeque};
+use std::rc::Rc;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use gpui::{
-    ClipboardItem, Context, Entity, FocusHandle, Focusable, FontWeight, IntoElement, Render,
-    ScrollHandle, Subscription, Task, Window, div, prelude::*, px,
+    ClipboardItem, Context, DispatchPhase, Entity, FocusHandle, Focusable, FontWeight, IntoElement,
+    ListAlignment, ListOffset, ListState, Render, ScrollHandle, ScrollWheelEvent, Subscription,
+    Task, Window, canvas, div, list, prelude::*, px,
 };
 
 use crate::actions::{
@@ -44,8 +48,9 @@ use crate::state::{RecoveryAction, ShellProjection};
 use crate::theme;
 use crate::views::composer::{Composer, ComposerAvailability, ComposerEvent, ComposerFeedback};
 use crate::views::controls;
-use crate::views::conversation::{self, ScrollPinning, TranscriptText};
-use crate::views::tool_card::{self, ToolCard};
+use crate::views::conversation::{
+    ConversationListModel, ConversationScrollMotion, TranscriptTextCache,
+};
 
 struct PendingDraft {
     request: crate::services::rpc::RequestId,
@@ -132,11 +137,12 @@ pub struct RootView {
     history_open: bool,
     history_confirmation: Option<HistoryConfirmation>,
     summarize_navigation: bool,
-    conversation: ConversationProjection,
-    conversation_scroll: ScrollHandle,
-    scroll_pinning: ScrollPinning,
-    transcript_texts: HashMap<String, Entity<TranscriptText>>,
-    tool_cards: HashMap<String, Entity<ToolCard>>,
+    conversation: Arc<ConversationProjection>,
+    conversation_list: Arc<ConversationListModel>,
+    conversation_list_state: ListState,
+    conversation_follow: Rc<Cell<bool>>,
+    conversation_scroll_motion: ConversationScrollMotion,
+    transcript_cache: Entity<TranscriptTextCache>,
     pending_draft: Option<PendingDraft>,
     pending_bash: Option<crate::services::rpc::RequestId>,
     pending_compaction_focus: Option<String>,
@@ -227,21 +233,25 @@ impl RootView {
         let extension_dialog_focus = cx.focus_handle();
         let subagent_dialog_focus = cx.focus_handle();
         let conversation = controller.read(cx).conversation_projection();
+        let conversation_list = ConversationListModel::new(&conversation);
+        let conversation_list_state = ListState::new(
+            conversation_list.item_count(),
+            ListAlignment::Top,
+            px(800.0),
+        );
+        let conversation_follow = Rc::new(Cell::new(true));
+        conversation_list_state.set_scroll_handler({
+            let conversation_follow = Rc::clone(&conversation_follow);
+            move |event, _, _| {
+                conversation_follow.set(event.visible_range.end >= event.count);
+            }
+        });
+        conversation_list_state.scroll_to(ListOffset {
+            item_ix: conversation_list.item_count(),
+            offset_in_item: px(0.0),
+        });
+        let transcript_cache = cx.new(|_| TranscriptTextCache::new(conversation.epoch));
         let extension_ui = controller.read(cx).extension_ui_projection();
-        let transcript_texts = conversation::text_fragments(&conversation)
-            .into_iter()
-            .map(|(key, text)| {
-                let entity = cx.new(|cx| TranscriptText::new(key.clone(), text, cx));
-                (key, entity)
-            })
-            .collect();
-        let tool_cards = tool_card::cards_for_projection(&conversation)
-            .into_iter()
-            .map(|card| {
-                let key = card.key.clone();
-                (key, cx.new(|_| ToolCard::new(card)))
-            })
-            .collect();
         window.focus(&composer.read(cx).focus_handle(cx));
         let controller_observation = cx.observe_in(&controller, window, |view, _, window, cx| {
             view.sync_runtime(window, cx)
@@ -357,11 +367,12 @@ impl RootView {
             history_open: false,
             history_confirmation: None,
             summarize_navigation: false,
-            conversation,
-            conversation_scroll: ScrollHandle::new(),
-            scroll_pinning: ScrollPinning::default(),
-            transcript_texts,
-            tool_cards,
+            conversation: Arc::new(conversation),
+            conversation_list: Arc::new(conversation_list),
+            conversation_list_state,
+            conversation_follow,
+            conversation_scroll_motion: ConversationScrollMotion::default(),
+            transcript_cache,
             pending_draft: None,
             pending_bash: None,
             pending_compaction_focus: None,
@@ -1618,18 +1629,90 @@ impl RootView {
         });
     }
 
+    fn on_conversation_scroll_wheel(
+        &mut self,
+        event: &ScrollWheelEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if event.delta.precise() {
+            // Pixel deltas already carry the platform's touchpad precision and
+            // momentum. Never layer synthetic motion on top of them.
+            self.conversation_scroll_motion.cancel();
+            return false;
+        }
+
+        let distance = -event.delta.pixel_delta(px(20.0)).y;
+        if distance == px(0.0) {
+            return false;
+        }
+        if distance > px(0.0) && self.conversation_follow.get() {
+            self.conversation_scroll_motion.cancel();
+            self.conversation_list_state.scroll_to(ListOffset {
+                item_ix: self.conversation_list.item_count(),
+                offset_in_item: px(0.0),
+            });
+            return true;
+        }
+
+        self.conversation_follow.set(false);
+        let now = Instant::now();
+        if self.conversation_scroll_motion.push(distance, now) {
+            self.advance_conversation_scroll(now, cx);
+            self.schedule_conversation_scroll_frame(window, cx);
+        }
+        true
+    }
+
+    fn advance_conversation_scroll(&mut self, now: Instant, cx: &mut Context<Self>) {
+        let Some(step) = self.conversation_scroll_motion.advance(now) else {
+            return;
+        };
+        let before = self.conversation_list_state.logical_scroll_top();
+        self.conversation_list_state.scroll_by(step);
+        let after = self.conversation_list_state.logical_scroll_top();
+        let stalled = before.item_ix == after.item_ix
+            && (f32::from(before.offset_in_item) - f32::from(after.offset_in_item)).abs() < 0.01;
+        let at_top =
+            step < px(0.0) && after.item_ix == 0 && f32::from(after.offset_in_item) <= 0.01;
+        let at_bottom =
+            step > px(0.0) && (after.item_ix >= self.conversation_list.item_count() || stalled);
+
+        if at_bottom {
+            self.conversation_list_state.scroll_to(ListOffset {
+                item_ix: self.conversation_list.item_count(),
+                offset_in_item: px(0.0),
+            });
+            self.conversation_follow.set(true);
+            self.conversation_scroll_motion.cancel();
+        } else if at_top || stalled {
+            self.conversation_scroll_motion.cancel();
+        }
+        cx.notify();
+    }
+
+    fn schedule_conversation_scroll_frame(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.conversation_scroll_motion.schedule_frame() {
+            return;
+        }
+        cx.on_next_frame(window, |view, window, cx| {
+            view.conversation_scroll_motion.begin_frame();
+            view.advance_conversation_scroll(Instant::now(), cx);
+            view.schedule_conversation_scroll_frame(window, cx);
+        });
+    }
+
     fn sync_runtime(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         cx.defer_in(window, |view, _, cx| view.collect_runtime_notifications(cx));
         self.sync_extension_ui(window, cx);
         let conversation = self.controller.read(cx).conversation_projection();
         let epoch_changed = conversation.epoch != self.conversation.epoch;
         if epoch_changed {
-            self.transcript_texts.clear();
-            self.tool_cards.clear();
+            self.conversation_scroll_motion.cancel();
+            self.conversation_follow.set(true);
         }
-        let history = self.controller.read(cx).history_projection();
-        self.history
-            .synchronize(&history.tree, history.leaf_id.as_ref());
+        self.transcript_cache
+            .update(cx, |cache, _| cache.prepare_epoch(conversation.epoch));
         let requested_editor_text = self
             .controller
             .update(cx, |controller, _| controller.take_requested_editor_text());
@@ -1637,35 +1720,21 @@ impl RootView {
             self.composer
                 .update(cx, |composer, cx| composer.set_draft(&text, cx));
         }
-        let fragments = conversation::text_fragments(&conversation);
-        let active = fragments
-            .iter()
-            .map(|(key, _)| key.clone())
-            .collect::<HashSet<_>>();
-        self.transcript_texts.retain(|key, _| active.contains(key));
-        for (key, text) in fragments {
-            if let Some(entity) = self.transcript_texts.get(&key) {
-                entity.update(cx, |text_view, cx| text_view.set_text(text, cx));
-            } else {
-                let entity = cx.new(|cx| TranscriptText::new(key.clone(), text, cx));
-                self.transcript_texts.insert(key, entity);
-            }
+        let conversation_list =
+            ConversationListModel::updated(&self.conversation_list, &conversation, epoch_changed);
+        conversation_list.reconcile(
+            &self.conversation_list,
+            &self.conversation_list_state,
+            epoch_changed,
+        );
+        if self.conversation_follow.get() {
+            self.conversation_list_state.scroll_to(ListOffset {
+                item_ix: conversation_list.item_count(),
+                offset_in_item: px(0.0),
+            });
         }
-        let cards = tool_card::cards_for_projection(&conversation);
-        let active_cards = cards
-            .iter()
-            .map(|card| card.key.clone())
-            .collect::<HashSet<_>>();
-        self.tool_cards.retain(|key, _| active_cards.contains(key));
-        for card in cards {
-            if let Some(entity) = self.tool_cards.get(&card.key) {
-                entity.update(cx, |view, cx| view.set_data(card, cx));
-            } else {
-                let key = card.key.clone();
-                self.tool_cards.insert(key, cx.new(|_| ToolCard::new(card)));
-            }
-        }
-        self.conversation = conversation;
+        self.conversation = Arc::new(conversation);
+        self.conversation_list = Arc::new(conversation_list);
         self.sync_retry_tick(cx);
 
         let compact_available = matches!(
@@ -2187,25 +2256,18 @@ impl Render for RootView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let projection = self.controller.read(cx).projection();
         let catalog = self.controller.read(cx).catalog_projection();
-        let history = self.controller.read(cx).history_projection();
+        let history = self
+            .history_open
+            .then(|| self.controller.read(cx).history_projection());
+        if let Some(history) = history.as_ref() {
+            self.history
+                .synchronize(&history.tree, history.leaf_id.as_ref());
+        }
         let bridge = self.controller.read(cx).bridge_projection();
         let models = self.controller.read(cx).model_runtime_projection();
         let resources = self.controller.read(cx).resource_center_projection();
         let orchestration = self.controller.read(cx).orchestration_projection();
         let command_catalog = self.command_catalog(cx);
-        let selection_active = self
-            .transcript_texts
-            .values()
-            .any(|text| text.read(cx).selection_active());
-        if self.scroll_pinning.should_follow(
-            self.conversation.epoch,
-            self.conversation.revision,
-            self.conversation_scroll.offset().y,
-            self.conversation_scroll.max_offset().height,
-            selection_active,
-        ) {
-            self.conversation_scroll.scroll_to_bottom();
-        }
 
         div()
             .id("runtime-shell")
@@ -2253,7 +2315,9 @@ impl Render for RootView {
                     .when(self.history_open, |layout| {
                         layout.child(history_panel(
                             HistoryPanelParams {
-                                projection: &history,
+                                projection: history
+                                    .as_ref()
+                                    .expect("history is projected while the panel is open"),
                                 bridge: &bridge,
                                 browser: &self.history,
                                 focus: &self.history_focus,
@@ -2289,10 +2353,11 @@ impl Render for RootView {
                             .flex_col()
                             .child(conversation_area(
                                 &projection,
-                                &self.conversation,
-                                &self.conversation_scroll,
-                                &self.transcript_texts,
-                                &self.tool_cards,
+                                Arc::clone(&self.conversation),
+                                Arc::clone(&self.conversation_list),
+                                self.conversation_list_state.clone(),
+                                self.transcript_cache.clone(),
+                                cx.entity(),
                             ))
                             .child(composer_bar(
                                 ComposerBarParams {
@@ -3709,7 +3774,7 @@ fn thinking_select_sheet(
                         })
                         .child(
                             div()
-                                .font_family(theme::SANS)
+                                .font_family(theme::CONTROL)
                                 .text_size(px(theme::T_TINY))
                                 .font_weight(if selected {
                                     FontWeight::SEMIBOLD
@@ -4649,13 +4714,12 @@ fn compact_count(value: u64) -> String {
 
 fn conversation_area(
     projection: &ShellProjection,
-    conversation_projection: &ConversationProjection,
-    scroll: &ScrollHandle,
-    transcript_texts: &HashMap<String, Entity<TranscriptText>>,
-    tool_cards: &HashMap<String, Entity<ToolCard>>,
+    conversation_projection: Arc<ConversationProjection>,
+    conversation_list: Arc<ConversationListModel>,
+    conversation_list_state: ListState,
+    transcript_cache: Entity<TranscriptTextCache>,
+    root: Entity<RootView>,
 ) -> impl IntoElement {
-    let scroll = scroll.clone();
-
     // The transcript shares the center column with the composer and must yield
     // height to it on every lifecycle-driven rerender.
     div()
@@ -4674,24 +4738,49 @@ fn conversation_area(
         )
         .child(
             div()
-                .id("conversation-scroll")
                 .flex_1()
+                .min_w_0()
                 .min_h_0()
                 .w_full()
-                .overflow_y_scroll()
-                .track_scroll(&scroll)
-                .scrollbar_width(px(theme::SCROLLBAR))
+                .relative()
+                .overflow_hidden()
                 .child(
-                    div()
-                        .w_full()
-                        .px(px(theme::STREAM_PAD_X))
-                        .pt(px(16.0))
-                        .pb(px(32.0))
-                        .child(conversation::stream(
-                            conversation_projection,
-                            transcript_texts,
-                            tool_cards,
-                        )),
+                    canvas(
+                        |_, _, _| (),
+                        move |bounds, _, window, _| {
+                            window.on_mouse_event(
+                                move |event: &ScrollWheelEvent, phase, window, cx| {
+                                    if phase != DispatchPhase::Capture
+                                        || !bounds.contains(&event.position)
+                                    {
+                                        return;
+                                    }
+                                    let handled = root.update(cx, |view, cx| {
+                                        view.on_conversation_scroll_wheel(event, window, cx)
+                                    });
+                                    if handled {
+                                        cx.stop_propagation();
+                                    }
+                                },
+                            );
+                        },
+                    )
+                    .absolute()
+                    .size_full(),
+                )
+                .child(
+                    list(conversation_list_state, move |item_index, _, cx| {
+                        conversation_list.render_item(
+                            item_index,
+                            &conversation_projection,
+                            &transcript_cache,
+                            cx,
+                        )
+                    })
+                    .size_full()
+                    .min_w_0()
+                    .pt(px(16.0))
+                    .pb(px(16.0)),
                 ),
         )
 }
@@ -5281,7 +5370,7 @@ fn extension_dialog_button(
         .justify_center()
         .child(
             div()
-                .font_family(theme::SANS)
+                .font_family(theme::CONTROL)
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_size(px(theme::T_UI_SM))
                 .text_color(theme::bone())
@@ -5844,7 +5933,8 @@ fn inspector(params: InspectorParams<'_>, cx: &mut Context<RootView>) -> impl In
                             context_pct(&projection.context.label()),
                             projection.input_tokens.label(),
                             projection.output_tokens.label(),
-                            projection.cache.label(),
+                            projection.cache_read.label(),
+                            projection.cache_write.label(),
                         ))
                         .child(
                             div()

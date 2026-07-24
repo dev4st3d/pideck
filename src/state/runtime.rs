@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::sync::Arc;
 use std::time::Instant;
 
 use serde_json::Value;
@@ -372,7 +373,7 @@ pub enum EntryKind {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct RuntimeTreeNode {
-    pub entry: RuntimeEntry,
+    pub entry: Arc<RuntimeEntry>,
     pub children: Vec<RuntimeTreeNode>,
     pub label: Option<String>,
 }
@@ -455,7 +456,8 @@ pub struct BashExecution {
     pub started_at: Instant,
     pub finished_at: Option<Instant>,
     pub reconciled: bool,
-    pub baseline: HashSet<MessageKey>,
+    pub baseline_message_count: usize,
+    pub baseline_message_key: Option<MessageKey>,
     pub error: Option<String>,
 }
 
@@ -574,7 +576,8 @@ pub struct OptimisticUserInput {
     pub kind: SubmissionKind,
     pub accepted: bool,
     pub authoritative_seen: bool,
-    pub baseline: HashSet<MessageKey>,
+    pub baseline_message_count: usize,
+    pub baseline_message_key: Option<MessageKey>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -714,8 +717,8 @@ pub struct RuntimeState {
     pub display_epoch: SessionEpoch,
     pub lifecycle: RuntimeLifecycle,
     pub session: Facet<SessionSnapshot>,
-    pub messages: Facet<Vec<RuntimeMessage>>,
-    pub entries: Facet<Vec<RuntimeEntry>>,
+    pub messages: Facet<Vec<Arc<RuntimeMessage>>>,
+    pub entries: Facet<Vec<Arc<RuntimeEntry>>>,
     pub stats: Facet<RuntimeStats>,
     pub commands: Facet<Vec<RuntimeCommand>>,
     pub models: Facet<Vec<ModelSummary>>,
@@ -754,6 +757,7 @@ pub struct RuntimeState {
     pub hydration_mode: HydrationMode,
     pub incremental_fallback_used: bool,
     pub revision: u64,
+    pub message_structure_revision: u64,
     pub next_request: u64,
     pub next_tool_sequence: u64,
 }
@@ -806,6 +810,7 @@ impl RuntimeState {
             hydration_mode: HydrationMode::Initial,
             incremental_fallback_used: false,
             revision: 0,
+            message_structure_revision: 0,
             next_request: 1,
             next_tool_sequence: 1,
         }

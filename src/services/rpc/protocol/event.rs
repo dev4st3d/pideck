@@ -1,104 +1,35 @@
-use serde::{Deserialize, Serialize};
+use serde::de::IgnoredAny;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 
 use super::{
-    AgentMessage, AssistantMessage, CompactionResult, SessionEntry, ThinkingLevel, ToolCall,
-    ToolCallId, ToolResultMessage,
+    AgentMessage, CompactionResult, SessionEntry, ThinkingLevel, ToolCallId, ToolResultMessage,
 };
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type")]
-pub enum AssistantMessageEvent {
-    #[serde(rename = "start")]
-    Start { partial: AssistantMessage },
-    #[serde(rename = "text_start")]
-    TextStart {
-        #[serde(rename = "contentIndex")]
-        content_index: usize,
-        partial: AssistantMessage,
-    },
-    #[serde(rename = "text_delta")]
-    TextDelta {
-        #[serde(rename = "contentIndex")]
-        content_index: usize,
-        delta: String,
-        partial: AssistantMessage,
-    },
-    #[serde(rename = "text_end")]
-    TextEnd {
-        #[serde(rename = "contentIndex")]
-        content_index: usize,
-        content: String,
-        partial: AssistantMessage,
-    },
-    #[serde(rename = "thinking_start")]
-    ThinkingStart {
-        #[serde(rename = "contentIndex")]
-        content_index: usize,
-        partial: AssistantMessage,
-    },
-    #[serde(rename = "thinking_delta")]
-    ThinkingDelta {
-        #[serde(rename = "contentIndex")]
-        content_index: usize,
-        delta: String,
-        partial: AssistantMessage,
-    },
-    #[serde(rename = "thinking_end")]
-    ThinkingEnd {
-        #[serde(rename = "contentIndex")]
-        content_index: usize,
-        content: String,
-        partial: AssistantMessage,
-    },
-    #[serde(rename = "toolcall_start")]
-    ToolCallStart {
-        #[serde(rename = "contentIndex")]
-        content_index: usize,
-        partial: AssistantMessage,
-    },
-    #[serde(rename = "toolcall_delta")]
-    ToolCallDelta {
-        #[serde(rename = "contentIndex")]
-        content_index: usize,
-        delta: String,
-        partial: AssistantMessage,
-    },
-    #[serde(rename = "toolcall_end")]
-    ToolCallEnd {
-        #[serde(rename = "contentIndex")]
-        content_index: usize,
-        #[serde(rename = "toolCall")]
-        tool_call: ToolCall,
-        partial: AssistantMessage,
-    },
-    #[serde(rename = "done")]
-    Done {
-        reason: AssistantDoneReason,
-        message: AssistantMessage,
-    },
-    #[serde(rename = "error")]
-    Error {
-        reason: AssistantErrorReason,
-        error: AssistantMessage,
-    },
+/// Pi duplicates the accumulated assistant message inside this event payload.
+///
+/// The runtime consumes the authoritative sibling `message` field, so retaining
+/// and decoding this second copy only multiplies streaming allocations.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct IgnoredAssistantMessageEvent;
+
+impl<'de> Deserialize<'de> for IgnoredAssistantMessageEvent {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        IgnoredAny::deserialize(deserializer)?;
+        Ok(Self)
+    }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum AssistantDoneReason {
-    #[serde(rename = "stop")]
-    Stop,
-    #[serde(rename = "length")]
-    Length,
-    #[serde(rename = "toolUse")]
-    ToolUse,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum AssistantErrorReason {
-    Aborted,
-    Error,
+impl Serialize for IgnoredAssistantMessageEvent {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_none()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -136,7 +67,7 @@ pub enum RpcEvent {
     MessageUpdate {
         message: Box<AgentMessage>,
         #[serde(rename = "assistantMessageEvent")]
-        assistant_message_event: Box<AssistantMessageEvent>,
+        assistant_message_event: IgnoredAssistantMessageEvent,
     },
     #[serde(rename = "message_end")]
     MessageEnd { message: AgentMessage },

@@ -504,11 +504,12 @@ mod tests {
     fn synthetic_tree() -> Vec<RuntimeTreeNode> {
         vec![
             RuntimeTreeNode {
-                entry: message("u1", None, MessageRole::User, "root prompt"),
+                entry: message("u1", None, MessageRole::User, "root prompt").into(),
                 label: Some("start".to_owned()),
                 children: vec![
                     RuntimeTreeNode {
-                        entry: message("a1", Some("u1"), MessageRole::Assistant, "first answer"),
+                        entry: message("a1", Some("u1"), MessageRole::Assistant, "first answer")
+                            .into(),
                         label: None,
                         children: vec![RuntimeTreeNode {
                             entry: entry(
@@ -517,13 +518,15 @@ mod tests {
                                 EntryKind::Compaction {
                                     summary: "kept context".to_owned(),
                                 },
-                            ),
+                            )
+                            .into(),
                             label: None,
                             children: Vec::new(),
                         }],
                     },
                     RuntimeTreeNode {
-                        entry: message("orphan", Some("missing"), MessageRole::User, "other path"),
+                        entry: message("orphan", Some("missing"), MessageRole::User, "other path")
+                            .into(),
                         label: None,
                         children: Vec::new(),
                     },
@@ -536,7 +539,8 @@ mod tests {
                     EntryKind::BranchSummary {
                         summary: "orphaned branch context".to_owned(),
                     },
-                ),
+                )
+                .into(),
                 label: Some("review".to_owned()),
                 children: Vec::new(),
             },

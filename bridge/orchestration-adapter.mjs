@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
@@ -9,6 +9,7 @@ import { pathToFileURL } from "node:url";
 import {
   agentQueuePositions,
   cascadeReadyTasks,
+  fitSnapshotRecord,
   goalCommand,
   latestGoalState,
   normalizeSchedules,
@@ -22,7 +23,10 @@ const ENDPOINT = process.env.PI_GUI_ORCHESTRATION_PIPE;
 const AGENT_DIR =
   process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent");
 const MAX_RECORD_BYTES = 1024 * 1024;
+const MAX_SNAPSHOT_RECORD_BYTES = 900 * 1024;
+const MAX_TRANSCRIPT_FILE_CACHE = 64;
 const MANAGER_KEY = Symbol.for("pi-subagents:manager");
+const transcriptFileCache = new Map();
 
 function readJson(path, fallback) {
   try {
@@ -124,39 +128,55 @@ async function taskSnapshots(ctx, diagnostics) {
   }));
 }
 
-function restoredAgentIds(ctx) {
-  const entries = ctx.sessionManager.getBranch?.() ?? ctx.sessionManager.getEntries?.() ?? [];
-  return entries
-    .filter((entry) => entry?.type === "custom" && entry.customType === "subagents:record")
-    .map((entry) => String(entry.data?.id ?? ""))
-    .filter(Boolean);
+function sessionEntries(ctx) {
+  return ctx.sessionManager.getBranch?.() ?? ctx.sessionManager.getEntries?.() ?? [];
 }
 
-function restoredAgent(ctx, id) {
-  const entries = ctx.sessionManager.getBranch?.() ?? ctx.sessionManager.getEntries?.() ?? [];
-  return [...entries]
-    .reverse()
-    .find(
-      (entry) =>
-        entry?.type === "custom" &&
-        entry.customType === "subagents:record" &&
-        String(entry.data?.id ?? "") === id,
-    )?.data;
+function restoredAgents(entries) {
+  const records = new Map();
+  for (let index = entries.length - 1; index >= 0; index--) {
+    const entry = entries[index];
+    if (entry?.type !== "custom" || entry.customType !== "subagents:record") continue;
+    const id = String(entry.data?.id ?? "");
+    if (id && !records.has(id)) records.set(id, entry.data);
+  }
+  return records;
 }
 
 function managerRegistry() {
   return globalThis[MANAGER_KEY];
 }
 
-async function subagentSnapshots(ctx, knownIds) {
+function cachedTranscriptFromFile(path) {
+  if (typeof path !== "string" || !path) return { entries: [], truncated: false };
+  let fingerprint;
+  try {
+    const stat = statSync(path);
+    fingerprint = `${stat.size}:${stat.mtimeMs}`;
+  } catch {
+    return { entries: [], truncated: false };
+  }
+  const cached = transcriptFileCache.get(path);
+  if (cached?.fingerprint === fingerprint) return cached.transcript;
+  const transcript = transcriptFromFile(path);
+  transcriptFileCache.delete(path);
+  transcriptFileCache.set(path, { fingerprint, transcript });
+  while (transcriptFileCache.size > MAX_TRANSCRIPT_FILE_CACHE) {
+    transcriptFileCache.delete(transcriptFileCache.keys().next().value);
+  }
+  return transcript;
+}
+
+async function subagentSnapshots(ctx, knownIds, entries) {
   const manager = managerRegistry();
   const settings = subagentSettings(ctx.cwd);
   const maxConcurrent = Number.isFinite(settings.maxConcurrent)
     ? Math.max(1, Math.floor(settings.maxConcurrent))
     : 4;
-  const ids = new Set([...knownIds, ...restoredAgentIds(ctx)]);
+  const restored = restoredAgents(entries);
+  const ids = new Set([...knownIds, ...restored.keys()]);
   const records = [...ids]
-    .map((id) => manager?.getRecord?.(id) ?? restoredAgent(ctx, id))
+    .map((id) => manager?.getRecord?.(id) ?? restored.get(id))
     .filter(Boolean)
     .sort((left, right) => Number(right.startedAt ?? 0) - Number(left.startedAt ?? 0));
   const queuePositions = agentQueuePositions(records);
@@ -168,7 +188,7 @@ async function subagentSnapshots(ctx, knownIds) {
       const fileTranscript =
         liveTranscript?.entries.length > 0
           ? liveTranscript
-          : transcriptFromFile(record.outputFile);
+          : cachedTranscriptFromFile(record.outputFile);
       return {
         id: String(record.id),
         type: String(record.type ?? "agent"),
@@ -194,8 +214,7 @@ async function subagentSnapshots(ctx, knownIds) {
   );
 }
 
-function goalSnapshot(ctx) {
-  const entries = ctx.sessionManager.getBranch?.() ?? ctx.sessionManager.getEntries?.() ?? [];
+function goalSnapshot(ctx, entries = sessionEntries(ctx)) {
   return latestGoalState(entries);
 }
 
@@ -249,6 +268,11 @@ export default function orchestrationAdapter(pi) {
   let reconnectTimer;
   let publishTimer;
   let pollTimer;
+  let publishInFlight = false;
+  let publishDirty = false;
+  let publishForced = false;
+  let snapshotWriteBlocked = false;
+  let pendingSnapshotEncoded;
   let generation = 0;
   let lastSnapshotJson = "";
   const knownAgentIds = new Set();
@@ -263,42 +287,72 @@ export default function orchestrationAdapter(pi) {
     return true;
   };
 
+  const writeSnapshot = (encoded) => {
+    if (!socket || socket.destroyed) return false;
+    if (snapshotWriteBlocked) {
+      pendingSnapshotEncoded = encoded;
+      return true;
+    }
+    snapshotWriteBlocked = !socket.write(`${encoded}\n`);
+    return true;
+  };
+
   const buildSnapshot = async () => {
-    if (!currentCtx) throw actionError("no_session", "No Pi session is active.");
+    const ctx = currentCtx;
+    if (!ctx) throw actionError("no_session", "No Pi session is active.");
     const diagnostics = [];
+    const entries = sessionEntries(ctx);
     const [tasks, subagents] = await Promise.all([
-      taskSnapshots(currentCtx, diagnostics),
-      subagentSnapshots(currentCtx, knownAgentIds),
+      taskSnapshots(ctx, diagnostics),
+      subagentSnapshots(ctx, knownAgentIds, entries),
     ]);
+    if (currentCtx !== ctx) throw actionError("stale_session", "The Pi session changed.");
     return {
-      sessionId: currentCtx.sessionManager.getSessionId(),
+      sessionId: ctx.sessionManager.getSessionId(),
       generation: ++generation,
       capturedAt: Date.now(),
       tasks,
       subagents,
-      schedules: scheduleSnapshots(currentCtx),
-      goal: goalSnapshot(currentCtx),
+      schedules: scheduleSnapshots(ctx),
+      goal: goalSnapshot(ctx, entries),
       diagnostics,
     };
   };
 
-  const publishNow = async (force = false) => {
-    publishTimer = undefined;
-    if (!currentCtx || !socket || socket.destroyed) return;
+  const publishNow = async () => {
+    if (publishInFlight) return;
+    publishInFlight = true;
     try {
-      const snapshot = await buildSnapshot();
-      const comparable = JSON.stringify({ ...snapshot, generation: 0, capturedAt: 0 });
-      if (!force && comparable === lastSnapshotJson) return;
-      lastSnapshotJson = comparable;
-      send({ type: "snapshot", snapshot });
-    } catch {
-      // A lifecycle edge can invalidate the context while the snapshot is building.
+      do {
+        publishDirty = false;
+        const force = publishForced;
+        publishForced = false;
+        if (!currentCtx || !socket || socket.destroyed) continue;
+        try {
+          const built = await buildSnapshot();
+          const { snapshot, encoded } = fitSnapshotRecord(built, MAX_SNAPSHOT_RECORD_BYTES);
+          const comparable = JSON.stringify({ ...snapshot, generation: 0, capturedAt: 0 });
+          if (!force && comparable === lastSnapshotJson) continue;
+          lastSnapshotJson = comparable;
+          if (Buffer.byteLength(encoded, "utf8") <= MAX_RECORD_BYTES) writeSnapshot(encoded);
+        } catch {
+          // A lifecycle edge can invalidate the context while the snapshot is building.
+        }
+      } while (publishDirty);
+    } finally {
+      publishInFlight = false;
+      if (publishDirty) publishSoon();
     }
   };
 
   const publishSoon = (force = false) => {
-    if (publishTimer) return;
-    publishTimer = setTimeout(() => void publishNow(force), 100);
+    publishDirty = true;
+    publishForced ||= force;
+    if (publishTimer || publishInFlight) return;
+    publishTimer = setTimeout(() => {
+      publishTimer = undefined;
+      void publishNow();
+    }, 250);
   };
 
   const findTaskByAgent = async (agentId) => {
@@ -410,7 +464,10 @@ export default function orchestrationAdapter(pi) {
     if (sessionId && sessionId !== activeSessionId) {
       throw actionError("stale_session", "The selected Pi session has changed.");
     }
-    if (action?.kind === "snapshot") return buildSnapshot();
+    if (action?.kind === "snapshot") {
+      const snapshot = await buildSnapshot();
+      return fitSnapshotRecord(snapshot, MAX_SNAPSHOT_RECORD_BYTES).snapshot;
+    }
     switch (action?.kind) {
       case "task_execute":
         return executeTasks(action);
@@ -529,6 +586,8 @@ export default function orchestrationAdapter(pi) {
 
   const attachSocket = (connected) => {
     socket = connected;
+    snapshotWriteBlocked = false;
+    pendingSnapshotEncoded = undefined;
     socket.setEncoding("utf8");
     const lines = createInterface({ input: socket, crlfDelay: Infinity });
     lines.on("line", (line) => {
@@ -557,12 +616,21 @@ export default function orchestrationAdapter(pi) {
     socket.on("close", () => {
       if (socket !== connected) return;
       socket = undefined;
+      snapshotWriteBlocked = false;
+      pendingSnapshotEncoded = undefined;
       clearInterval(pollTimer);
       pollTimer = undefined;
       scheduleReconnect();
     });
+    socket.on("drain", () => {
+      if (socket !== connected) return;
+      snapshotWriteBlocked = false;
+      const pending = pendingSnapshotEncoded;
+      pendingSnapshotEncoded = undefined;
+      if (pending) writeSnapshot(pending);
+    });
     socket.on("error", () => {});
-    pollTimer ??= setInterval(() => publishSoon(), 500);
+    pollTimer ??= setInterval(() => publishSoon(), 2000);
     pollTimer.unref?.();
     publishSoon(true);
   };
@@ -606,6 +674,7 @@ export default function orchestrationAdapter(pi) {
     knownAgentIds.clear();
     taskAgentMap.clear();
     cascadeByTask.clear();
+    transcriptFileCache.clear();
     lastSnapshotJson = "";
     publishSoon(true);
   });
@@ -616,7 +685,6 @@ export default function orchestrationAdapter(pi) {
   });
 
   pi.on("tool_execution_end", () => publishSoon());
-  pi.on("message_update", () => publishSoon());
   pi.on("session_shutdown", () => {
     currentCtx = undefined;
     clearInterval(pollTimer);

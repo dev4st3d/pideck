@@ -7,11 +7,13 @@ use std::time::{Duration, Instant};
 
 use super::{
     Command, ConnectionGeneration, ExtensionUiResponse, IncomingRecord, JsonlCodec, OutboundRecord,
-    RequestId, ResponseResult, RpcCommand, RpcResponse, SessionState, encode_record,
+    RequestId, ResponseResult, RpcCommand, RpcEvent, RpcResponse, SessionState, encode_record,
 };
 use crate::services::pi_process::{
     PiLaunchConfig, PiSupervisor, ProcessFailureKind, ShutdownReport, StartError, SupervisorState,
 };
+
+const MAX_PENDING_NOTIFICATIONS: usize = 32;
 
 trait RecoverPoison<T> {
     fn recover_poison(self) -> T;
@@ -249,7 +251,7 @@ impl RpcClient {
         deadlines: RpcDeadlines,
     ) -> Result<Self, RpcClientStartError> {
         deadlines.validate()?;
-        let (notification_sender, notifications) = mpsc::channel();
+        let (notification_sender, notifications) = mpsc::sync_channel(MAX_PENDING_NOTIFICATIONS);
         let inner = Arc::new(RpcClientInner {
             config,
             deadlines,
@@ -374,7 +376,7 @@ struct RpcClientInner {
     lifecycle: Mutex<()>,
     active: Mutex<Option<Arc<Connection>>>,
     generation: AtomicU64,
-    notification_sender: mpsc::Sender<TaggedIncomingRecord>,
+    notification_sender: mpsc::SyncSender<TaggedIncomingRecord>,
     notifications: Mutex<mpsc::Receiver<TaggedIncomingRecord>>,
     stale_records_ignored: AtomicU64,
     ready_state: Mutex<Option<SessionState>>,
@@ -549,7 +551,7 @@ struct Connection {
     status: Mutex<ConnectionStatus>,
     timed_out_requests: AtomicU64,
     mutation_sender: mpsc::Sender<MutationJob>,
-    notification_sender: mpsc::Sender<TaggedIncomingRecord>,
+    notification_sender: mpsc::SyncSender<TaggedIncomingRecord>,
     workers: Mutex<Vec<JoinHandle<()>>>,
 }
 
@@ -559,7 +561,7 @@ impl Connection {
         supervisor: PiSupervisor,
         stdout: mpsc::Receiver<crate::services::pi_process::StdoutEvent>,
         deadlines: RpcDeadlines,
-        notification_sender: mpsc::Sender<TaggedIncomingRecord>,
+        notification_sender: mpsc::SyncSender<TaggedIncomingRecord>,
     ) -> Arc<Self> {
         let (mutation_sender, mutation_receiver) = mpsc::channel();
         let connection = Arc::new(Self {
@@ -767,12 +769,28 @@ impl Connection {
     }
 
     fn route(&self, record: IncomingRecord) {
+        let replaceable_stream_update = matches!(
+            &record,
+            IncomingRecord::Event(event) if matches!(event.as_ref(), RpcEvent::MessageUpdate { .. })
+        );
         let IncomingRecord::Response(response) = record else {
-            let _ = self.notification_sender.send(TaggedIncomingRecord {
+            let mut notification = TaggedIncomingRecord {
                 generation: self.generation,
                 record,
-            });
-            return;
+            };
+            loop {
+                if self.closed.load(Ordering::Acquire) {
+                    return;
+                }
+                match self.notification_sender.try_send(notification) {
+                    Ok(()) | Err(mpsc::TrySendError::Disconnected(_)) => return,
+                    Err(mpsc::TrySendError::Full(_)) if replaceable_stream_update => return,
+                    Err(mpsc::TrySendError::Full(pending)) => {
+                        notification = pending;
+                        thread::sleep(Duration::from_millis(1));
+                    }
+                }
+            }
         };
         let Some(id) = response.id.clone() else {
             self.protocol_fault();

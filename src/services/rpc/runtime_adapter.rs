@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::time::Instant;
 
 use serde_json::Value;
@@ -1067,7 +1068,7 @@ fn runtime_entry(entry: SessionEntry) -> RuntimeEntry {
 
 fn runtime_tree(node: SessionTreeNode) -> RuntimeTreeNode {
     RuntimeTreeNode {
-        entry: runtime_entry(node.entry),
+        entry: Arc::new(runtime_entry(node.entry)),
         children: node.children.into_iter().map(runtime_tree).collect(),
         label: node.label,
     }

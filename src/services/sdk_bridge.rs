@@ -8,7 +8,7 @@ use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use async_channel::{Receiver, Sender};
 use serde::{Deserialize, Serialize};
@@ -348,6 +348,7 @@ struct BridgeInner {
     pending: Mutex<HashMap<String, mpsc::Sender<Result<Value, BridgeError>>>>,
     next_id: AtomicU64,
     stopped: AtomicBool,
+    healthy: AtomicBool,
     event_sender: Sender<BridgeEvent>,
 }
 
@@ -412,6 +413,7 @@ impl SdkBridgeClient {
             pending: Mutex::new(HashMap::new()),
             next_id: AtomicU64::new(1),
             stopped: AtomicBool::new(false),
+            healthy: AtomicBool::new(true),
             event_sender,
         });
         spawn_reader(stdout, Arc::clone(&inner));
@@ -426,12 +428,23 @@ impl SdkBridgeClient {
             },
             events: events.clone(),
         };
-        let hello: BridgeHello = serde_json::from_value(
-            provisional.call(BridgeCommand::Hello, Duration::from_secs(10))?,
-        )
-        .map_err(|_| {
-            BridgeError::new(BridgeErrorKind::Protocol, "The bridge hello was invalid.")
-        })?;
+        let hello_value = match provisional.call(BridgeCommand::Hello, Duration::from_secs(10)) {
+            Ok(value) => value,
+            Err(error) => {
+                provisional.stop();
+                return Err(error);
+            }
+        };
+        let hello: BridgeHello = match serde_json::from_value(hello_value) {
+            Ok(hello) => hello,
+            Err(_) => {
+                provisional.stop();
+                return Err(BridgeError::new(
+                    BridgeErrorKind::Protocol,
+                    "The bridge hello was invalid.",
+                ));
+            }
+        };
         if hello.protocol_version != PROTOCOL_VERSION {
             provisional.stop();
             return Err(BridgeError::new(
@@ -452,6 +465,10 @@ impl SdkBridgeClient {
 
     pub fn events(&self) -> Receiver<BridgeEvent> {
         self.events.clone()
+    }
+
+    fn is_healthy(&self) -> bool {
+        self.inner.healthy.load(Ordering::Acquire)
     }
 
     pub fn call_default(&self, command: BridgeCommand) -> Result<Value, BridgeError> {
@@ -555,6 +572,7 @@ impl SdkBridgeClient {
         if self.inner.stopped.swap(true, Ordering::AcqRel) {
             return;
         }
+        self.inner.healthy.store(false, Ordering::Release);
         self.inner
             .stdin
             .lock()
@@ -600,10 +618,14 @@ fn write_record<T: Serialize>(inner: &BridgeInner, record: &T) -> Result<(), Bri
     let stdin = guard.as_mut().ok_or_else(|| {
         BridgeError::new(BridgeErrorKind::Disconnected, "The bridge input is closed.")
     })?;
-    stdin
+    let result = stdin
         .write_all(&bytes)
         .and_then(|_| stdin.flush())
-        .map_err(|_| BridgeError::new(BridgeErrorKind::Disconnected, "The bridge input failed."))
+        .map_err(|_| BridgeError::new(BridgeErrorKind::Disconnected, "The bridge input failed."));
+    if result.is_err() {
+        inner.healthy.store(false, Ordering::Release);
+    }
+    result
 }
 
 fn spawn_reader(stdout: impl std::io::Read + Send + 'static, inner: Arc<BridgeInner>) {
@@ -651,6 +673,12 @@ fn spawn_reader(stdout: impl std::io::Read + Send + 'static, inner: Arc<BridgeIn
             };
             let _ = sender.send(result);
         }
+        inner.healthy.store(false, Ordering::Release);
+        inner
+            .stdin
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
         fail_pending(&inner, "The Pi SDK bridge disconnected.");
     });
 }
@@ -736,6 +764,8 @@ fn bridge_worker(
     let (internal_sender, internal_receiver) = mpsc::channel();
     let mut client = start_discovered_bridge(&working_directory);
     let mut event_receiver = client.as_ref().ok().map(SdkBridgeClient::events);
+    let mut reconnect_delay = Duration::from_secs(1);
+    let mut reconnect_due = client.is_err().then(|| Instant::now() + reconnect_delay);
     let _ = results.send_blocking(BridgeWorkerResult::Capabilities(
         client
             .as_ref()
@@ -743,6 +773,34 @@ fn bridge_worker(
             .map_err(Clone::clone),
     ));
     loop {
+        if client.as_ref().is_ok_and(|active| !active.is_healthy()) {
+            if let Ok(active) = &client {
+                active.stop();
+            }
+            client = Err(BridgeError::new(
+                BridgeErrorKind::Disconnected,
+                "The Pi SDK bridge disconnected.",
+            ));
+            event_receiver = None;
+            reconnect_due.get_or_insert_with(Instant::now);
+        }
+        if reconnect_due.is_some_and(|due| Instant::now() >= due) {
+            client = start_discovered_bridge(&working_directory);
+            event_receiver = client.as_ref().ok().map(SdkBridgeClient::events);
+            let _ = results.send_blocking(BridgeWorkerResult::Capabilities(
+                client
+                    .as_ref()
+                    .map(|client| client.hello().clone())
+                    .map_err(Clone::clone),
+            ));
+            if client.is_ok() {
+                reconnect_due = None;
+                reconnect_delay = Duration::from_secs(1);
+            } else {
+                reconnect_due = Some(Instant::now() + reconnect_delay);
+                reconnect_delay = (reconnect_delay * 2).min(Duration::from_secs(15));
+            }
+        }
         if let Some(events) = &event_receiver {
             while let Ok(event) = events.try_recv() {
                 let _ = results.send_blocking(BridgeWorkerResult::Event(event));
@@ -758,16 +816,6 @@ fn bridge_worker(
         };
         match command {
             BridgeWorkerCommand::Execute { id, command } => {
-                if client.is_err() {
-                    client = start_discovered_bridge(&working_directory);
-                    event_receiver = client.as_ref().ok().map(SdkBridgeClient::events);
-                    let _ = results.send_blocking(BridgeWorkerResult::Capabilities(
-                        client
-                            .as_ref()
-                            .map(|client| client.hello().clone())
-                            .map_err(Clone::clone),
-                    ));
-                }
                 let Err(unavailable) = client.as_ref() else {
                     let active = client
                         .as_ref()
@@ -808,6 +856,8 @@ fn bridge_worker(
                 }
                 client = start_discovered_bridge(&working_directory);
                 event_receiver = client.as_ref().ok().map(SdkBridgeClient::events);
+                reconnect_delay = Duration::from_secs(1);
+                reconnect_due = client.is_err().then(|| Instant::now() + reconnect_delay);
                 let _ = results.send_blocking(BridgeWorkerResult::Capabilities(
                     client
                         .as_ref()

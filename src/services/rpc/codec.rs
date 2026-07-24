@@ -4,13 +4,13 @@ use serde::Serialize;
 
 use super::protocol::{IncomingRecord, ProtocolDecodeError, decode_record};
 
-/// Maximum JSON payload size for one inbound or outbound record: 8 MiB, excluding
+/// Maximum JSON payload size for one inbound or outbound record: 64 MiB, excluding
 /// the LF delimiter and an optional CR immediately before it.
 ///
 /// A limit prevents a broken or hostile child from growing the transport buffer
-/// without bound. Crossing it is a fatal protocol fault; callers must replace the
-/// child/connection rather than attempt to resume this decoder.
-pub const DEFAULT_MAX_FRAME_SIZE: usize = 8 * 1024 * 1024;
+/// without bound. Pi returns a complete session transcript as one record, so the
+/// bound must also accommodate legitimately large tasks without disconnecting.
+pub const DEFAULT_MAX_FRAME_SIZE: usize = 64 * 1024 * 1024;
 
 #[derive(Debug)]
 pub struct JsonlCodec {

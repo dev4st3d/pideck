@@ -3,7 +3,8 @@
 use gpui::{Rgba, rgb, rgba};
 
 pub const SANS: &str = "Switzer";
-pub const DISPLAY: &str = "Tanker";
+pub const DISPLAY: &str = "Bonny";
+pub const CONTROL: &str = DISPLAY;
 pub const MONO: &str = "Cascadia Mono";
 
 // Layout

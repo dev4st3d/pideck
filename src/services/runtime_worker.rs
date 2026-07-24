@@ -16,10 +16,11 @@ use super::rpc::{
     RpcClientStartError, RpcDispatch, SessionEpoch, disconnected_input, dispatch_for_effect,
     normalize_call_result, normalize_tagged_record,
 };
-use crate::state::runtime::{RuntimeEffect, StampedInput};
+use crate::state::runtime::{NormalizedEvent, RuntimeEffect, RuntimeInput, StampedInput};
 
 const COORDINATOR_TICK: Duration = Duration::from_millis(10);
 const EVENT_POLL: Duration = Duration::from_millis(50);
+const MAX_PENDING_RUNTIME_EVENTS: usize = 32;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct AttemptGeneration(u64);
@@ -290,6 +291,20 @@ pub enum WorkerResult {
     },
 }
 
+fn send_result(results: &Sender<WorkerResult>, result: WorkerResult) {
+    match results.try_send(result) {
+        Ok(()) | Err(async_channel::TrySendError::Closed(_)) => {}
+        Err(async_channel::TrySendError::Full(WorkerResult::Input { input, .. }))
+            if matches!(
+                &input.input,
+                RuntimeInput::Event(NormalizedEvent::MessageUpdate(_))
+            ) => {}
+        Err(async_channel::TrySendError::Full(result)) => {
+            let _ = results.send_blocking(result);
+        }
+    }
+}
+
 enum WorkerCommand {
     Connect {
         attempt: AttemptGeneration,
@@ -342,7 +357,7 @@ pub struct RuntimeWorkerHandle {
 impl RuntimeWorkerHandle {
     pub fn spawn(service: Arc<dyn RuntimeService>) -> Self {
         let (commands, command_receiver) = mpsc::channel();
-        let (results, result_receiver) = async_channel::unbounded();
+        let (results, result_receiver) = async_channel::bounded(MAX_PENDING_RUNTIME_EVENTS);
         let shutdown_requested = Arc::new(AtomicBool::new(false));
         thread::spawn(move || coordinator(service, command_receiver, results));
         Self {
@@ -394,7 +409,7 @@ fn coordinator(
     commands: mpsc::Receiver<WorkerCommand>,
     results: Sender<WorkerResult>,
 ) {
-    let (internal_sender, internal_receiver) = mpsc::channel();
+    let (internal_sender, internal_receiver) = mpsc::sync_channel(MAX_PENDING_RUNTIME_EVENTS);
     let mut desired_attempt = None;
     let mut active: Option<ActiveConnection> = None;
 
@@ -421,10 +436,13 @@ fn coordinator(
             } => {
                 desired_attempt = Some(attempt);
                 stop_active(&mut active);
-                let _ = results.try_send(WorkerResult::Connecting {
-                    attempt,
-                    generation,
-                });
+                send_result(
+                    &results,
+                    WorkerResult::Connecting {
+                        attempt,
+                        generation,
+                    },
+                );
                 let service = Arc::clone(&service);
                 let internal = internal_sender.clone();
                 thread::spawn(move || match service.connect(generation) {
@@ -477,7 +495,7 @@ fn coordinator(
                         });
                     });
                 } else if let Some(attempt) = stopped_attempt {
-                    let _ = results.try_send(WorkerResult::Stopped { attempt });
+                    send_result(&results, WorkerResult::Stopped { attempt });
                 }
             }
             WorkerCommand::Shutdown => {
@@ -493,7 +511,7 @@ fn handle_internal(
     desired_attempt: Option<AttemptGeneration>,
     active: &mut Option<ActiveConnection>,
     results: &Sender<WorkerResult>,
-    internal_sender: &mpsc::Sender<InternalResult>,
+    internal_sender: &mpsc::SyncSender<InternalResult>,
 ) {
     match result {
         InternalResult::Connected {
@@ -521,10 +539,13 @@ fn handle_internal(
                 epoch,
                 cancelled,
             });
-            let _ = results.try_send(WorkerResult::Connected {
-                attempt,
-                generation,
-            });
+            send_result(
+                results,
+                WorkerResult::Connected {
+                    attempt,
+                    generation,
+                },
+            );
         }
         InternalResult::ConnectionFailed {
             attempt,
@@ -532,11 +553,14 @@ fn handle_internal(
             failure,
         } => {
             if desired_attempt == Some(attempt) {
-                let _ = results.try_send(WorkerResult::ConnectionFailed {
-                    attempt,
-                    generation,
-                    failure,
-                });
+                send_result(
+                    results,
+                    WorkerResult::ConnectionFailed {
+                        attempt,
+                        generation,
+                        failure,
+                    },
+                );
             }
         }
         InternalResult::Input { attempt, input } => {
@@ -545,7 +569,7 @@ fn handle_internal(
                     .as_ref()
                     .is_some_and(|active| active.attempt == attempt)
             {
-                let _ = results.try_send(WorkerResult::Input { attempt, input });
+                send_result(results, WorkerResult::Input { attempt, input });
             }
         }
         InternalResult::PollClosed { attempt } => {
@@ -558,7 +582,7 @@ fn handle_internal(
             }
         }
         InternalResult::StopCompleted { attempt } => {
-            let _ = results.try_send(WorkerResult::Stopped { attempt });
+            send_result(results, WorkerResult::Stopped { attempt });
         }
     }
 }
@@ -568,7 +592,7 @@ fn spawn_event_pump(
     connection: Arc<dyn RuntimeConnection>,
     epoch: Arc<AtomicU64>,
     cancelled: Arc<AtomicBool>,
-    internal: mpsc::Sender<InternalResult>,
+    internal: mpsc::SyncSender<InternalResult>,
 ) {
     thread::spawn(move || {
         while !cancelled.load(Ordering::Acquire) {

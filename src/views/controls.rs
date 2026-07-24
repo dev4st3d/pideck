@@ -41,7 +41,7 @@ pub fn meta_sep() -> impl IntoElement {
 
 pub fn section_label(text: impl Into<SharedString>) -> impl IntoElement {
     div()
-        .font_family(theme::SANS)
+        .font_family(theme::CONTROL)
         .text_size(px(theme::T_LABEL))
         .font_weight(FontWeight::SEMIBOLD)
         .text_color(theme::ash())
@@ -67,7 +67,7 @@ pub fn status_pill(label: impl Into<SharedString>, color: gpui::Rgba) -> impl In
         )
         .child(
             div()
-                .font_family(theme::SANS)
+                .font_family(theme::CONTROL)
                 .text_size(px(theme::T_UI_SM))
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(color)
@@ -128,7 +128,7 @@ pub fn recovery_button(
         })
         .child(
             div()
-                .font_family(theme::SANS)
+                .font_family(theme::CONTROL)
                 .text_size(px(theme::T_UI_SM))
                 .font_weight(FontWeight::BOLD)
                 .child(label),
@@ -173,7 +173,7 @@ pub fn quiet_button(
         })
         .child(
             div()
-                .font_family(theme::SANS)
+                .font_family(theme::CONTROL)
                 .text_size(px(theme::T_UI_SM))
                 .font_weight(FontWeight::SEMIBOLD)
                 .child(label.into()),
@@ -230,7 +230,7 @@ pub fn chip_button(
         })
         .child(
             div()
-                .font_family(theme::SANS)
+                .font_family(theme::CONTROL)
                 .text_size(px(theme::T_TINY))
                 .font_weight(if selected {
                     FontWeight::BOLD
@@ -297,7 +297,7 @@ pub fn compact_select(
             div()
                 .min_w_0()
                 .flex_1()
-                .font_family(theme::SANS)
+                .font_family(theme::CONTROL)
                 .text_size(px(theme::T_TINY))
                 .font_weight(FontWeight::MEDIUM)
                 .overflow_hidden()
@@ -345,7 +345,7 @@ pub fn chrome_action(
         })
         .child(
             div()
-                .font_family(theme::SANS)
+                .font_family(theme::CONTROL)
                 .text_size(px(10.0))
                 .font_weight(FontWeight::MEDIUM)
                 .child(label.into()),
@@ -410,7 +410,7 @@ pub fn tab_button(
         .on_click(move |event, window, cx| on_click(event, window, cx))
         .child(
             div()
-                .font_family(theme::SANS)
+                .font_family(theme::CONTROL)
                 .text_size(px(theme::T_TINY))
                 .font_weight(if selected {
                     FontWeight::BOLD
@@ -603,7 +603,8 @@ pub fn context_block(
     pct: Option<f32>,
     tokens_in: impl Into<SharedString>,
     tokens_out: impl Into<SharedString>,
-    cache: impl Into<SharedString>,
+    cache_read: impl Into<SharedString>,
+    cache_write: impl Into<SharedString>,
 ) -> impl IntoElement {
     let pct = pct.unwrap_or(0.0).clamp(0.0, 1.0);
     let fill_color = if pct > 0.85 {
@@ -655,15 +656,28 @@ pub fn context_block(
                         .bg(fill_color),
                 ),
         )
+        // Two equal pairs so long cache figures never crush in/out.
         .child(
             div()
                 .flex()
-                .flex_row()
-                .justify_between()
+                .flex_col()
                 .gap(px(8.0))
-                .child(stat("in", tokens_in))
-                .child(stat("out", tokens_out))
-                .child(stat("cache", cache)),
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .gap(px(12.0))
+                        .child(stat("in", tokens_in))
+                        .child(stat("out", tokens_out)),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .gap(px(12.0))
+                        .child(stat("cache read", cache_read))
+                        .child(stat("cache write", cache_write)),
+                ),
         )
 }
 

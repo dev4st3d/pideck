@@ -1,83 +1,112 @@
 //! Live, turn-grouped conversation presentation and read-only selectable text.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::ops::Range;
 
 use gpui::{
-    AnyElement, ClipboardItem, Context, CursorStyle, Entity, FocusHandle, Focusable, FontStyle,
-    FontWeight, HighlightStyle, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, Pixels, Render, SharedString, StrikethroughStyle, StyledText, TextLayout,
-    UnderlineStyle, Window, div, prelude::*, px, relative,
+    AnyElement, App, ClipboardItem, Context, CursorStyle, Entity, FocusHandle, Focusable,
+    FontStyle, FontWeight, HighlightStyle, IntoElement, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, Pixels, Render, SharedString, StrikethroughStyle, StyledText,
+    TextLayout, UnderlineStyle, Window, div, prelude::*, px, relative,
 };
 
 use crate::actions::{TranscriptCopy, TranscriptSelectAll};
 use crate::controller::{AcceptedUserInput, ConversationProjection};
-use crate::services::rpc::SessionEpoch;
+use crate::services::rpc::{SessionEpoch, ToolCallId};
 use crate::state::runtime::{
     CompactionKind, CompactionState, FacetStatus, MessageBlock, MessageRole, MessageStopReason,
-    RetryState, RuntimeLifecycle, RuntimeMessage, SubmissionKind,
+    RetryState, RuntimeLifecycle, RuntimeMessage, SubmissionKind, ToolImage,
 };
 use crate::theme;
 use crate::views::markdown::{MarkdownDocument, MarkdownStyle};
 use crate::views::tool_card::{
-    ToolCard, ToolPresentation, has_tool_call, presentation_for_bash_block,
-    presentation_for_standalone_result, presentation_for_tool_call, render_tool_presentation,
-    status_color, tail_presentations,
+    ToolPresentation, presentation_for_bash_block, presentation_for_standalone_result,
+    presentation_for_tool_call, render_tool_presentation, status_color, tail_presentations,
 };
 
-const FOLLOW_THRESHOLD: Pixels = px(72.0);
+mod list;
+mod scroll;
 
-#[derive(Debug, Clone)]
-pub(super) struct ScrollPinning {
-    epoch: Option<SessionEpoch>,
-    revision: u64,
-    pinned: bool,
+pub(super) use list::ConversationListModel;
+pub(super) use scroll::ConversationScrollMotion;
+
+const MAX_CACHED_TRANSCRIPT_BLOCKS: usize = 256;
+
+struct CachedTranscriptText {
+    entity: Entity<TranscriptText>,
+    last_used: u64,
 }
 
-impl Default for ScrollPinning {
-    fn default() -> Self {
+pub(super) struct TranscriptTextCache {
+    epoch: SessionEpoch,
+    use_counter: u64,
+    entries: HashMap<String, CachedTranscriptText>,
+}
+
+impl TranscriptTextCache {
+    pub(super) fn new(epoch: SessionEpoch) -> Self {
         Self {
-            epoch: None,
-            revision: 0,
-            pinned: true,
+            epoch,
+            use_counter: 0,
+            entries: HashMap::new(),
         }
     }
-}
 
-impl ScrollPinning {
-    pub(super) fn should_follow(
+    pub(super) fn prepare_epoch(&mut self, epoch: SessionEpoch) {
+        if self.epoch != epoch {
+            self.epoch = epoch;
+            self.use_counter = 0;
+            self.entries.clear();
+        }
+    }
+
+    fn entity_for(
         &mut self,
-        epoch: SessionEpoch,
-        revision: u64,
-        offset_y: Pixels,
-        max_offset_y: Pixels,
-        selection_active: bool,
-    ) -> bool {
-        if self.epoch != Some(epoch) {
-            self.epoch = Some(epoch);
-            self.revision = revision;
-            self.pinned = !selection_active;
-            return self.pinned;
+        key: String,
+        text: &str,
+        cx: &mut Context<Self>,
+    ) -> Entity<TranscriptText> {
+        self.use_counter = self.use_counter.wrapping_add(1);
+        if let Some(cached) = self.entries.get_mut(&key) {
+            cached.last_used = self.use_counter;
+            cached
+                .entity
+                .update(cx, |text_view, cx| text_view.set_text(text, cx));
+            return cached.entity.clone();
         }
 
-        let near_bottom = (max_offset_y + offset_y).max(Pixels::ZERO) <= FOLLOW_THRESHOLD;
-        if revision == self.revision {
-            self.pinned = near_bottom && !selection_active;
-            return false;
-        }
+        let entity = cx.new(|cx| TranscriptText::new(key.clone(), text, cx));
+        self.entries.insert(
+            key,
+            CachedTranscriptText {
+                entity: entity.clone(),
+                last_used: self.use_counter,
+            },
+        );
+        self.trim(cx);
+        entity
+    }
 
-        self.revision = revision;
-        let follow = self.pinned && !selection_active;
-        if selection_active {
-            self.pinned = false;
+    fn trim(&mut self, cx: &App) {
+        while self.entries.len() > MAX_CACHED_TRANSCRIPT_BLOCKS {
+            let eviction = self
+                .entries
+                .iter()
+                .filter(|(_, cached)| !cached.entity.read(cx).is_selecting)
+                .min_by_key(|(_, cached)| cached.last_used)
+                .map(|(key, _)| key.clone());
+            let Some(eviction) = eviction else {
+                break;
+            };
+            self.entries.remove(&eviction);
         }
-        follow
     }
 }
 
 pub(super) struct TranscriptText {
     id: SharedString,
-    source: String,
+    source_hash: u64,
     document: MarkdownDocument,
     selection: Range<usize>,
     selection_reversed: bool,
@@ -87,11 +116,11 @@ pub(super) struct TranscriptText {
 }
 
 impl TranscriptText {
-    pub(super) fn new(id: String, text: String, cx: &mut Context<Self>) -> Self {
-        let document = MarkdownDocument::parse(&text);
+    pub(super) fn new(id: String, text: &str, cx: &mut Context<Self>) -> Self {
+        let document = MarkdownDocument::parse(text);
         Self {
             id: SharedString::from(id),
-            source: text,
+            source_hash: source_hash(text),
             document,
             selection: 0..0,
             selection_reversed: false,
@@ -101,24 +130,21 @@ impl TranscriptText {
         }
     }
 
-    pub(super) fn set_text(&mut self, text: String, cx: &mut Context<Self>) {
-        if self.source == text {
+    pub(super) fn set_text(&mut self, text: &str, cx: &mut Context<Self>) {
+        let next_hash = source_hash(text);
+        if self.source_hash == next_hash {
             return;
         }
 
-        let document = MarkdownDocument::parse(&text);
+        let document = MarkdownDocument::parse(text);
         self.selection =
             preserved_selection(&self.document.text, &document.text, self.selection.clone());
         if self.selection.is_empty() {
             self.selection_reversed = false;
         }
-        self.source = text;
+        self.source_hash = next_hash;
         self.document = document;
         cx.notify();
-    }
-
-    pub(super) fn selection_active(&self) -> bool {
-        self.is_selecting || !self.selection.is_empty()
     }
 
     fn on_mouse_down(
@@ -187,6 +213,12 @@ impl TranscriptText {
             .unwrap_or_else(|nearest| nearest);
         clamp_boundary(&self.document.text, index)
     }
+}
+
+fn source_hash(text: &str) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    text.hash(&mut hasher);
+    hasher.finish()
 }
 
 impl Focusable for TranscriptText {
@@ -329,158 +361,60 @@ fn clamp_boundary(text: &str, offset: usize) -> usize {
     offset
 }
 
-pub(super) fn text_fragments(projection: &ConversationProjection) -> Vec<(String, String)> {
-    let mut fragments = Vec::new();
-    for message in &projection.messages {
-        for block in &message.content {
-            let text = match block {
-                MessageBlock::Text { text, .. }
-                | MessageBlock::Summary { text, .. }
-                | MessageBlock::Custom { text, .. } => Some(text.clone()),
-                MessageBlock::Thinking { text, redacted, .. } => (!redacted).then(|| text.clone()),
-                MessageBlock::Image { .. }
-                | MessageBlock::ToolCall { .. }
-                | MessageBlock::ToolResult { .. }
-                | MessageBlock::Bash { .. }
-                | MessageBlock::Unsupported { .. } => None,
-            };
-            if let Some(text) = text {
-                fragments.push((fragment_key(message, block), text));
+pub(super) fn cached_message_texts(
+    projection: &ConversationProjection,
+    range: Range<usize>,
+    cache: &Entity<TranscriptTextCache>,
+    cx: &mut App,
+) -> HashMap<String, Entity<TranscriptText>> {
+    cache.update(cx, |cache, cx| {
+        let mut texts = HashMap::new();
+        for message in &projection.messages[range] {
+            for block in &message.content {
+                let Some(text) = transcript_block_text(block) else {
+                    continue;
+                };
+                let key = fragment_key(message, block);
+                let entity = cache.entity_for(key.clone(), text, cx);
+                texts.insert(key, entity);
             }
         }
-    }
-    fragments.extend(
+        texts
+    })
+}
+
+pub(super) fn cached_optimistic_texts(
+    projection: &ConversationProjection,
+    cache: &Entity<TranscriptTextCache>,
+    cx: &mut App,
+) -> HashMap<String, Entity<TranscriptText>> {
+    cache.update(cx, |cache, cx| {
         projection
             .accepted_user_inputs
             .iter()
             .filter(|input| !input.text.is_empty())
             .map(|input| {
-                (
-                    format!("optimistic:{}:text", input.request.as_str()),
-                    input.text.clone(),
-                )
-            }),
-    );
-    fragments
+                let key = format!("optimistic:{}:text", input.request.as_str());
+                let entity = cache.entity_for(key.clone(), &input.text, cx);
+                (key, entity)
+            })
+            .collect()
+    })
 }
 
-pub(super) fn stream(
-    projection: &ConversationProjection,
-    texts: &HashMap<String, Entity<TranscriptText>>,
-    tool_cards: &HashMap<String, Entity<ToolCard>>,
-) -> impl IntoElement {
-    let segments = segment_messages(&projection.messages);
-    let turn_count = segments
-        .iter()
-        .filter(|segment| matches!(segment, Segment::Turn { .. }))
-        .count()
-        + projection.accepted_user_inputs.len();
-
-    div()
-        .w_full()
-        .flex()
-        .flex_col()
-        .gap(px(16.0))
-        .child(
-            div()
-                .w_full()
-                .flex()
-                .flex_row()
-                .items_baseline()
-                .justify_between()
-                .pb(px(10.0))
-                .border_b_1()
-                .border_color(theme::edge_soft())
-                .child(
-                    div()
-                        .font_family(theme::SANS)
-                        .text_size(px(theme::T_UI_SM))
-                        .font_weight(FontWeight::BOLD)
-                        .text_color(theme::ash())
-                        .child("Conversation"),
-                )
-                .child(
-                    div()
-                        .font_family(theme::MONO)
-                        .text_size(px(theme::T_TINY))
-                        .text_color(theme::smoke())
-                        .child(format!(
-                            "{turn_count} turn{}",
-                            if turn_count == 1 { "" } else { "s" }
-                        )),
-                ),
-        )
-        .children(segments.into_iter().map(|segment| match segment {
-            Segment::Preamble(message) => preamble(message, projection, texts, tool_cards),
-            Segment::Turn {
-                index,
-                user,
-                messages,
-            } => {
-                turn_card(index, user, &messages, projection, texts, tool_cards).into_any_element()
-            }
-        }))
-        .children(
-            projection
-                .accepted_user_inputs
-                .iter()
-                .enumerate()
-                .map(|(index, input)| {
-                    optimistic_turn(
-                        turn_count - projection.accepted_user_inputs.len() + index + 1,
-                        input,
-                        texts,
-                    )
-                    .into_any_element()
-                }),
-        )
-        .when_some(tail_activity(projection, tool_cards), |stream, tail| {
-            stream.child(tail)
-        })
-        .children(notices(projection))
-        .when(
-            projection.messages.is_empty()
-                && projection.accepted_user_inputs.is_empty()
-                && !matches!(projection.status, FacetStatus::Loading),
-            |stream| stream.child(empty_state(projection)),
-        )
-}
-
-enum Segment<'a> {
-    Preamble(&'a RuntimeMessage),
-    Turn {
-        index: usize,
-        user: &'a RuntimeMessage,
-        messages: Vec<&'a RuntimeMessage>,
-    },
-}
-
-fn segment_messages(messages: &[RuntimeMessage]) -> Vec<Segment<'_>> {
-    let mut segments = Vec::new();
-    let mut index = 0;
-    let mut turn = 0;
-    while index < messages.len() {
-        if messages[index].role != MessageRole::User {
-            segments.push(Segment::Preamble(&messages[index]));
-            index += 1;
-            continue;
-        }
-
-        turn += 1;
-        let user = &messages[index];
-        index += 1;
-        let mut body = Vec::new();
-        while index < messages.len() && messages[index].role != MessageRole::User {
-            body.push(&messages[index]);
-            index += 1;
-        }
-        segments.push(Segment::Turn {
-            index: turn,
-            user,
-            messages: body,
-        });
+fn transcript_block_text(block: &MessageBlock) -> Option<&str> {
+    match block {
+        MessageBlock::Text { text, .. }
+        | MessageBlock::Summary { text, .. }
+        | MessageBlock::Custom { text, .. } => Some(text),
+        MessageBlock::Thinking { text, redacted, .. } if !redacted => Some(text),
+        MessageBlock::Thinking { .. }
+        | MessageBlock::Image { .. }
+        | MessageBlock::ToolCall { .. }
+        | MessageBlock::ToolResult { .. }
+        | MessageBlock::Bash { .. }
+        | MessageBlock::Unsupported { .. } => None,
     }
-    segments
 }
 
 fn turn_card(
@@ -489,7 +423,6 @@ fn turn_card(
     messages: &[&RuntimeMessage],
     projection: &ConversationProjection,
     texts: &HashMap<String, Entity<TranscriptText>>,
-    tool_cards: &HashMap<String, Entity<ToolCard>>,
 ) -> impl IntoElement {
     let (activity, reply) = split_turn(messages, projection);
     div()
@@ -504,13 +437,7 @@ fn turn_card(
         .border_color(theme::edge_soft())
         .child(user_prompt(index, user, texts))
         .when(!activity.is_empty(), |turn| {
-            turn.child(activity_band(
-                &activity,
-                reply.is_some(),
-                projection,
-                texts,
-                tool_cards,
-            ))
+            turn.child(activity_band(&activity, reply.is_some(), projection, texts))
         })
         .when_some(reply, |turn, message| {
             turn.child(assistant_reply(message, texts))
@@ -662,10 +589,48 @@ enum ActivityStep<'a> {
     Notice { text: String, error: bool },
 }
 
+type PersistedToolResult<'a> = (
+    &'a str,
+    &'a [ToolImage],
+    Option<&'a serde_json::Value>,
+    bool,
+);
+
 fn split_turn<'a>(
     messages: &[&'a RuntimeMessage],
     projection: &ConversationProjection,
 ) -> (Vec<ActivityStep<'a>>, Option<&'a RuntimeMessage>) {
+    let call_ids = messages
+        .iter()
+        .flat_map(|message| &message.content)
+        .filter_map(|block| match block {
+            MessageBlock::ToolCall { id, .. } => Some(id.clone()),
+            _ => None,
+        })
+        .collect::<HashSet<_>>();
+    let persisted_results = messages
+        .iter()
+        .flat_map(|message| &message.content)
+        .filter_map(|block| match block {
+            MessageBlock::ToolResult {
+                id,
+                content,
+                images,
+                details,
+                is_error,
+                ..
+            } => Some((
+                id.clone(),
+                (
+                    content.as_str(),
+                    images.as_slice(),
+                    details.as_ref(),
+                    *is_error,
+                ),
+            )),
+            _ => None,
+        })
+        .collect::<HashMap<_, _>>();
     let reply_index = messages.iter().rposition(|message| {
         message.role == MessageRole::Assistant
             && has_reply_text(message)
@@ -675,7 +640,14 @@ fn split_turn<'a>(
     let mut activity = Vec::new();
     for (index, message) in messages.iter().enumerate() {
         let is_reply = reply_index == Some(index);
-        push_message_activity(&mut activity, message, projection, is_reply);
+        push_message_activity(
+            &mut activity,
+            message,
+            projection,
+            &call_ids,
+            &persisted_results,
+            is_reply,
+        );
     }
     let reply = reply_index.map(|index| messages[index]);
     (activity, reply)
@@ -700,6 +672,8 @@ fn push_message_activity<'a>(
     activity: &mut Vec<ActivityStep<'a>>,
     message: &'a RuntimeMessage,
     projection: &ConversationProjection,
+    call_ids: &HashSet<ToolCallId>,
+    persisted_results: &HashMap<ToolCallId, PersistedToolResult<'a>>,
     is_reply: bool,
 ) {
     for block in &message.content {
@@ -721,7 +695,13 @@ fn push_message_activity<'a>(
                 arguments,
                 ..
             } => activity.push(ActivityStep::Tool {
-                presentation: presentation_for_tool_call(projection, id, name, arguments),
+                presentation: presentation_for_tool_call(
+                    projection,
+                    id,
+                    name,
+                    arguments,
+                    persisted_results.get(id).copied(),
+                ),
             }),
             MessageBlock::ToolResult {
                 id,
@@ -732,7 +712,7 @@ fn push_message_activity<'a>(
                 is_error,
                 ..
             } => {
-                if !has_tool_call(projection, id) {
+                if !call_ids.contains(id) {
                     activity.push(ActivityStep::Tool {
                         presentation: presentation_for_standalone_result(
                             name,
@@ -785,7 +765,6 @@ fn activity_band(
     has_reply: bool,
     projection: &ConversationProjection,
     texts: &HashMap<String, Entity<TranscriptText>>,
-    tool_cards: &HashMap<String, Entity<ToolCard>>,
 ) -> impl IntoElement {
     let mut children = Vec::new();
     let mut index = 0;
@@ -817,7 +796,6 @@ fn activity_band(
             is_last,
             projection,
             texts,
-            tool_cards,
         ));
         index += 1;
     }
@@ -863,7 +841,6 @@ fn render_activity_step(
     is_last: bool,
     _projection: &ConversationProjection,
     texts: &HashMap<String, Entity<TranscriptText>>,
-    _tool_cards: &HashMap<String, Entity<ToolCard>>,
 ) -> AnyElement {
     match step {
         ActivityStep::Thinking {
@@ -1122,7 +1099,6 @@ fn preamble(
     message: &RuntimeMessage,
     projection: &ConversationProjection,
     texts: &HashMap<String, Entity<TranscriptText>>,
-    tool_cards: &HashMap<String, Entity<ToolCard>>,
 ) -> AnyElement {
     match message.role {
         MessageRole::Assistant if has_reply_text(message) && !is_tool_only_assistant(message) => {
@@ -1139,9 +1115,7 @@ fn preamble(
                     .bg(theme::floor())
                     .border_1()
                     .border_color(theme::edge_soft())
-                    .child(activity_band(
-                        &activity, true, projection, texts, tool_cards,
-                    ))
+                    .child(activity_band(&activity, true, projection, texts))
                     .child(assistant_reply(message, texts))
                     .into_any_element()
             }
@@ -1160,19 +1134,14 @@ fn preamble(
             div()
                 .w_full()
                 .px(px(2.0))
-                .child(activity_band(
-                    &activity, false, projection, texts, tool_cards,
-                ))
+                .child(activity_band(&activity, false, projection, texts))
                 .into_any_element()
         }
         MessageRole::User => div().into_any_element(),
     }
 }
 
-fn tail_activity(
-    projection: &ConversationProjection,
-    tool_cards: &HashMap<String, Entity<ToolCard>>,
-) -> Option<AnyElement> {
+fn tail_activity(projection: &ConversationProjection) -> Option<AnyElement> {
     let activity = tail_presentations(projection)
         .into_iter()
         .map(|presentation| ActivityStep::Tool { presentation })
@@ -1189,13 +1158,7 @@ fn tail_activity(
             .bg(theme::floor())
             .border_1()
             .border_color(theme::edge_soft())
-            .child(activity_band(
-                &activity,
-                false,
-                projection,
-                &HashMap::new(),
-                tool_cards,
-            ))
+            .child(activity_band(&activity, false, projection, &HashMap::new()))
             .into_any_element(),
     )
 }
@@ -1499,7 +1462,7 @@ fn empty_state(projection: &ConversationProjection) -> impl IntoElement {
         )
 }
 
-fn has_summary(messages: &[RuntimeMessage], summary: &str) -> bool {
+fn has_summary(messages: &[std::sync::Arc<RuntimeMessage>], summary: &str) -> bool {
     !summary.is_empty()
         && messages.iter().any(|message| {
             message
@@ -1557,22 +1520,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn follow_policy_preserves_manual_scroll_and_selection() {
-        let epoch = SessionEpoch::new(1);
-        let mut policy = ScrollPinning::default();
-        assert!(policy.should_follow(epoch, 1, px(0.0), px(0.0), false));
-
-        assert!(!policy.should_follow(epoch, 1, px(-400.0), px(900.0), false));
-        assert!(!policy.should_follow(epoch, 2, px(-400.0), px(900.0), false));
-
-        assert!(!policy.should_follow(epoch, 2, px(-890.0), px(900.0), false));
-        assert!(policy.should_follow(epoch, 3, px(-890.0), px(900.0), false));
-
-        assert!(!policy.should_follow(epoch, 4, px(-900.0), px(900.0), true));
-        assert!(!policy.should_follow(epoch, 5, px(-900.0), px(900.0), false));
-    }
-
-    #[test]
     fn selection_survives_accumulated_stream_replacement() {
         assert_eq!(
             preserved_selection("Hello world", "Hello world, still streaming", 6..11),
@@ -1586,14 +1533,6 @@ mod tests {
             preserved_selection("Hello world", "Completely replaced", 6..11),
             6..6
         );
-    }
-
-    #[test]
-    fn session_epoch_replacement_reenables_follow() {
-        let mut policy = ScrollPinning::default();
-        assert!(policy.should_follow(SessionEpoch::new(1), 1, px(0.0), px(0.0), false));
-        policy.should_follow(SessionEpoch::new(1), 1, px(0.0), px(500.0), false);
-        assert!(policy.should_follow(SessionEpoch::new(2), 1, px(0.0), px(0.0), false));
     }
 
     #[test]
@@ -1643,9 +1582,13 @@ mod tests {
         let projection = ConversationProjection {
             epoch: SessionEpoch::new(1),
             revision: 1,
+            message_structure_revision: 1,
             lifecycle: RuntimeLifecycle::Settled,
             status: FacetStatus::Ready,
-            messages: vec![assistant_tools.clone(), assistant_reply.clone()],
+            messages: vec![
+                assistant_tools.clone().into(),
+                assistant_reply.clone().into(),
+            ],
             accepted_user_inputs: Vec::new(),
             tools: Default::default(),
             bash_executions: Vec::new(),

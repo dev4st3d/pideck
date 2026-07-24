@@ -78,8 +78,52 @@ impl Error for ProtocolDecodeError {
 }
 
 pub fn decode_record(bytes: &[u8]) -> Result<IncomingRecord, ProtocolDecodeError> {
-    let value = serde_json::from_slice(bytes).map_err(ProtocolDecodeError::InvalidJson)?;
-    IncomingRecord::from_value(value)
+    #[derive(Deserialize)]
+    struct RecordTypeProbe {
+        #[serde(rename = "type")]
+        record_type: Value,
+    }
+
+    let probe = match serde_json::from_slice::<RecordTypeProbe>(bytes) {
+        Ok(probe) => probe,
+        Err(_) => {
+            let value = serde_json::from_slice(bytes).map_err(ProtocolDecodeError::InvalidJson)?;
+            return IncomingRecord::from_value(value);
+        }
+    };
+    let record_type = probe
+        .record_type
+        .as_str()
+        .ok_or(ProtocolDecodeError::TypeNotString)?
+        .to_owned();
+    let invalid = |error: serde_json::Error| ProtocolDecodeError::InvalidRecord {
+        record_type: record_type.clone(),
+        message: error.to_string(),
+    };
+
+    match record_type.as_str() {
+        known if is_known_event(known) => serde_json::from_slice(bytes)
+            .map(Box::new)
+            .map(IncomingRecord::Event)
+            .map_err(invalid),
+        "extension_ui_request" => serde_json::from_slice(bytes)
+            .map(IncomingRecord::ExtensionUiRequest)
+            .map_err(invalid),
+        "extension_error" => serde_json::from_slice(bytes)
+            .map(IncomingRecord::ExtensionError)
+            .map_err(invalid),
+        "response" => {
+            let value = serde_json::from_slice(bytes).map_err(ProtocolDecodeError::InvalidJson)?;
+            IncomingRecord::from_value(value)
+        }
+        _ => {
+            let value = serde_json::from_slice(bytes).map_err(ProtocolDecodeError::InvalidJson)?;
+            Ok(IncomingRecord::UnknownEvent(UnknownEvent {
+                event_type: record_type,
+                raw: value,
+            }))
+        }
+    }
 }
 
 impl IncomingRecord {

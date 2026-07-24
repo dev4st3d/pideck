@@ -650,6 +650,33 @@ fn parallel_tools_interleave_and_updates_replace_accumulated_results() {
     );
     assert_eq!(state.tools[&b].status, ToolStatus::Cancelled);
 
+    apply(
+        &mut state,
+        RuntimeInput::Event(NormalizedEvent::MessageEnd(RuntimeMessage {
+            key: MessageKey("tool-result:b".to_owned()),
+            role: MessageRole::ToolResult,
+            timestamp: 43,
+            content: vec![MessageBlock::ToolResult {
+                key: BlockKey("tool-result:0".to_owned()),
+                id: b.clone(),
+                name: "bash".to_owned(),
+                content: "cancelled".to_owned(),
+                images: Vec::new(),
+                details: None,
+                is_error: true,
+            }],
+            visible: true,
+            terminal: true,
+            stop_reason: None,
+            error: None,
+            assistant: None,
+        })),
+    );
+    assert!(
+        !state.tools.contains_key(&b),
+        "persisted terminal tools should leave the transient live cache"
+    );
+
     let c = ToolCallId::from("c");
     apply(
         &mut state,
@@ -780,7 +807,9 @@ fn direct_bash_records_results_reconciles_and_cancels_separately() {
     }
 
     let (mut state, _) = connected_state("s1");
-    state.messages.ready(vec![bash_message("bash:historical")]);
+    state
+        .messages
+        .ready(vec![bash_message("bash:historical").into()]);
     let request = RequestId::from("bash-1");
     let effects = apply(
         &mut state,
@@ -853,7 +882,10 @@ fn direct_bash_records_results_reconciles_and_cancels_separately() {
             bash_message("bash:persisted"),
         ])),
     );
-    assert!(state.bash_executions[0].reconciled);
+    assert!(
+        state.bash_executions.is_empty(),
+        "persisted executions should leave the transient overlay cache"
+    );
 }
 
 #[test]
@@ -863,6 +895,7 @@ fn streaming_uses_accumulated_replacement_and_terminal_events_are_idempotent() {
         &mut state,
         RuntimeInput::Event(NormalizedEvent::MessageStart(message("a", "", false))),
     );
+    let structure_revision = state.message_structure_revision;
     apply(
         &mut state,
         RuntimeInput::Event(NormalizedEvent::MessageUpdate(message("a", "Hello", false))),
@@ -874,6 +907,10 @@ fn streaming_uses_accumulated_replacement_and_terminal_events_are_idempotent() {
             "Hello world",
             false,
         ))),
+    );
+    assert_eq!(
+        state.message_structure_revision, structure_revision,
+        "accumulated replacements should not rebuild the virtual list"
     );
     let terminal = message("a", "Hello world", true);
     apply(
@@ -908,7 +945,7 @@ fn streaming_start_cannot_erase_a_newer_partial_or_terminal_message() {
         &mut state,
         RuntimeInput::Event(NormalizedEvent::MessageStart(message("ordered", "", false))),
     );
-    assert_eq!(state.messages.data.as_ref().unwrap()[0], partial);
+    assert_eq!(state.messages.data.as_ref().unwrap()[0].as_ref(), &partial);
 
     let terminal = message("ordered", "final text", true);
     apply(
@@ -923,7 +960,7 @@ fn streaming_start_cannot_erase_a_newer_partial_or_terminal_message() {
             false,
         ))),
     );
-    assert_eq!(state.messages.data.as_ref().unwrap()[0], terminal);
+    assert_eq!(state.messages.data.as_ref().unwrap()[0].as_ref(), &terminal);
 }
 
 #[test]
@@ -954,7 +991,10 @@ fn partial_messages_replace_text_and_thinking_blocks_in_place() {
         &mut state,
         RuntimeInput::Event(NormalizedEvent::MessageUpdate(accumulated.clone())),
     );
-    assert_eq!(state.messages.data.as_ref().unwrap(), &vec![accumulated]);
+    assert_eq!(
+        state.messages.data.as_ref().unwrap()[0].as_ref(),
+        &accumulated
+    );
 }
 
 #[test]
@@ -1743,7 +1783,7 @@ fn cancelled_or_rejected_session_replacement_resyncs_new_epoch() {
     let (mut state, _) = connected_state("s1");
     state
         .messages
-        .ready(vec![message("old", "preserved", true)]);
+        .ready(vec![message("old", "preserved", true).into()]);
     let display_epoch = state.display_epoch;
     let mutation = SessionMutation::Clone;
     apply(
@@ -1841,8 +1881,10 @@ fn session_rename_and_export_use_serialized_runtime_operations() {
 #[test]
 fn changed_session_performs_full_rebuild_and_advances_epoch() {
     let (mut state, _) = connected_state("s1");
-    state.messages.ready(vec![message("old", "old", true)]);
-    state.entries.ready(vec![entry("old")]);
+    state
+        .messages
+        .ready(vec![message("old", "old", true).into()]);
+    state.entries.ready(vec![entry("old").into()]);
     state.durable_cursor = Some(EntryId::from("old"));
     state.cursor_session_id = Some(SessionId::from("s1"));
     let epoch = state.epoch;
@@ -1867,7 +1909,7 @@ fn session_replacement_suppresses_old_events_and_rebuilds_even_with_same_session
     let (mut state, _) = connected_state("s1");
     state
         .messages
-        .ready(vec![message("old", "old transcript", true)]);
+        .ready(vec![message("old", "old transcript", true).into()]);
     let ignored_before = state.stale_inputs_ignored;
 
     let mutation = SessionMutation::Clone;
@@ -1909,7 +1951,7 @@ fn reconnect_hydration_replaces_stale_partials_but_keeps_new_generation_events()
     let (mut state, _) = connected_state("s1");
     state
         .messages
-        .ready(vec![message("stale", "old partial", false)]);
+        .ready(vec![message("stale", "old partial", false).into()]);
     let epoch = state.epoch;
     reduce(
         &mut state,
@@ -2172,7 +2214,9 @@ fn long_streamed_content_is_not_truncated_or_split_into_duplicate_messages() {
 #[test]
 fn process_crash_preserves_last_valid_data_and_invalidates_dialogs() {
     let (mut state, _) = connected_state("s1");
-    state.messages.ready(vec![message("a", "saved", true)]);
+    state
+        .messages
+        .ready(vec![message("a", "saved", true).into()]);
     state.dialogs.push_back(ExtensionDialog {
         id: RequestId::from("dialog"),
         request: DialogRequest::Input {
@@ -2603,7 +2647,8 @@ fn cancellation_scopes_do_not_cross_target_operations() {
         started_at: Instant::now(),
         finished_at: None,
         reconciled: false,
-        baseline: Default::default(),
+        baseline_message_count: 0,
+        baseline_message_key: None,
         error: None,
     });
 
@@ -2626,7 +2671,9 @@ fn cancellation_scopes_do_not_cross_target_operations() {
 #[test]
 fn close_during_tool_marks_live_tool_uncertain_without_erasing_transcript() {
     let (mut state, _) = connected_state("s1");
-    state.messages.ready(vec![message("durable", "kept", true)]);
+    state
+        .messages
+        .ready(vec![message("durable", "kept", true).into()]);
     let tool_id = ToolCallId::from("live-tool");
     apply(
         &mut state,
@@ -2662,7 +2709,9 @@ fn close_during_tool_marks_live_tool_uncertain_without_erasing_transcript() {
 #[test]
 fn crash_after_acceptance_preserves_last_durable_transcript_read_only() {
     let (mut state, _) = connected_state("s1");
-    state.messages.ready(vec![message("durable", "kept", true)]);
+    state
+        .messages
+        .ready(vec![message("durable", "kept", true).into()]);
     let request = RequestId::from("accepted-before-crash");
     let submit = RuntimeRequest::Submit {
         request: request.clone(),

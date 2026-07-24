@@ -8,7 +8,7 @@ const SWITZER_REGULAR: &[u8] = include_bytes!("../assets/fonts/Switzer-Regular.t
 const SWITZER_MEDIUM: &[u8] = include_bytes!("../assets/fonts/Switzer-Medium.ttf");
 const SWITZER_SEMIBOLD: &[u8] = include_bytes!("../assets/fonts/Switzer-Semibold.ttf");
 const SWITZER_BOLD: &[u8] = include_bytes!("../assets/fonts/Switzer-Bold.ttf");
-const TANKER_REGULAR: &[u8] = include_bytes!("../assets/fonts/Tanker-Regular.ttf");
+const BONNY_REGULAR: &[u8] = include_bytes!("../assets/fonts/Bonny-Regular.otf");
 
 pub fn register(cx: &App) {
     let fonts: Vec<Cow<'static, [u8]>> = vec![
@@ -16,7 +16,7 @@ pub fn register(cx: &App) {
         Cow::Borrowed(SWITZER_MEDIUM),
         Cow::Borrowed(SWITZER_SEMIBOLD),
         Cow::Borrowed(SWITZER_BOLD),
-        Cow::Borrowed(TANKER_REGULAR),
+        Cow::Borrowed(BONNY_REGULAR),
     ];
 
     if let Err(error) = cx.text_system().add_fonts(fonts) {

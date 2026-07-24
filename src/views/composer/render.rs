@@ -161,7 +161,7 @@ impl Composer {
                                             view.emit_accept(false, cx);
                                         }))
                                 })
-                                .font_family(theme::SANS)
+                                .font_family(theme::CONTROL)
                                 .text_size(px(theme::T_TINY))
                                 .font_weight(FontWeight::BOLD)
                                 .child(self.action_label.clone()),
@@ -373,7 +373,7 @@ impl Composer {
                                             .rounded(px(theme::RADIUS_SM))
                                             .flex()
                                             .items_center()
-                                            .font_family(theme::SANS)
+                                            .font_family(theme::CONTROL)
                                             .text_size(px(theme::T_UI_SM))
                                             .font_weight(FontWeight::SEMIBOLD)
                                             .text_color(theme::bone_dim())
@@ -406,7 +406,7 @@ impl Composer {
                                                 .rounded(px(theme::RADIUS_SM))
                                                 .flex()
                                                 .items_center()
-                                                .font_family(theme::SANS)
+                                                .font_family(theme::CONTROL)
                                                 .text_size(px(theme::T_UI_SM))
                                                 .font_weight(FontWeight::SEMIBOLD)
                                                 .text_color(if can_submit {
@@ -470,7 +470,7 @@ impl Composer {
                                                 view.emit_accept(false, cx);
                                             }))
                                     })
-                                    .font_family(theme::SANS)
+                                    .font_family(theme::CONTROL)
                                     .text_size(px(theme::T_UI_SM))
                                     .font_weight(FontWeight::BOLD)
                                     .child(primary_label),
@@ -536,7 +536,7 @@ impl Composer {
                             .cursor_pointer()
                             .px(px(6.0))
                             .py(px(3.0))
-                            .font_family(theme::SANS)
+                            .font_family(theme::CONTROL)
                             .text_size(px(theme::T_TINY))
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(theme::ash())

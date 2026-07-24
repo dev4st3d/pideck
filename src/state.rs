@@ -74,7 +74,8 @@ pub struct ShellProjection {
     pub context: DisplayValue,
     pub input_tokens: DisplayValue,
     pub output_tokens: DisplayValue,
-    pub cache: DisplayValue,
+    pub cache_read: DisplayValue,
+    pub cache_write: DisplayValue,
     pub lifecycle: String,
     pub headline: String,
     pub detail: String,
@@ -99,12 +100,11 @@ impl ShellProjection {
         let input_tokens = project_stats(&runtime.stats, |stats| format_count(stats.input_tokens));
         let output_tokens =
             project_stats(&runtime.stats, |stats| format_count(stats.output_tokens));
-        let cache = project_stats(&runtime.stats, |stats| {
-            format!(
-                "{} read / {} write",
-                format_count(stats.cache_read_tokens),
-                format_count(stats.cache_write_tokens)
-            )
+        let cache_read = project_stats(&runtime.stats, |stats| {
+            format_count(stats.cache_read_tokens)
+        });
+        let cache_write = project_stats(&runtime.stats, |stats| {
+            format_count(stats.cache_write_tokens)
         });
         let no_model = status == ControllerStatus::Active && model_is_unavailable(runtime);
         let reducer_error = runtime
@@ -196,7 +196,8 @@ impl ShellProjection {
             &context,
             &input_tokens,
             &output_tokens,
-            &cache,
+            &cache_read,
+            &cache_write,
         ]
         .into_iter()
         .any(|value| matches!(value, DisplayValue::Stale(_)));
@@ -210,7 +211,8 @@ impl ShellProjection {
             context,
             input_tokens,
             output_tokens,
-            cache,
+            cache_read,
+            cache_write,
             lifecycle: lifecycle.to_owned(),
             headline: headline.to_owned(),
             detail: detail.to_owned(),

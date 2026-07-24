@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use gpui::{Context, Task};
 
@@ -31,11 +31,11 @@ use crate::services::session_catalog::{
 use crate::state::reducer::reduce;
 use crate::state::runtime::{
     BashExecution, BashStatus, CommandSource, CompactionState, DialogAnswer, ExtensionDialog,
-    ExtensionFailure, ExtensionStatus, ExtensionWidget, FacetStatus, ModelSummary, PromptDelivery,
-    PromptImage, QueueContents, QueueDeliveryMode, RetryState, RuntimeCommand, RuntimeForkMessage,
-    RuntimeInput, RuntimeIntent, RuntimeLifecycle, RuntimeMessage, RuntimeNotification,
-    RuntimeOperation, RuntimeState, RuntimeThinkingLevel, RuntimeTreeNode, SafeError, StampedInput,
-    SubmissionKind, ToolExecution,
+    ExtensionFailure, ExtensionStatus, ExtensionWidget, FacetStatus, ModelSummary, NormalizedEvent,
+    PromptDelivery, PromptImage, QueueContents, QueueDeliveryMode, RetryState, RuntimeCommand,
+    RuntimeForkMessage, RuntimeInput, RuntimeIntent, RuntimeLifecycle, RuntimeMessage,
+    RuntimeNotification, RuntimeOperation, RuntimeState, RuntimeThinkingLevel, RuntimeTreeNode,
+    SafeError, StampedInput, SubmissionKind, ToolExecution,
 };
 use crate::state::{ControllerStatus, ShellProjection};
 
@@ -50,6 +50,50 @@ fn session_paths_equal(left: &Path, right: &Path) -> bool {
     {
         left == right
     }
+}
+
+// Coalesce token-rate updates without capping high-refresh displays at 60 Hz.
+const RUNTIME_FRAME_BUDGET: Duration = Duration::from_millis(7);
+const MAX_RUNTIME_BATCH: usize = 512;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ReplaceableRuntimeUpdate {
+    Message(String),
+    Tool(String),
+}
+
+fn replaceable_runtime_update(result: &WorkerResult) -> Option<ReplaceableRuntimeUpdate> {
+    let WorkerResult::Input { input, .. } = result else {
+        return None;
+    };
+    match &input.input {
+        RuntimeInput::Event(NormalizedEvent::MessageUpdate(message)) => {
+            Some(ReplaceableRuntimeUpdate::Message(message.key.0.clone()))
+        }
+        RuntimeInput::Event(NormalizedEvent::ToolUpdate { id, .. }) => {
+            Some(ReplaceableRuntimeUpdate::Tool(id.as_str().to_owned()))
+        }
+        _ => None,
+    }
+}
+
+fn coalesce_runtime_results(results: Vec<WorkerResult>) -> Vec<WorkerResult> {
+    let mut coalesced = Vec::with_capacity(results.len());
+    for result in results {
+        let replace = replaceable_runtime_update(&result).and_then(|key| {
+            coalesced
+                .last()
+                .and_then(replaceable_runtime_update)
+                .filter(|previous| previous == &key)
+                .map(|_| key)
+        });
+        if replace.is_some() {
+            *coalesced.last_mut().expect("a matching result exists") = result;
+        } else {
+            coalesced.push(result);
+        }
+    }
+    coalesced
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -92,9 +136,10 @@ pub struct AcceptedUserInput {
 pub struct ConversationProjection {
     pub epoch: SessionEpoch,
     pub revision: u64,
+    pub message_structure_revision: u64,
     pub lifecycle: RuntimeLifecycle,
     pub status: FacetStatus,
-    pub messages: Vec<RuntimeMessage>,
+    pub messages: Vec<Arc<RuntimeMessage>>,
     pub accepted_user_inputs: Vec<AcceptedUserInput>,
     pub tools: HashMap<crate::services::rpc::ToolCallId, ToolExecution>,
     pub bash_executions: Vec<BashExecution>,
@@ -455,6 +500,7 @@ impl ControllerCore {
         ConversationProjection {
             epoch: self.runtime.display_epoch,
             revision: self.runtime.revision,
+            message_structure_revision: self.runtime.message_structure_revision,
             lifecycle: self.runtime.lifecycle,
             status: self.runtime.messages.status.clone(),
             messages: self
@@ -1018,9 +1064,20 @@ impl RuntimeController {
         let worker = RuntimeWorkerHandle::spawn(Arc::clone(&service));
         let results = worker.results();
         let event_task = cx.spawn(async move |controller, cx| {
-            while let Ok(result) = results.recv().await {
+            while let Ok(first) = results.recv().await {
+                cx.background_executor().timer(RUNTIME_FRAME_BUDGET).await;
+                let mut batch = vec![first];
+                while batch.len() < MAX_RUNTIME_BATCH {
+                    let Ok(result) = results.try_recv() else {
+                        break;
+                    };
+                    batch.push(result);
+                }
+                let batch = coalesce_runtime_results(batch);
                 let updated = controller.update(cx, |controller, cx| {
-                    controller.receive(result);
+                    for result in batch {
+                        controller.receive(result);
+                    }
                     cx.notify();
                 });
                 if updated.is_err() {
@@ -1730,8 +1787,12 @@ impl RuntimeController {
             return false;
         }
 
-        self.preferred_session_file = Some(path.clone());
-        self.start_connection(Some(path), cx)
+        let session_path = path.to_string_lossy().into_owned();
+        let accepted = self.send_core_effects(|core| core.switch_session(session_path), cx);
+        if accepted {
+            self.preferred_session_file = Some(path);
+        }
+        accepted
     }
 
     pub fn set_session_name(&mut self, name: String, cx: &mut Context<Self>) -> bool {
@@ -2799,12 +2860,31 @@ mod tests {
         }
 
         let mut core = ready_core();
+        let visible = Arc::new(custom("visible", true));
         core.runtime
             .messages
-            .ready(vec![custom("visible", true), custom("hidden", false)]);
+            .ready(vec![Arc::clone(&visible), custom("hidden", false).into()]);
         let projection = core.conversation_projection();
         assert_eq!(projection.messages.len(), 1);
         assert_eq!(projection.messages[0].key, MessageKey("visible".to_owned()));
+        assert!(Arc::ptr_eq(&projection.messages[0], &visible));
+    }
+
+    #[test]
+    fn session_switch_uses_the_live_connection_generation() {
+        use crate::state::runtime::{EffectKind, RuntimeRequest, SessionMutation};
+
+        let mut core = ready_core();
+        let generation = core.generation;
+        let effects = core.switch_session("next-session.jsonl".to_owned());
+
+        assert_eq!(core.generation, generation);
+        assert!(matches!(
+            effects[0].effect,
+            EffectKind::Request(RuntimeRequest::SessionMutation(SessionMutation::Switch {
+                ref session_path
+            })) if session_path == "next-session.jsonl"
+        ));
     }
 
     #[test]

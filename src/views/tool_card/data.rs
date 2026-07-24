@@ -1,13 +1,12 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use serde_json::Value;
 
-use super::{COLLAPSED_PREVIEW_BYTES, CardImage, CardStatus, ToolCardData, ToolPayload};
+use super::{COLLAPSED_PREVIEW_BYTES, CardImage, CardStatus, ToolPayload};
 use crate::controller::ConversationProjection;
 use crate::services::rpc::{RequestId, ToolCallId};
 use crate::state::runtime::{
-    BashExecution, BashStatus, MessageBlock, ToolExecution, ToolImage, ToolStatus,
-    sanitize_untrusted_text,
+    BashExecution, BashStatus, MessageBlock, ToolImage, ToolStatus, sanitize_untrusted_text,
 };
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -244,217 +243,6 @@ fn payload_from_persisted(
     payload
 }
 
-pub(crate) fn cards_for_projection(projection: &ConversationProjection) -> Vec<ToolCardData> {
-    let call_ids = projection
-        .messages
-        .iter()
-        .flat_map(|message| &message.content)
-        .filter_map(|block| match block {
-            MessageBlock::ToolCall { id, .. } => Some(id.clone()),
-            _ => None,
-        })
-        .collect::<HashSet<_>>();
-    let persisted_results = projection
-        .messages
-        .iter()
-        .flat_map(|message| &message.content)
-        .filter_map(|block| match block {
-            MessageBlock::ToolResult {
-                id,
-                content,
-                images,
-                details,
-                is_error,
-                ..
-            } => Some((
-                id.clone(),
-                (
-                    payload_from_persisted(content, images, details.as_ref()),
-                    *is_error,
-                ),
-            )),
-            _ => None,
-        })
-        .collect::<HashMap<_, _>>();
-
-    let mut cards = Vec::new();
-    let mut seen = HashSet::new();
-    for message in &projection.messages {
-        for block in &message.content {
-            match block {
-                MessageBlock::ToolCall {
-                    id,
-                    name,
-                    arguments,
-                    ..
-                } => {
-                    seen.insert(id.clone());
-                    cards.push(tool_card(
-                        id,
-                        name,
-                        arguments,
-                        projection.tools.get(id),
-                        persisted_results.get(id),
-                    ));
-                }
-                MessageBlock::ToolResult {
-                    id,
-                    name,
-                    content,
-                    images,
-                    details,
-                    is_error,
-                    ..
-                } if !call_ids.contains(id) => cards.push(ToolCardData {
-                    key: standalone_result_key(&message.key.0, id),
-                    name: name.clone(),
-                    status: if *is_error {
-                        CardStatus::Error
-                    } else {
-                        CardStatus::Success
-                    },
-                    arguments: None,
-                    payload: payload_from_persisted(content, images, details.as_ref()),
-                    elapsed_ms: None,
-                    context_excluded: false,
-                    error: None,
-                }),
-                MessageBlock::Bash { .. } => cards.push(bash_message_card(&message.key.0, block)),
-                _ => {}
-            }
-        }
-    }
-
-    let mut orphan_tools = projection
-        .tools
-        .values()
-        .filter(|tool| !seen.contains(&tool.id))
-        .collect::<Vec<_>>();
-    orphan_tools.sort_by_key(|tool| tool.sequence);
-    cards.extend(orphan_tools.into_iter().map(|tool| {
-        tool_card(
-            &tool.id,
-            &tool.name,
-            &tool.arguments,
-            Some(tool),
-            persisted_results.get(&tool.id),
-        )
-    }));
-    cards.extend(
-        projection
-            .bash_executions
-            .iter()
-            .filter(|execution| !execution.reconciled)
-            .map(local_bash_card),
-    );
-    cards
-}
-
-fn tool_card(
-    id: &ToolCallId,
-    name: &str,
-    arguments: &Value,
-    live: Option<&ToolExecution>,
-    persisted: Option<&(ToolPayload, bool)>,
-) -> ToolCardData {
-    let status = live.map_or_else(
-        || {
-            persisted.map_or(CardStatus::Pending, |(_, is_error)| {
-                if *is_error {
-                    CardStatus::Error
-                } else {
-                    CardStatus::Success
-                }
-            })
-        },
-        |tool| match tool.status {
-            ToolStatus::Pending => CardStatus::Pending,
-            ToolStatus::Running => CardStatus::Running,
-            ToolStatus::Succeeded => CardStatus::Success,
-            ToolStatus::Failed => CardStatus::Error,
-            ToolStatus::Cancelled => CardStatus::Cancelled,
-            ToolStatus::Uncertain => CardStatus::Uncertain,
-        },
-    );
-    let payload = live
-        .and_then(|tool| tool.result.as_ref())
-        .map(payload_from_value)
-        .or_else(|| persisted.map(|(payload, _)| payload.clone()))
-        .unwrap_or_default();
-    ToolCardData {
-        key: tool_key(id),
-        name: name.to_owned(),
-        status,
-        arguments: Some(live.map_or_else(|| arguments.clone(), |tool| tool.arguments.clone())),
-        payload,
-        elapsed_ms: live.map(ToolExecution::elapsed_ms),
-        context_excluded: false,
-        error: None,
-    }
-}
-
-fn bash_message_card(message_key: &str, block: &MessageBlock) -> ToolCardData {
-    let MessageBlock::Bash {
-        command,
-        output,
-        exit_code,
-        cancelled,
-        truncated,
-        full_output_path,
-        exclude_from_context,
-        ..
-    } = block
-    else {
-        unreachable!("bash_message_card requires a Bash block")
-    };
-    ToolCardData {
-        key: bash_message_key(message_key),
-        name: "bash".to_owned(),
-        status: if *cancelled {
-            CardStatus::Cancelled
-        } else if exit_code.is_some_and(|code| code != 0) {
-            CardStatus::Error
-        } else {
-            CardStatus::Success
-        },
-        arguments: Some(serde_json::json!({"command": command})),
-        payload: ToolPayload {
-            text: bash_body(command, output),
-            truncated: *truncated,
-            full_output_path: full_output_path.clone(),
-            ..ToolPayload::default()
-        },
-        elapsed_ms: None,
-        context_excluded: *exclude_from_context,
-        error: None,
-    }
-}
-
-fn local_bash_card(execution: &BashExecution) -> ToolCardData {
-    ToolCardData {
-        key: local_bash_key(&execution.request),
-        name: "bash".to_owned(),
-        status: match execution.status {
-            BashStatus::Running => CardStatus::Running,
-            BashStatus::Cancelling => CardStatus::Cancelling,
-            BashStatus::Succeeded => CardStatus::Success,
-            BashStatus::Failed => CardStatus::Error,
-            BashStatus::Cancelled => CardStatus::Cancelled,
-            BashStatus::Uncertain => CardStatus::Uncertain,
-        },
-        arguments: Some(serde_json::json!({"command": execution.command})),
-        payload: ToolPayload {
-            text: bash_body(&execution.command, &execution.output),
-            truncated: execution.truncated,
-            full_output_path: execution.full_output_path.clone(),
-            ..ToolPayload::default()
-        },
-        elapsed_ms: Some(execution.elapsed_ms()),
-        context_excluded: execution.exclude_from_context,
-        error: execution.error.clone(),
-    }
-}
-
 fn bash_body(command: &str, output: &str) -> String {
     if output.is_empty() {
         format!("$ {command}")
@@ -483,15 +271,6 @@ pub struct ToolPresentation {
 }
 
 impl ToolPresentation {
-    pub fn from_card(data: &ToolCardData) -> Self {
-        presentation(
-            &data.name,
-            data.arguments.as_ref(),
-            &data.payload,
-            data.status,
-        )
-    }
-
     pub fn groupable(&self) -> bool {
         matches!(
             self.name.as_str(),
@@ -521,20 +300,37 @@ pub(crate) fn presentation_for_tool_call(
     id: &ToolCallId,
     name: &str,
     arguments: &Value,
+    persisted: Option<(&str, &[ToolImage], Option<&Value>, bool)>,
 ) -> ToolPresentation {
     let live = projection.tools.get(id);
-    let status = live.map_or(CardStatus::Pending, |tool| match tool.status {
-        ToolStatus::Pending => CardStatus::Pending,
-        ToolStatus::Running => CardStatus::Running,
-        ToolStatus::Succeeded => CardStatus::Success,
-        ToolStatus::Failed => CardStatus::Error,
-        ToolStatus::Cancelled => CardStatus::Cancelled,
-        ToolStatus::Uncertain => CardStatus::Uncertain,
+    let persisted = persisted.map(|(content, images, details, is_error)| {
+        (payload_from_persisted(content, images, details), is_error)
     });
+    let status = live.map_or_else(
+        || {
+            persisted
+                .as_ref()
+                .map_or(CardStatus::Pending, |(_, is_error)| {
+                    if *is_error {
+                        CardStatus::Error
+                    } else {
+                        CardStatus::Success
+                    }
+                })
+        },
+        |tool| match tool.status {
+            ToolStatus::Pending => CardStatus::Pending,
+            ToolStatus::Running => CardStatus::Running,
+            ToolStatus::Succeeded => CardStatus::Success,
+            ToolStatus::Failed => CardStatus::Error,
+            ToolStatus::Cancelled => CardStatus::Cancelled,
+            ToolStatus::Uncertain => CardStatus::Uncertain,
+        },
+    );
     let payload = live
         .and_then(|tool| tool.result.as_ref())
         .map(payload_from_value)
-        .or_else(|| persisted_result_payload(projection, id))
+        .or_else(|| persisted.map(|(payload, _)| payload))
         .unwrap_or_default();
     presentation(name, Some(arguments), &payload, status)
 }
@@ -605,24 +401,6 @@ pub(crate) fn presentation_for_local_bash(execution: &BashExecution) -> ToolPres
         &payload,
         status,
     )
-}
-
-fn persisted_result_payload(
-    projection: &ConversationProjection,
-    id: &ToolCallId,
-) -> Option<ToolPayload> {
-    projection.messages.iter().find_map(|message| {
-        message.content.iter().find_map(|block| match block {
-            MessageBlock::ToolResult {
-                id: result_id,
-                content,
-                images,
-                details,
-                ..
-            } if result_id == id => Some(payload_from_persisted(content, images, details.as_ref())),
-            _ => None,
-        })
-    })
 }
 
 fn presentation(
@@ -811,14 +589,6 @@ fn display_path(path: &str) -> String {
     sanitize_untrusted_text(&label)
 }
 
-pub(crate) fn standalone_result_key(message_key: &str, id: &ToolCallId) -> String {
-    format!("tool-result:{message_key}:{}", id.as_str())
-}
-
-pub(crate) fn bash_message_key(message_key: &str) -> String {
-    format!("bash-message:{message_key}")
-}
-
 fn local_bash_key(request: &RequestId) -> String {
     format!("bash-local:{}", request.as_str())
 }
@@ -853,14 +623,6 @@ pub(crate) fn tail_card_keys(projection: &ConversationProjection) -> Vec<String>
     keys
 }
 
-pub(crate) fn has_tool_call(projection: &ConversationProjection, id: &ToolCallId) -> bool {
-    projection.messages.iter().any(|message| {
-        message.content.iter().any(
-            |block| matches!(block, MessageBlock::ToolCall { id: call_id, .. } if call_id == id),
-        )
-    })
-}
-
 pub(crate) fn tail_presentations(projection: &ConversationProjection) -> Vec<ToolPresentation> {
     let keys = tail_card_keys(projection);
     let mut out = Vec::new();
@@ -872,6 +634,7 @@ pub(crate) fn tail_presentations(projection: &ConversationProjection) -> Vec<Too
                 &tool.id,
                 &tool.name,
                 &tool.arguments,
+                None,
             ));
         }
     }

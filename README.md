@@ -95,7 +95,7 @@ If no model is available, open Settings > Providers, authenticate, refresh catal
 | Next focus | `Tab` |
 | Previous focus | `Shift+Tab` |
 
-The interface preserves the warm-charcoal Switzer/Tanker identity, with Cascadia Mono reserved for runtime data.
+The interface preserves the warm-charcoal Switzer/Bonny identity, with Cascadia Mono reserved for runtime data.
 
 ## Architecture
 

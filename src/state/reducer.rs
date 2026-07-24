@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use super::runtime::{
@@ -142,14 +143,7 @@ fn reduce_intent(
             {
                 return Vec::new();
             }
-            let baseline = state
-                .messages
-                .data
-                .as_ref()
-                .into_iter()
-                .flatten()
-                .map(|message| message.key.clone())
-                .collect();
+            let (baseline_message_count, baseline_message_key) = message_baseline(state);
             state.bash_executions.push(BashExecution {
                 request: request.clone(),
                 command: command.clone(),
@@ -163,7 +157,8 @@ fn reduce_intent(
                 started_at: observed_at,
                 finished_at: None,
                 reconciled: false,
-                baseline,
+                baseline_message_count,
+                baseline_message_key,
                 error: None,
             });
             state.bump_revision();
@@ -367,14 +362,7 @@ fn submit(
         return Vec::new();
     }
 
-    let baseline = state
-        .messages
-        .data
-        .as_ref()
-        .into_iter()
-        .flatten()
-        .map(|message| message.key.clone())
-        .collect();
+    let (baseline_message_count, baseline_message_key) = message_baseline(state);
     state.optimistic_user_inputs.push(OptimisticUserInput {
         request: request.clone(),
         text: text.clone(),
@@ -382,7 +370,8 @@ fn submit(
         kind,
         accepted: false,
         authoritative_seen: false,
-        baseline,
+        baseline_message_count,
+        baseline_message_key,
     });
     state.pending_prompt_settled = false;
     state.prompt_delivery = PromptDelivery::Pending {
@@ -443,6 +432,7 @@ fn reduce_response(
                 .filter(|message| state.live_message_keys.contains(&message.key))
                 .collect();
             state.messages.ready(merge_messages(messages, live));
+            state.message_structure_revision = state.message_structure_revision.saturating_add(1);
             state.live_message_keys.clear();
             reconcile_optimistic_user_inputs(state);
             reconcile_bash_executions(state);
@@ -1412,7 +1402,7 @@ fn apply_entries(
     entries: Vec<super::runtime::RuntimeEntry>,
     base_revision: u64,
 ) {
-    let entries = dedup_entries(entries);
+    let entries = dedup_entries(entries.into_iter().map(Arc::new).collect());
     if since.is_some() {
         let existing = state.entries.data.take().unwrap_or_default();
         state.entries.ready(merge_entries(existing, entries));
@@ -1440,7 +1430,7 @@ fn append_entry(state: &mut RuntimeState, entry: super::runtime::RuntimeEntry) {
     let id = entry.id.clone();
     let entries = state.entries.data.get_or_insert_with(Vec::new);
     if !entries.iter().any(|existing| existing.id == id) {
-        entries.push(entry);
+        entries.push(Arc::new(entry));
         state.durable_cursor = Some(id);
         state.cursor_session_id = state.session_id().cloned();
         state.entries.status = FacetStatus::Ready;
@@ -1485,7 +1475,7 @@ fn rebuild_tree_from_entries(state: &mut RuntimeState) {
 
     fn build_node(
         index: usize,
-        entries: &[super::runtime::RuntimeEntry],
+        entries: &[Arc<super::runtime::RuntimeEntry>],
         children: &[Vec<usize>],
         labels: &HashMap<crate::services::rpc::EntryId, Option<String>>,
     ) -> super::runtime::RuntimeTreeNode {
@@ -1510,7 +1500,9 @@ fn rebuild_tree_from_entries(state: &mut RuntimeState) {
     );
 }
 
-fn dedup_entries(entries: Vec<super::runtime::RuntimeEntry>) -> Vec<super::runtime::RuntimeEntry> {
+fn dedup_entries(
+    entries: Vec<Arc<super::runtime::RuntimeEntry>>,
+) -> Vec<Arc<super::runtime::RuntimeEntry>> {
     let mut seen = HashSet::new();
     entries
         .into_iter()
@@ -1519,9 +1511,9 @@ fn dedup_entries(entries: Vec<super::runtime::RuntimeEntry>) -> Vec<super::runti
 }
 
 fn merge_entries(
-    mut existing: Vec<super::runtime::RuntimeEntry>,
-    incoming: Vec<super::runtime::RuntimeEntry>,
-) -> Vec<super::runtime::RuntimeEntry> {
+    mut existing: Vec<Arc<super::runtime::RuntimeEntry>>,
+    incoming: Vec<Arc<super::runtime::RuntimeEntry>>,
+) -> Vec<Arc<super::runtime::RuntimeEntry>> {
     let mut seen = existing
         .iter()
         .map(|entry| entry.id.clone())
@@ -1544,42 +1536,84 @@ enum MessagePhase {
 fn upsert_messages(state: &mut RuntimeState, messages: Vec<RuntimeMessage>, phase: MessagePhase) {
     let transcript = state.messages.data.get_or_insert_with(Vec::new);
     let mut changed = false;
+    let mut structure_changed = false;
+    let mut persisted_tool_results = Vec::new();
     for message in messages {
+        structure_changed |= transcript
+            .iter()
+            .rev()
+            .find(|existing| existing.key == message.key)
+            .is_none_or(|existing| {
+                existing.role != message.role || existing.visible != message.visible
+            });
+        persisted_tool_results.extend(message.content.iter().filter_map(|block| match block {
+            MessageBlock::ToolResult { id, .. } => Some(id.clone()),
+            _ => None,
+        }));
         state.live_message_keys.insert(message.key.clone());
         changed |= upsert_message(transcript, message, phase);
+    }
+    for id in persisted_tool_results {
+        if state
+            .tools
+            .get(&id)
+            .is_some_and(|tool| tool.status.is_terminal())
+        {
+            state.tools.remove(&id);
+        }
     }
     state.messages.status = FacetStatus::Ready;
     reconcile_optimistic_user_inputs(state);
     reconcile_bash_executions(state);
     if changed {
+        if structure_changed {
+            state.message_structure_revision = state.message_structure_revision.saturating_add(1);
+        }
         state.bump_revision();
     }
 }
 
 fn merge_messages(
-    mut first: Vec<RuntimeMessage>,
-    second: Vec<RuntimeMessage>,
-) -> Vec<RuntimeMessage> {
-    let original = std::mem::take(&mut first);
-    for message in original.into_iter().chain(second) {
+    first: Vec<RuntimeMessage>,
+    second: Vec<Arc<RuntimeMessage>>,
+) -> Vec<Arc<RuntimeMessage>> {
+    let mut merged = Vec::with_capacity(first.len().saturating_add(second.len()));
+    for message in first {
         let phase = if message.terminal {
             MessagePhase::Terminal
         } else {
             MessagePhase::Update
         };
-        upsert_message(&mut first, message, phase);
+        upsert_shared_message(&mut merged, Arc::new(message), phase);
     }
-    first
+    for message in second {
+        let phase = if message.terminal {
+            MessagePhase::Terminal
+        } else {
+            MessagePhase::Update
+        };
+        upsert_shared_message(&mut merged, message, phase);
+    }
+    merged
 }
 
 fn upsert_message(
-    messages: &mut Vec<RuntimeMessage>,
+    messages: &mut Vec<Arc<RuntimeMessage>>,
     mut message: RuntimeMessage,
     phase: MessagePhase,
 ) -> bool {
     message.terminal |= matches!(phase, MessagePhase::Terminal);
+    upsert_shared_message(messages, Arc::new(message), phase)
+}
+
+fn upsert_shared_message(
+    messages: &mut Vec<Arc<RuntimeMessage>>,
+    message: Arc<RuntimeMessage>,
+    phase: MessagePhase,
+) -> bool {
     let Some(existing) = messages
         .iter_mut()
+        .rev()
         .find(|existing| existing.key == message.key)
     else {
         messages.push(message);
@@ -1590,7 +1624,7 @@ fn upsert_message(
         MessagePhase::Start => false,
         MessagePhase::Update if existing.terminal => false,
         MessagePhase::Update | MessagePhase::Terminal => {
-            if existing == &message {
+            if existing.as_ref() == message.as_ref() {
                 false
             } else {
                 *existing = message;
@@ -1603,11 +1637,12 @@ fn upsert_message(
 fn reconcile_optimistic_user_inputs(state: &mut RuntimeState) {
     let messages = state.messages.data.as_deref().unwrap_or_default();
     for input in &mut state.optimistic_user_inputs {
-        input.authoritative_seen |= messages.iter().any(|message| {
-            message.role == MessageRole::User
-                && !input.baseline.contains(&message.key)
-                && message_text(message) == input.text
-        });
+        input.authoritative_seen |= messages_after_baseline(
+            messages,
+            input.baseline_message_count,
+            input.baseline_message_key.as_ref(),
+        )
+        .any(|message| message.role == MessageRole::User && message_text(message) == input.text);
     }
     state
         .optimistic_user_inputs
@@ -1620,25 +1655,58 @@ fn reconcile_bash_executions(state: &mut RuntimeState) {
         if execution.reconciled || execution.status.is_active() {
             continue;
         }
-        execution.reconciled = messages.iter().any(|message| {
-            !execution.baseline.contains(&message.key)
-                && message.content.iter().any(|block| match block {
-                    MessageBlock::Bash {
-                        command,
-                        output,
-                        cancelled,
-                        exclude_from_context,
-                        ..
-                    } => {
-                        command == &execution.command
-                            && output == &execution.output
-                            && cancelled == &execution.cancelled
-                            && exclude_from_context == &execution.exclude_from_context
-                    }
-                    _ => false,
-                })
+        execution.reconciled = messages_after_baseline(
+            messages,
+            execution.baseline_message_count,
+            execution.baseline_message_key.as_ref(),
+        )
+        .any(|message| {
+            message.content.iter().any(|block| match block {
+                MessageBlock::Bash {
+                    command,
+                    output,
+                    cancelled,
+                    exclude_from_context,
+                    ..
+                } => {
+                    command == &execution.command
+                        && output == &execution.output
+                        && cancelled == &execution.cancelled
+                        && exclude_from_context == &execution.exclude_from_context
+                }
+                _ => false,
+            })
         });
     }
+    state
+        .bash_executions
+        .retain(|execution| !execution.reconciled);
+}
+
+fn message_baseline(state: &RuntimeState) -> (usize, Option<super::runtime::MessageKey>) {
+    let messages = state.messages.data.as_deref().unwrap_or_default();
+    (
+        messages.len(),
+        messages.last().map(|message| message.key.clone()),
+    )
+}
+
+fn messages_after_baseline<'a>(
+    messages: &'a [Arc<RuntimeMessage>],
+    baseline_count: usize,
+    baseline_key: Option<&super::runtime::MessageKey>,
+) -> impl Iterator<Item = &'a RuntimeMessage> {
+    let start = baseline_key
+        .and_then(|key| messages.iter().rposition(|message| &message.key == key))
+        .map(|index| index + 1)
+        .unwrap_or_else(|| {
+            if baseline_count <= messages.len() {
+                baseline_count
+            } else {
+                messages.len().saturating_sub(64)
+            }
+        });
+    messages[start..].iter().map(AsRef::as_ref)
 }
 
 fn message_text(message: &RuntimeMessage) -> String {
