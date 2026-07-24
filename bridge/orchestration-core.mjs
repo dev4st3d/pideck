@@ -5,8 +5,47 @@ export const MAX_TRANSCRIPT_BYTES = 48 * 1024;
 const MAX_TRANSCRIPT_SOURCE_ENTRIES = MAX_TRANSCRIPT_ENTRIES * 2;
 const MAX_TRANSCRIPT_FILE_READ_BYTES = 256 * 1024;
 
+export function reconnectDelay(attempt, minimumMs = 250, maximumMs = 5_000) {
+  const normalizedAttempt = Number.isFinite(attempt) ? Math.max(0, Math.floor(attempt)) : 0;
+  const minimum = Math.max(1, Math.floor(minimumMs));
+  const maximum = Math.max(minimum, Math.floor(maximumMs));
+  return Math.min(maximum, minimum * (2 ** Math.min(normalizedAttempt, 20)));
+}
+
+export function isLiveSubagentStatus(status) {
+  return status === "running" || status === "queued";
+}
+
+export function subagentTaskOutcome(data, failed = false) {
+  const status = String(data?.status ?? (failed ? "error" : "completed"));
+  // pi-subagents emits both completed and steered terminal records on its
+  // successful completion channel. "steered" means the agent wrapped up at
+  // its turn boundary, not that the task failed.
+  const succeeded = !failed && (status === "completed" || status === "steered");
+  return {
+    succeeded,
+    status,
+    result: succeeded ? String(data?.result ?? "") : undefined,
+    error: succeeded
+      ? undefined
+      : String(data?.error ?? (status === "stopped" ? "Stopped by user." : status)),
+  };
+}
+
 export function isRecord(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+export function taskRuntimeMetadata(metadata, { keepAgentId = false } = {}) {
+  const source = isRecord(metadata) ? metadata : {};
+  const { agentId, result: _result, lastError: _lastError, ...stable } = source;
+  return {
+    ...stable,
+    // pi-tasks shallow-merges metadata and treats null as a deletion tombstone.
+    agentId: keepAgentId && typeof agentId === "string" && agentId ? agentId : null,
+    result: null,
+    lastError: null,
+  };
 }
 
 export function taskOpenBlockers(task, tasks) {

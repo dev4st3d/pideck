@@ -41,6 +41,15 @@ export interface CancelRecord {
   targetId: string;
 }
 
+export interface OrchestrationSnapshotRecord {
+  sessionId: string;
+  /** Stable for one injected adapter process; changes when its generation resets. */
+  producerId?: string;
+  generation: number;
+  capturedAt: number;
+  [key: string]: unknown;
+}
+
 export interface ResponseRecord {
   version: typeof PROTOCOL_VERSION;
   type: "response";
@@ -79,7 +88,7 @@ export type EventRecord =
       version: typeof PROTOCOL_VERSION;
       type: "event";
       event: "orchestration_snapshot";
-      snapshot: Record<string, unknown>;
+      snapshot: OrchestrationSnapshotRecord;
     }
   | {
       version: typeof PROTOCOL_VERSION;

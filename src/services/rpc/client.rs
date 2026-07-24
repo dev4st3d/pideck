@@ -13,7 +13,7 @@ use crate::services::pi_process::{
     PiLaunchConfig, PiSupervisor, ProcessFailureKind, ShutdownReport, StartError, SupervisorState,
 };
 
-const MAX_PENDING_NOTIFICATIONS: usize = 32;
+const MAX_PENDING_NOTIFICATIONS: usize = 256;
 
 trait RecoverPoison<T> {
     fn recover_poison(self) -> T;
@@ -790,7 +790,11 @@ impl Connection {
     fn route(&self, record: IncomingRecord) {
         let replaceable_stream_update = matches!(
             &record,
-            IncomingRecord::Event(event) if matches!(event.as_ref(), RpcEvent::MessageUpdate { .. })
+            IncomingRecord::Event(event)
+                if matches!(
+                    event.as_ref(),
+                    RpcEvent::MessageUpdate { .. } | RpcEvent::ToolExecutionUpdate { .. }
+                )
         );
         let IncomingRecord::Response(response) = record else {
             let mut notification = TaggedIncomingRecord {

@@ -1,13 +1,16 @@
 #!/usr/bin/env node
 
-import { createInterface } from "node:readline";
 import { basename, dirname, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 
+import { attachJsonlLineReader, serializeJsonLine } from "./jsonl.mjs";
+
 const PROTOCOL_VERSION = 1;
 const MAX_LINE_BYTES = 1024 * 1024;
+const ORCHESTRATION_DISCONNECT_GRACE_MS = 2_500;
+const ORCHESTRATION_HANDSHAKE_TIMEOUT_MS = 2_000;
 const SESSION_VERSION = 3;
 const ORCHESTRATION_ENDPOINT = process.env.PI_GUI_ORCHESTRATION_PIPE;
 const CAPABILITIES = Object.freeze({
@@ -81,12 +84,17 @@ let resourceGeneration = 0;
 let resourcePlane;
 let resourceBuildPromise;
 let orchestrationSocket;
+let orchestrationProducerId;
+const retiredOrchestrationProducers = new Set();
 let orchestrationSnapshot;
 let orchestrationRequestId = 0;
+let orchestrationDisconnectTimer;
 const orchestrationPending = new Map();
 
 function emit(event, value) {
-  process.stdout.write(`${JSON.stringify({ version: PROTOCOL_VERSION, type: "event", event, ...value })}\n`);
+  process.stdout.write(
+    serializeJsonLine({ version: PROTOCOL_VERSION, type: "event", event, ...value }),
+  );
 }
 
 function orchestrationError(message = "The orchestration adapter is unavailable.") {
@@ -103,23 +111,80 @@ function failOrchestrationPending(message) {
   orchestrationPending.clear();
 }
 
+function cancelOrchestrationDisconnectNotice() {
+  clearTimeout(orchestrationDisconnectTimer);
+  orchestrationDisconnectTimer = undefined;
+}
+
+function scheduleOrchestrationDisconnectNotice() {
+  if (orchestrationDisconnectTimer) return;
+  orchestrationDisconnectTimer = setTimeout(() => {
+    orchestrationDisconnectTimer = undefined;
+    if (!orchestrationSocket || orchestrationSocket.destroyed) {
+      emit("orchestration_disconnected", {});
+    }
+  }, ORCHESTRATION_DISCONNECT_GRACE_MS);
+  orchestrationDisconnectTimer.unref?.();
+}
+
 function acceptOrchestrationSocket(socket) {
-  orchestrationSocket?.destroy();
-  orchestrationSocket = socket;
-  socket.setEncoding("utf8");
-  const lines = createInterface({ input: socket, crlfDelay: Infinity });
-  lines.on("line", (line) => {
-    if (Buffer.byteLength(line, "utf8") > MAX_LINE_BYTES) return;
-    let record;
-    try {
-      record = JSON.parse(line);
-    } catch {
+  let accepted = false;
+  let handshakeTimer = setTimeout(() => socket.destroy(), ORCHESTRATION_HANDSHAKE_TIMEOUT_MS);
+  handshakeTimer.unref?.();
+
+  const activate = (producerId) => {
+    if (accepted) return orchestrationSocket === socket;
+    if (!producerId || retiredOrchestrationProducers.has(producerId)) {
+      socket.destroy();
+      return false;
+    }
+
+    const previousSocket = orchestrationSocket;
+    const previousProducerId = orchestrationProducerId;
+    if (previousProducerId && previousProducerId !== producerId) {
+      retiredOrchestrationProducers.add(previousProducerId);
+    }
+
+    accepted = true;
+    clearTimeout(handshakeTimer);
+    handshakeTimer = undefined;
+    orchestrationSocket = socket;
+    orchestrationProducerId = producerId;
+    cancelOrchestrationDisconnectNotice();
+    if (previousSocket && previousSocket !== socket) {
+      failOrchestrationPending("The orchestration adapter was replaced.");
+      previousSocket.destroy();
+    }
+    return true;
+  };
+
+  const processRecord = (record) => {
+    if (record?.type === "hello" && typeof record.producerId === "string") {
+      activate(record.producerId);
       return;
     }
-    if (record?.type === "snapshot" && record.snapshot && typeof record.snapshot === "object") {
-      orchestrationSnapshot = record.snapshot;
-      emit("orchestration_snapshot", { snapshot: record.snapshot });
-      return;
+
+    if (!accepted) {
+      // Additive compatibility for adapters that publish a producer-tagged
+      // snapshot before the explicit hello record.
+      const producerId =
+        record?.type === "snapshot" && typeof record.snapshot?.producerId === "string"
+          ? record.snapshot.producerId
+          : undefined;
+      if (!activate(producerId)) return;
+    }
+    if (orchestrationSocket !== socket) return;
+
+    if (record?.type === "snapshot") {
+      if (record.snapshot === null) {
+        orchestrationSnapshot = undefined;
+        return;
+      }
+      if (record.snapshot && typeof record.snapshot === "object") {
+        orchestrationSnapshot = record.snapshot;
+        emit("orchestration_snapshot", { snapshot: record.snapshot });
+        return;
+      }
     }
     if (record?.type !== "response" || typeof record.id !== "string") return;
     const pending = orchestrationPending.get(record.id);
@@ -128,15 +193,24 @@ function acceptOrchestrationSocket(socket) {
     clearTimeout(pending.timer);
     if (record.ok) pending.resolve(record.result ?? {});
     else pending.reject(orchestrationError("The Pi orchestration action was rejected."));
-  });
+  };
+
+  const detachJsonl = attachJsonlLineReader(socket, (line) => {
+    let record;
+    try {
+      record = JSON.parse(line);
+    } catch {
+      return;
+    }
+    processRecord(record);
+  }, { maxRecordBytes: MAX_LINE_BYTES });
   socket.on("close", () => {
-    // Replacing an adapter intentionally closes the previous socket. Ignore that
-    // stale close event so it cannot overwrite the new adapter's live snapshot
-    // with a transient disconnected state.
-    if (orchestrationSocket !== socket) return;
+    clearTimeout(handshakeTimer);
+    detachJsonl();
+    if (!accepted || orchestrationSocket !== socket) return;
     orchestrationSocket = undefined;
     failOrchestrationPending("The orchestration adapter disconnected.");
-    emit("orchestration_disconnected", {});
+    scheduleOrchestrationDisconnectNotice();
   });
   socket.on("error", () => {});
 }
@@ -152,7 +226,7 @@ if (ORCHESTRATION_ENDPOINT) {
   }
   orchestrationServer = createServer(acceptOrchestrationSocket);
   orchestrationServer.on("error", () => {
-    emit("orchestration_disconnected", {});
+    scheduleOrchestrationDisconnectNotice();
   });
   orchestrationServer.listen(ORCHESTRATION_ENDPOINT);
 }
@@ -168,14 +242,17 @@ function requestOrchestration(action, sessionId) {
       rejectRequest(orchestrationError("The orchestration adapter did not answer in time."));
     }, 30_000);
     orchestrationPending.set(id, { resolve: resolveRequest, reject: rejectRequest, timer });
-    orchestrationSocket.write(`${JSON.stringify({ type: "request", id, sessionId, action })}\n`, (error) => {
-      if (!error) return;
-      const pending = orchestrationPending.get(id);
-      if (!pending) return;
-      orchestrationPending.delete(id);
-      clearTimeout(pending.timer);
-      rejectRequest(orchestrationError("The orchestration adapter could not receive the action."));
-    });
+    orchestrationSocket.write(
+      serializeJsonLine({ type: "request", id, sessionId, action }),
+      (error) => {
+        if (!error) return;
+        const pending = orchestrationPending.get(id);
+        if (!pending) return;
+        orchestrationPending.delete(id);
+        clearTimeout(pending.timer);
+        rejectRequest(orchestrationError("The orchestration adapter could not receive the action."));
+      },
+    );
   });
 }
 
@@ -861,7 +938,7 @@ function respond(id, ok, value) {
   const record = ok
     ? { version: PROTOCOL_VERSION, type: "response", id, ok: true, result: value }
     : { version: PROTOCOL_VERSION, type: "response", id, ok: false, error: value };
-  process.stdout.write(`${JSON.stringify(record)}\n`);
+  process.stdout.write(serializeJsonLine(record));
 }
 
 function requireString(params, name) {
@@ -1213,12 +1290,7 @@ async function execute(record) {
   }
 }
 
-const input = createInterface({ input: process.stdin, crlfDelay: Infinity });
-input.on("line", (line) => {
-  if (Buffer.byteLength(line, "utf8") > MAX_LINE_BYTES) {
-    respond("oversized", false, { code: "record_too_large", message: "Bridge record is too large" });
-    return;
-  }
+const detachInput = attachJsonlLineReader(process.stdin, (line) => {
   let record;
   try {
     record = JSON.parse(line);
@@ -1256,14 +1328,24 @@ input.on("line", (line) => {
     return;
   }
   void execute(record);
+}, {
+  maxRecordBytes: MAX_LINE_BYTES,
+  onOversized: () => {
+    respond("oversized", false, { code: "record_too_large", message: "Bridge record is too large" });
+  },
 });
 
-input.on("close", () => {
+let bridgeShuttingDown = false;
+function shutdownBridge() {
+  if (bridgeShuttingDown) return;
+  bridgeShuttingDown = true;
+  detachInput();
   for (const operation of active.values()) {
     operation.abortController.abort();
     operation.session?.abortBranchSummary();
   }
   resourcePlane?.session?.dispose?.();
+  cancelOrchestrationDisconnectNotice();
   failOrchestrationPending("The Pi SDK bridge stopped.");
   orchestrationSocket?.destroy();
   orchestrationServer?.close();
@@ -1274,4 +1356,8 @@ input.on("close", () => {
       // The endpoint may already have been removed by the server shutdown.
     }
   }
-});
+}
+
+process.stdin.once("end", shutdownBridge);
+process.stdin.once("close", shutdownBridge);
+process.stdin.once("error", shutdownBridge);

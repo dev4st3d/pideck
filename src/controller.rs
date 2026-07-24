@@ -52,11 +52,12 @@ fn session_paths_equal(left: &Path, right: &Path) -> bool {
     }
 }
 
-// Coalesce token-rate updates without capping high-refresh displays at 60 Hz.
-const RUNTIME_FRAME_BUDGET: Duration = Duration::from_millis(7);
+// Dispatch streaming updates at the display cadence instead of invalidating the
+// whole GPUI shell multiple times inside one frame.
+const RUNTIME_FRAME_BUDGET: Duration = Duration::from_millis(16);
 const MAX_RUNTIME_BATCH: usize = 512;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum ReplaceableRuntimeUpdate {
     Message(String),
     Tool(String),
@@ -77,22 +78,28 @@ fn replaceable_runtime_update(result: &WorkerResult) -> Option<ReplaceableRuntim
     }
 }
 
+fn flush_replaceable_runtime_results(
+    pending: &mut HashMap<ReplaceableRuntimeUpdate, (usize, WorkerResult)>,
+    coalesced: &mut Vec<WorkerResult>,
+) {
+    let mut latest = std::mem::take(pending).into_values().collect::<Vec<_>>();
+    latest.sort_unstable_by_key(|(sequence, _)| *sequence);
+    coalesced.extend(latest.into_iter().map(|(_, result)| result));
+}
+
 fn coalesce_runtime_results(results: Vec<WorkerResult>) -> Vec<WorkerResult> {
     let mut coalesced = Vec::with_capacity(results.len());
-    for result in results {
-        let replace = replaceable_runtime_update(&result).and_then(|key| {
-            coalesced
-                .last()
-                .and_then(replaceable_runtime_update)
-                .filter(|previous| previous == &key)
-                .map(|_| key)
-        });
-        if replace.is_some() {
-            *coalesced.last_mut().expect("a matching result exists") = result;
+    let mut pending = HashMap::new();
+    for (sequence, result) in results.into_iter().enumerate() {
+        if let Some(key) = replaceable_runtime_update(&result) {
+            pending.insert(key, (sequence, result));
         } else {
+            // Do not move a stream update across a lifecycle/control record.
+            flush_replaceable_runtime_results(&mut pending, &mut coalesced);
             coalesced.push(result);
         }
     }
+    flush_replaceable_runtime_results(&mut pending, &mut coalesced);
     coalesced
 }
 
@@ -2498,6 +2505,32 @@ mod tests {
     use super::*;
     use crate::services::runtime_worker::{RuntimeStartFailure, RuntimeStartFailureKind};
 
+    fn runtime_event(event: NormalizedEvent) -> WorkerResult {
+        WorkerResult::Input {
+            attempt: AttemptGeneration::new(1),
+            input: Box::new(StampedInput {
+                generation: ConnectionGeneration::new(1),
+                epoch: SessionEpoch::new(1),
+                observed_at: Instant::now(),
+                input: RuntimeInput::Event(event),
+            }),
+        }
+    }
+
+    fn message_update(key: &str, timestamp: u64) -> WorkerResult {
+        runtime_event(NormalizedEvent::MessageUpdate(RuntimeMessage {
+            key: crate::state::runtime::MessageKey(key.to_owned()),
+            role: crate::state::runtime::MessageRole::Assistant,
+            timestamp,
+            content: Vec::new(),
+            visible: true,
+            terminal: false,
+            stop_reason: None,
+            error: None,
+            assistant: None,
+        }))
+    }
+
     #[test]
     fn runtime_batching_does_not_delay_first_or_control_events() {
         assert_eq!(runtime_batch_delay(RUNTIME_FRAME_BUDGET, true), None);
@@ -2508,8 +2541,42 @@ mod tests {
     fn runtime_batching_waits_only_for_the_remaining_frame_budget() {
         assert_eq!(
             runtime_batch_delay(Duration::from_millis(3), true),
-            Some(Duration::from_millis(4))
+            Some(Duration::from_millis(13))
         );
+    }
+
+    #[test]
+    fn runtime_batching_keeps_only_the_latest_stream_update_per_key() {
+        let coalesced = coalesce_runtime_results(vec![
+            message_update("a", 1),
+            message_update("b", 2),
+            message_update("a", 3),
+        ]);
+        assert_eq!(coalesced.len(), 2);
+        let messages = coalesced
+            .iter()
+            .map(|result| {
+                let WorkerResult::Input { input, .. } = result else {
+                    panic!("expected a runtime input");
+                };
+                let RuntimeInput::Event(NormalizedEvent::MessageUpdate(message)) = &input.input
+                else {
+                    panic!("expected a message update");
+                };
+                (message.key.0.as_str(), message.timestamp)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(messages, vec![("b", 2), ("a", 3)]);
+    }
+
+    #[test]
+    fn runtime_batching_never_moves_stream_updates_across_control_events() {
+        let coalesced = coalesce_runtime_results(vec![
+            message_update("a", 1),
+            runtime_event(NormalizedEvent::AgentStart),
+            message_update("a", 2),
+        ]);
+        assert_eq!(coalesced.len(), 3);
     }
 
     #[test]

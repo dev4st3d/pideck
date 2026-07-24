@@ -20,6 +20,8 @@ pub enum OrchestrationPhase {
 #[serde(rename_all = "camelCase")]
 pub struct OrchestrationSnapshot {
     pub session_id: String,
+    #[serde(default)]
+    pub producer_id: Option<String>,
     pub generation: u64,
     pub captured_at: u64,
     #[serde(default)]
@@ -47,6 +49,21 @@ impl OrchestrationSnapshot {
 
     pub fn subagent(&self, id: &str) -> Option<&SubagentSnapshot> {
         self.subagents.iter().find(|agent| agent.id == id)
+    }
+
+    fn is_older_than(&self, current: &Self) -> bool {
+        match (&self.producer_id, &current.producer_id) {
+            (Some(incoming), Some(existing)) if incoming == existing => {
+                (self.generation, self.captured_at) < (current.generation, current.captured_at)
+            }
+            (Some(_), Some(_)) => false,
+            _ => {
+                // Legacy adapters did not identify their producer process. Their generation
+                // counter restarted from zero whenever the extension reloaded, so wall-clock
+                // capture time is the only restart-safe ordering signal available.
+                (self.captured_at, self.generation) < (current.captured_at, current.generation)
+            }
+        }
     }
 }
 
@@ -288,7 +305,7 @@ impl OrchestrationState {
         if self
             .snapshot
             .as_ref()
-            .is_some_and(|current| current.generation > snapshot.generation)
+            .is_some_and(|current| snapshot.is_older_than(current))
         {
             self.phase = OrchestrationPhase::Stale;
             return false;
@@ -313,9 +330,14 @@ impl OrchestrationState {
     }
 
     pub fn disconnect(&mut self) {
-        self.phase = OrchestrationPhase::Disconnected;
+        self.phase = if self.snapshot.is_some() {
+            OrchestrationPhase::Stale
+        } else {
+            OrchestrationPhase::Disconnected
+        };
         self.feedback = Some(
-            "The orchestration adapter disconnected. Last known work remains visible.".to_owned(),
+            "Pi's orchestration transport is reconnecting. Last known work remains visible."
+                .to_owned(),
         );
     }
 }
@@ -473,8 +495,9 @@ mod tests {
     fn stale_session_and_older_generation_cannot_replace_current_snapshot() {
         let mut state = OrchestrationState::default();
         state.begin_session(Some("current".to_owned()));
-        let snapshot = |session: &str, generation| OrchestrationSnapshot {
+        let snapshot = |session: &str, producer: &str, generation| OrchestrationSnapshot {
             session_id: session.to_owned(),
+            producer_id: Some(producer.to_owned()),
             generation,
             captured_at: generation,
             tasks: Vec::new(),
@@ -483,11 +506,55 @@ mod tests {
             goal: None,
             diagnostics: Vec::new(),
         };
-        assert!(!state.apply_snapshot(snapshot("old", 1)));
-        assert!(state.apply_snapshot(snapshot("current", 2)));
-        assert!(!state.apply_snapshot(snapshot("current", 1)));
+        assert!(!state.apply_snapshot(snapshot("old", "first", 1)));
+        assert!(state.apply_snapshot(snapshot("current", "first", 2)));
+        assert!(!state.apply_snapshot(snapshot("current", "first", 1)));
         assert_eq!(state.snapshot.as_ref().unwrap().generation, 2);
         assert_eq!(state.phase, OrchestrationPhase::Stale);
+    }
+
+    #[test]
+    fn adapter_restart_accepts_a_new_producer_with_a_reset_generation() {
+        let mut state = OrchestrationState::default();
+        state.begin_session(Some("current".to_owned()));
+        let snapshot = |producer: &str, generation, captured_at| OrchestrationSnapshot {
+            session_id: "current".to_owned(),
+            producer_id: Some(producer.to_owned()),
+            generation,
+            captured_at,
+            tasks: Vec::new(),
+            subagents: Vec::new(),
+            schedules: Vec::new(),
+            goal: None,
+            diagnostics: Vec::new(),
+        };
+
+        assert!(state.apply_snapshot(snapshot("first", 12, 100)));
+        assert!(state.apply_snapshot(snapshot("second", 1, 101)));
+        let current = state.snapshot.as_ref().unwrap();
+        assert_eq!(current.producer_id.as_deref(), Some("second"));
+        assert_eq!(current.generation, 1);
+    }
+
+    #[test]
+    fn legacy_adapter_restart_uses_capture_time_when_generation_resets() {
+        let mut state = OrchestrationState::default();
+        state.begin_session(Some("current".to_owned()));
+        let snapshot = |generation, captured_at| OrchestrationSnapshot {
+            session_id: "current".to_owned(),
+            producer_id: None,
+            generation,
+            captured_at,
+            tasks: Vec::new(),
+            subagents: Vec::new(),
+            schedules: Vec::new(),
+            goal: None,
+            diagnostics: Vec::new(),
+        };
+
+        assert!(state.apply_snapshot(snapshot(12, 100)));
+        assert!(state.apply_snapshot(snapshot(1, 101)));
+        assert_eq!(state.snapshot.as_ref().unwrap().generation, 1);
     }
 
     #[test]
@@ -496,6 +563,7 @@ mod tests {
         state.begin_session(Some("first".to_owned()));
         state.apply_snapshot(OrchestrationSnapshot {
             session_id: "first".to_owned(),
+            producer_id: Some("producer".to_owned()),
             generation: 1,
             captured_at: 1,
             tasks: vec![task("1", TaskStatus::InProgress, &[])],
@@ -506,7 +574,7 @@ mod tests {
         });
 
         state.disconnect();
-        assert_eq!(state.phase, OrchestrationPhase::Disconnected);
+        assert_eq!(state.phase, OrchestrationPhase::Stale);
         assert_eq!(state.snapshot.as_ref().unwrap().tasks[0].id, "1");
 
         state.begin_session(Some("second".to_owned()));

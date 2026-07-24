@@ -7,12 +7,72 @@ import {
   cascadeReadyTasks,
   fitSnapshotRecord,
   goalCommand,
+  isLiveSubagentStatus,
   latestGoalState,
   normalizeSchedules,
+  reconnectDelay,
+  subagentTaskOutcome,
   taskCycleMembers,
   taskOpenBlockers,
+  taskRuntimeMetadata,
   transcriptFromMessages,
 } from "./orchestration-core.mjs";
+
+test("reconnect delay backs off quickly and remains bounded", () => {
+  assert.deepEqual(
+    [0, 1, 2, 3, 4, 5, 20].map((attempt) => reconnectDelay(attempt)),
+    [250, 500, 1000, 2000, 4000, 5000, 5000],
+  );
+});
+
+test("only successful subagent completion unlocks dependent tasks", () => {
+  assert.deepEqual(subagentTaskOutcome({ status: "completed", result: "done" }), {
+    succeeded: true,
+    status: "completed",
+    result: "done",
+    error: undefined,
+  });
+  assert.deepEqual(subagentTaskOutcome({ status: "steered", result: "wrapped" }), {
+    succeeded: true,
+    status: "steered",
+    result: "wrapped",
+    error: undefined,
+  });
+  assert.deepEqual(subagentTaskOutcome({ status: "stopped" }), {
+    succeeded: false,
+    status: "stopped",
+    result: undefined,
+    error: "Stopped by user.",
+  });
+  assert.equal(subagentTaskOutcome({ status: "completed" }, true).succeeded, false);
+  assert.equal(isLiveSubagentStatus("running"), true);
+  assert.equal(isLiveSubagentStatus("queued"), true);
+  assert.equal(isLiveSubagentStatus("completed"), false);
+});
+
+test("task runtime metadata clears stale execution state between retries", () => {
+  const metadata = {
+    agentType: "worker",
+    agentId: "old-agent",
+    result: "stale output",
+    lastError: "stale error",
+    custom: true,
+  };
+  assert.deepEqual(taskRuntimeMetadata(metadata), {
+    agentType: "worker",
+    custom: true,
+    agentId: null,
+    result: null,
+    lastError: null,
+  });
+  assert.deepEqual(taskRuntimeMetadata(metadata, { keepAgentId: true }), {
+    agentType: "worker",
+    custom: true,
+    agentId: "old-agent",
+    result: null,
+    lastError: null,
+  });
+});
 
 test("task DAG guards blockers, detects cycles, and cascades only newly ready tasks", () => {
   const tasks = [
@@ -162,6 +222,7 @@ test("live subagent transcript keeps conversation roles, failures, and a bounded
 test("oversized snapshots shed old transcript payloads instead of breaking the connection", () => {
   const snapshot = {
     sessionId: "session",
+    producerId: "adapter-instance",
     generation: 1,
     capturedAt: 1,
     tasks: [],
@@ -185,6 +246,7 @@ test("oversized snapshots shed old transcript payloads instead of breaking the c
 
   const fitted = fitSnapshotRecord(snapshot, 64 * 1024);
   assert.ok(Buffer.byteLength(fitted.encoded, "utf8") <= 64 * 1024);
+  assert.equal(fitted.snapshot.producerId, "adapter-instance");
   assert.equal(fitted.snapshot.subagents[0].id, "agent-0");
   assert.ok(
     fitted.snapshot.subagents.some(

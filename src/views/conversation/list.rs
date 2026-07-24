@@ -173,8 +173,10 @@ impl ConversationListModel {
                 let messages = &projection.messages[body.clone()];
                 connected_row(
                     super::turn_card(
-                        *number,
-                        *number == self.turn_count,
+                        super::TurnPosition {
+                            index: *number,
+                            is_last: *number == self.turn_count,
+                        },
                         &projection.messages[*user_index],
                         messages,
                         projection,

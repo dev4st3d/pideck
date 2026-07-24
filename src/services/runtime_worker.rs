@@ -20,7 +20,7 @@ use crate::state::runtime::{NormalizedEvent, RuntimeEffect, RuntimeInput, Stampe
 
 const COORDINATOR_TICK: Duration = Duration::from_millis(10);
 const EVENT_POLL: Duration = Duration::from_millis(50);
-const MAX_PENDING_RUNTIME_EVENTS: usize = 32;
+const MAX_PENDING_RUNTIME_EVENTS: usize = 256;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct AttemptGeneration(u64);
@@ -303,7 +303,9 @@ fn send_result(results: &Sender<WorkerResult>, result: WorkerResult) {
         Err(async_channel::TrySendError::Full(WorkerResult::Input { input, .. }))
             if matches!(
                 &input.input,
-                RuntimeInput::Event(NormalizedEvent::MessageUpdate(_))
+                RuntimeInput::Event(
+                    NormalizedEvent::MessageUpdate(_) | NormalizedEvent::ToolUpdate { .. }
+                )
             ) => {}
         Err(async_channel::TrySendError::Full(result)) => {
             let _ = results.send_blocking(result);

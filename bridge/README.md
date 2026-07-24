@@ -6,7 +6,7 @@
 
 - Rust owns discovery, process start/stop/restart, request IDs, deadlines, cancellation requests, capability checks, stale-result rejection, and user-visible state.
 - Node owns Pi SDK objects, SDK version-sensitive calls, resource loading, secret redaction at the SDK boundary, and clean disposal when stdin closes.
-- Records are bounded UTF-8 JSONL. `protocol.ts` documents the TypeScript shapes and `protocol.schema.json` is the machine-readable v1 request/response/event contract.
+- Records are bounded UTF-8 JSONL with LF as the only record delimiter. The shared `jsonl.mjs` reader preserves U+2028/U+2029 inside JSON strings, accepts optional CRLF input, and drops oversized incomplete records without retaining unbounded memory. `protocol.ts` documents the TypeScript shapes and `protocol.schema.json` is the machine-readable v1 request/response/event contract.
 - Changes are additive within protocol v1. A command is usable only when both the negotiated hello capability and the Node command gate allow it. Unknown record versions fail with `incompatible_protocol`.
 
 ## Cancellation and restart
@@ -21,7 +21,9 @@ Closing stdin aborts active controllers, aborts an active branch summary, dispos
 
 The adapter connects to `pi-bridge.mjs` over a per-process local named pipe/Unix socket. The sidecar proxies bounded typed snapshots, lifecycle events, and correlated actions to Rust; the endpoint is not a network listener. Task execution preserves dependency and cycle guards before using the subagent RPC bus. Subagent actions verify current IDs and lifecycle state. Goal actions verify the active goal ID, then return the installed extension command for invocation through Pi so its completion, blocking, budget, pause, and resume guards remain authoritative.
 
-The last valid snapshot remains visible as stale after adapter loss. Bridge restart establishes a fresh endpoint and reloads the active session; a session switch clears the old snapshot until the new session ID is observed.
+The last valid snapshot remains visible as stale after adapter loss. A short disconnect grace period hides harmless sidecar replacement flicker, and reconnect attempts use bounded exponential backoff instead of a permanent 500 ms retry loop. Every adapter process handshakes with a `producerId`, so generation ordering survives extension reloads where the local generation counter restarts. The bridge retires superseded producers, while socket identity fencing prevents buffered or reconnecting records from an old adapter from regressing the current snapshot. Bridge restart establishes a fresh endpoint and reloads the active session; a session switch clears the old snapshot until the new session ID is observed.
+
+Task completion is deliberately conservative: only the subagent extension's successful terminal states (`completed` and `steered`) mark a task complete and unlock dependents. A stopped, aborted, or failed agent returns its task to `pending` with a bounded error note; it never cascades dependents as though the work succeeded. Runtime metadata resets use the task store's documented null tombstones, and its empty-string owner clear value is hidden from snapshots, so retries cannot inherit a stale agent ID, result, error, or visible owner. On session start, persisted `in_progress` tasks are matched against the live subagent manager; orphaned runs are reset to retryable `pending` state. Session shutdown force-resets every still-running task before Pi aborts its in-memory agents.
 
 ## Resource and trust policy
 

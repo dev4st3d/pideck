@@ -3,7 +3,6 @@ import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import { createConnection } from "node:net";
-import { createInterface } from "node:readline";
 import { pathToFileURL } from "node:url";
 
 import {
@@ -11,13 +10,18 @@ import {
   cascadeReadyTasks,
   fitSnapshotRecord,
   goalCommand,
+  isLiveSubagentStatus,
   latestGoalState,
   normalizeSchedules,
+  reconnectDelay,
+  subagentTaskOutcome,
   taskCycleMembers,
   taskOpenBlockers,
+  taskRuntimeMetadata,
   transcriptFromFile,
   transcriptFromMessages,
 } from "./orchestration-core.mjs";
+import { attachJsonlLineReader, serializeJsonLine } from "./jsonl.mjs";
 
 const ENDPOINT = process.env.PI_GUI_ORCHESTRATION_PIPE;
 const AGENT_DIR =
@@ -25,6 +29,12 @@ const AGENT_DIR =
 const MAX_RECORD_BYTES = 1024 * 1024;
 const MAX_SNAPSHOT_RECORD_BYTES = 900 * 1024;
 const MAX_TRANSCRIPT_FILE_CACHE = 64;
+const SNAPSHOT_DEBOUNCE_MS = 500;
+const SNAPSHOT_POLL_INTERVAL_MS = 5_000;
+const RECONNECT_JITTER_RATIO = 0.2;
+// pi-tasks ignores owner: undefined and does not accept null; an empty string
+// is the supported persisted clear value and is hidden from snapshots below.
+const CLEARED_TASK_OWNER = "";
 const MANAGER_KEY = Symbol.for("pi-subagents:manager");
 const transcriptFileCache = new Map();
 
@@ -134,7 +144,7 @@ async function taskSnapshots(ctx, diagnostics) {
     description: String(task.description ?? ""),
     status: task.status,
     activeForm: typeof task.activeForm === "string" ? task.activeForm : undefined,
-    owner: typeof task.owner === "string" ? task.owner : undefined,
+    owner: typeof task.owner === "string" && task.owner ? task.owner : undefined,
     metadata: task.metadata && typeof task.metadata === "object" ? task.metadata : {},
     blocks: Array.isArray(task.blocks) ? task.blocks.map(String) : [],
     blockedBy: Array.isArray(task.blockedBy) ? task.blockedBy.map(String) : [],
@@ -280,14 +290,16 @@ function taskPrompt(task, tasks, additionalContext) {
 export default function orchestrationAdapter(pi) {
   if (!ENDPOINT) return;
 
+  const producerId = randomUUID();
   let socket;
   let currentCtx;
+  let sessionClosing = false;
   let reconnectTimer;
+  let reconnectAttempt = 0;
   let publishTimer;
   let pollTimer;
   let publishInFlight = false;
   let publishDirty = false;
-  let publishForced = false;
   let snapshotWriteBlocked = false;
   let pendingSnapshotEncoded;
   let generation = 0;
@@ -295,12 +307,13 @@ export default function orchestrationAdapter(pi) {
   const knownAgentIds = new Set();
   const taskAgentMap = new Map();
   const cascadeByTask = new Map();
+  const terminalAgentIds = new Set();
 
   const send = (record) => {
     if (!socket || socket.destroyed) return false;
-    const encoded = JSON.stringify(record);
-    if (Buffer.byteLength(encoded, "utf8") > MAX_RECORD_BYTES) return false;
-    socket.write(`${encoded}\n`);
+    const encoded = serializeJsonLine(record);
+    if (Buffer.byteLength(encoded, "utf8") > MAX_RECORD_BYTES + 1) return false;
+    socket.write(encoded);
     return true;
   };
 
@@ -326,6 +339,7 @@ export default function orchestrationAdapter(pi) {
     if (currentCtx !== ctx) throw actionError("stale_session", "The Pi session changed.");
     return {
       sessionId: ctx.sessionManager.getSessionId(),
+      producerId,
       generation: ++generation,
       capturedAt: Date.now(),
       tasks,
@@ -342,14 +356,12 @@ export default function orchestrationAdapter(pi) {
     try {
       do {
         publishDirty = false;
-        const force = publishForced;
-        publishForced = false;
         if (!currentCtx || !socket || socket.destroyed) continue;
         try {
           const built = await buildSnapshot();
           const { snapshot, encoded } = fitSnapshotRecord(built, MAX_SNAPSHOT_RECORD_BYTES);
           const comparable = JSON.stringify({ ...snapshot, generation: 0, capturedAt: 0 });
-          if (!force && comparable === lastSnapshotJson) continue;
+          if (comparable === lastSnapshotJson) continue;
           lastSnapshotJson = comparable;
           if (Buffer.byteLength(encoded, "utf8") <= MAX_RECORD_BYTES) writeSnapshot(encoded);
         } catch {
@@ -362,14 +374,42 @@ export default function orchestrationAdapter(pi) {
     }
   };
 
-  const publishSoon = (force = false) => {
+  const publishSoon = () => {
     publishDirty = true;
-    publishForced ||= force;
     if (publishTimer || publishInFlight) return;
     publishTimer = setTimeout(() => {
       publishTimer = undefined;
       void publishNow();
-    }, 250);
+    }, SNAPSHOT_DEBOUNCE_MS);
+  };
+
+  const recoverOrphanedTasks = async (ctx, reason, { force = false } = {}) => {
+    const store = await openTaskStore(ctx);
+    if (!store) return 0;
+    const manager = managerRegistry();
+    let recovered = 0;
+    for (const task of store.list()) {
+      if (task.status !== "in_progress") continue;
+      const agentId = typeof task.metadata?.agentId === "string" ? task.metadata.agentId : "";
+      const record = agentId ? manager?.getRecord?.(agentId) : undefined;
+      if (!force && record && isLiveSubagentStatus(record.status)) {
+        knownAgentIds.add(agentId);
+        taskAgentMap.set(agentId, task.id);
+        continue;
+      }
+      if (agentId) {
+        terminalAgentIds.add(agentId);
+        taskAgentMap.delete(agentId);
+      }
+      cascadeByTask.delete(task.id);
+      store.update(task.id, {
+        status: "pending",
+        owner: CLEARED_TASK_OWNER,
+        metadata: { ...taskRuntimeMetadata(task.metadata), lastError: reason },
+      });
+      recovered++;
+    }
+    return recovered;
   };
 
   const findTaskByAgent = async (agentId) => {
@@ -384,6 +424,9 @@ export default function orchestrationAdapter(pi) {
   };
 
   const executeTasks = async (action) => {
+    if (!currentCtx || sessionClosing) {
+      throw actionError("no_session", "No active Pi session can launch tasks.");
+    }
     const store = await openTaskStore(currentCtx);
     if (!store) throw actionError("store_unavailable", "The task store is memory-only.");
     const tasks = store.list();
@@ -406,7 +449,12 @@ export default function orchestrationAdapter(pi) {
       if (typeof agentType !== "string" || !agentType) {
         throw actionError("guard", `Task ${taskId} has no agentType.`);
       }
-      store.update(task.id, { status: "in_progress" });
+      const baseMetadata = taskRuntimeMetadata(task.metadata);
+      store.update(task.id, {
+        status: "in_progress",
+        owner: CLEARED_TASK_OWNER,
+        metadata: baseMetadata,
+      });
       try {
         const result = await rpcCall(
           pi,
@@ -430,39 +478,64 @@ export default function orchestrationAdapter(pi) {
         cascadeByTask.set(task.id, action);
         store.update(task.id, {
           owner: agentId,
-          metadata: { ...task.metadata, agentId },
+          metadata: { ...baseMetadata, agentId },
         });
         launched.push({ taskId: task.id, agentId });
       } catch (error) {
         store.update(task.id, {
           status: "pending",
-          metadata: { ...task.metadata, lastError: error.message },
+          owner: CLEARED_TASK_OWNER,
+          metadata: {
+            ...baseMetadata,
+            lastError: error instanceof Error ? error.message : String(error),
+          },
         });
         throw error;
       }
     }
-    publishSoon(true);
+    publishSoon();
     return { launched };
   };
 
   const completeTaskForAgent = async (data, failed) => {
-    const found = await findTaskByAgent(String(data?.id ?? ""));
-    if (!found) return;
+    const agentId = String(data?.id ?? "");
+    if (!agentId || terminalAgentIds.has(agentId)) return;
+    terminalAgentIds.add(agentId);
+    let found;
+    try {
+      found = await findTaskByAgent(agentId);
+    } catch (error) {
+      terminalAgentIds.delete(agentId);
+      throw error;
+    }
+    if (!found) {
+      terminalAgentIds.delete(agentId);
+      return;
+    }
     const { store, task } = found;
-    taskAgentMap.delete(String(data.id));
-    if (failed && data.status !== "stopped") {
+    taskAgentMap.delete(agentId);
+    const cascade = cascadeByTask.get(task.id);
+    cascadeByTask.delete(task.id);
+    if (task.status !== "in_progress") return;
+    const outcome = sessionClosing
+      ? { succeeded: false, error: "The Pi session ended before the subagent completed." }
+      : subagentTaskOutcome(data, failed);
+    if (!outcome.succeeded) {
       store.update(task.id, {
         status: "pending",
-        metadata: { ...task.metadata, lastError: String(data.error ?? data.status ?? "failed") },
+        owner: CLEARED_TASK_OWNER,
+        metadata: { ...taskRuntimeMetadata(task.metadata), lastError: outcome.error },
       });
-      publishSoon(true);
+      publishSoon();
       return;
     }
     store.update(task.id, {
       status: "completed",
-      metadata: { ...task.metadata, result: String(data.result ?? task.metadata?.result ?? "") },
+      metadata: {
+        ...taskRuntimeMetadata(task.metadata, { keepAgentId: true }),
+        result: outcome.result,
+      },
     });
-    const cascade = cascadeByTask.get(task.id);
     if (cascade?.cascade) {
       const refreshed = store.list();
       const ready = cascadeReadyTasks(refreshed, task.id).filter(
@@ -472,11 +545,13 @@ export default function orchestrationAdapter(pi) {
         await executeTasks({ ...cascade, taskIds: ready.map((candidate) => candidate.id) });
       }
     }
-    publishSoon(true);
+    publishSoon();
   };
 
   const handleAction = async (action, sessionId) => {
-    if (!currentCtx) throw actionError("no_session", "No Pi session is active.");
+    if (!currentCtx || sessionClosing) {
+      throw actionError("no_session", "No Pi session is active.");
+    }
     const activeSessionId = currentCtx.sessionManager.getSessionId();
     if (sessionId && sessionId !== activeSessionId) {
       throw actionError("stale_session", "The selected Pi session has changed.");
@@ -496,19 +571,28 @@ export default function orchestrationAdapter(pi) {
           throw actionError("guard", "Only an in-progress subagent task can be stopped.");
         }
         await rpcCall(pi, "subagents:rpc:stop", { agentId: task.metadata.agentId });
-        store.update(task.id, { status: "completed" });
-        publishSoon(true);
+        taskAgentMap.delete(task.metadata.agentId);
+        cascadeByTask.delete(task.id);
+        store.update(task.id, {
+          status: "pending",
+          owner: CLEARED_TASK_OWNER,
+          metadata: {
+            ...taskRuntimeMetadata(task.metadata),
+            lastError: "Stopped by user.",
+          },
+        });
+        publishSoon();
         return { stopped: true };
       }
       case "subagent_stop": {
         const id = String(action.agentId ?? "");
         const record = managerRegistry()?.getRecord?.(id);
         if (!record) throw actionError("stale_id", "The subagent ID is stale.");
-        if (record.status !== "running" && record.status !== "queued") {
+        if (!isLiveSubagentStatus(record.status)) {
           throw actionError("guard", `The subagent is ${record.status}.`);
         }
         await rpcCall(pi, "subagents:rpc:stop", { agentId: id });
-        publishSoon(true);
+        publishSoon();
         return { stopped: true };
       }
       case "subagent_steer": {
@@ -516,14 +600,14 @@ export default function orchestrationAdapter(pi) {
         const message = String(action.message ?? "").trim();
         const record = managerRegistry()?.getRecord?.(id);
         if (!record) throw actionError("stale_id", "The subagent ID is stale.");
-        if (record.status !== "running" && record.status !== "queued") {
+        if (!isLiveSubagentStatus(record.status)) {
           throw actionError("guard", `The subagent is ${record.status}.`);
         }
         if (!message) throw actionError("invalid", "A steering message is required.");
         if (record.session) await record.session.steer(message);
         else (record.pendingSteers ??= []).push(message);
         pi.events.emit("subagents:steered", { id, message });
-        publishSoon(true);
+        publishSoon();
         return { steered: true };
       }
       case "subagent_resume": {
@@ -532,7 +616,7 @@ export default function orchestrationAdapter(pi) {
         const record = managerRegistry()?.getRecord?.(id);
         if (!record) throw actionError("stale_id", "The subagent ID is stale.");
         if (!record.session) throw actionError("guard", "The subagent has no resumable session.");
-        if (record.status === "running" || record.status === "queued") {
+        if (isLiveSubagentStatus(record.status)) {
           throw actionError("guard", "The subagent is already active.");
         }
         if (!prompt) throw actionError("invalid", "A resume prompt is required.");
@@ -541,7 +625,7 @@ export default function orchestrationAdapter(pi) {
         record.completedAt = undefined;
         record.result = undefined;
         record.error = undefined;
-        publishSoon(true);
+        publishSoon();
         try {
           agentRunnerModule ??= await importInstalled(
             "@tintinweb/pi-subagents/dist/agent-runner.js",
@@ -583,7 +667,7 @@ export default function orchestrationAdapter(pi) {
           startedAt: record.startedAt,
           completedAt: record.completedAt,
         });
-        publishSoon(true);
+        publishSoon();
         return { resumed: true };
       }
       case "goal_pause":
@@ -603,12 +687,11 @@ export default function orchestrationAdapter(pi) {
 
   const attachSocket = (connected) => {
     socket = connected;
+    reconnectAttempt = 0;
     snapshotWriteBlocked = false;
     pendingSnapshotEncoded = undefined;
-    socket.setEncoding("utf8");
-    const lines = createInterface({ input: socket, crlfDelay: Infinity });
-    lines.on("line", (line) => {
-      if (Buffer.byteLength(line, "utf8") > MAX_RECORD_BYTES) return;
+    lastSnapshotJson = "";
+    const detachJsonl = attachJsonlLineReader(socket, (line) => {
       let request;
       try {
         request = JSON.parse(line);
@@ -629,8 +712,9 @@ export default function orchestrationAdapter(pi) {
             },
           }),
         );
-    });
+    }, { maxRecordBytes: MAX_RECORD_BYTES });
     socket.on("close", () => {
+      detachJsonl();
       if (socket !== connected) return;
       socket = undefined;
       snapshotWriteBlocked = false;
@@ -647,9 +731,10 @@ export default function orchestrationAdapter(pi) {
       if (pending) writeSnapshot(pending);
     });
     socket.on("error", () => {});
-    pollTimer ??= setInterval(() => publishSoon(), 2000);
+    send({ type: "hello", producerId });
+    pollTimer ??= setInterval(() => publishSoon(), SNAPSHOT_POLL_INTERVAL_MS);
     pollTimer.unref?.();
-    publishSoon(true);
+    publishSoon();
   };
 
   const connect = () => {
@@ -665,7 +750,9 @@ export default function orchestrationAdapter(pi) {
 
   const scheduleReconnect = () => {
     if (reconnectTimer) return;
-    reconnectTimer = setTimeout(connect, 500);
+    const baseDelay = reconnectDelay(reconnectAttempt++);
+    const jitter = baseDelay * RECONNECT_JITTER_RATIO * (Math.random() * 2 - 1);
+    reconnectTimer = setTimeout(connect, Math.max(50, Math.round(baseDelay + jitter)));
     reconnectTimer.unref?.();
   };
 
@@ -682,31 +769,62 @@ export default function orchestrationAdapter(pi) {
       if (data?.id) knownAgentIds.add(String(data.id));
       if (eventName === "subagents:completed") void completeTaskForAgent(data, false);
       if (eventName === "subagents:failed") void completeTaskForAgent(data, true);
-      publishSoon(true);
+      publishSoon();
     });
   }
 
-  pi.on("session_start", (_event, ctx) => {
+  pi.on("session_start", async (_event, ctx) => {
     currentCtx = ctx;
+    sessionClosing = false;
     knownAgentIds.clear();
     taskAgentMap.clear();
     cascadeByTask.clear();
+    terminalAgentIds.clear();
     transcriptFileCache.clear();
     lastSnapshotJson = "";
-    publishSoon(true);
+    try {
+      await recoverOrphanedTasks(
+        ctx,
+        "Pi restarted before the subagent completed. Retry this task.",
+      );
+    } catch {
+      // Snapshot diagnostics will surface an inaccessible task store.
+    }
+    if (currentCtx === ctx && !sessionClosing) publishSoon();
   });
 
   pi.on("session_info_changed", (_event, ctx) => {
+    if (sessionClosing) return;
     currentCtx = ctx;
-    publishSoon(true);
+    publishSoon();
   });
 
   pi.on("tool_execution_end", () => publishSoon());
-  pi.on("session_shutdown", () => {
+  pi.on("session_shutdown", async () => {
+    sessionClosing = true;
+    const closingCtx = currentCtx;
+    // Fence any snapshot already being built before clearing durable task state.
     currentCtx = undefined;
-    clearInterval(pollTimer);
-    pollTimer = undefined;
-    send({ type: "snapshot", snapshot: undefined });
+    clearTimeout(publishTimer);
+    publishTimer = undefined;
+    publishDirty = false;
+    send({ type: "snapshot", snapshot: null });
+    if (closingCtx) {
+      try {
+        await recoverOrphanedTasks(
+          closingCtx,
+          "The Pi session ended before the subagent completed. Retry this task.",
+          { force: true },
+        );
+      } catch {
+        // Pi is already shutting down; the next session_start will retry recovery.
+      }
+    }
+    knownAgentIds.clear();
+    taskAgentMap.clear();
+    cascadeByTask.clear();
+    // Keep the unref'd socket poller alive across session switches. A new
+    // adapter instance can also replace this socket without a disconnect flash.
   });
 
   connect();

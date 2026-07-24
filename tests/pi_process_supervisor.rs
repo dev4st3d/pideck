@@ -234,19 +234,35 @@ fn broken_stdin_falls_back_to_forced_kill() {
 }
 
 #[test]
-fn stdout_queue_overflow_fails_closed_without_blocking_drain() {
+fn stdout_queue_backpressures_without_killing_pi() {
     let environment = TestEnvironment::new("stdout-flood");
     let mut config = environment.config();
     config.stdout_queue_capacity = 1;
     let mut supervisor = PiSupervisor::start(config).expect("start fake Pi");
 
-    let state = supervisor.wait_for_terminal(Duration::from_secs(3));
-    assert!(matches!(
-        state,
-        SupervisorState::Failed(ref failure)
-            if failure.kind == ProcessFailureKind::StdoutBackpressure
-    ));
+    thread::sleep(Duration::from_millis(100));
+    assert_eq!(supervisor.state(), SupervisorState::Ready);
+
+    let stdout = supervisor.take_stdout().expect("take stdout receiver");
+    let drain = thread::spawn(move || while stdout.recv().is_ok() {});
     supervisor.shutdown();
+    let _ = drain.join();
+    assert!(!matches!(supervisor.state(), SupervisorState::Failed(_)));
+}
+
+#[test]
+fn shutdown_does_not_wait_on_an_undrained_stdout_queue() {
+    let environment = TestEnvironment::new("stdout-flood");
+    let mut config = environment.config();
+    config.stdout_queue_capacity = 1;
+    let mut supervisor = PiSupervisor::start(config).expect("start fake Pi");
+
+    thread::sleep(Duration::from_millis(100));
+    let started = Instant::now();
+    supervisor.shutdown();
+
+    assert!(started.elapsed() < Duration::from_secs(3));
+    assert!(!matches!(supervisor.state(), SupervisorState::Failed(_)));
 }
 
 #[test]

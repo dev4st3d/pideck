@@ -104,9 +104,12 @@ impl TranscriptTextCache {
         self.use_counter = self.use_counter.wrapping_add(1);
         if let Some(cached) = self.entries.get_mut(&key) {
             cached.last_used = self.use_counter;
-            cached
-                .entity
-                .update(cx, |text_view, cx| text_view.set_text(text, cx));
+            let next_hash = source_hash(text);
+            if cached.entity.read(cx).source_hash != next_hash {
+                cached
+                    .entity
+                    .update(cx, |text_view, cx| text_view.set_text(text, next_hash, cx));
+            }
             return cached.entity.clone();
         }
 
@@ -164,8 +167,7 @@ impl TranscriptText {
         }
     }
 
-    pub(super) fn set_text(&mut self, text: &str, cx: &mut Context<Self>) {
-        let next_hash = source_hash(text);
+    fn set_text(&mut self, text: &str, next_hash: u64, cx: &mut Context<Self>) {
         if self.source_hash == next_hash {
             return;
         }
@@ -491,9 +493,13 @@ fn transcript_block_text(block: &MessageBlock) -> Option<&str> {
     }
 }
 
-fn turn_card(
+struct TurnPosition {
     index: usize,
     is_last: bool,
+}
+
+fn turn_card(
+    position: TurnPosition,
     user: &RuntimeMessage,
     messages: &[Arc<RuntimeMessage>],
     projection: &ConversationProjection,
@@ -507,11 +513,11 @@ fn turn_card(
         .w_full()
         .flex()
         .flex_col()
-        .when(index == 1, |turn| {
+        .when(position.index == 1, |turn| {
             turn.rounded_tl(px(theme::RADIUS))
                 .rounded_tr(px(theme::RADIUS))
         })
-        .when(is_last, |turn| {
+        .when(position.is_last, |turn| {
             turn.rounded_bl(px(theme::RADIUS))
                 .rounded_br(px(theme::RADIUS))
         })
@@ -519,7 +525,7 @@ fn turn_card(
         .bg(theme::floor())
         .border_1()
         .border_color(theme::edge_soft())
-        .child(user_prompt(index, user, texts))
+        .child(user_prompt(position.index, user, texts))
         .when(!activity.is_empty(), |turn| {
             turn.child(activity_band(
                 &format!("turn:{}", user.key.0),

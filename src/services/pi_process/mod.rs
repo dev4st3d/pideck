@@ -150,7 +150,6 @@ pub enum ProcessFailureKind {
     UnexpectedExit,
     EarlyStdoutEof,
     StdoutRead,
-    StdoutBackpressure,
     StdinWrite,
     RpcFault,
     Wait,
@@ -850,25 +849,31 @@ fn spawn_stdout_worker(
         loop {
             match stdout.read(&mut buffer) {
                 Ok(0) => {
-                    let _ = sender.try_send(StdoutEvent::Eof);
+                    let _ = send_stdout_event(&sender, &shared, StdoutEvent::Eof);
                     handle_stdout_eof(&process, &shared);
                     return;
                 }
                 Ok(count) => {
-                    if matches!(
-                        sender.try_send(StdoutEvent::Data(buffer[..count].to_vec())),
-                        Err(mpsc::TrySendError::Full(_))
-                    ) && shared.fail(ProcessFailure {
-                        kind: ProcessFailureKind::StdoutBackpressure,
-                        message: "Pi stdout exceeded the bounded transport queue".to_owned(),
-                        exit_status: None,
-                    }) {
-                        let _ = process.terminate();
+                    // A full host queue is ordinary stream backpressure, not a Pi
+                    // process failure. Blocking here lets the OS pipe propagate
+                    // pressure to Pi, whose RPC writer explicitly waits for stdout
+                    // capacity. Killing Pi on a temporary UI stall turns harmless
+                    // streaming bursts into user-visible reconnect loops.
+                    if !send_stdout_event(
+                        &sender,
+                        &shared,
+                        StdoutEvent::Data(buffer[..count].to_vec()),
+                    ) {
+                        return;
                     }
                 }
                 Err(error) => {
                     let message = error.to_string();
-                    let _ = sender.try_send(StdoutEvent::ReadError(message.clone()));
+                    let _ = send_stdout_event(
+                        &sender,
+                        &shared,
+                        StdoutEvent::ReadError(message.clone()),
+                    );
                     if shared.fail(ProcessFailure {
                         kind: ProcessFailureKind::StdoutRead,
                         message: format!("could not read Pi stdout: {message}"),
@@ -881,6 +886,29 @@ fn spawn_stdout_worker(
             }
         }
     })
+}
+
+fn send_stdout_event(
+    sender: &mpsc::SyncSender<StdoutEvent>,
+    shared: &SharedState,
+    mut event: StdoutEvent,
+) -> bool {
+    loop {
+        match sender.try_send(event) {
+            Ok(()) => return true,
+            Err(mpsc::TrySendError::Disconnected(_)) => return false,
+            Err(mpsc::TrySendError::Full(pending)) => {
+                if !matches!(
+                    shared.snapshot(),
+                    SupervisorState::Starting | SupervisorState::Ready
+                ) {
+                    return false;
+                }
+                event = pending;
+                thread::sleep(Duration::from_millis(1));
+            }
+        }
+    }
 }
 
 fn handle_stdout_eof(process: &ProcessHandle, shared: &SharedState) {

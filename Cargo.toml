@@ -28,6 +28,29 @@ windows-sys = { version = "0.61.2", features = [
     "Win32_System_Threading",
 ] }
 
+# GPUI, layout, markdown, and image work are hot enough that an entirely
+# unoptimized `cargo run` gives a misleadingly sluggish development build.
+# Keep the application debuggable while compiling the renderer-facing path
+# similarly to Zed's development profile.
+[profile.dev]
+opt-level = 1
+debug = "limited"
+incremental = true
+codegen-units = 16
+
+[profile.dev.package.gpui]
+opt-level = 3
+
+[profile.dev.package.serde_json]
+opt-level = 3
+
+[profile.dev.package."pulldown-cmark"]
+opt-level = 3
+
+[profile.dev.package.image]
+opt-level = 3
+
 [profile.release]
 lto = "thin"
+codegen-units = 1
 strip = true
