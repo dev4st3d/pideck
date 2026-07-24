@@ -221,6 +221,31 @@ impl Composer {
         &self.images
     }
 
+    pub fn replace_image(
+        &mut self,
+        index: usize,
+        image: PromptImage,
+        cx: &mut Context<Self>,
+    ) -> Result<(), &'static str> {
+        let Some(current) = self.images.get(index) else {
+            return Err("The image is no longer attached.");
+        };
+        let current_bytes = decoded_image_len(&current.data);
+        let replacement_bytes = decoded_image_len(&image.data);
+        let next_total = self
+            .image_bytes
+            .saturating_sub(current_bytes)
+            .saturating_add(replacement_bytes);
+        if next_total > MAX_IMAGE_BYTES {
+            return Err("The edited image would exceed the 5 MB attachment limit.");
+        }
+
+        self.images[index] = image;
+        self.image_bytes = next_total;
+        cx.notify();
+        Ok(())
+    }
+
     pub fn has_images(&self) -> bool {
         !self.images.is_empty()
     }

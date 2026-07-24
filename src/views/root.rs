@@ -8,10 +8,11 @@ use std::time::{Duration, Instant};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use gpui::{
-    Animation, AnimationExt, ClipboardItem, Context, DispatchPhase, Entity, FocusHandle, Focusable,
-    FontWeight, Image, ImageFormat, IntoElement, ListAlignment, ListOffset, ListState, ObjectFit,
+    Animation, AnimationExt, Bounds, ClipboardItem, Context, DispatchPhase, Entity, FocusHandle,
+    Focusable, FontWeight, Image, ImageFormat, IntoElement, ListAlignment, ListOffset, ListState,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit, PathBuilder, Pixels,
     Render, ScrollHandle, ScrollWheelEvent, StyledImage, Subscription, Task, Window, canvas, div,
-    img, list, prelude::*, px,
+    fill, img, list, point, prelude::*, px, size,
 };
 
 use crate::actions::{
@@ -52,7 +53,7 @@ use crate::theme;
 use crate::views::composer::{Composer, ComposerAvailability, ComposerEvent, ComposerFeedback};
 use crate::views::controls;
 use crate::views::conversation::{
-    ConversationListModel, ConversationScrollMotion, TranscriptTextCache,
+    ActivityDisclosureState, ConversationListModel, ConversationScrollMotion, TranscriptTextCache,
 };
 
 mod composer_bar;
@@ -63,11 +64,73 @@ mod render;
 mod shared;
 mod shell;
 
-use overlays::{extension_dialog_key, single_line_title, wrapped_index};
+use overlays::{annotate_prompt_image, extension_dialog_key, single_line_title, wrapped_index};
 
 struct PendingDraft {
     request: crate::services::rpc::RequestId,
     text: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct ImagePoint {
+    x: f32,
+    y: f32,
+}
+
+#[derive(Debug, Clone)]
+struct PencilStroke {
+    image_index: usize,
+    points: Vec<ImagePoint>,
+    color: PencilColor,
+    size: u16,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PencilColor {
+    Red,
+    Amber,
+    Green,
+    Blue,
+    White,
+    Black,
+}
+
+impl PencilColor {
+    const ALL: [Self; 6] = [
+        Self::Red,
+        Self::Amber,
+        Self::Green,
+        Self::Blue,
+        Self::White,
+        Self::Black,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Red => "Red",
+            Self::Amber => "Amber",
+            Self::Green => "Green",
+            Self::Blue => "Blue",
+            Self::White => "White",
+            Self::Black => "Black",
+        }
+    }
+
+    fn rgb(self) -> u32 {
+        match self {
+            Self::Red => 0xe35d5b,
+            Self::Amber => 0xe0a84f,
+            Self::Green => 0x69ad7c,
+            Self::Blue => 0x5f8fce,
+            Self::White => 0xf4f0e8,
+            Self::Black => 0x171513,
+        }
+    }
+
+    fn rgba8(self) -> [u8; 4] {
+        let rgb = self.rgb();
+        [(rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8, 255]
+    }
 }
 
 const MAX_VISIBLE_RUNTIME_NOTIFICATIONS: usize = 3;
@@ -162,6 +225,12 @@ pub struct RootView {
     hotkey_help_open: bool,
     compaction_modal_open: bool,
     pasted_image_preview: Option<usize>,
+    pencil_enabled: bool,
+    pencil_color: PencilColor,
+    pencil_size: u16,
+    pencil_stroke: Option<PencilStroke>,
+    pencil_undo: Vec<PromptImage>,
+    pencil_error: Option<String>,
     command_selection: usize,
     command_catalog_source: CommandCatalogProjection,
     command_catalog: CommandCatalog,
@@ -199,7 +268,9 @@ pub struct RootView {
     conversation_list_state: ListState,
     conversation_follow: Rc<Cell<bool>>,
     conversation_scroll_motion: ConversationScrollMotion,
+    conversation_scrollbar_drag_offset: Option<Pixels>,
     transcript_cache: Entity<TranscriptTextCache>,
+    activity_disclosures: Entity<ActivityDisclosureState>,
     pending_draft: Option<PendingDraft>,
     pending_bash: Option<crate::services::rpc::RequestId>,
     pending_compaction_focus: Option<String>,
@@ -207,6 +278,7 @@ pub struct RootView {
     retry_tick_task: Option<Task<()>>,
     focus_handle: FocusHandle,
     _controller_observation: Subscription,
+    _activity_disclosure_observation: Subscription,
     _composer_subscription: Subscription,
     _compaction_subscription: Subscription,
     _session_name_subscription: Subscription,
@@ -322,10 +394,13 @@ impl RootView {
             offset_in_item: px(0.0),
         });
         let transcript_cache = cx.new(|_| TranscriptTextCache::new(conversation.epoch));
+        let activity_disclosures = cx.new(|_| ActivityDisclosureState::new(conversation.epoch));
         window.focus(&composer.read(cx).focus_handle(cx));
         let controller_observation = cx.observe_in(&controller, window, |view, _, window, cx| {
             view.sync_runtime(window, cx)
         });
+        let activity_disclosure_observation =
+            cx.observe(&activity_disclosures, |_, _, cx| cx.notify());
         let composer_subscription =
             cx.subscribe_in(&composer, window, |view, _, event, window, cx| {
                 view.on_composer_event(event, window, cx)
@@ -420,6 +495,12 @@ impl RootView {
             hotkey_help_open: false,
             compaction_modal_open: false,
             pasted_image_preview: None,
+            pencil_enabled: false,
+            pencil_color: PencilColor::Red,
+            pencil_size: 6,
+            pencil_stroke: None,
+            pencil_undo: Vec::new(),
+            pencil_error: None,
             command_selection: 0,
             command_catalog_source,
             command_catalog,
@@ -456,7 +537,9 @@ impl RootView {
             conversation_list_state,
             conversation_follow,
             conversation_scroll_motion: ConversationScrollMotion::default(),
+            conversation_scrollbar_drag_offset: None,
             transcript_cache,
+            activity_disclosures,
             pending_draft: None,
             pending_bash: None,
             pending_compaction_focus: None,
@@ -464,6 +547,7 @@ impl RootView {
             retry_tick_task: None,
             focus_handle,
             _controller_observation: controller_observation,
+            _activity_disclosure_observation: activity_disclosure_observation,
             _composer_subscription: composer_subscription,
             _compaction_subscription: compaction_subscription,
             _session_name_subscription: session_name_subscription,
@@ -612,12 +696,18 @@ impl RootView {
         self.command_palette_open = false;
         self.hotkey_help_open = false;
         self.pasted_image_preview = Some(index);
+        self.pencil_stroke = None;
+        self.pencil_undo.clear();
+        self.pencil_error = None;
         window.focus(&self.focus_handle);
         cx.notify();
     }
 
     fn close_pasted_image(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.pasted_image_preview.take().is_some() {
+            self.pencil_stroke = None;
+            self.pencil_undo.clear();
+            self.pencil_error = None;
             window.focus(&self.composer.read(cx).focus_handle(cx));
             cx.notify();
         }
@@ -630,8 +720,125 @@ impl RootView {
         let count = self.composer.read(cx).images().len();
         if count > 1 {
             self.pasted_image_preview = Some(wrapped_index(current, count, delta));
+            self.pencil_stroke = None;
+            self.pencil_undo.clear();
+            self.pencil_error = None;
             cx.notify();
         }
+    }
+
+    fn toggle_pencil(&mut self, cx: &mut Context<Self>) {
+        self.pencil_enabled = !self.pencil_enabled;
+        self.pencil_stroke = None;
+        self.pencil_error = None;
+        cx.notify();
+    }
+
+    fn set_pencil_color(&mut self, color: PencilColor, cx: &mut Context<Self>) {
+        self.pencil_color = color;
+        self.pencil_error = None;
+        cx.notify();
+    }
+
+    fn adjust_pencil_size(&mut self, delta: i16, cx: &mut Context<Self>) {
+        self.pencil_size = (self.pencil_size as i16 + delta).clamp(1, 64) as u16;
+        self.pencil_error = None;
+        cx.notify();
+    }
+
+    fn start_pencil_stroke(
+        &mut self,
+        image_index: usize,
+        point: ImagePoint,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.pencil_enabled || self.pasted_image_preview != Some(image_index) {
+            return;
+        }
+        self.pencil_stroke = Some(PencilStroke {
+            image_index,
+            points: vec![point],
+            color: self.pencil_color,
+            size: self.pencil_size,
+        });
+        self.pencil_error = None;
+        cx.notify();
+    }
+
+    fn continue_pencil_stroke(
+        &mut self,
+        image_index: usize,
+        point: ImagePoint,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(stroke) = self.pencil_stroke.as_mut() else {
+            return false;
+        };
+        if stroke.image_index != image_index {
+            return false;
+        }
+        let should_append = stroke.points.last().is_none_or(|last| {
+            let dx = point.x - last.x;
+            let dy = point.y - last.y;
+            dx * dx + dy * dy >= 0.25
+        });
+        if should_append {
+            stroke.points.push(point);
+            cx.notify();
+        }
+        true
+    }
+
+    fn finish_pencil_stroke(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(stroke) = self.pencil_stroke.take() else {
+            return false;
+        };
+        let Some(original) = self
+            .composer
+            .read(cx)
+            .images()
+            .get(stroke.image_index)
+            .cloned()
+        else {
+            return false;
+        };
+
+        match annotate_prompt_image(&original, &stroke) {
+            Ok(edited) => {
+                let replacement = self.composer.update(cx, |composer, cx| {
+                    composer.replace_image(stroke.image_index, edited, cx)
+                });
+                match replacement {
+                    Ok(()) => {
+                        self.pencil_undo.push(original);
+                        if self.pencil_undo.len() > 20 {
+                            self.pencil_undo.remove(0);
+                        }
+                        self.pencil_error = None;
+                    }
+                    Err(message) => self.pencil_error = Some(message.to_owned()),
+                }
+            }
+            Err(message) => self.pencil_error = Some(message),
+        }
+        cx.notify();
+        true
+    }
+
+    fn undo_pencil_stroke(&mut self, cx: &mut Context<Self>) {
+        let (Some(index), Some(previous)) = (self.pasted_image_preview, self.pencil_undo.pop())
+        else {
+            return;
+        };
+        if let Err(message) = self.composer.update(cx, |composer, cx| {
+            composer.replace_image(index, previous.clone(), cx)
+        }) {
+            self.pencil_undo.push(previous);
+            self.pencil_error = Some(message.to_owned());
+        } else {
+            self.pencil_error = None;
+        }
+        cx.notify();
     }
 
     fn on_image_preview_previous(
@@ -1956,6 +2163,9 @@ impl RootView {
         }
         self.transcript_cache
             .update(cx, |cache, _| cache.prepare_epoch(conversation.epoch));
+        self.activity_disclosures.update(cx, |disclosures, _| {
+            disclosures.prepare_epoch(conversation.epoch)
+        });
         let requested_editor_text = self
             .controller
             .update(cx, |controller, _| controller.take_requested_editor_text());

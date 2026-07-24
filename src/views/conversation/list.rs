@@ -6,7 +6,7 @@ use gpui::{
     AnyElement, App, Entity, FontWeight, IntoElement, ListState, SharedString, div, prelude::*, px,
 };
 
-use super::{TranscriptText, TranscriptTextCache};
+use super::{ActivityDisclosureState, TranscriptText, TranscriptTextCache};
 use crate::controller::ConversationProjection;
 use crate::state::runtime::{FacetStatus, MessageRole};
 use crate::theme;
@@ -137,6 +137,7 @@ impl ConversationListModel {
         item_index: usize,
         projection: &ConversationProjection,
         cache: &Entity<TranscriptTextCache>,
+        disclosures: &Entity<ActivityDisclosureState>,
         cx: &mut App,
     ) -> AnyElement {
         let Some(item) = self.items.get(item_index) else {
@@ -157,6 +158,8 @@ impl ConversationListModel {
                     &projection.messages[*message_index],
                     projection,
                     &texts,
+                    disclosures,
+                    cx,
                 ))
             }
             ConversationItem::Turn {
@@ -176,13 +179,15 @@ impl ConversationListModel {
                         messages,
                         projection,
                         &texts,
+                        disclosures,
+                        cx,
                     )
                     .into_any_element(),
                 )
             }
             ConversationItem::Trailing => {
                 let texts = super::cached_optimistic_texts(projection, cache, cx);
-                trailing(projection, self.turn_count, &texts).into_any_element()
+                trailing(projection, self.turn_count, &texts, disclosures, cx).into_any_element()
             }
         }
     }
@@ -241,6 +246,8 @@ fn trailing(
     projection: &ConversationProjection,
     completed_turns: usize,
     texts: &HashMap<String, Entity<TranscriptText>>,
+    disclosures: &Entity<ActivityDisclosureState>,
+    cx: &mut App,
 ) -> impl IntoElement {
     stream_gutter()
         .flex()
@@ -255,9 +262,10 @@ fn trailing(
                     super::optimistic_turn(completed_turns + index + 1, input, texts)
                 }),
         )
-        .when_some(super::tail_activity(projection), |tail, activity| {
-            tail.child(activity)
-        })
+        .when_some(
+            super::tail_activity(projection, disclosures, cx),
+            |tail, activity| tail.child(activity),
+        )
         .children(super::notices(projection))
         .when(
             projection.messages.is_empty()

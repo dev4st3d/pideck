@@ -35,6 +35,38 @@ pub(super) use scroll::ConversationScrollMotion;
 
 const MAX_CACHED_TRANSCRIPT_BLOCKS: usize = 256;
 
+pub(super) struct ActivityDisclosureState {
+    epoch: SessionEpoch,
+    expanded: HashSet<String>,
+}
+
+impl ActivityDisclosureState {
+    pub(super) fn new(epoch: SessionEpoch) -> Self {
+        Self {
+            epoch,
+            expanded: HashSet::new(),
+        }
+    }
+
+    pub(super) fn prepare_epoch(&mut self, epoch: SessionEpoch) {
+        if self.epoch != epoch {
+            self.epoch = epoch;
+            self.expanded.clear();
+        }
+    }
+
+    fn is_expanded(&self, key: &str) -> bool {
+        self.expanded.contains(key)
+    }
+
+    fn toggle(&mut self, key: &str, cx: &mut Context<Self>) {
+        if !self.expanded.remove(key) {
+            self.expanded.insert(key.to_owned());
+        }
+        cx.notify();
+    }
+}
+
 struct CachedTranscriptText {
     entity: Entity<TranscriptText>,
     last_used: u64,
@@ -466,6 +498,8 @@ fn turn_card(
     messages: &[Arc<RuntimeMessage>],
     projection: &ConversationProjection,
     texts: &HashMap<String, Entity<TranscriptText>>,
+    disclosures: &Entity<ActivityDisclosureState>,
+    cx: &mut App,
 ) -> impl IntoElement {
     let (activity, reply) = split_turn(messages, projection);
     div()
@@ -487,7 +521,15 @@ fn turn_card(
         .border_color(theme::edge_soft())
         .child(user_prompt(index, user, texts))
         .when(!activity.is_empty(), |turn| {
-            turn.child(activity_band(&activity, reply.is_some(), projection, texts))
+            turn.child(activity_band(
+                &format!("turn:{}", user.key.0),
+                &activity,
+                reply.is_some(),
+                projection,
+                texts,
+                disclosures,
+                cx,
+            ))
         })
         .when_some(reply, |turn, message| {
             turn.child(assistant_reply(message, texts))
@@ -811,21 +853,27 @@ fn push_message_activity<'a>(
 }
 
 fn activity_band(
+    disclosure_key: &str,
     steps: &[ActivityStep<'_>],
     has_reply: bool,
     projection: &ConversationProjection,
     texts: &HashMap<String, Entity<TranscriptText>>,
+    disclosures: &Entity<ActivityDisclosureState>,
+    cx: &mut App,
 ) -> impl IntoElement {
+    let Some((latest, history)) = steps.split_last() else {
+        return div().into_any_element();
+    };
     let mut children = Vec::new();
     let mut index = 0;
-    while index < steps.len() {
-        if let ActivityStep::Tool { presentation } = &steps[index]
+    while index < history.len() {
+        if let ActivityStep::Tool { presentation } = &history[index]
             && presentation.groupable()
         {
             let mut group = vec![presentation.clone()];
             let mut end = index + 1;
-            while end < steps.len() {
-                let ActivityStep::Tool { presentation: next } = &steps[end] else {
+            while end < history.len() {
+                let ActivityStep::Tool { presentation: next } = &history[end] else {
                     break;
                 };
                 if next.name != presentation.name || !next.groupable() {
@@ -834,15 +882,15 @@ fn activity_band(
                 group.push(next.clone());
                 end += 1;
             }
-            let is_last = end == steps.len();
+            let is_last = end == history.len();
             children.push(render_tool_group(&group, is_last));
             index = end;
             continue;
         }
 
-        let is_last = index + 1 == steps.len();
+        let is_last = index + 1 == history.len();
         children.push(render_activity_step(
-            &steps[index],
+            &history[index],
             is_last,
             projection,
             texts,
@@ -850,15 +898,141 @@ fn activity_band(
         index += 1;
     }
 
+    let expanded = disclosures.read(cx).is_expanded(disclosure_key);
+    let latest = render_activity_step(latest, true, projection, texts);
     div()
         .w_full()
-        .px(px(18.0))
-        .pt(px(12.0))
-        .pb(if has_reply { px(4.0) } else { px(14.0) })
         .bg(theme::floor())
         .flex()
         .flex_col()
-        .children(children)
+        .when(!history.is_empty(), |band| {
+            band.child(activity_disclosure(
+                disclosure_key,
+                history.len(),
+                expanded,
+                disclosures,
+            ))
+        })
+        .when(expanded && !history.is_empty(), |band| {
+            band.child(
+                div()
+                    .w_full()
+                    .px(px(18.0))
+                    .pt(px(12.0))
+                    .pb(px(5.0))
+                    .flex()
+                    .flex_col()
+                    .children(children),
+            )
+        })
+        .child(
+            div()
+                .w_full()
+                .px(px(18.0))
+                .pt(px(7.0))
+                .pb(if has_reply { px(7.0) } else { px(14.0) })
+                .child(latest),
+        )
+        .into_any_element()
+}
+
+fn activity_disclosure(
+    key: &str,
+    history_count: usize,
+    expanded: bool,
+    disclosures: &Entity<ActivityDisclosureState>,
+) -> impl IntoElement {
+    let click_key = key.to_owned();
+    let click_state = disclosures.clone();
+    let keyboard_key = key.to_owned();
+    let keyboard_state = disclosures.clone();
+
+    div()
+        .w_full()
+        .bg(theme::canvas())
+        .flex()
+        .flex_col()
+        .child(
+            div()
+                .id(SharedString::from(format!("activity-disclosure:{key}")))
+                .tab_index(0)
+                .cursor_pointer()
+                .w_full()
+                .min_h(px(38.0))
+                .px(px(16.0))
+                .py(px(8.0))
+                .text_color(theme::ash())
+                .flex()
+                .flex_row()
+                .items_center()
+                .justify_between()
+                .gap(px(14.0))
+                .hover(|row| row.bg(theme::panel()).text_color(theme::bone_dim()))
+                .active(|row| row.bg(theme::panel_lift()))
+                .focus(|row| row.bg(theme::panel()).text_color(theme::focus()))
+                .on_click(move |_, _, cx| {
+                    click_state.update(cx, |state, cx| state.toggle(&click_key, cx));
+                })
+                .on_key_down(move |event: &gpui::KeyDownEvent, _, cx| {
+                    if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                        cx.stop_propagation();
+                        keyboard_state.update(cx, |state, cx| state.toggle(&keyboard_key, cx));
+                    }
+                })
+                .child(
+                    div()
+                        .min_w_0()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(9.0))
+                        .child(
+                            div()
+                                .w(px(16.0))
+                                .h(px(16.0))
+                                .flex_shrink_0()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .font_family(theme::MONO)
+                                .text_size(px(theme::T_UI_SM))
+                                .font_weight(FontWeight::BOLD)
+                                .child(if expanded { "−" } else { "+" }),
+                        )
+                        .child(
+                            div()
+                                .min_w_0()
+                                .overflow_hidden()
+                                .text_ellipsis()
+                                .whitespace_nowrap()
+                                .font_family(theme::SANS)
+                                .text_size(px(theme::T_UI_SM))
+                                .font_weight(FontWeight::MEDIUM)
+                                .child("Earlier activity"),
+                        ),
+                )
+                .child(
+                    div()
+                        .flex_shrink_0()
+                        .font_family(theme::MONO)
+                        .text_size(px(theme::T_TINY))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(theme::smoke())
+                        .child(format!(
+                            "{history_count:02} step{}",
+                            if history_count == 1 { "" } else { "s" }
+                        )),
+                ),
+        )
+        .child(
+            div().w_full().px(px(18.0)).child(
+                div()
+                    .w_full()
+                    .h(px(1.0))
+                    .rounded_full()
+                    .bg(theme::edge_hard()),
+            ),
+        )
 }
 
 fn render_tool_group(items: &[ToolPresentation], is_last: bool) -> AnyElement {
@@ -896,6 +1070,7 @@ fn render_activity_step(
         ActivityStep::Thinking {
             key: _,
             redacted: true,
+            ..
         } => step_shell(
             is_last,
             theme::smoke(),
@@ -910,6 +1085,7 @@ fn render_activity_step(
         ActivityStep::Thinking {
             key,
             redacted: false,
+            ..
         } => step_shell(
             is_last,
             theme::smoke(),
@@ -1149,6 +1325,8 @@ fn preamble(
     message: &RuntimeMessage,
     projection: &ConversationProjection,
     texts: &HashMap<String, Entity<TranscriptText>>,
+    disclosures: &Entity<ActivityDisclosureState>,
+    cx: &mut App,
 ) -> AnyElement {
     match message.role {
         MessageRole::Assistant if is_final_assistant_reply(message) => {
@@ -1166,7 +1344,15 @@ fn preamble(
                     .bg(theme::floor())
                     .border_1()
                     .border_color(theme::edge_soft())
-                    .child(activity_band(&activity, true, projection, texts))
+                    .child(activity_band(
+                        &format!("preamble:{}", message.key.0),
+                        &activity,
+                        true,
+                        projection,
+                        texts,
+                        disclosures,
+                        cx,
+                    ))
                     .child(assistant_reply(message, texts))
                     .into_any_element()
             }
@@ -1186,14 +1372,26 @@ fn preamble(
             div()
                 .w_full()
                 .px(px(2.0))
-                .child(activity_band(&activity, false, projection, texts))
+                .child(activity_band(
+                    &format!("preamble:{}", message.key.0),
+                    &activity,
+                    false,
+                    projection,
+                    texts,
+                    disclosures,
+                    cx,
+                ))
                 .into_any_element()
         }
         MessageRole::User => div().into_any_element(),
     }
 }
 
-fn tail_activity(projection: &ConversationProjection) -> Option<AnyElement> {
+fn tail_activity(
+    projection: &ConversationProjection,
+    disclosures: &Entity<ActivityDisclosureState>,
+    cx: &mut App,
+) -> Option<AnyElement> {
     let activity = tail_presentations(projection)
         .into_iter()
         .map(|presentation| ActivityStep::Tool { presentation })
@@ -1210,7 +1408,15 @@ fn tail_activity(projection: &ConversationProjection) -> Option<AnyElement> {
             .bg(theme::floor())
             .border_1()
             .border_color(theme::edge_soft())
-            .child(activity_band(&activity, false, projection, &HashMap::new()))
+            .child(activity_band(
+                &format!("tail:{}", projection.epoch.value()),
+                &activity,
+                false,
+                projection,
+                &HashMap::new(),
+                disclosures,
+                cx,
+            ))
             .into_any_element(),
     )
 }
@@ -1570,6 +1776,20 @@ fn format_cost(cost: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn activity_disclosures_reset_only_when_the_session_changes() {
+        let first = SessionEpoch::new(1);
+        let second = SessionEpoch::new(2);
+        let mut state = ActivityDisclosureState::new(first);
+        state.expanded.insert("turn:user-1".to_owned());
+
+        state.prepare_epoch(first);
+        assert!(state.is_expanded("turn:user-1"));
+
+        state.prepare_epoch(second);
+        assert!(!state.is_expanded("turn:user-1"));
+    }
 
     #[test]
     fn selection_survives_accumulated_stream_replacement() {

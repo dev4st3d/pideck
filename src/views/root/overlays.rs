@@ -2,14 +2,106 @@ use super::inspector::runtime_error_notice;
 use super::shared::{plural, popup_sheet};
 use super::*;
 
+const CONVERSATION_SCROLLBAR_MIN_THUMB: f32 = 28.0;
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct ConversationScrollbarGeometry {
+    thumb_top: Pixels,
+    thumb_height: Pixels,
+    travel: Pixels,
+    max_offset: Pixels,
+}
+
+impl ConversationScrollbarGeometry {
+    fn new(track_height: Pixels, max_offset: Pixels, current_offset: Pixels) -> Option<Self> {
+        if track_height <= Pixels::ZERO || max_offset <= Pixels::ZERO {
+            return None;
+        }
+
+        let content_height = track_height + max_offset;
+        let thumb_height = (track_height * (track_height / content_height))
+            .max(px(CONVERSATION_SCROLLBAR_MIN_THUMB))
+            .min(track_height);
+        let travel = track_height - thumb_height;
+        let thumb_top = travel * (current_offset / max_offset).clamp(0.0, 1.0);
+
+        Some(Self {
+            thumb_top,
+            thumb_height,
+            travel,
+            max_offset,
+        })
+    }
+
+    fn offset_for_pointer(self, pointer_y: Pixels, drag_offset: Pixels) -> Pixels {
+        if self.travel <= Pixels::ZERO {
+            return Pixels::ZERO;
+        }
+        let thumb_top = (pointer_y - drag_offset).clamp(Pixels::ZERO, self.travel);
+        self.max_offset * (thumb_top / self.travel)
+    }
+}
+
+fn conversation_scrollbar_geometry(
+    state: &ListState,
+    track_height: Pixels,
+) -> Option<ConversationScrollbarGeometry> {
+    ConversationScrollbarGeometry::new(
+        track_height,
+        state.max_offset_for_scrollbar().height,
+        -state.scroll_px_offset_for_scrollbar().y,
+    )
+}
+
+fn scroll_conversation_from_scrollbar(
+    view: &mut RootView,
+    state: &ListState,
+    geometry: ConversationScrollbarGeometry,
+    pointer_y: Pixels,
+    drag_offset: Pixels,
+    cx: &mut Context<RootView>,
+) {
+    let offset = geometry.offset_for_pointer(pointer_y, drag_offset);
+    state.set_offset_from_scrollbar(point(Pixels::ZERO, -offset));
+    view.conversation_follow.set(offset >= geometry.max_offset);
+    view.conversation_scroll_motion.cancel();
+    cx.notify();
+}
+
+#[cfg(test)]
+mod conversation_scrollbar_tests {
+    use super::*;
+
+    #[test]
+    fn geometry_tracks_scroll_range() {
+        let geometry = ConversationScrollbarGeometry::new(px(200.0), px(600.0), px(300.0)).unwrap();
+
+        assert_eq!(geometry.thumb_height, px(50.0));
+        assert_eq!(geometry.thumb_top, px(75.0));
+        assert_eq!(geometry.offset_for_pointer(px(100.0), px(25.0)), px(300.0));
+    }
+
+    #[test]
+    fn hidden_without_overflow() {
+        assert_eq!(
+            ConversationScrollbarGeometry::new(px(200.0), Pixels::ZERO, Pixels::ZERO),
+            None
+        );
+    }
+}
+
 pub(super) fn conversation_area(
     projection: &ShellProjection,
     conversation_projection: Arc<ConversationProjection>,
     conversation_list: Arc<ConversationListModel>,
     conversation_list_state: ListState,
     transcript_cache: Entity<TranscriptTextCache>,
+    activity_disclosures: Entity<ActivityDisclosureState>,
     root: Entity<RootView>,
 ) -> impl IntoElement {
+    let wheel_root = root.clone();
+    let scrollbar_state = conversation_list_state.clone();
+
     // The transcript shares the center column with the composer and must yield
     // height to it on every lifecycle-driven rerender.
     div()
@@ -45,7 +137,7 @@ pub(super) fn conversation_area(
                                     {
                                         return;
                                     }
-                                    let handled = root.update(cx, |view, cx| {
+                                    let handled = wheel_root.update(cx, |view, cx| {
                                         view.on_conversation_scroll_wheel(event, window, cx)
                                     });
                                     if handled {
@@ -64,6 +156,7 @@ pub(super) fn conversation_area(
                             item_index,
                             &conversation_projection,
                             &transcript_cache,
+                            &activity_disclosures,
                             cx,
                         )
                     })
@@ -71,6 +164,112 @@ pub(super) fn conversation_area(
                     .min_w_0()
                     .pt(px(16.0))
                     .pb(px(16.0)),
+                )
+                .child(
+                    canvas(
+                        |_, _, _| (),
+                        move |bounds, _, window, _| {
+                            let Some(geometry) = conversation_scrollbar_geometry(
+                                &scrollbar_state,
+                                bounds.size.height,
+                            ) else {
+                                return;
+                            };
+
+                            let track = Bounds::new(
+                                point(bounds.right() - px(2.0), bounds.top()),
+                                size(px(2.0), bounds.size.height),
+                            );
+                            let thumb = Bounds::new(
+                                point(bounds.right() - px(6.0), bounds.top() + geometry.thumb_top),
+                                size(px(5.0), geometry.thumb_height),
+                            );
+                            window.paint_quad(fill(track, theme::edge_soft()));
+                            window.paint_quad(fill(thumb, theme::edge_hard()));
+
+                            let mouse_down_root = root.clone();
+                            let mouse_down_state = scrollbar_state.clone();
+                            window.on_mouse_event(move |event: &MouseDownEvent, phase, _, cx| {
+                                if phase != DispatchPhase::Capture
+                                    || event.button != MouseButton::Left
+                                    || !bounds.contains(&event.position)
+                                {
+                                    return;
+                                }
+
+                                let drag_offset = if thumb.contains(&event.position) {
+                                    event.position.y - thumb.top()
+                                } else {
+                                    geometry.thumb_height / 2.0
+                                };
+                                mouse_down_state.scrollbar_drag_started();
+                                mouse_down_root.update(cx, |view, cx| {
+                                    view.conversation_scrollbar_drag_offset = Some(drag_offset);
+                                    scroll_conversation_from_scrollbar(
+                                        view,
+                                        &mouse_down_state,
+                                        geometry,
+                                        event.position.y - bounds.top(),
+                                        drag_offset,
+                                        cx,
+                                    );
+                                });
+                                cx.stop_propagation();
+                            });
+
+                            let mouse_move_root = root.clone();
+                            let mouse_move_state = scrollbar_state.clone();
+                            window.on_mouse_event(move |event: &MouseMoveEvent, phase, _, cx| {
+                                if phase != DispatchPhase::Capture {
+                                    return;
+                                }
+                                let handled = mouse_move_root.update(cx, |view, cx| {
+                                    let Some(drag_offset) = view.conversation_scrollbar_drag_offset
+                                    else {
+                                        return false;
+                                    };
+                                    scroll_conversation_from_scrollbar(
+                                        view,
+                                        &mouse_move_state,
+                                        geometry,
+                                        event.position.y - bounds.top(),
+                                        drag_offset,
+                                        cx,
+                                    );
+                                    true
+                                });
+                                if handled {
+                                    cx.stop_propagation();
+                                }
+                            });
+
+                            let mouse_up_root = root.clone();
+                            let mouse_up_state = scrollbar_state.clone();
+                            window.on_mouse_event(move |event: &MouseUpEvent, phase, _, cx| {
+                                if phase != DispatchPhase::Capture
+                                    || event.button != MouseButton::Left
+                                {
+                                    return;
+                                }
+                                let handled = mouse_up_root.update(cx, |view, cx| {
+                                    if view.conversation_scrollbar_drag_offset.take().is_none() {
+                                        return false;
+                                    }
+                                    mouse_up_state.scrollbar_drag_ended();
+                                    cx.notify();
+                                    true
+                                });
+                                if handled {
+                                    cx.stop_propagation();
+                                }
+                            });
+                        },
+                    )
+                    .absolute()
+                    .right_0()
+                    .top_0()
+                    .bottom_0()
+                    .w(px(theme::SCROLLBAR + 4.0)),
                 ),
         )
 }
@@ -644,20 +843,275 @@ pub(super) fn wrapped_index(current: usize, count: usize, delta: isize) -> usize
     (current as isize + delta).rem_euclid(count as isize) as usize
 }
 
-fn pasted_image_source(image: &PromptImage) -> Option<Arc<Image>> {
-    let format = ImageFormat::from_mime_type(&image.mime_type)?;
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct PastedImageLayout {
+    bounds: Bounds<Pixels>,
+    image_width: u32,
+    image_height: u32,
+    scale: f32,
+}
+
+impl PastedImageLayout {
+    fn new(frame: Bounds<Pixels>, image_width: u32, image_height: u32) -> Option<Self> {
+        if image_width == 0
+            || image_height == 0
+            || frame.size.width <= Pixels::ZERO
+            || frame.size.height <= Pixels::ZERO
+        {
+            return None;
+        }
+        let scale = (f32::from(frame.size.width) / image_width as f32)
+            .min(f32::from(frame.size.height) / image_height as f32)
+            .min(1.0);
+        let drawn_width = px(image_width as f32 * scale);
+        let drawn_height = px(image_height as f32 * scale);
+        Some(Self {
+            bounds: Bounds::new(
+                point(
+                    frame.left() + (frame.size.width - drawn_width) / 2.0,
+                    frame.top() + (frame.size.height - drawn_height) / 2.0,
+                ),
+                size(drawn_width, drawn_height),
+            ),
+            image_width,
+            image_height,
+            scale,
+        })
+    }
+
+    fn image_point(self, position: gpui::Point<Pixels>, clamp: bool) -> Option<ImagePoint> {
+        if !clamp && !self.bounds.contains(&position) {
+            return None;
+        }
+        let x = (f32::from(position.x - self.bounds.left()) / self.scale)
+            .clamp(0.0, self.image_width.saturating_sub(1) as f32);
+        let y = (f32::from(position.y - self.bounds.top()) / self.scale)
+            .clamp(0.0, self.image_height.saturating_sub(1) as f32);
+        Some(ImagePoint { x, y })
+    }
+
+    fn screen_point(self, image: ImagePoint) -> gpui::Point<Pixels> {
+        point(
+            self.bounds.left() + px(image.x * self.scale),
+            self.bounds.top() + px(image.y * self.scale),
+        )
+    }
+}
+
+fn decoded_pasted_image(image: &PromptImage) -> Option<(Vec<u8>, u32, u32)> {
     let bytes = STANDARD.decode(&image.data).ok()?;
-    (!bytes.is_empty()).then(|| Arc::new(Image::from_bytes(format, bytes)))
+    let decoded = image::load_from_memory(&bytes).ok()?;
+    Some((bytes, decoded.width(), decoded.height()))
+}
+
+fn pasted_image_source(image: &PromptImage) -> Option<(Arc<Image>, u32, u32)> {
+    let format = ImageFormat::from_mime_type(&image.mime_type)?;
+    let (bytes, width, height) = decoded_pasted_image(image)?;
+    (!bytes.is_empty()).then(|| (Arc::new(Image::from_bytes(format, bytes)), width, height))
+}
+
+fn draw_brush_disc(
+    pixels: &mut image::RgbaImage,
+    center: ImagePoint,
+    diameter: u16,
+    color: [u8; 4],
+) {
+    let radius = diameter as f32 / 2.0;
+    let radius_squared = radius * radius;
+    let min_x = (center.x - radius).floor().max(0.0) as u32;
+    let max_x = (center.x + radius).ceil().min(pixels.width() as f32 - 1.0) as u32;
+    let min_y = (center.y - radius).floor().max(0.0) as u32;
+    let max_y = (center.y + radius).ceil().min(pixels.height() as f32 - 1.0) as u32;
+    for y in min_y..=max_y {
+        for x in min_x..=max_x {
+            let dx = x as f32 + 0.5 - center.x;
+            let dy = y as f32 + 0.5 - center.y;
+            if dx * dx + dy * dy <= radius_squared {
+                pixels.put_pixel(x, y, image::Rgba(color));
+            }
+        }
+    }
+}
+
+fn draw_brush_segment(
+    pixels: &mut image::RgbaImage,
+    from: ImagePoint,
+    to: ImagePoint,
+    diameter: u16,
+    color: [u8; 4],
+) {
+    let dx = to.x - from.x;
+    let dy = to.y - from.y;
+    let distance = (dx * dx + dy * dy).sqrt();
+    let spacing = (diameter as f32 / 4.0).max(0.5);
+    let steps = (distance / spacing).ceil().max(1.0) as usize;
+    for step in 0..=steps {
+        let t = step as f32 / steps as f32;
+        draw_brush_disc(
+            pixels,
+            ImagePoint {
+                x: from.x + dx * t,
+                y: from.y + dy * t,
+            },
+            diameter,
+            color,
+        );
+    }
+}
+
+pub(super) fn annotate_prompt_image(
+    image: &PromptImage,
+    stroke: &PencilStroke,
+) -> Result<PromptImage, String> {
+    let bytes = STANDARD
+        .decode(&image.data)
+        .map_err(|_| "The image data could not be decoded.".to_owned())?;
+    let mut pixels = image::load_from_memory(&bytes)
+        .map_err(|_| "The image could not be opened for drawing.".to_owned())?
+        .to_rgba8();
+    let color = stroke.color.rgba8();
+    if let Some(first) = stroke.points.first().copied() {
+        draw_brush_disc(&mut pixels, first, stroke.size, color);
+        for pair in stroke.points.windows(2) {
+            draw_brush_segment(&mut pixels, pair[0], pair[1], stroke.size, color);
+        }
+    }
+
+    let (format, mime_type) = match image.mime_type.as_str() {
+        "image/jpeg" => (image::ImageFormat::Jpeg, "image/jpeg"),
+        "image/webp" => (image::ImageFormat::WebP, "image/webp"),
+        _ => (image::ImageFormat::Png, "image/png"),
+    };
+    let mut encoded = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgba8(pixels)
+        .write_to(&mut encoded, format)
+        .map_err(|_| "The edited image could not be encoded.".to_owned())?;
+    Ok(PromptImage {
+        data: STANDARD.encode(encoded.into_inner()),
+        mime_type: mime_type.to_owned(),
+    })
+}
+
+#[cfg(test)]
+mod pasted_image_tests {
+    use super::*;
+
+    #[test]
+    fn scale_down_layout_centers_and_maps_image_pixels() {
+        let frame = Bounds::new(point(px(10.0), px(20.0)), size(px(400.0), px(300.0)));
+        let layout = PastedImageLayout::new(frame, 800, 400).unwrap();
+
+        assert_eq!(layout.scale, 0.5);
+        assert_eq!(layout.bounds.origin, point(px(10.0), px(70.0)));
+        assert_eq!(layout.bounds.size, size(px(400.0), px(200.0)));
+        assert_eq!(
+            layout.image_point(point(px(210.0), px(170.0)), false),
+            Some(ImagePoint { x: 400.0, y: 200.0 })
+        );
+        assert_eq!(layout.image_point(point(px(0.0), px(0.0)), false), None);
+    }
+
+    #[test]
+    fn annotation_changes_pixels_and_keeps_a_supported_payload() {
+        let source = image::RgbaImage::from_pixel(12, 12, image::Rgba([0, 0, 0, 0]));
+        let mut encoded = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(source)
+            .write_to(&mut encoded, image::ImageFormat::Png)
+            .unwrap();
+        let prompt = PromptImage {
+            data: STANDARD.encode(encoded.into_inner()),
+            mime_type: "image/png".to_owned(),
+        };
+        let stroke = PencilStroke {
+            image_index: 0,
+            points: vec![ImagePoint { x: 2.0, y: 6.0 }, ImagePoint { x: 9.0, y: 6.0 }],
+            color: PencilColor::Red,
+            size: 3,
+        };
+
+        let edited = annotate_prompt_image(&prompt, &stroke).unwrap();
+        let bytes = STANDARD.decode(&edited.data).unwrap();
+        let pixels = image::load_from_memory(&bytes).unwrap().to_rgba8();
+
+        assert_eq!(edited.mime_type, "image/png");
+        assert_eq!(pixels.get_pixel(5, 6).0, PencilColor::Red.rgba8());
+        assert_eq!(pixels.get_pixel(0, 0).0, [0, 0, 0, 0]);
+    }
+}
+
+fn paint_pencil_stroke(stroke: &PencilStroke, layout: PastedImageLayout, window: &mut Window) {
+    let Some(first) = stroke.points.first().copied() else {
+        return;
+    };
+    let color = gpui::rgb(stroke.color.rgb());
+    if stroke.points.len() == 1 {
+        let center = layout.screen_point(first);
+        let radius = px(stroke.size as f32 * layout.scale / 2.0);
+        let mut dot = PathBuilder::fill();
+        dot.move_to(point(center.x + radius, center.y));
+        dot.arc_to(
+            point(radius, radius),
+            px(0.0),
+            false,
+            false,
+            point(center.x - radius, center.y),
+        );
+        dot.arc_to(
+            point(radius, radius),
+            px(0.0),
+            false,
+            false,
+            point(center.x + radius, center.y),
+        );
+        dot.close();
+        if let Ok(path) = dot.build() {
+            window.paint_path(path, color);
+        }
+        return;
+    }
+
+    let mut path = PathBuilder::stroke(px((stroke.size as f32 * layout.scale).max(1.0)));
+    path.move_to(layout.screen_point(first));
+    for point in stroke.points.iter().skip(1).copied() {
+        path.line_to(layout.screen_point(point));
+    }
+    if let Ok(path) = path.build() {
+        window.paint_path(path, color);
+    }
+}
+
+pub(super) struct PastedImageOverlayParams<'a> {
+    pub prompt_image: &'a PromptImage,
+    pub index: usize,
+    pub count: usize,
+    pub pencil_enabled: bool,
+    pub pencil_color: PencilColor,
+    pub pencil_size: u16,
+    pub pencil_stroke: Option<PencilStroke>,
+    pub can_undo: bool,
+    pub pencil_error: Option<&'a str>,
 }
 
 pub(super) fn pasted_image_overlay(
-    prompt_image: &PromptImage,
-    index: usize,
-    count: usize,
+    params: PastedImageOverlayParams<'_>,
     cx: &mut Context<RootView>,
 ) -> gpui::AnyElement {
+    let PastedImageOverlayParams {
+        prompt_image,
+        index,
+        count,
+        pencil_enabled,
+        pencil_color,
+        pencil_size,
+        pencil_stroke,
+        can_undo,
+        pencil_error,
+    } = params;
     let image = pasted_image_source(prompt_image);
     let image_missing = image.is_none();
+    let image_dimensions = image.as_ref().map(|(_, width, height)| (*width, *height));
+    let image_source = image.map(|(source, _, _)| source);
+    let root = cx.entity();
     let format = prompt_image
         .mime_type
         .strip_prefix("image/")
@@ -744,16 +1198,330 @@ pub(super) fn pasted_image_overlay(
                 )
                 .child(
                     div()
+                        .min_h(px(46.0))
+                        .px(px(14.0))
+                        .py(px(7.0))
+                        .flex_shrink_0()
+                        .flex()
+                        .flex_wrap()
+                        .items_center()
+                        .gap(px(6.0))
+                        .child(
+                            div()
+                                .id("pasted-image-pencil")
+                                .tab_index(0)
+                                .h(px(32.0))
+                                .px(px(11.0))
+                                .rounded(px(theme::RADIUS_SM))
+                                .border_1()
+                                .border_color(if pencil_enabled {
+                                    theme::focus()
+                                } else {
+                                    theme::edge_soft()
+                                })
+                                .bg(if pencil_enabled {
+                                    theme::panel_hover()
+                                } else {
+                                    theme::canvas()
+                                })
+                                .font_family(theme::CONTROL)
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_size(px(theme::T_UI_SM))
+                                .text_color(theme::bone())
+                                .cursor_pointer()
+                                .hover(|button| button.bg(theme::panel_lift()))
+                                .focus(|button| button.border_color(theme::focus()))
+                                .on_key_down(cx.listener(
+                                    |view, event: &gpui::KeyDownEvent, _, cx| {
+                                        if matches!(event.keystroke.key.as_str(), "enter" | "space")
+                                        {
+                                            cx.stop_propagation();
+                                            view.toggle_pencil(cx);
+                                        }
+                                    },
+                                ))
+                                .on_click(cx.listener(|view, _, _, cx| view.toggle_pencil(cx)))
+                                .child(if pencil_enabled {
+                                    "Pencil on"
+                                } else {
+                                    "Pencil"
+                                }),
+                        )
+                        .when(pencil_enabled, |toolbar| {
+                            toolbar
+                                .child(
+                                    div()
+                                        .font_family(theme::SANS)
+                                        .text_size(px(theme::T_TINY))
+                                        .text_color(theme::smoke())
+                                        .child(format!("Color: {}", pencil_color.label())),
+                                )
+                                .children(PencilColor::ALL.into_iter().map(|color| {
+                                    let selected = color == pencil_color;
+                                    div()
+                                        .id(gpui::SharedString::from(format!(
+                                            "pencil-color-{}",
+                                            color.label().to_ascii_lowercase()
+                                        )))
+                                        .tab_index(0)
+                                        .w(px(22.0))
+                                        .h(px(22.0))
+                                        .rounded(px(4.0))
+                                        .border_1()
+                                        .border_color(if selected {
+                                            theme::focus()
+                                        } else {
+                                            theme::edge_hard()
+                                        })
+                                        .bg(gpui::rgb(color.rgb()))
+                                        .cursor_pointer()
+                                        .focus(|swatch| swatch.border_color(theme::focus()))
+                                        .on_key_down(cx.listener(
+                                            move |view, event: &gpui::KeyDownEvent, _, cx| {
+                                                if matches!(
+                                                    event.keystroke.key.as_str(),
+                                                    "enter" | "space"
+                                                ) {
+                                                    cx.stop_propagation();
+                                                    view.set_pencil_color(color, cx);
+                                                }
+                                            },
+                                        ))
+                                        .on_click(cx.listener(move |view, _, _, cx| {
+                                            view.set_pencil_color(color, cx)
+                                        }))
+                                }))
+                                .child(
+                                    div()
+                                        .font_family(theme::SANS)
+                                        .text_size(px(theme::T_TINY))
+                                        .text_color(theme::smoke())
+                                        .child("Pixels"),
+                                )
+                                .child(
+                                    div()
+                                        .id("pencil-size-decrease")
+                                        .tab_index(0)
+                                        .w(px(28.0))
+                                        .h(px(28.0))
+                                        .rounded(px(theme::RADIUS_SM))
+                                        .bg(theme::canvas())
+                                        .border_1()
+                                        .border_color(theme::edge_soft())
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .cursor_pointer()
+                                        .hover(|button| button.bg(theme::panel_lift()))
+                                        .focus(|button| button.border_color(theme::focus()))
+                                        .on_key_down(cx.listener(
+                                            |view, event: &gpui::KeyDownEvent, _, cx| {
+                                                if matches!(
+                                                    event.keystroke.key.as_str(),
+                                                    "enter" | "space"
+                                                ) {
+                                                    cx.stop_propagation();
+                                                    view.adjust_pencil_size(-1, cx);
+                                                }
+                                            },
+                                        ))
+                                        .on_click(cx.listener(|view, _, _, cx| {
+                                            view.adjust_pencil_size(-1, cx)
+                                        }))
+                                        .child("−"),
+                                )
+                                .child(
+                                    div()
+                                        .w(px(44.0))
+                                        .font_family(theme::MONO)
+                                        .text_size(px(theme::T_TINY))
+                                        .text_color(theme::bone_dim())
+                                        .text_align(gpui::TextAlign::Center)
+                                        .child(format!("{pencil_size} px")),
+                                )
+                                .child(
+                                    div()
+                                        .id("pencil-size-increase")
+                                        .tab_index(0)
+                                        .w(px(28.0))
+                                        .h(px(28.0))
+                                        .rounded(px(theme::RADIUS_SM))
+                                        .bg(theme::canvas())
+                                        .border_1()
+                                        .border_color(theme::edge_soft())
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .cursor_pointer()
+                                        .hover(|button| button.bg(theme::panel_lift()))
+                                        .focus(|button| button.border_color(theme::focus()))
+                                        .on_key_down(cx.listener(
+                                            |view, event: &gpui::KeyDownEvent, _, cx| {
+                                                if matches!(
+                                                    event.keystroke.key.as_str(),
+                                                    "enter" | "space"
+                                                ) {
+                                                    cx.stop_propagation();
+                                                    view.adjust_pencil_size(1, cx);
+                                                }
+                                            },
+                                        ))
+                                        .on_click(cx.listener(|view, _, _, cx| {
+                                            view.adjust_pencil_size(1, cx)
+                                        }))
+                                        .child("+"),
+                                )
+                                .child(
+                                    div()
+                                        .id("pencil-undo")
+                                        .tab_index(0)
+                                        .h(px(28.0))
+                                        .px(px(8.0))
+                                        .rounded(px(theme::RADIUS_SM))
+                                        .font_family(theme::CONTROL)
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_size(px(theme::T_TINY))
+                                        .text_color(if can_undo {
+                                            theme::bone_dim()
+                                        } else {
+                                            theme::smoke()
+                                        })
+                                        .cursor(if can_undo {
+                                            gpui::CursorStyle::PointingHand
+                                        } else {
+                                            gpui::CursorStyle::Arrow
+                                        })
+                                        .when(can_undo, |button| {
+                                            button
+                                                .hover(|button| {
+                                                    button
+                                                        .bg(theme::panel_lift())
+                                                        .text_color(theme::bone())
+                                                })
+                                                .focus(|button| button.text_color(theme::focus()))
+                                                .on_key_down(cx.listener(
+                                                    |view, event: &gpui::KeyDownEvent, _, cx| {
+                                                        if matches!(
+                                                            event.keystroke.key.as_str(),
+                                                            "enter" | "space"
+                                                        ) {
+                                                            cx.stop_propagation();
+                                                            view.undo_pencil_stroke(cx);
+                                                        }
+                                                    },
+                                                ))
+                                                .on_click(cx.listener(|view, _, _, cx| {
+                                                    view.undo_pencil_stroke(cx)
+                                                }))
+                                        })
+                                        .child("Undo"),
+                                )
+                        }),
+                )
+                .child(
+                    div()
                         .flex_1()
                         .min_h_0()
                         .mx(px(14.0))
+                        .relative()
                         .bg(theme::canvas())
                         .overflow_hidden()
                         .flex()
                         .items_center()
                         .justify_center()
-                        .when_some(image, |frame, source| {
+                        .when_some(image_source, |frame, source| {
                             frame.child(img(source).size_full().object_fit(ObjectFit::ScaleDown))
+                        })
+                        .when(pencil_enabled && image_dimensions.is_some(), |frame| {
+                            let (image_width, image_height) = image_dimensions.unwrap();
+                            let paint_stroke = pencil_stroke.clone();
+                            let paint_root = root.clone();
+                            frame.child(
+                                canvas(
+                                    |_, _, _| (),
+                                    move |bounds, _, window, _| {
+                                        let Some(layout) = PastedImageLayout::new(
+                                            bounds,
+                                            image_width,
+                                            image_height,
+                                        ) else {
+                                            return;
+                                        };
+                                        if let Some(stroke) = paint_stroke
+                                            .as_ref()
+                                            .filter(|stroke| stroke.image_index == index)
+                                        {
+                                            paint_pencil_stroke(stroke, layout, window);
+                                        }
+
+                                        let down_root = paint_root.clone();
+                                        window.on_mouse_event(
+                                            move |event: &MouseDownEvent, phase, _, cx| {
+                                                if phase != DispatchPhase::Capture
+                                                    || event.button != MouseButton::Left
+                                                {
+                                                    return;
+                                                }
+                                                let Some(image_point) =
+                                                    layout.image_point(event.position, false)
+                                                else {
+                                                    return;
+                                                };
+                                                down_root.update(cx, |view, cx| {
+                                                    view.start_pencil_stroke(index, image_point, cx)
+                                                });
+                                                cx.stop_propagation();
+                                            },
+                                        );
+
+                                        let move_root = paint_root.clone();
+                                        window.on_mouse_event(
+                                            move |event: &MouseMoveEvent, phase, _, cx| {
+                                                if phase != DispatchPhase::Capture {
+                                                    return;
+                                                }
+                                                let Some(image_point) =
+                                                    layout.image_point(event.position, true)
+                                                else {
+                                                    return;
+                                                };
+                                                let handled = move_root.update(cx, |view, cx| {
+                                                    view.continue_pencil_stroke(
+                                                        index,
+                                                        image_point,
+                                                        cx,
+                                                    )
+                                                });
+                                                if handled {
+                                                    cx.stop_propagation();
+                                                }
+                                            },
+                                        );
+
+                                        let up_root = paint_root.clone();
+                                        window.on_mouse_event(
+                                            move |event: &MouseUpEvent, phase, _, cx| {
+                                                if phase != DispatchPhase::Capture
+                                                    || event.button != MouseButton::Left
+                                                {
+                                                    return;
+                                                }
+                                                if up_root.update(cx, |view, cx| {
+                                                    view.finish_pencil_stroke(cx)
+                                                }) {
+                                                    cx.stop_propagation();
+                                                }
+                                            },
+                                        );
+                                    },
+                                )
+                                .absolute()
+                                .top_0()
+                                .right_0()
+                                .bottom_0()
+                                .left_0()
+                                .cursor_crosshair(),
+                            )
                         })
                         .when(image_missing, |frame| {
                             frame.child(
@@ -773,6 +1541,16 @@ pub(super) fn pasted_image_overlay(
                         .flex()
                         .items_center()
                         .justify_center()
+                        .gap(px(18.0))
+                        .when_some(pencil_error, |footer, message| {
+                            footer.child(
+                                div()
+                                    .font_family(theme::SANS)
+                                    .text_size(px(theme::T_TINY))
+                                    .text_color(theme::error())
+                                    .child(message.to_owned()),
+                            )
+                        })
                         .when(count > 1, |footer| {
                             footer.child(
                                 div()

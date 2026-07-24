@@ -2,8 +2,9 @@ use super::composer_bar::{ComposerBarParams, composer_bar};
 use super::inspector::{InspectorParams, inspector, subagent_dialog};
 use super::model_panels::{ModelSettingsPanelParams, model_settings_panel};
 use super::overlays::{
-    command_palette_overlay, compaction_dialog, conversation_area, extension_dialog_overlay,
-    hotkey_help_overlay, pasted_image_overlay, runtime_notification_stack,
+    PastedImageOverlayParams, command_palette_overlay, compaction_dialog, conversation_area,
+    extension_dialog_overlay, hotkey_help_overlay, pasted_image_overlay,
+    runtime_notification_stack,
 };
 use super::shell::{
     HistoryPanelParams, SessionsPanelParams, history_panel, sessions_panel, titlebar,
@@ -119,6 +120,7 @@ impl Render for RootView {
                                 Arc::clone(&self.conversation_list),
                                 self.conversation_list_state.clone(),
                                 self.transcript_cache.clone(),
+                                self.activity_disclosures.clone(),
                                 cx.entity(),
                             ))
                             .child(composer_bar(
@@ -155,7 +157,20 @@ impl Render for RootView {
                     )),
             )
             .when_some(pasted_image_preview, |shell, (image, index, count)| {
-                shell.child(pasted_image_overlay(&image, index, count, cx))
+                shell.child(pasted_image_overlay(
+                    PastedImageOverlayParams {
+                        prompt_image: &image,
+                        index,
+                        count,
+                        pencil_enabled: self.pencil_enabled,
+                        pencil_color: self.pencil_color,
+                        pencil_size: self.pencil_size,
+                        pencil_stroke: self.pencil_stroke.clone(),
+                        can_undo: !self.pencil_undo.is_empty(),
+                        pencil_error: self.pencil_error.as_deref(),
+                    },
+                    cx,
+                ))
             })
             .when(self.compaction_modal_open, |shell| {
                 shell.child(compaction_dialog(&self.compaction_composer, cx))
