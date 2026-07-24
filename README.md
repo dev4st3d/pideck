@@ -1,6 +1,6 @@
-# Pi GUI
+# Pideck
 
-Native Windows-first desktop shell for Pi, built with Rust and GPUI 0.2.2.
+Pideck is a native Windows-first desktop shell for Pi, built with Rust and GPUI 0.2.2.
 
 ## Current maturity
 

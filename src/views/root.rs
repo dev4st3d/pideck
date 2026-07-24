@@ -342,7 +342,7 @@ impl RootView {
             cx.subscribe_in(&goal_edit_composer, window, |view, _, event, _, cx| {
                 view.on_goal_edit_event(event, cx)
             });
-        window.set_window_title("Pi GUI");
+        window.set_window_title("Pideck");
         Self {
             controller,
             composer,
@@ -386,7 +386,7 @@ impl RootView {
             usage_tooltip_epoch: 0,
             subagent_dialog_focus,
             subagent_dialog_scroll: ScrollHandle::new(),
-            window_title: "Pi GUI".to_owned(),
+            window_title: "Pideck".to_owned(),
             history: HistoryBrowser::default(),
             history_focus,
             history_open: false,
@@ -1096,7 +1096,7 @@ impl RootView {
             .as_deref()
             .map(single_line_title)
             .filter(|title| !title.is_empty())
-            .unwrap_or_else(|| "Pi GUI".to_owned());
+            .unwrap_or_else(|| "Pideck".to_owned());
         if title != self.window_title {
             window.set_window_title(&title);
             self.window_title = title;
@@ -2677,7 +2677,7 @@ fn titlebar(projection: &ShellProjection, cx: &mut Context<RootView>) -> impl In
                         .font_weight(FontWeight::NORMAL)
                         .text_color(theme::bone())
                         .flex_shrink_0()
-                        .child("pi"),
+                        .child("Pideck"),
                 )
                 .child(
                     div()

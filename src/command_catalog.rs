@@ -70,7 +70,7 @@ impl CommandEntry {
 
     pub fn provenance_label(&self) -> String {
         let Some(provenance) = &self.provenance else {
-            return "Built into Pi GUI".to_owned();
+            return "Built into Pideck".to_owned();
         };
         let source = if provenance.source.is_empty() {
             provenance.path.as_str()
