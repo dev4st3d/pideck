@@ -1,14 +1,53 @@
-use super::shared::{action_id, lifecycle_color, short_path};
+use super::shared::{action_id, runtime_operation_label, short_path};
 use super::*;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TitlebarStatusTone {
+    Idle,
+    Working,
+    Attention,
+    Complete,
+    Error,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TitlebarStatus {
+    label: String,
+    tone: TitlebarStatusTone,
+    animated: bool,
+}
+
+impl TitlebarStatus {
+    fn new(label: impl Into<String>, tone: TitlebarStatusTone, animated: bool) -> Self {
+        Self {
+            label: label.into(),
+            tone,
+            animated,
+        }
+    }
+
+    fn color(&self) -> gpui::Rgba {
+        match self.tone {
+            TitlebarStatusTone::Idle => theme::ash(),
+            TitlebarStatusTone::Working => theme::working(),
+            TitlebarStatusTone::Attention => theme::data(),
+            TitlebarStatusTone::Complete => theme::live(),
+            TitlebarStatusTone::Error => theme::error(),
+        }
+    }
+}
 
 pub(super) fn titlebar(
     projection: &ShellProjection,
+    conversation: &ConversationProjection,
     name_composer: &Entity<Composer>,
     rename_open: bool,
     rename_enabled: bool,
     cx: &mut Context<RootView>,
 ) -> impl IntoElement {
     let action = projection.action;
+    let status = titlebar_status(projection, conversation);
+    let status_color = status.color();
     div()
         .h(px(theme::TITLE_H))
         .px(px(theme::PAD_X))
@@ -111,12 +150,29 @@ pub(super) fn titlebar(
                 .items_center()
                 .gap(px(10.0))
                 .flex_shrink_0()
-                .child(controls::meta_text(projection.cost.label()))
-                .child(controls::meta_sep())
-                .child(controls::status_pill(
-                    projection.lifecycle.clone(),
-                    lifecycle_color(projection),
-                ))
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(8.0))
+                        .child(controls::square_status_indicator(
+                            0,
+                            status.animated,
+                            Duration::from_millis(720),
+                            status_color,
+                        ))
+                        .child(
+                            div()
+                                .font_family(theme::main())
+                                .text_size(px(theme::T_UI_SM))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(status_color)
+                                .whitespace_nowrap()
+                                .child(status.label),
+                        ),
+                )
+                .when(action.is_some(), |row| row.child(controls::meta_sep()))
                 .when_some(action, |row, action| {
                     row.child(controls::recovery_button(
                         action_id(action),
@@ -129,6 +185,145 @@ pub(super) fn titlebar(
                     ))
                 }),
         )
+}
+
+fn titlebar_status(
+    projection: &ShellProjection,
+    conversation: &ConversationProjection,
+) -> TitlebarStatus {
+    titlebar_status_for(
+        &projection.lifecycle,
+        conversation.lifecycle,
+        matches!(
+            conversation.status,
+            crate::state::runtime::FacetStatus::Loading
+        ),
+        conversation.error.is_some(),
+        &conversation.retry,
+        &conversation.compaction,
+        conversation.pending_operation.as_ref(),
+    )
+}
+
+fn titlebar_status_for(
+    shell_lifecycle: &str,
+    lifecycle: RuntimeLifecycle,
+    conversation_loading: bool,
+    has_error: bool,
+    retry: &RetryState,
+    compaction: &CompactionState,
+    pending_operation: Option<&RuntimeOperation>,
+) -> TitlebarStatus {
+    match shell_lifecycle {
+        "Not connected" | "Stopped" => {
+            return TitlebarStatus::new("Disconnected", TitlebarStatusTone::Idle, false);
+        }
+        "Connecting" => {
+            return TitlebarStatus::new("Connecting", TitlebarStatusTone::Working, true);
+        }
+        "Stopping" => {
+            return TitlebarStatus::new("Stopping", TitlebarStatusTone::Attention, true);
+        }
+        "Connection error" => {
+            return TitlebarStatus::new("Disconnected", TitlebarStatusTone::Error, false);
+        }
+        "No model" => {
+            return TitlebarStatus::new("No model", TitlebarStatusTone::Error, false);
+        }
+        _ => {}
+    }
+
+    if lifecycle == RuntimeLifecycle::Disconnected {
+        return TitlebarStatus::new("Disconnected", TitlebarStatusTone::Error, false);
+    }
+    if lifecycle == RuntimeLifecycle::Failed {
+        return TitlebarStatus::new("Error", TitlebarStatusTone::Error, false);
+    }
+
+    match retry {
+        RetryState::Waiting {
+            attempt,
+            max_attempts,
+            ..
+        } => {
+            return TitlebarStatus::new(
+                format!("Retrying {attempt}/{max_attempts}"),
+                TitlebarStatusTone::Attention,
+                true,
+            );
+        }
+        RetryState::Cancelling => {
+            return TitlebarStatus::new("Cancelling retry", TitlebarStatusTone::Attention, true);
+        }
+        RetryState::Idle | RetryState::Succeeded { .. } | RetryState::Failed { .. } => {}
+    }
+
+    match compaction {
+        CompactionState::Running { .. } => {
+            return TitlebarStatus::new("Compacting", TitlebarStatusTone::Attention, true);
+        }
+        CompactionState::Completed {
+            will_retry: true, ..
+        } if lifecycle == RuntimeLifecycle::Running && matches!(retry, RetryState::Idle) => {
+            return TitlebarStatus::new(
+                "Retrying after compaction",
+                TitlebarStatusTone::Attention,
+                true,
+            );
+        }
+        CompactionState::Idle
+        | CompactionState::Completed { .. }
+        | CompactionState::Failed { .. }
+        | CompactionState::Aborted { .. } => {}
+    }
+
+    if let Some(operation) = pending_operation {
+        return TitlebarStatus::new(
+            runtime_operation_label(operation),
+            TitlebarStatusTone::Attention,
+            true,
+        );
+    }
+    if has_error {
+        return TitlebarStatus::new("Conversation error", TitlebarStatusTone::Error, false);
+    }
+    if lifecycle == RuntimeLifecycle::Running {
+        return TitlebarStatus::new("Working", TitlebarStatusTone::Working, true);
+    }
+    if let RetryState::Failed { attempt, .. } = retry {
+        return TitlebarStatus::new(
+            format!("Retry failed · attempt {attempt}"),
+            TitlebarStatusTone::Error,
+            false,
+        );
+    }
+    if matches!(compaction, CompactionState::Failed { .. }) {
+        return TitlebarStatus::new("Compaction failed", TitlebarStatusTone::Error, false);
+    }
+    if matches!(compaction, CompactionState::Aborted { .. }) {
+        return TitlebarStatus::new("Compaction aborted", TitlebarStatusTone::Attention, false);
+    }
+    if conversation_loading {
+        return TitlebarStatus::new("Loading conversation", TitlebarStatusTone::Working, true);
+    }
+
+    match lifecycle {
+        RuntimeLifecycle::Loading => {
+            TitlebarStatus::new("Loading", TitlebarStatusTone::Working, true)
+        }
+        RuntimeLifecycle::Ready => TitlebarStatus::new("Idle", TitlebarStatusTone::Idle, false),
+        RuntimeLifecycle::Running => unreachable!("running status returns above"),
+        RuntimeLifecycle::Cancelling => {
+            TitlebarStatus::new("Cancelling", TitlebarStatusTone::Attention, true)
+        }
+        RuntimeLifecycle::Settled => {
+            TitlebarStatus::new("Finished", TitlebarStatusTone::Complete, false)
+        }
+        RuntimeLifecycle::Disconnected => {
+            TitlebarStatus::new("Disconnected", TitlebarStatusTone::Error, false)
+        }
+        RuntimeLifecycle::Failed => TitlebarStatus::new("Error", TitlebarStatusTone::Error, false),
+    }
 }
 
 pub(super) struct SessionsPanelParams<'a> {
@@ -856,4 +1051,115 @@ pub(super) fn history_panel(
                     )),
             )
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::runtime::CompactionKind;
+
+    fn runtime_status(
+        lifecycle: RuntimeLifecycle,
+        retry: RetryState,
+        compaction: CompactionState,
+    ) -> TitlebarStatus {
+        titlebar_status_for("Ready", lifecycle, false, false, &retry, &compaction, None)
+    }
+
+    #[test]
+    fn titlebar_distinguishes_working_finished_and_idle() {
+        assert_eq!(
+            runtime_status(
+                RuntimeLifecycle::Running,
+                RetryState::Idle,
+                CompactionState::Idle,
+            ),
+            TitlebarStatus::new("Working", TitlebarStatusTone::Working, true)
+        );
+        assert_eq!(
+            runtime_status(
+                RuntimeLifecycle::Settled,
+                RetryState::Idle,
+                CompactionState::Idle,
+            ),
+            TitlebarStatus::new("Finished", TitlebarStatusTone::Complete, false)
+        );
+        assert_eq!(
+            runtime_status(
+                RuntimeLifecycle::Ready,
+                RetryState::Idle,
+                CompactionState::Idle,
+            ),
+            TitlebarStatus::new("Idle", TitlebarStatusTone::Idle, false)
+        );
+    }
+
+    #[test]
+    fn retry_attempt_overrides_generic_working_state() {
+        let status = runtime_status(
+            RuntimeLifecycle::Running,
+            RetryState::Waiting {
+                attempt: 2,
+                max_attempts: 3,
+                delay_ms: 500,
+                started_at: Instant::now(),
+            },
+            CompactionState::Idle,
+        );
+        assert_eq!(
+            status,
+            TitlebarStatus::new("Retrying 2/3", TitlebarStatusTone::Attention, true)
+        );
+    }
+
+    #[test]
+    fn failures_and_disconnection_override_active_states() {
+        let compaction_failure = runtime_status(
+            RuntimeLifecycle::Settled,
+            RetryState::Idle,
+            CompactionState::Failed {
+                reason: CompactionKind::Manual,
+                summary: "provider refused compaction".to_owned(),
+            },
+        );
+        assert_eq!(
+            compaction_failure,
+            TitlebarStatus::new("Compaction failed", TitlebarStatusTone::Error, false)
+        );
+
+        let disconnected = titlebar_status_for(
+            "Connection error",
+            RuntimeLifecycle::Disconnected,
+            false,
+            true,
+            &RetryState::Waiting {
+                attempt: 1,
+                max_attempts: 3,
+                delay_ms: 500,
+                started_at: Instant::now(),
+            },
+            &CompactionState::Idle,
+            None,
+        );
+        assert_eq!(
+            disconnected,
+            TitlebarStatus::new("Disconnected", TitlebarStatusTone::Error, false)
+        );
+    }
+
+    #[test]
+    fn current_work_overrides_stale_terminal_retry_state() {
+        let status = runtime_status(
+            RuntimeLifecycle::Running,
+            RetryState::Failed {
+                attempt: 3,
+                summary: "old provider failure".to_owned(),
+            },
+            CompactionState::Idle,
+        );
+        assert_eq!(
+            status,
+            TitlebarStatus::new("Working", TitlebarStatusTone::Working, true)
+        );
+    }
 }

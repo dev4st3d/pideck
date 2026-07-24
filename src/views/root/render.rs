@@ -62,6 +62,7 @@ impl Render for RootView {
             .text_color(theme::bone())
             .child(titlebar(
                 projection,
+                &self.conversation,
                 &self.session_name_composer,
                 self.session_rename_open,
                 matches!(
@@ -130,7 +131,6 @@ impl Render for RootView {
                             .flex()
                             .flex_col()
                             .child(conversation_area(
-                                projection,
                                 Arc::clone(&self.conversation),
                                 Arc::clone(&self.conversation_list),
                                 self.conversation_list_state.clone(),

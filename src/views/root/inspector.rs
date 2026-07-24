@@ -1,3 +1,4 @@
+use super::shared::runtime_operation_label;
 use super::shared::{plural, short_path};
 use super::*;
 
@@ -787,64 +788,13 @@ fn task_status_widget(
     blockers: usize,
     color: gpui::Rgba,
 ) -> gpui::AnyElement {
-    if blockers > 0 || status == TaskStatus::Completed {
-        return div()
-            .relative()
-            .flex_shrink_0()
-            .size(px(8.0))
-            .child(
-                div()
-                    .absolute()
-                    .left(px(1.0))
-                    .top(px(1.0))
-                    .size(px(6.0))
-                    .bg(color),
-            )
-            .into_any_element();
-    }
-
+    let animated = blockers == 0 && status != TaskStatus::Completed;
     let cycle = match status {
         TaskStatus::Pending => Duration::from_millis(1_100),
-        TaskStatus::InProgress => Duration::from_millis(720),
-        TaskStatus::Completed => unreachable!(),
+        TaskStatus::InProgress | TaskStatus::Completed => Duration::from_millis(720),
     };
-    div()
-        .relative()
-        .flex_shrink_0()
-        .size(px(8.0))
-        .children([
-            task_status_dot(index, 0, px(0.0), px(0.0), cycle, color),
-            task_status_dot(index, 1, px(6.0), px(0.0), cycle, color),
-            task_status_dot(index, 2, px(6.0), px(6.0), cycle, color),
-            task_status_dot(index, 3, px(0.0), px(6.0), cycle, color),
-        ])
-        .into_any_element()
-}
-
-fn task_status_dot(
-    task_index: usize,
-    dot_index: usize,
-    left: gpui::Pixels,
-    top: gpui::Pixels,
-    cycle: Duration,
-    color: gpui::Rgba,
-) -> gpui::AnyElement {
-    div()
-        .absolute()
-        .left(left)
-        .top(top)
-        .size(px(2.0))
-        .bg(color)
-        .with_animation(
-            ("task-status", task_index * 4 + dot_index),
-            Animation::new(cycle).repeat(),
-            move |dot, progress| {
-                let target = dot_index as f32 * 0.25;
-                let distance = ((progress - target + 0.5).rem_euclid(1.0) - 0.5).abs();
-                dot.opacity(0.28 + (1.0 - distance / 0.25).max(0.0) * 0.72)
-            },
-        )
-        .into_any_element()
+    // Key zero belongs to the titlebar status indicator.
+    controls::square_status_indicator(index + 1, animated, cycle, color)
 }
 
 fn task_status_color(status: TaskStatus, blockers: usize) -> gpui::Rgba {
@@ -1359,7 +1309,7 @@ fn run_controls(
                             conversation
                                 .pending_operation
                                 .as_ref()
-                                .map(operation_label)
+                                .map(runtime_operation_label)
                                 .unwrap_or(run_status),
                         ),
                 ),
@@ -1603,36 +1553,6 @@ fn queue_panel(conversation: &ConversationProjection) -> impl IntoElement {
         })
 }
 
-pub(super) fn runtime_error_notice(projection: &ShellProjection) -> impl IntoElement {
-    div()
-        .mx(px(theme::STREAM_PAD_X))
-        .mt(px(14.0))
-        .p(px(12.0))
-        .rounded(px(theme::RADIUS_SM))
-        .bg(theme::panel())
-        .border_1()
-        .border_color(theme::error())
-        .flex()
-        .flex_col()
-        .gap(px(4.0))
-        .child(
-            div()
-                .font_family(theme::sans())
-                .text_size(px(theme::T_UI))
-                .font_weight(FontWeight::BOLD)
-                .text_color(theme::error())
-                .child(projection.headline.clone()),
-        )
-        .child(
-            div()
-                .font_family(theme::sans())
-                .text_size(px(theme::T_UI_SM))
-                .line_height(gpui::relative(1.4))
-                .text_color(theme::bone_dim())
-                .child(projection.detail.clone()),
-        )
-}
-
 pub(super) fn context_pct(label: &str) -> Option<f32> {
     let cleaned = label
         .split('·')
@@ -1652,18 +1572,4 @@ pub(super) fn context_pct(label: &str) -> Option<f32> {
         .parse::<f32>()
         .ok()
         .map(|value| (value / 100.0).clamp(0.0, 1.0))
-}
-
-fn operation_label(operation: &RuntimeOperation) -> &'static str {
-    match operation {
-        RuntimeOperation::SetModel { .. } => "Switching model",
-        RuntimeOperation::SetThinkingLevel(_) => "Changing thinking",
-        RuntimeOperation::SetSteeringMode(_) => "Changing steering mode",
-        RuntimeOperation::SetFollowUpMode(_) => "Changing follow-up mode",
-        RuntimeOperation::Compact => "Compacting",
-        RuntimeOperation::SetAutoCompaction(_) => "Changing auto compaction",
-        RuntimeOperation::SetAutoRetry(_) => "Changing auto retry",
-        RuntimeOperation::SetSessionName(_) => "Renaming session",
-        RuntimeOperation::ExportHtml => "Exporting session",
-    }
 }

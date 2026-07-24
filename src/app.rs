@@ -9,6 +9,7 @@ use crate::actions::{
     RECOVERY_BUTTON_CONTEXT, Retry, ShowHotkeys, Stop, composer_key_bindings, history_key_bindings,
     image_preview_key_bindings, orchestration_key_bindings, transcript_key_bindings,
 };
+use crate::assets::Assets;
 use crate::controller::RuntimeController;
 use crate::services::runtime_worker::{RpcRuntimeService, RuntimeService};
 use crate::services::session_catalog::{SessionCatalogConfig, without_windows_verbatim_prefix};
@@ -29,7 +30,8 @@ pub fn run() {
         session_root,
     ));
 
-    Application::new().run(move |cx: &mut App| {
+    let application = Application::new().with_assets(Assets);
+    application.run(move |cx: &mut App| {
         let font_catalog = fonts::initialize(cx);
         cx.bind_keys([
             KeyBinding::new("ctrl-alt-c", Connect, None),

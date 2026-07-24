@@ -8,11 +8,11 @@ use std::time::{Duration, Instant};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use gpui::{
-    Animation, AnimationExt, Bounds, ClipboardItem, Context, DispatchPhase, Entity, FocusHandle,
-    Focusable, FontWeight, Image, ImageFormat, IntoElement, ListAlignment, ListOffset, ListState,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit, PathBuilder, Pixels,
-    Render, ScrollHandle, ScrollWheelEvent, StyledImage, Subscription, Task, Window, canvas,
-    deferred, div, fill, img, list, point, prelude::*, px, size,
+    Bounds, ClipboardItem, Context, DispatchPhase, Entity, FocusHandle, Focusable, FontWeight,
+    Image, ImageFormat, IntoElement, ListAlignment, ListOffset, ListState, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit, PathBuilder, Pixels, Render,
+    ScrollHandle, ScrollWheelEvent, StyledImage, Subscription, Task, Window, canvas, deferred, div,
+    fill, img, list, point, prelude::*, px, size,
 };
 
 use crate::actions::{
@@ -284,7 +284,6 @@ pub struct RootView {
     pending_bash: Option<crate::services::rpc::RequestId>,
     pending_compaction_focus: Option<String>,
     pending_session_name: Option<String>,
-    retry_tick_task: Option<Task<()>>,
     focus_handle: FocusHandle,
     _controller_observation: Subscription,
     _activity_disclosure_observation: Subscription,
@@ -568,7 +567,6 @@ impl RootView {
             pending_bash: None,
             pending_compaction_focus: None,
             pending_session_name: None,
-            retry_tick_task: None,
             focus_handle,
             _controller_observation: controller_observation,
             _activity_disclosure_observation: activity_disclosure_observation,
@@ -2340,7 +2338,6 @@ impl RootView {
         }
         self.conversation = Arc::new(conversation);
         self.conversation_list = Arc::new(conversation_list);
-        self.sync_retry_tick(cx);
         self.enforce_all_delivery_modes(cx);
 
         let compact_available = matches!(
@@ -2597,36 +2594,6 @@ impl RootView {
         } else if self.conversation.follow_up_mode == Some(QueueDeliveryMode::OneAtATime) {
             self.set_follow_up_mode(QueueDeliveryMode::All, cx);
         }
-    }
-
-    fn sync_retry_tick(&mut self, cx: &mut Context<Self>) {
-        let waiting = matches!(self.conversation.retry, RetryState::Waiting { .. });
-        if !waiting {
-            self.retry_tick_task = None;
-            return;
-        }
-        if self.retry_tick_task.is_some() {
-            return;
-        }
-        self.retry_tick_task = Some(cx.spawn(async move |view, cx| {
-            loop {
-                cx.background_executor()
-                    .timer(Duration::from_millis(100))
-                    .await;
-                let keep_ticking = view
-                    .update(cx, |view, cx| {
-                        let waiting = matches!(view.conversation.retry, RetryState::Waiting { .. });
-                        if waiting {
-                            cx.notify();
-                        }
-                        waiting
-                    })
-                    .unwrap_or(false);
-                if !keep_ticking {
-                    break;
-                }
-            }
-        }));
     }
 
     fn reconcile_scoped_operations(

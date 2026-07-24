@@ -17,8 +17,8 @@ use crate::actions::{TranscriptCopy, TranscriptSelectAll};
 use crate::controller::{AcceptedUserInput, ConversationProjection};
 use crate::services::rpc::{SessionEpoch, ToolCallId};
 use crate::state::runtime::{
-    CompactionKind, CompactionState, FacetStatus, MessageBlock, MessageRole, MessageStopReason,
-    RetryState, RuntimeLifecycle, RuntimeMessage, SubmissionKind, ToolImage,
+    MessageBlock, MessageRole, MessageStopReason, RuntimeLifecycle, RuntimeMessage, SubmissionKind,
+    ToolImage,
 };
 use crate::theme;
 use crate::views::markdown::{MarkdownDocument, MarkdownStyle};
@@ -1509,177 +1509,6 @@ fn stop_color(reason: Option<MessageStopReason>) -> gpui::Rgba {
     }
 }
 
-fn notices(projection: &ConversationProjection) -> Vec<AnyElement> {
-    let mut notices = Vec::new();
-    if matches!(projection.status, FacetStatus::Loading) {
-        notices.push(system_notice(
-            "conversation-loading",
-            "Loading conversation",
-            if projection.messages.is_empty() {
-                "Reading the current Pi transcript."
-            } else {
-                "Refreshing the authoritative transcript. Existing messages remain visible."
-            },
-            false,
-        ));
-    }
-
-    match &projection.retry {
-        RetryState::Waiting {
-            attempt,
-            max_attempts,
-            ..
-        } => notices.push(system_notice(
-            &format!("retry-{attempt}"),
-            "Provider retry",
-            &format!(
-                "Attempt {attempt} of {max_attempts} starts in {} ms. A timeout does not cancel the run.",
-                projection.retry.remaining_ms(std::time::Instant::now()).unwrap_or_default()
-            ),
-            false,
-        )),
-        RetryState::Succeeded { attempt } => notices.push(system_notice(
-            &format!("retry-succeeded-{attempt}"),
-            "Provider retry succeeded",
-            "Pi is continuing the run.",
-            false,
-        )),
-        RetryState::Failed { attempt, summary } => notices.push(system_notice(
-            &format!("retry-failed-{attempt}"),
-            "Provider retry failed",
-            summary,
-            true,
-        )),
-        RetryState::Cancelling => notices.push(system_notice(
-            "retry-cancelling",
-            "Cancelling retry",
-            "Waiting for Pi to settle.",
-            false,
-        )),
-        RetryState::Idle => {}
-    }
-
-    match &projection.compaction {
-        CompactionState::Running { reason } => notices.push(system_notice(
-            "compaction-running",
-            "Compacting conversation",
-            compaction_reason(*reason),
-            false,
-        )),
-        CompactionState::Completed {
-            reason,
-            summary,
-            will_retry,
-        } if !has_summary(&projection.messages, summary) => notices.push(system_notice(
-            "compaction-completed",
-            "Conversation compacted",
-            if *will_retry {
-                "Context was compacted. Pi is retrying the interrupted request."
-            } else {
-                compaction_reason(*reason)
-            },
-            false,
-        )),
-        CompactionState::Failed { summary, .. } => notices.push(system_notice(
-            "compaction-failed",
-            "Compaction failed",
-            summary,
-            true,
-        )),
-        CompactionState::Aborted { .. } => notices.push(system_notice(
-            "compaction-aborted",
-            "Compaction aborted",
-            "The existing conversation remains available.",
-            false,
-        )),
-        CompactionState::Idle | CompactionState::Completed { .. } => {}
-    }
-
-    if projection.context_awaiting_fresh_usage {
-        notices.push(system_notice(
-            "context-awaiting-usage",
-            "Context usage pending",
-            "Pi compacted context. Fresh usage will appear after the next provider response.",
-            false,
-        ));
-    }
-    if projection.lifecycle == RuntimeLifecycle::Cancelling {
-        notices.push(system_notice(
-            "run-cancelling",
-            "Cancelling response",
-            "Partial content remains visible while Pi settles.",
-            false,
-        ));
-    }
-    if projection.lifecycle == RuntimeLifecycle::Settled {
-        notices.push(system_notice(
-            "agent-settled",
-            "Run settled",
-            "The agent has finished this run. Send the next prompt or compact before continuing.",
-            false,
-        ));
-    }
-    if projection.lifecycle == RuntimeLifecycle::Disconnected {
-        notices.push(system_notice(
-            "transcript-read-only",
-            "Transcript is read-only",
-            "Reconnect to resync from the last durable entry. Uncertain prompts are never replayed automatically.",
-            true,
-        ));
-    }
-    if let Some(error) = projection.error.as_ref() {
-        notices.push(system_notice(
-            "conversation-error",
-            if projection.lifecycle == RuntimeLifecycle::Disconnected {
-                "Pi disconnected"
-            } else {
-                "Conversation unavailable"
-            },
-            &error.summary,
-            true,
-        ));
-    }
-    notices
-}
-
-fn system_notice(id: &str, title: &str, body: &str, error: bool) -> AnyElement {
-    div()
-        .id(SharedString::from(id.to_owned()))
-        .w_full()
-        .px(px(14.0))
-        .py(px(11.0))
-        .rounded(px(theme::RADIUS_SM))
-        .bg(if error {
-            theme::panel()
-        } else {
-            theme::data_wash()
-        })
-        .flex()
-        .flex_col()
-        .gap(px(3.0))
-        .child(
-            div()
-                .font_family(theme::sans())
-                .text_size(px(theme::T_UI_SM))
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(if error {
-                    theme::error()
-                } else {
-                    theme::bone_dim()
-                })
-                .child(title.to_owned()),
-        )
-        .child(
-            div()
-                .font_family(theme::sans())
-                .text_size(px(theme::T_UI_SM))
-                .line_height(relative(1.45))
-                .text_color(theme::smoke())
-                .child(body.to_owned()),
-        )
-        .into_any_element()
-}
-
 fn error_text(error: String) -> impl IntoElement {
     div()
         .font_family(theme::sans())
@@ -1726,24 +1555,6 @@ fn empty_state(projection: &ConversationProjection) -> impl IntoElement {
         )
 }
 
-fn has_summary(messages: &[std::sync::Arc<RuntimeMessage>], summary: &str) -> bool {
-    !summary.is_empty()
-        && messages.iter().any(|message| {
-            message
-                .content
-                .iter()
-                .any(|block| matches!(block, MessageBlock::Summary { text, .. } if text == summary))
-        })
-}
-
-fn compaction_reason(reason: CompactionKind) -> &'static str {
-    match reason {
-        CompactionKind::Manual => "Pi compacted earlier context on request.",
-        CompactionKind::Threshold => "Pi compacted earlier context near the context limit.",
-        CompactionKind::Overflow => "Pi compacted context after the provider limit was reached.",
-    }
-}
-
 fn optimistic_status(kind: SubmissionKind) -> &'static str {
     match kind {
         SubmissionKind::Prompt => "Accepted · awaiting transcript",
@@ -1782,6 +1593,7 @@ fn format_cost(cost: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::runtime::{CompactionState, FacetStatus, RetryState};
 
     #[test]
     fn activity_disclosures_reset_only_when_the_session_changes() {

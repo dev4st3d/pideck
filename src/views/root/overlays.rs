@@ -1,4 +1,3 @@
-use super::inspector::runtime_error_notice;
 use super::shared::{plural, popup_sheet};
 use super::*;
 
@@ -91,7 +90,6 @@ mod conversation_scrollbar_tests {
 }
 
 pub(super) fn conversation_area(
-    projection: &ShellProjection,
     conversation_projection: Arc<ConversationProjection>,
     conversation_list: Arc<ConversationListModel>,
     conversation_list_state: ListState,
@@ -111,13 +109,6 @@ pub(super) fn conversation_area(
         .flex()
         .flex_col()
         .bg(theme::canvas())
-        .when(
-            matches!(
-                projection.lifecycle.as_str(),
-                "Connection error" | "No model"
-            ),
-            |area| area.child(runtime_error_notice(projection)),
-        )
         .child(
             div()
                 .flex_1()

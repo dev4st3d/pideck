@@ -182,9 +182,9 @@ pub(super) fn composer_bar(
                                         )
                                     },
                                 )
-                                .child(controls::chrome_action(
+                                .child(controls::chrome_icon_action(
                                     "prompt-model-settings",
-                                    "Settings",
+                                    "icons/cog.svg",
                                     true,
                                     Box::new(cx.listener(|view, _, window, cx| {
                                         view.show_model_panel(

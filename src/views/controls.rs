@@ -4,7 +4,7 @@ use std::{rc::Rc, time::Duration};
 
 use gpui::{
     Animation, AnimationExt, ClickEvent, FontWeight, IntoElement, SharedString, Window, deferred,
-    div, ease_out_quint, prelude::*, px, relative, rgba,
+    div, ease_out_quint, prelude::*, px, relative, rgba, svg,
 };
 
 use crate::actions::RECOVERY_BUTTON_CONTEXT;
@@ -77,6 +77,68 @@ pub fn status_pill(label: impl Into<SharedString>, color: gpui::Rgba) -> impl In
                 .text_color(color)
                 .child(label.into()),
         )
+}
+
+/// Four-corner activity mark shared by task rows and the titlebar runtime state.
+pub fn square_status_indicator(
+    animation_key: usize,
+    animated: bool,
+    cycle: Duration,
+    color: gpui::Rgba,
+) -> gpui::AnyElement {
+    if !animated {
+        return div()
+            .relative()
+            .flex_shrink_0()
+            .size(px(8.0))
+            .child(
+                div()
+                    .absolute()
+                    .left(px(1.0))
+                    .top(px(1.0))
+                    .size(px(6.0))
+                    .bg(color),
+            )
+            .into_any_element();
+    }
+
+    div()
+        .relative()
+        .flex_shrink_0()
+        .size(px(8.0))
+        .children([
+            square_status_dot(animation_key, 0, px(0.0), px(0.0), cycle, color),
+            square_status_dot(animation_key, 1, px(6.0), px(0.0), cycle, color),
+            square_status_dot(animation_key, 2, px(6.0), px(6.0), cycle, color),
+            square_status_dot(animation_key, 3, px(0.0), px(6.0), cycle, color),
+        ])
+        .into_any_element()
+}
+
+fn square_status_dot(
+    animation_key: usize,
+    dot_index: usize,
+    left: gpui::Pixels,
+    top: gpui::Pixels,
+    cycle: Duration,
+    color: gpui::Rgba,
+) -> gpui::AnyElement {
+    div()
+        .absolute()
+        .left(left)
+        .top(top)
+        .size(px(2.0))
+        .bg(color)
+        .with_animation(
+            ("square-status", animation_key * 4 + dot_index),
+            Animation::new(cycle).repeat(),
+            move |dot, progress| {
+                let target = dot_index as f32 * 0.25;
+                let distance = ((progress - target + 0.5).rem_euclid(1.0) - 0.5).abs();
+                dot.opacity(0.28 + (1.0 - distance / 0.25).max(0.0) * 0.72)
+            },
+        )
+        .into_any_element()
 }
 
 pub fn recovery_button(
@@ -521,6 +583,39 @@ pub fn chrome_action(
                 .text_size(px(10.0))
                 .font_weight(FontWeight::MEDIUM)
                 .child(label.into()),
+        )
+}
+
+/// Bare SVG action for dense toolbars.
+pub fn chrome_icon_action(
+    id: impl Into<SharedString>,
+    icon_path: impl Into<SharedString>,
+    enabled: bool,
+    on_click: ClickHandler,
+) -> impl IntoElement {
+    div()
+        .id(id.into())
+        .size(px(20.0))
+        .rounded(px(theme::RADIUS_SM))
+        .flex()
+        .items_center()
+        .justify_center()
+        .flex_shrink_0()
+        .text_color(theme::smoke())
+        .when(enabled, |button| {
+            button
+                .tab_index(0)
+                .cursor_pointer()
+                .hover(|button| button.bg(theme::canvas()).text_color(theme::bone_dim()))
+                .active(|button| button.bg(theme::panel_lift()))
+                .focus(|button| button.border_1().border_color(theme::focus()))
+                .on_click(move |event, window, cx| on_click(event, window, cx))
+        })
+        .child(
+            svg()
+                .path(icon_path.into())
+                .size(px(13.0))
+                .text_color(theme::smoke()),
         )
 }
 

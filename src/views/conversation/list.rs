@@ -268,7 +268,6 @@ fn trailing(
             super::tail_activity(projection, disclosures, cx),
             |tail, activity| tail.child(activity),
         )
-        .children(super::notices(projection))
         .when(
             projection.messages.is_empty()
                 && projection.accepted_user_inputs.is_empty()

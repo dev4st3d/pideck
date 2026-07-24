@@ -72,12 +72,16 @@ pub(super) fn action_id(action: RecoveryAction) -> &'static str {
     }
 }
 
-pub(super) fn lifecycle_color(projection: &ShellProjection) -> gpui::Rgba {
-    match projection.lifecycle.as_str() {
-        "Ready" => theme::live(),
-        "Running" | "Loading" | "Connecting" | "Cancelling" | "Stopping" => theme::data(),
-        "Connection error" | "No model" => theme::error(),
-        "Not connected" | "Stopped" => theme::ash(),
-        _ => theme::bone_dim(),
+pub(super) fn runtime_operation_label(operation: &RuntimeOperation) -> &'static str {
+    match operation {
+        RuntimeOperation::SetModel { .. } => "Switching model",
+        RuntimeOperation::SetThinkingLevel(_) => "Changing thinking",
+        RuntimeOperation::SetSteeringMode(_) => "Changing steering mode",
+        RuntimeOperation::SetFollowUpMode(_) => "Changing follow-up mode",
+        RuntimeOperation::Compact => "Compacting",
+        RuntimeOperation::SetAutoCompaction(_) => "Changing auto compaction",
+        RuntimeOperation::SetAutoRetry(_) => "Changing auto retry",
+        RuntimeOperation::SetSessionName(_) => "Renaming session",
+        RuntimeOperation::ExportHtml => "Exporting session",
     }
 }
