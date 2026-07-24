@@ -17,8 +17,10 @@ impl Composer {
     }
 
     fn render_field(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        let can_submit =
-            !self.disabled && (!self.buffer.text().trim().is_empty() || !self.images.is_empty());
+        let can_submit = !self.disabled
+            && (self.allow_empty_submit
+                || !self.buffer.text().trim().is_empty()
+                || !self.images.is_empty());
         let handles_composer_keys = self.availability != ComposerAvailability::Unavailable;
         let field_height = self.field_height();
         let field_padding_y = ((field_height - 22.0) / 2.0).max(0.0);
@@ -184,8 +186,10 @@ impl Composer {
     }
 
     fn render_multiline(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        let can_submit =
-            !self.disabled && (!self.buffer.text().trim().is_empty() || !self.images.is_empty());
+        let can_submit = !self.disabled
+            && (self.allow_empty_submit
+                || !self.buffer.text().trim().is_empty()
+                || !self.images.is_empty());
         let handles_composer_keys = self.availability != ComposerAvailability::Unavailable;
         let running = self.availability == ComposerAvailability::Running;
         let bash_running = self.availability == ComposerAvailability::BashRunning;

@@ -437,13 +437,20 @@ fn flat_entries_build_deep_history_without_requesting_nested_tree_json() {
 fn agent_end_is_only_a_low_level_boundary() {
     let (mut state, _) = connected_state("s1");
     apply(&mut state, RuntimeInput::Event(NormalizedEvent::AgentStart));
-    apply(
+    let effects = apply(
         &mut state,
         RuntimeInput::Event(NormalizedEvent::AgentEnd {
             will_retry: false,
             messages: vec![message("a", "done", true)],
         }),
     );
+    assert!(matches!(
+        effects.as_slice(),
+        [RuntimeEffect {
+            effect: EffectKind::Request(RuntimeRequest::GetStats),
+            ..
+        }]
+    ));
     assert_eq!(state.lifecycle, RuntimeLifecycle::Running);
     assert!(state.low_level_agent_end_seen);
 
@@ -453,6 +460,26 @@ fn agent_end_is_only_a_low_level_boundary() {
     );
     assert_eq!(state.lifecycle, RuntimeLifecycle::Settled);
     assert!(!state.low_level_agent_end_seen);
+}
+
+#[test]
+fn turn_end_refreshes_usage_before_the_agent_settles() {
+    let (mut state, _) = connected_state("s1");
+    let effects = apply(
+        &mut state,
+        RuntimeInput::Event(NormalizedEvent::TurnEnd {
+            message: message("a", "tool call", true),
+            tool_results: Vec::new(),
+        }),
+    );
+
+    assert!(matches!(
+        effects.as_slice(),
+        [RuntimeEffect {
+            effect: EffectKind::Request(RuntimeRequest::GetStats),
+            ..
+        }]
+    ));
 }
 
 #[test]

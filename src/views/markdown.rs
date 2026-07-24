@@ -1,6 +1,7 @@
 use std::ops::Range;
 
-use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
+use pulldown_cmark::{Alignment, Event, Options, Parser, Tag, TagEnd};
+use unicode_width::UnicodeWidthStr;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(super) struct MarkdownStyle {
@@ -11,6 +12,7 @@ pub(super) struct MarkdownStyle {
     pub link: bool,
     pub quote: bool,
     pub strikethrough: bool,
+    pub table: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -44,6 +46,7 @@ struct DocumentBuilder {
     quote_depth: usize,
     list_stack: Vec<ListState>,
     at_line_start: bool,
+    table: Option<TableState>,
 }
 
 impl Default for DocumentBuilder {
@@ -54,6 +57,7 @@ impl Default for DocumentBuilder {
             quote_depth: 0,
             list_stack: Vec::new(),
             at_line_start: true,
+            table: None,
         }
     }
 }
@@ -62,9 +66,36 @@ struct ListState {
     next_number: Option<u64>,
 }
 
+struct TableState {
+    alignments: Vec<Alignment>,
+    rows: Vec<TableRow>,
+    current_row: Vec<String>,
+    current_cell: String,
+    in_head: bool,
+}
+
+struct TableRow {
+    cells: Vec<String>,
+    header: bool,
+}
+
 impl DocumentBuilder {
     fn handle(&mut self, event: Event<'_>) {
+        if self.handle_table_event(&event) {
+            return;
+        }
+
         match event {
+            Event::Start(Tag::Table(alignments)) => {
+                self.ensure_block_gap();
+                self.table = Some(TableState {
+                    alignments,
+                    rows: Vec::new(),
+                    current_row: Vec::new(),
+                    current_cell: String::new(),
+                    in_head: false,
+                });
+            }
             Event::Start(tag) => self.start(tag),
             Event::End(tag) => self.end(tag),
             Event::Text(text) => self.push(&text, self.style),
@@ -143,13 +174,6 @@ impl DocumentBuilder {
             Tag::Strong => self.style.strong = true,
             Tag::Strikethrough => self.style.strikethrough = true,
             Tag::Link { .. } => self.style.link = true,
-            Tag::Table(_) => self.ensure_block_gap(),
-            Tag::TableRow => self.ensure_line(),
-            Tag::TableCell => {
-                if !self.at_line_start {
-                    self.push("  |  ", self.style);
-                }
-            }
             Tag::Image { dest_url, .. } => {
                 self.push("Image: ", self.style);
                 let mut style = self.style;
@@ -182,13 +206,129 @@ impl DocumentBuilder {
                 self.list_stack.pop();
                 self.ensure_block_gap();
             }
-            TagEnd::Item | TagEnd::TableRow => self.newline(),
+            TagEnd::Item => self.newline(),
             TagEnd::Emphasis => self.style.emphasis = false,
             TagEnd::Strong => self.style.strong = false,
             TagEnd::Strikethrough => self.style.strikethrough = false,
             TagEnd::Link => self.style.link = false,
-            TagEnd::Table => self.ensure_block_gap(),
             _ => {}
+        }
+    }
+
+    fn handle_table_event(&mut self, event: &Event<'_>) -> bool {
+        let Some(table) = self.table.as_mut() else {
+            return false;
+        };
+
+        match event {
+            Event::Start(Tag::TableHead) => {
+                table.current_row.clear();
+                table.in_head = true;
+            }
+            Event::End(TagEnd::TableHead) => {
+                table.rows.push(TableRow {
+                    cells: std::mem::take(&mut table.current_row),
+                    header: true,
+                });
+                table.in_head = false;
+            }
+            Event::Start(Tag::TableRow) => table.current_row.clear(),
+            Event::Start(Tag::TableCell) => table.current_cell.clear(),
+            Event::Text(text) | Event::Code(text) => table.current_cell.push_str(text),
+            Event::SoftBreak | Event::HardBreak => table.current_cell.push(' '),
+            Event::End(TagEnd::TableCell) => {
+                table.current_row.push(normalize_cell(&table.current_cell));
+                table.current_cell.clear();
+            }
+            Event::End(TagEnd::TableRow) => {
+                table.rows.push(TableRow {
+                    cells: std::mem::take(&mut table.current_row),
+                    header: table.in_head,
+                });
+            }
+            Event::End(TagEnd::Table) => {
+                let table = self.table.take().expect("active Markdown table");
+                self.push_table(table);
+                self.ensure_block_gap();
+            }
+            _ => {}
+        }
+        true
+    }
+
+    fn push_table(&mut self, table: TableState) {
+        if table.rows.is_empty() {
+            return;
+        }
+
+        let column_count = table
+            .rows
+            .iter()
+            .map(|row| row.cells.len())
+            .max()
+            .unwrap_or(0);
+        if column_count == 0 {
+            return;
+        }
+
+        let widths = (0..column_count)
+            .map(|column| {
+                table
+                    .rows
+                    .iter()
+                    .filter_map(|row| row.cells.get(column))
+                    .map(|cell| UnicodeWidthStr::width(cell.as_str()))
+                    .max()
+                    .unwrap_or(0)
+            })
+            .collect::<Vec<_>>();
+
+        let top = table_border('┌', '┬', '┐', &widths);
+        let middle = table_border('├', '┼', '┤', &widths);
+        let bottom = table_border('└', '┴', '┘', &widths);
+        let mut rendered = String::new();
+        let mut header_ranges = Vec::new();
+        rendered.push_str(&top);
+        rendered.push('\n');
+        for (index, row) in table.rows.iter().enumerate() {
+            let start = rendered.len();
+            rendered.push('│');
+            for (column, width) in widths.iter().copied().enumerate() {
+                let cell = row.cells.get(column).map(String::as_str).unwrap_or("");
+                let alignment = table
+                    .alignments
+                    .get(column)
+                    .copied()
+                    .unwrap_or(Alignment::None);
+                rendered.push('\u{a0}');
+                rendered.push_str(&aligned_cell(cell, width, alignment));
+                rendered.push('\u{a0}');
+                rendered.push('│');
+            }
+            if row.header {
+                header_ranges.push(start..rendered.len());
+            }
+            rendered.push('\n');
+            if row.header && index + 1 < table.rows.len() {
+                rendered.push_str(&middle);
+                rendered.push('\n');
+            }
+        }
+        rendered.push_str(&bottom);
+
+        let table_start = self.document.text.len();
+        let mut style = self.style;
+        style.table = true;
+        self.push(&rendered, style);
+        for range in header_ranges {
+            let start = table_start + range.start;
+            let end = table_start + range.end;
+            let mut header_style = style;
+            header_style.strong = true;
+            self.document.spans.push(MarkdownSpan {
+                range: start..end,
+                style: header_style,
+            });
         }
     }
 
@@ -262,6 +402,40 @@ impl DocumentBuilder {
     }
 }
 
+fn normalize_cell(cell: &str) -> String {
+    cell.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn table_border(left: char, join: char, right: char, widths: &[usize]) -> String {
+    let mut border = String::new();
+    border.push(left);
+    for (index, width) in widths.iter().enumerate() {
+        border.push_str(&"─".repeat(width + 2));
+        border.push(if index + 1 == widths.len() {
+            right
+        } else {
+            join
+        });
+    }
+    border
+}
+
+fn aligned_cell(cell: &str, width: usize, alignment: Alignment) -> String {
+    let content_width = UnicodeWidthStr::width(cell);
+    let remaining = width.saturating_sub(content_width);
+    let (left, right) = match alignment {
+        Alignment::Center => (remaining / 2, remaining - remaining / 2),
+        Alignment::Right => (remaining, 0),
+        Alignment::None | Alignment::Left => (0, remaining),
+    };
+    format!(
+        "{}{}{}",
+        "\u{a0}".repeat(left),
+        cell.replace(' ', "\u{a0}"),
+        "\u{a0}".repeat(right)
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -319,5 +493,31 @@ mod tests {
         let document = MarkdownDocument::parse("Working on **the answer");
         assert!(document.text.contains("Working on"));
         assert!(document.text.contains("the answer"));
+    }
+
+    #[test]
+    fn renders_markdown_tables_as_aligned_grids() {
+        let document = MarkdownDocument::parse(
+            "Before\n\n| Component | Installed | Latest | Status |\n|:--|--:|:-:|:--|\n| Pi coding agent | 0.80.10 | 0.81.1 | Update available |\n| pi-bar | 0.3.39 | 0.3.39 | Current |\n\nAfter",
+        );
+
+        let expected = concat!(
+            "Before\n\n",
+            "┌─────────────────┬───────────┬────────┬──────────────────┐\n",
+            "│ Component       │ Installed │ Latest │ Status           │\n",
+            "├─────────────────┼───────────┼────────┼──────────────────┤\n",
+            "│ Pi coding agent │   0.80.10 │ 0.81.1 │ Update available │\n",
+            "│ pi-bar          │    0.3.39 │ 0.3.39 │ Current          │\n",
+            "└─────────────────┴───────────┴────────┴──────────────────┘\n\n",
+            "After",
+        );
+        assert_eq!(document.text.replace('\u{a0}', " "), expected);
+        assert!(document.spans.iter().any(|span| span.style.table));
+        assert!(
+            document
+                .spans
+                .iter()
+                .any(|span| span.style.table && span.style.strong)
+        );
     }
 }

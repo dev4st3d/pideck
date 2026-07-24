@@ -101,6 +101,7 @@ pub struct Composer {
     masked: bool,
     /// Optional override for Field chrome input height (defaults to 34).
     field_height: Option<f32>,
+    allow_empty_submit: bool,
     disabled: bool,
     availability: ComposerAvailability,
     feedback: ComposerFeedback,
@@ -125,6 +126,7 @@ impl Composer {
             placeholder: "Message Pi…  @ file  / command  ! shell".into(),
             masked: false,
             field_height: None,
+            allow_empty_submit: false,
             disabled: true,
             availability: ComposerAvailability::Unavailable,
             feedback: ComposerFeedback::Ready,
@@ -169,6 +171,11 @@ impl Composer {
 
     pub fn with_field_height(mut self, height: f32) -> Self {
         self.field_height = Some(height);
+        self
+    }
+
+    pub fn allowing_empty_submit(mut self) -> Self {
+        self.allow_empty_submit = true;
         self
     }
 
@@ -577,7 +584,10 @@ impl Composer {
         if self.chrome == ComposerChrome::Field && self.action_label.is_empty() {
             return;
         }
-        if self.buffer.text().trim().is_empty() && self.images.is_empty() {
+        if !self.allow_empty_submit
+            && self.buffer.text().trim().is_empty()
+            && self.images.is_empty()
+        {
             self.feedback = ComposerFeedback::Rejected(match self.chrome {
                 ComposerChrome::Full => "Write a prompt or attach an image first.".to_owned(),
                 ComposerChrome::Panel | ComposerChrome::Field => "Enter a value first.".to_owned(),

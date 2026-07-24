@@ -960,6 +960,7 @@ fn reduce_event(
         NormalizedEvent::AgentEnd { messages, .. } => {
             upsert_messages(state, messages, MessagePhase::Terminal);
             state.low_level_agent_end_seen = true;
+            effects.push(effect(state, RuntimeRequest::GetStats));
         }
         NormalizedEvent::AgentSettled => settle(state),
         NormalizedEvent::TurnEnd {
@@ -969,6 +970,7 @@ fn reduce_event(
             let mut messages = vec![message];
             messages.extend(tool_results);
             upsert_messages(state, messages, MessagePhase::Terminal);
+            effects.push(effect(state, RuntimeRequest::GetStats));
         }
         NormalizedEvent::MessageStart(message) => {
             upsert_messages(state, vec![message], MessagePhase::Start)

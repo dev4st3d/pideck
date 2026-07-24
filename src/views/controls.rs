@@ -180,6 +180,125 @@ pub fn quiet_button(
         )
 }
 
+/// Dense toolbar button for inspector run actions.
+pub fn tone_button(
+    id: impl Into<SharedString>,
+    label: impl Into<SharedString>,
+    enabled: bool,
+    tone: ControlTone,
+    on_click: ClickHandler,
+) -> impl IntoElement {
+    let (idle_bg, idle_border, idle_text, hot_bg, hot_border, hot_text) = match (enabled, tone) {
+        (true, ControlTone::Danger) => (
+            theme::panel(),
+            theme::edge_hard(),
+            theme::error(),
+            theme::panel_hover(),
+            theme::error(),
+            theme::error(),
+        ),
+        (true, ControlTone::Normal) => (
+            theme::panel_lift(),
+            theme::edge_hard(),
+            theme::bone(),
+            theme::panel_hover(),
+            theme::edge(),
+            theme::bone(),
+        ),
+        (false, _) => (
+            clear(),
+            theme::edge_soft(),
+            theme::smoke(),
+            clear(),
+            theme::edge_soft(),
+            theme::smoke(),
+        ),
+    };
+
+    div()
+        .id(id.into())
+        .h(px(28.0))
+        .px(px(10.0))
+        .rounded(px(theme::RADIUS_SM))
+        .flex()
+        .items_center()
+        .justify_center()
+        .flex_1()
+        .min_w_0()
+        .bg(idle_bg)
+        .border_1()
+        .border_color(idle_border)
+        .text_color(idle_text)
+        .when(enabled, |button| {
+            button
+                .tab_index(0)
+                .cursor_pointer()
+                .hover(move |button| {
+                    button
+                        .bg(hot_bg)
+                        .border_color(hot_border)
+                        .text_color(hot_text)
+                })
+                .active(|button| button.bg(theme::panel()))
+                .focus(|button| button.border_color(theme::focus()))
+                .on_click(move |event, window, cx| on_click(event, window, cx))
+        })
+        .child(
+            div()
+                .font_family(theme::CONTROL)
+                .text_size(px(theme::T_TINY))
+                .font_weight(FontWeight::SEMIBOLD)
+                .child(label.into()),
+        )
+}
+
+/// Label + trailing control on one baseline, for inspector settings.
+pub fn setting_row(
+    label: impl Into<SharedString>,
+    detail: Option<impl Into<SharedString>>,
+    control: impl IntoElement,
+) -> impl IntoElement {
+    div()
+        .min_h(px(32.0))
+        .flex()
+        .flex_row()
+        .items_center()
+        .justify_between()
+        .gap(px(10.0))
+        .child(
+            div()
+                .min_w_0()
+                .flex_1()
+                .flex()
+                .flex_col()
+                .gap(px(1.0))
+                .child(
+                    div()
+                        .font_family(theme::SANS)
+                        .text_size(px(theme::T_UI_SM))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(theme::bone_dim())
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .whitespace_nowrap()
+                        .child(label.into()),
+                )
+                .when_some(detail, |col, detail| {
+                    col.child(
+                        div()
+                            .font_family(theme::MONO)
+                            .text_size(px(theme::T_TINY))
+                            .text_color(theme::smoke())
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .whitespace_nowrap()
+                            .child(detail.into()),
+                    )
+                }),
+        )
+        .child(div().flex_shrink_0().child(control))
+}
+
 pub fn chip_button(
     id: impl Into<SharedString>,
     label: impl Into<SharedString>,
@@ -355,6 +474,7 @@ pub fn chrome_action(
 /// Segmented tab track for multi-section settings.
 pub fn tab_track() -> gpui::Div {
     div()
+        .w_full()
         .flex()
         .flex_row()
         .items_center()
@@ -378,6 +498,8 @@ pub fn tab_button(
         .px(px(12.0))
         .rounded(px(2.0))
         .flex()
+        .flex_1()
+        .min_w_0()
         .items_center()
         .justify_center()
         .bg(if selected {

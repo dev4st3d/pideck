@@ -8,7 +8,7 @@ use gpui::{
     AnyElement, App, ClipboardItem, Context, CursorStyle, Entity, FocusHandle, Focusable,
     FontStyle, FontWeight, HighlightStyle, IntoElement, MouseButton, MouseDownEvent,
     MouseMoveEvent, MouseUpEvent, Pixels, Render, SharedString, StrikethroughStyle, StyledText,
-    TextLayout, UnderlineStyle, Window, div, prelude::*, px, relative,
+    TextLayout, TextRun, TextStyle, UnderlineStyle, Window, div, prelude::*, px, relative,
 };
 
 use crate::actions::{TranscriptCopy, TranscriptSelectAll};
@@ -228,12 +228,9 @@ impl Focusable for TranscriptText {
 }
 
 impl Render for TranscriptText {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let mut text = StyledText::new(self.document.text.clone());
-        let highlights = markdown_highlights(&self.document, self.selection.clone());
-        if !highlights.is_empty() {
-            text = text.with_highlights(highlights);
-        }
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let runs = markdown_runs(&self.document, self.selection.clone(), &window.text_style());
+        let text = StyledText::new(self.document.text.clone()).with_runs(runs);
         self.layout = Some(text.layout().clone());
 
         div()
@@ -242,6 +239,8 @@ impl Render for TranscriptText {
             .key_context("TranscriptText")
             .tab_index(0)
             .w_full()
+            .overflow_x_scroll()
+            .scrollbar_width(px(4.0))
             .cursor(CursorStyle::IBeam)
             .focus(|text| text.text_color(theme::focus()))
             .on_action(cx.listener(Self::copy))
@@ -277,12 +276,7 @@ fn markdown_highlights(
             if range.is_empty() {
                 return None;
             }
-            let markdown = document
-                .spans
-                .iter()
-                .find(|span| span.range.start <= range.start && span.range.end >= range.end)
-                .map(|span| span.style)
-                .unwrap_or_default();
+            let markdown = markdown_style_for_range(document, &range);
             let selected = !selection.is_empty()
                 && selection.start <= range.start
                 && selection.end >= range.end;
@@ -290,6 +284,50 @@ fn markdown_highlights(
             (style != HighlightStyle::default()).then_some((range, style))
         })
         .collect()
+}
+
+fn markdown_style_for_range(document: &MarkdownDocument, range: &Range<usize>) -> MarkdownStyle {
+    document
+        .spans
+        .iter()
+        .filter(|span| span.range.start <= range.start && span.range.end >= range.end)
+        .fold(MarkdownStyle::default(), |mut combined, span| {
+            combined.heading |= span.style.heading;
+            combined.strong |= span.style.strong;
+            combined.emphasis |= span.style.emphasis;
+            combined.code |= span.style.code;
+            combined.link |= span.style.link;
+            combined.quote |= span.style.quote;
+            combined.strikethrough |= span.style.strikethrough;
+            combined.table |= span.style.table;
+            combined
+        })
+}
+
+fn markdown_runs(
+    document: &MarkdownDocument,
+    selection: Range<usize>,
+    default_style: &TextStyle,
+) -> Vec<TextRun> {
+    let highlights = markdown_highlights(document, selection);
+    let mut runs = Vec::new();
+    let mut offset = 0;
+    for (range, highlight) in highlights {
+        if offset < range.start {
+            runs.push(default_style.to_run(range.start - offset));
+        }
+        let mut style = default_style.clone().highlight(highlight);
+        if markdown_style_for_range(document, &range).table {
+            style.font_family = theme::MONO.into();
+            style.font_size = px(theme::T_UI_SM).into();
+        }
+        runs.push(style.to_run(range.len()));
+        offset = range.end;
+    }
+    if offset < document.text.len() {
+        runs.push(default_style.to_run(document.text.len() - offset));
+    }
+    runs
 }
 
 fn highlight_style(markdown: MarkdownStyle, selected: bool) -> HighlightStyle {
@@ -300,6 +338,8 @@ fn highlight_style(markdown: MarkdownStyle, selected: bool) -> HighlightStyle {
             Some(theme::data().into())
         } else if markdown.quote {
             Some(theme::ash().into())
+        } else if markdown.table {
+            Some(theme::bone_dim().into())
         } else {
             None
         },
@@ -631,11 +671,9 @@ fn split_turn<'a>(
             _ => None,
         })
         .collect::<HashMap<_, _>>();
-    let reply_index = messages.iter().rposition(|message| {
-        message.role == MessageRole::Assistant
-            && has_reply_text(message)
-            && !is_tool_only_assistant(message)
-    });
+    let reply_index = messages
+        .iter()
+        .rposition(|message| is_final_assistant_reply(message));
 
     let mut activity = Vec::new();
     for (index, message) in messages.iter().enumerate() {
@@ -660,12 +698,11 @@ fn has_reply_text(message: &RuntimeMessage) -> bool {
         .any(|block| matches!(block, MessageBlock::Text { text, .. } if !text.trim().is_empty()))
 }
 
-fn is_tool_only_assistant(message: &RuntimeMessage) -> bool {
+fn is_final_assistant_reply(message: &RuntimeMessage) -> bool {
     message.role == MessageRole::Assistant
-        && message.stop_reason == Some(MessageStopReason::ToolUse)
-        && !message.content.iter().any(
-            |block| matches!(block, MessageBlock::Text { text, .. } if !text.trim().is_empty()),
-        )
+        && message.terminal
+        && message.stop_reason != Some(MessageStopReason::ToolUse)
+        && has_reply_text(message)
 }
 
 fn push_message_activity<'a>(
@@ -1101,7 +1138,7 @@ fn preamble(
     texts: &HashMap<String, Entity<TranscriptText>>,
 ) -> AnyElement {
     match message.role {
-        MessageRole::Assistant if has_reply_text(message) && !is_tool_only_assistant(message) => {
+        MessageRole::Assistant if is_final_assistant_reply(message) => {
             let (activity, _) = split_turn(&[message], projection);
             if activity.is_empty() {
                 assistant_reply(message, texts).into_any_element()
@@ -1552,6 +1589,10 @@ mod tests {
                     text: "plan".into(),
                     redacted: false,
                 },
+                MessageBlock::Text {
+                    key: BlockKey("interim".into()),
+                    text: "I will inspect that now.".into(),
+                },
                 MessageBlock::ToolCall {
                     key: BlockKey("tc".into()),
                     id: ToolCallId::new("call-1"),
@@ -1606,11 +1647,14 @@ mod tests {
             compaction: CompactionState::Idle,
             error: None,
         };
+        assert!(!is_final_assistant_reply(&assistant_tools));
+        assert!(is_final_assistant_reply(&assistant_reply));
         let messages = vec![&assistant_tools, &assistant_reply];
         let (activity, reply) = split_turn(&messages, &projection);
-        assert_eq!(activity.len(), 2);
+        assert_eq!(activity.len(), 3);
         assert!(matches!(activity[0], ActivityStep::Thinking { .. }));
-        assert!(matches!(activity[1], ActivityStep::Tool { .. }));
+        assert!(matches!(activity[1], ActivityStep::Text { .. }));
+        assert!(matches!(activity[2], ActivityStep::Tool { .. }));
         assert_eq!(reply.map(|m| m.key.0.as_str()), Some("a2"));
     }
 }

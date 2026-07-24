@@ -94,6 +94,13 @@ enum ExtensionDialogKey {
     AcceptSelection,
 }
 
+/// Which queue-delivery control the inspector is editing right now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DeliveryFocus {
+    Steering,
+    FollowUp,
+}
+
 pub struct RootView {
     controller: Entity<RuntimeController>,
     composer: Entity<Composer>,
@@ -115,6 +122,7 @@ pub struct RootView {
     resource_state_filter: ResourceStateFilter,
     command_palette_open: bool,
     hotkey_help_open: bool,
+    compaction_modal_open: bool,
     command_selection: usize,
     command_palette_scroll: ScrollHandle,
     slash_command_scroll: ScrollHandle,
@@ -129,6 +137,8 @@ pub struct RootView {
     extension_dialog_timeout_task: Option<Task<()>>,
     selected_task_id: Option<String>,
     selected_subagent_id: Option<String>,
+    /// Inspector edits one queue delivery mode at a time (steering or follow-up).
+    delivery_focus: DeliveryFocus,
     subagent_dialog_focus: FocusHandle,
     subagent_dialog_scroll: ScrollHandle,
     window_title: String,
@@ -183,6 +193,7 @@ impl RootView {
                 "Compact",
                 cx,
             )
+            .allowing_empty_submit()
         });
         let session_name_composer =
             cx.new(|cx| Composer::field("session-name", "Rename session…", "Rename", cx));
@@ -260,10 +271,11 @@ impl RootView {
             cx.subscribe_in(&composer, window, |view, _, event, window, cx| {
                 view.on_composer_event(event, window, cx)
             });
-        let compaction_subscription =
-            cx.subscribe_in(&compaction_composer, window, |view, _, event, _, cx| {
-                view.on_compaction_event(event, cx)
-            });
+        let compaction_subscription = cx.subscribe_in(
+            &compaction_composer,
+            window,
+            |view, _, event, window, cx| view.on_compaction_event(event, window, cx),
+        );
         let session_name_subscription =
             cx.subscribe_in(&session_name_composer, window, |view, _, event, _, cx| {
                 view.on_session_name_event(event, cx)
@@ -345,6 +357,7 @@ impl RootView {
             resource_state_filter: ResourceStateFilter::All,
             command_palette_open: false,
             hotkey_help_open: false,
+            compaction_modal_open: false,
             command_selection: 0,
             command_palette_scroll: ScrollHandle::new(),
             slash_command_scroll: ScrollHandle::new(),
@@ -359,6 +372,7 @@ impl RootView {
             extension_dialog_timeout_task: None,
             selected_task_id: None,
             selected_subagent_id: None,
+            delivery_focus: DeliveryFocus::Steering,
             subagent_dialog_focus,
             subagent_dialog_scroll: ScrollHandle::new(),
             window_title: "Pi GUI".to_owned(),
@@ -1196,28 +1210,60 @@ impl RootView {
         });
     }
 
-    fn set_auto_retry(&mut self, enabled: bool, cx: &mut Context<Self>) {
-        self.controller.update(cx, |controller, cx| {
-            controller.set_auto_retry(enabled, cx);
-        });
-    }
-
-    fn on_compaction_event(&mut self, event: &ComposerEvent, cx: &mut Context<Self>) {
-        let ComposerEvent::Accept { text, .. } = event else {
-            return;
-        };
-        let focus = text.trim().to_owned();
-        if focus.is_empty() || self.pending_compaction_focus.is_some() {
+    fn open_compaction_modal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.pending_compaction_focus.is_some() {
             return;
         }
-        let accepted = self.controller.update(cx, |controller, cx| {
-            controller.compact(Some(focus.clone()), cx)
+        self.command_palette_open = false;
+        self.hotkey_help_open = false;
+        self.compaction_modal_open = true;
+        self.compaction_composer.update(cx, |composer, cx| {
+            composer.set_feedback(ComposerFeedback::Ready, cx)
         });
-        if accepted {
-            self.pending_compaction_focus = Some(focus);
-            self.compaction_composer.update(cx, |composer, cx| {
-                composer.set_feedback(ComposerFeedback::Pending(SubmissionKind::Prompt), cx)
-            });
+        window.focus(&self.compaction_composer.read(cx).focus_handle(cx));
+        cx.notify();
+    }
+
+    fn close_compaction_modal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.pending_compaction_focus.is_some() {
+            return;
+        }
+        self.compaction_modal_open = false;
+        window.focus(&self.focus_handle);
+        cx.notify();
+    }
+
+    fn on_compaction_event(
+        &mut self,
+        event: &ComposerEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            ComposerEvent::Accept { text, .. } => {
+                if self.pending_compaction_focus.is_some() {
+                    return;
+                }
+                let draft = text.trim().to_owned();
+                let focus = (!draft.is_empty()).then(|| draft.clone());
+                let accepted = self
+                    .controller
+                    .update(cx, |controller, cx| controller.compact(focus, cx));
+                if accepted {
+                    self.pending_compaction_focus = Some(draft);
+                    self.compaction_composer.update(cx, |composer, cx| {
+                        composer.set_feedback(ComposerFeedback::Pending(SubmissionKind::Prompt), cx)
+                    });
+                }
+            }
+            ComposerEvent::Abort | ComposerEvent::AbortBash => {
+                self.close_compaction_modal(window, cx)
+            }
+            ComposerEvent::FollowUp { .. }
+            | ComposerEvent::CommandNext
+            | ComposerEvent::CommandPrevious
+            | ComposerEvent::CommandAccept
+            | ComposerEvent::CommandDismiss => {}
         }
     }
 
@@ -1736,6 +1782,7 @@ impl RootView {
         self.conversation = Arc::new(conversation);
         self.conversation_list = Arc::new(conversation_list);
         self.sync_retry_tick(cx);
+        self.enforce_all_delivery_modes(cx);
 
         let compact_available = matches!(
             self.conversation.lifecycle,
@@ -1826,7 +1873,7 @@ impl RootView {
                 window.focus(&composer.read(cx).focus_handle(cx));
             }
         }
-        self.reconcile_scoped_operations(&catalog, cx);
+        self.reconcile_scoped_operations(&catalog, window, cx);
 
         let projection = self.controller.read(cx).composer_projection();
         let availability = match projection.runtime {
@@ -1952,6 +1999,17 @@ impl RootView {
         cx.notify();
     }
 
+    fn enforce_all_delivery_modes(&mut self, cx: &mut Context<Self>) {
+        if self.conversation.pending_operation.is_some() {
+            return;
+        }
+        if self.conversation.steering_mode == Some(QueueDeliveryMode::OneAtATime) {
+            self.set_steering_mode(QueueDeliveryMode::All, cx);
+        } else if self.conversation.follow_up_mode == Some(QueueDeliveryMode::OneAtATime) {
+            self.set_follow_up_mode(QueueDeliveryMode::All, cx);
+        }
+    }
+
     fn sync_retry_tick(&mut self, cx: &mut Context<Self>) {
         let waiting = matches!(self.conversation.retry, RetryState::Waiting { .. });
         if !waiting {
@@ -1982,7 +2040,12 @@ impl RootView {
         }));
     }
 
-    fn reconcile_scoped_operations(&mut self, catalog: &CatalogProjection, cx: &mut Context<Self>) {
+    fn reconcile_scoped_operations(
+        &mut self,
+        catalog: &CatalogProjection,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if let Some(focus) = self.pending_compaction_focus.clone()
             && self.conversation.pending_operation.is_none()
         {
@@ -2001,6 +2064,12 @@ impl RootView {
                 }
             });
             self.pending_compaction_focus = None;
+            if completed {
+                self.compaction_modal_open = false;
+                window.focus(&self.focus_handle);
+            } else {
+                window.focus(&self.compaction_composer.read(cx).focus_handle(cx));
+            }
         }
         if let Some(name) = self.pending_session_name.clone()
             && self.conversation.pending_operation.is_none()
@@ -2038,6 +2107,10 @@ impl RootView {
             self.focus_active_extension_dialog(window, cx);
             return;
         }
+        if self.compaction_modal_open {
+            window.focus(&self.compaction_composer.read(cx).focus_handle(cx));
+            return;
+        }
         window.focus_next();
     }
 
@@ -2049,6 +2122,10 @@ impl RootView {
     ) {
         if self.extension_ui.active_dialog.is_some() {
             self.focus_active_extension_dialog(window, cx);
+            return;
+        }
+        if self.compaction_modal_open {
+            window.focus(&self.compaction_composer.read(cx).focus_handle(cx));
             return;
         }
         window.focus_prev();
@@ -2381,15 +2458,17 @@ impl Render for RootView {
                         InspectorParams {
                             projection: &projection,
                             conversation: &self.conversation,
-                            extension_ui: &self.extension_ui,
-                            compaction_composer: &self.compaction_composer,
                             orchestration: &orchestration,
                             selected_task_id: self.selected_task_id.as_deref(),
                             goal_edit_composer: &self.goal_edit_composer,
+                            delivery_focus: self.delivery_focus,
                         },
                         cx,
                     )),
             )
+            .when(self.compaction_modal_open, |shell| {
+                shell.child(compaction_dialog(&self.compaction_composer, cx))
+            })
             .when(self.command_palette_open, |shell| {
                 shell.child(command_palette_overlay(
                     &command_catalog,
@@ -5062,64 +5141,6 @@ fn extension_status_bar(extension_ui: &ExtensionUiProjection) -> impl IntoElemen
         }))
 }
 
-fn extension_diagnostics_panel(extension_ui: &ExtensionUiProjection) -> impl IntoElement {
-    const UNSUPPORTED: [&str; 6] = [
-        "custom() overlays and components",
-        "component-factory widgets",
-        "custom editor, header, and footer",
-        "TUI message and entry renderers",
-        "theme enumeration and switching",
-        "process-local extension event bus",
-    ];
-
-    div()
-        .flex()
-        .flex_col()
-        .gap(px(8.0))
-        .child(controls::section_label("Extensions"))
-        .when(!extension_ui.errors.is_empty(), |panel| {
-            panel.child(controls::divider_list().children(
-                extension_ui.errors.iter().rev().take(4).map(|error| {
-                    div()
-                        .py(px(6.0))
-                        .flex()
-                        .flex_col()
-                        .gap(px(2.0))
-                        .child(
-                            div()
-                                .font_family(theme::MONO)
-                                .text_size(px(theme::T_TINY))
-                                .text_color(theme::error())
-                                .child(format!("{} · {}", error.extension, error.event)),
-                        )
-                        .child(
-                            div()
-                                .font_family(theme::SANS)
-                                .text_size(px(theme::T_TINY))
-                                .text_color(theme::ash())
-                                .child(error.summary.clone()),
-                        )
-                }),
-            ))
-        })
-        .child(
-            div()
-                .font_family(theme::SANS)
-                .text_size(px(theme::T_TINY))
-                .line_height(px(16.0))
-                .text_color(theme::smoke())
-                .child("Stock RPC support only. Explicitly unsupported:"),
-        )
-        .children(UNSUPPORTED.into_iter().map(|item| {
-            div()
-                .font_family(theme::SANS)
-                .text_size(px(theme::T_TINY))
-                .line_height(px(16.0))
-                .text_color(theme::ash())
-                .child(format!("— {item}"))
-        }))
-}
-
 fn extension_dialog_overlay(
     dialog: &crate::state::runtime::ExtensionDialog,
     queued_dialogs: usize,
@@ -5403,6 +5424,64 @@ fn extension_dialog_key(kind: Option<&str>, key: &str) -> Option<ExtensionDialog
         }
         _ => None,
     }
+}
+
+fn compaction_dialog(composer: &Entity<Composer>, cx: &mut Context<RootView>) -> impl IntoElement {
+    div()
+        .absolute()
+        .top_0()
+        .bottom_0()
+        .left_0()
+        .right_0()
+        .occlude()
+        .bg(theme::canvas())
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(
+            popup_sheet()
+                .w(px(560.0))
+                .child(
+                    div()
+                        .px(px(14.0))
+                        .py(px(12.0))
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .justify_between()
+                        .gap(px(12.0))
+                        .child(
+                            div()
+                                .font_family(theme::SANS)
+                                .font_weight(FontWeight::BOLD)
+                                .text_size(px(theme::T_BODY))
+                                .text_color(theme::bone())
+                                .child("Compact context"),
+                        )
+                        .child(controls::chrome_action(
+                            "close-compaction-dialog",
+                            "Cancel · Esc",
+                            composer.read(cx).availability()
+                                != ComposerAvailability::Unavailable,
+                            Box::new(cx.listener(|view, _, window, cx| {
+                                view.close_compaction_modal(window, cx)
+                            })),
+                        )),
+                )
+                .child(
+                    div()
+                        .px(px(14.0))
+                        .pb(px(10.0))
+                        .font_family(theme::SANS)
+                        .text_size(px(theme::T_UI_SM))
+                        .line_height(gpui::relative(1.4))
+                        .text_color(theme::smoke())
+                        .child(
+                            "Optionally tell Pi what the compacted summary should preserve. Leave it blank to compact normally.",
+                        ),
+                )
+                .child(div().px(px(14.0)).pb(px(14.0)).child(composer.clone())),
+        )
 }
 
 fn command_palette_overlay(
@@ -5868,22 +5947,20 @@ fn compact_label(value: &str, max_chars: usize) -> String {
 struct InspectorParams<'a> {
     projection: &'a ShellProjection,
     conversation: &'a ConversationProjection,
-    extension_ui: &'a ExtensionUiProjection,
-    compaction_composer: &'a Entity<Composer>,
     orchestration: &'a OrchestrationProjection,
     selected_task_id: Option<&'a str>,
     goal_edit_composer: &'a Entity<Composer>,
+    delivery_focus: DeliveryFocus,
 }
 
 fn inspector(params: InspectorParams<'_>, cx: &mut Context<RootView>) -> impl IntoElement {
     let InspectorParams {
         projection,
         conversation,
-        extension_ui,
-        compaction_composer,
         orchestration,
         selected_task_id,
         goal_edit_composer,
+        delivery_focus,
     } = params;
     div()
         .w(px(theme::INSPECT_W))
@@ -5953,9 +6030,8 @@ fn inspector(params: InspectorParams<'_>, cx: &mut Context<RootView>) -> impl In
                             goal_edit_composer,
                             cx,
                         ))
-                        .child(run_controls(conversation, compaction_composer, cx))
-                        .child(queue_panel(conversation))
-                        .child(extension_diagnostics_panel(extension_ui)),
+                        .child(run_controls(conversation, delivery_focus, cx))
+                        .child(queue_panel(conversation)),
                 ),
         )
 }
@@ -7058,11 +7134,12 @@ fn subagent_metadata_panel(agent: &SubagentSnapshot) -> impl IntoElement {
 
 fn run_controls(
     conversation: &ConversationProjection,
-    compaction_composer: &Entity<Composer>,
+    delivery_focus: DeliveryFocus,
     cx: &mut Context<RootView>,
 ) -> impl IntoElement {
     let locked = conversation.pending_operation.is_some();
     let can_run_controls = conversation.steering_mode.is_some();
+    let settings_locked = locked || !can_run_controls;
     let compact_enabled = matches!(
         conversation.lifecycle,
         RuntimeLifecycle::Ready | RuntimeLifecycle::Settled
@@ -7074,175 +7151,167 @@ fn run_controls(
         .bash_executions
         .iter()
         .any(|execution| execution.status == BashStatus::Running);
+    let run_status = run_status_label(
+        conversation,
+        abort_enabled,
+        bash_running,
+        abort_retry_enabled,
+    );
 
     div()
         .flex()
         .flex_col()
-        .gap(px(8.0))
+        .gap(px(12.0))
         .child(
             div()
                 .flex()
                 .flex_row()
                 .items_baseline()
                 .justify_between()
+                .gap(px(8.0))
                 .child(controls::section_label("Run"))
-                .when_some(conversation.pending_operation.as_ref(), |row, operation| {
-                    row.child(
-                        div()
-                            .font_family(theme::MONO)
-                            .text_size(px(theme::T_TINY))
-                            .text_color(theme::data())
-                            .child(operation_label(operation)),
-                    )
-                }),
-        )
-        .child(
-            controls::divider_list()
-                .child(controls::action_row(
-                    "abort-run",
-                    "Abort run",
-                    if abort_enabled {
-                        "Current agent only"
-                    } else {
-                        "No active run"
-                    },
-                    abort_enabled,
-                    controls::ControlTone::Danger,
-                    Box::new(cx.listener(|view, _, window, cx| {
-                        let _ = view.execute_native_action(NativeAction::Abort, "", window, cx);
-                    })),
-                ))
-                .child(controls::action_row(
-                    "abort-bash",
-                    "Abort Bash",
-                    if bash_running {
-                        "Direct Bash only"
-                    } else {
-                        "No Bash running"
-                    },
-                    bash_running,
-                    controls::ControlTone::Danger,
-                    Box::new(cx.listener(|view, _, window, cx| {
-                        let _ = view.execute_native_action(NativeAction::Abort, "", window, cx);
-                    })),
-                ))
-                .child(controls::action_row(
-                    "abort-retry",
-                    "Abort retry",
-                    if abort_retry_enabled {
-                        "Retry timer only"
-                    } else {
-                        "No retry timer"
-                    },
-                    abort_retry_enabled,
-                    controls::ControlTone::Danger,
-                    Box::new(cx.listener(|view, _, _, cx| view.abort_retry(cx))),
-                ))
-                .child(controls::action_row(
-                    "compact-now",
-                    "Compact",
-                    if compact_enabled {
-                        "Manual context summary"
-                    } else {
-                        "Wait until idle"
-                    },
-                    compact_enabled,
-                    controls::ControlTone::Normal,
-                    Box::new(cx.listener(|view, _, window, cx| {
-                        let _ = view.execute_native_action(NativeAction::Compact, "", window, cx);
-                    })),
-                )),
-        )
-        .child(compaction_composer.clone())
-        .child(mode_controls(
-            "steering",
-            "Steering",
-            conversation.steering_mode,
-            locked || !can_run_controls,
-            |view, mode, cx| view.set_steering_mode(mode, cx),
-            cx,
-        ))
-        .child(mode_controls(
-            "follow-up",
-            "Follow-up",
-            conversation.follow_up_mode,
-            locked || !can_run_controls,
-            |view, mode, cx| view.set_follow_up_mode(mode, cx),
-            cx,
-        ))
-        .child(toggle_row(
-            "auto-compaction",
-            "Auto compaction",
-            conversation.auto_compaction_enabled,
-            locked || !can_run_controls,
-            |view, enabled, cx| view.set_auto_compaction(enabled, cx),
-            cx,
-        ))
-        .child(toggle_row(
-            "auto-retry",
-            "Auto retry",
-            conversation.auto_retry_enabled,
-            locked || !can_run_controls,
-            |view, enabled, cx| view.set_auto_retry(enabled, cx),
-            cx,
-        ))
-}
-
-fn mode_controls(
-    prefix: &'static str,
-    title: &'static str,
-    current: Option<QueueDeliveryMode>,
-    locked: bool,
-    apply: fn(&mut RootView, QueueDeliveryMode, &mut Context<RootView>),
-    cx: &mut Context<RootView>,
-) -> impl IntoElement {
-    let current_label = current.map(mode_label).unwrap_or("Unknown");
-    div()
-        .flex()
-        .flex_col()
-        .gap(px(6.0))
-        .child(
-            div()
-                .flex()
-                .flex_row()
-                .items_baseline()
-                .justify_between()
-                .child(controls::section_label(title))
                 .child(
                     div()
+                        .min_w_0()
                         .font_family(theme::MONO)
                         .text_size(px(theme::T_TINY))
-                        .text_color(theme::smoke())
-                        .child(current_label),
+                        .text_color(if conversation.pending_operation.is_some() {
+                            theme::data()
+                        } else {
+                            theme::smoke()
+                        })
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .whitespace_nowrap()
+                        .child(
+                            conversation
+                                .pending_operation
+                                .as_ref()
+                                .map(operation_label)
+                                .unwrap_or(run_status),
+                        ),
                 ),
         )
         .child(
             div()
                 .flex()
+                .w_full()
                 .flex_row()
                 .gap(px(6.0))
-                .child(controls::chip_button(
-                    format!("{prefix}-all"),
-                    "All",
-                    current == Some(QueueDeliveryMode::All),
-                    current.is_some() && !locked && current != Some(QueueDeliveryMode::All),
-                    Box::new(
-                        cx.listener(move |view, _, _, cx| apply(view, QueueDeliveryMode::All, cx)),
-                    ),
-                ))
-                .child(controls::chip_button(
-                    format!("{prefix}-one"),
-                    "One at a time",
-                    current == Some(QueueDeliveryMode::OneAtATime),
-                    current.is_some() && !locked && current != Some(QueueDeliveryMode::OneAtATime),
-                    Box::new(cx.listener(move |view, _, _, cx| {
-                        apply(view, QueueDeliveryMode::OneAtATime, cx)
+                .child(controls::tone_button(
+                    "abort-run",
+                    "Abort",
+                    abort_enabled,
+                    controls::ControlTone::Danger,
+                    Box::new(cx.listener(|view, _, _, cx| {
+                        view.controller.update(cx, |controller, cx| {
+                            let _ = controller.abort(cx);
+                        });
                     })),
+                ))
+                .child(controls::tone_button(
+                    "abort-bash",
+                    "Bash",
+                    bash_running,
+                    controls::ControlTone::Danger,
+                    Box::new(cx.listener(|view, _, _, cx| {
+                        view.controller.update(cx, |controller, cx| {
+                            let _ = controller.abort_bash(cx);
+                        });
+                    })),
+                ))
+                .child(controls::tone_button(
+                    "abort-retry",
+                    "Retry",
+                    abort_retry_enabled,
+                    controls::ControlTone::Danger,
+                    Box::new(cx.listener(|view, _, _, cx| view.abort_retry(cx))),
+                ))
+                .child(controls::tone_button(
+                    "compact-now",
+                    "Compact",
+                    compact_enabled,
+                    controls::ControlTone::Normal,
+                    Box::new(cx.listener(|view, _, window, cx| {
+                        view.open_compaction_modal(window, cx);
+                    })),
+                )),
+        )
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(8.0))
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_baseline()
+                        .justify_between()
+                        .gap(px(8.0))
+                        .child(controls::section_label("Delivery"))
+                        .child(
+                            div()
+                                .font_family(theme::MONO)
+                                .text_size(px(theme::T_TINY))
+                                .text_color(theme::smoke())
+                                .child("All"),
+                        ),
+                )
+                .child(
+                    controls::tab_track()
+                        .child(controls::tab_button(
+                            "delivery-steering",
+                            "Steering",
+                            delivery_focus == DeliveryFocus::Steering,
+                            Box::new(cx.listener(|view, _, _, cx| {
+                                view.delivery_focus = DeliveryFocus::Steering;
+                                cx.notify();
+                            })),
+                        ))
+                        .child(controls::tab_button(
+                            "delivery-follow-up",
+                            "Follow-up",
+                            delivery_focus == DeliveryFocus::FollowUp,
+                            Box::new(cx.listener(|view, _, _, cx| {
+                                view.delivery_focus = DeliveryFocus::FollowUp;
+                                cx.notify();
+                            })),
+                        )),
+                )
+                .child(
+                    div()
+                        .font_family(theme::SANS)
+                        .text_size(px(theme::T_TINY))
+                        .line_height(gpui::relative(1.35))
+                        .text_color(theme::smoke())
+                        .child(match delivery_focus {
+                            DeliveryFocus::Steering => {
+                                "How queued steers land while the agent is running."
+                            }
+                            DeliveryFocus::FollowUp => {
+                                "How follow-ups drain after the current turn finishes."
+                            }
+                        }),
+                ),
+        )
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(4.0))
+                .child(toggle_setting_row(
+                    "auto-compaction",
+                    "Auto compact",
+                    conversation.auto_compaction_enabled,
+                    settings_locked,
+                    |view, enabled, cx| view.set_auto_compaction(enabled, cx),
+                    cx,
                 )),
         )
 }
 
-fn toggle_row(
+fn toggle_setting_row(
     prefix: &'static str,
     title: &'static str,
     current: Option<bool>,
@@ -7250,35 +7319,56 @@ fn toggle_row(
     apply: fn(&mut RootView, bool, &mut Context<RootView>),
     cx: &mut Context<RootView>,
 ) -> impl IntoElement {
-    let current_label = current.map(on_off).unwrap_or("Unknown");
-    let target = !current.unwrap_or(true);
-    div()
-        .flex()
-        .flex_row()
-        .items_center()
-        .justify_between()
-        .gap(px(8.0))
-        .child(
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(2.0))
-                .child(controls::section_label(title))
-                .child(
-                    div()
-                        .font_family(theme::MONO)
-                        .text_size(px(theme::T_TINY))
-                        .text_color(theme::smoke())
-                        .child(current_label),
-                ),
-        )
-        .child(controls::chip_button(
-            format!("{prefix}-toggle"),
-            if target { "Enable" } else { "Disable" },
-            false,
-            current.is_some() && !locked,
-            Box::new(cx.listener(move |view, _, _, cx| apply(view, target, cx))),
-        ))
+    let enabled = current.unwrap_or(false);
+    let known = current.is_some();
+    controls::setting_row(
+        title,
+        None::<&str>,
+        div()
+            .flex()
+            .flex_row()
+            .gap(px(4.0))
+            .child(controls::chip_button(
+                format!("{prefix}-on"),
+                "On",
+                known && enabled,
+                known && !locked && !enabled,
+                Box::new(cx.listener(move |view, _, _, cx| apply(view, true, cx))),
+            ))
+            .child(controls::chip_button(
+                format!("{prefix}-off"),
+                "Off",
+                known && !enabled,
+                known && !locked && enabled,
+                Box::new(cx.listener(move |view, _, _, cx| apply(view, false, cx))),
+            )),
+    )
+}
+
+fn run_status_label(
+    conversation: &ConversationProjection,
+    abort_enabled: bool,
+    bash_running: bool,
+    abort_retry_enabled: bool,
+) -> &'static str {
+    if matches!(conversation.compaction, CompactionState::Running { .. }) {
+        "Compacting"
+    } else if abort_enabled && bash_running {
+        "Agent + Bash"
+    } else if abort_enabled {
+        "Running"
+    } else if bash_running {
+        "Bash running"
+    } else if abort_retry_enabled {
+        "Retry waiting"
+    } else {
+        match conversation.lifecycle {
+            RuntimeLifecycle::Ready => "Ready",
+            RuntimeLifecycle::Settled => "Settled",
+            RuntimeLifecycle::Running => "Running",
+            _ => "Idle",
+        }
+    }
 }
 
 fn queue_panel(conversation: &ConversationProjection) -> impl IntoElement {
@@ -7419,17 +7509,6 @@ fn operation_label(operation: &RuntimeOperation) -> &'static str {
         RuntimeOperation::SetSessionName(_) => "Renaming session",
         RuntimeOperation::ExportHtml => "Exporting session",
     }
-}
-
-fn mode_label(mode: QueueDeliveryMode) -> &'static str {
-    match mode {
-        QueueDeliveryMode::All => "All",
-        QueueDeliveryMode::OneAtATime => "One at a time",
-    }
-}
-
-fn on_off(enabled: bool) -> &'static str {
-    if enabled { "On" } else { "Off" }
 }
 
 fn plural(count: u64) -> &'static str {
