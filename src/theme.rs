@@ -15,7 +15,7 @@ pub enum ThemeId {
 impl ThemeId {
     pub const fn label(self) -> &'static str {
         match self {
-            Self::PiDeckDark => "PiDeck Dark",
+            Self::PiDeckDark => "Pideck Dark",
             Self::CursorDark => "Cursor Dark",
         }
     }
@@ -149,9 +149,9 @@ const PIDECK_DARK: Palette = Palette {
 const CURSOR_DARK: Palette = Palette {
     canvas: 0x0b0b0bff,      // deepened background / editor.background
     floor: 0x080808ff,       // deepened surface / panel / title bar
-    panel: 0xe4e4e40a,       // element.background
-    panel_lift: 0xe4e4e41e,  // element.active / selected
-    panel_hover: 0xe4e4e411, // element.hover
+    panel: 0x121212ff,       // opaque panel; prevents content bleed-through
+    panel_lift: 0x1b1b1bff,  // opaque active / selected surface
+    panel_hover: 0x171717ff, // opaque hover surface
     edge: 0xe4e4e413,        // border
     edge_hard: 0xe4e4e426,   // border.focused
     edge_soft: 0xe4e4e413,   // border.variant
@@ -274,7 +274,7 @@ mod tests {
 
     #[test]
     fn theme_names_and_cycle_are_stable() {
-        assert_eq!(ThemeId::PiDeckDark.label(), "PiDeck Dark");
+        assert_eq!(ThemeId::PiDeckDark.label(), "Pideck Dark");
         assert_eq!(ThemeId::PiDeckDark.next(), ThemeId::CursorDark);
         assert_eq!(ThemeId::CursorDark.label(), "Cursor Dark");
         assert_eq!(ThemeId::CursorDark.next(), ThemeId::PiDeckDark);
@@ -292,6 +292,9 @@ mod tests {
     fn cursor_dark_uses_subdued_accents_on_deeper_surfaces() {
         assert_eq!(CURSOR_DARK.canvas, 0x0b0b0bff);
         assert_eq!(CURSOR_DARK.floor, 0x080808ff);
+        assert_eq!(CURSOR_DARK.panel, 0x121212ff);
+        assert_eq!(CURSOR_DARK.panel_lift, 0x1b1b1bff);
+        assert_eq!(CURSOR_DARK.panel_hover, 0x171717ff);
         assert_eq!(CURSOR_DARK.edge, 0xe4e4e413);
         assert_eq!(CURSOR_DARK.bone, 0xe4e4e4eb);
         assert_eq!(CURSOR_DARK.signal, 0x5a7188ff);
