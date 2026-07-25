@@ -209,6 +209,7 @@ impl RenderProjections {
 pub struct RootView {
     controller: Entity<RuntimeController>,
     render_projections: RenderProjections,
+    active_theme: theme::ThemeId,
     composer: Entity<Composer>,
     compaction_composer: Entity<Composer>,
     session_name_composer: Entity<Composer>,
@@ -330,6 +331,8 @@ impl RootView {
         font_catalog: FontCatalog,
         cx: &mut Context<Self>,
     ) -> Self {
+        let active_theme = theme::ThemeId::PiDeckDark;
+        theme::set_active(active_theme);
         let focus_handle = cx.focus_handle();
         let composer = cx.new(Composer::new);
         let compaction_composer = cx.new(|cx| {
@@ -508,6 +511,7 @@ impl RootView {
         Self {
             controller,
             render_projections,
+            active_theme,
             composer,
             compaction_composer,
             session_name_composer,
@@ -620,6 +624,13 @@ impl RootView {
             _subagent_subscription: subagent_subscription,
             _goal_edit_subscription: goal_edit_subscription,
         }
+    }
+
+    fn cycle_theme(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.active_theme = self.active_theme.next();
+        theme::set_active(self.active_theme);
+        window.refresh();
+        cx.notify();
     }
 
     fn connect(&mut self, cx: &mut Context<Self>) {

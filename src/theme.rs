@@ -1,8 +1,59 @@
 //! Shared visual tokens for the harness desk.
 
-use gpui::{Rgba, SharedString, rgb, rgba};
+use std::sync::atomic::{AtomicU8, Ordering};
+
+use gpui::{Rgba, SharedString, rgba};
 
 use crate::fonts::{self, FontRole};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThemeId {
+    PiDeckDark,
+    CursorDark,
+}
+
+impl ThemeId {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::PiDeckDark => "PiDeck Dark",
+            Self::CursorDark => "Cursor Dark",
+        }
+    }
+
+    pub const fn next(self) -> Self {
+        match self {
+            Self::PiDeckDark => Self::CursorDark,
+            Self::CursorDark => Self::PiDeckDark,
+        }
+    }
+
+    const fn index(self) -> u8 {
+        match self {
+            Self::PiDeckDark => 0,
+            Self::CursorDark => 1,
+        }
+    }
+
+    const fn palette(self) -> &'static Palette {
+        match self {
+            Self::PiDeckDark => &PIDECK_DARK,
+            Self::CursorDark => &CURSOR_DARK,
+        }
+    }
+}
+
+static ACTIVE_THEME: AtomicU8 = AtomicU8::new(ThemeId::PiDeckDark.index());
+
+pub fn active() -> ThemeId {
+    match ACTIVE_THEME.load(Ordering::Relaxed) {
+        1 => ThemeId::CursorDark,
+        _ => ThemeId::PiDeckDark,
+    }
+}
+
+pub fn set_active(theme: ThemeId) {
+    ACTIVE_THEME.store(theme.index(), Ordering::Relaxed);
+}
 
 pub fn main() -> SharedString {
     fonts::family(FontRole::Main)
@@ -39,96 +90,214 @@ pub const T_MONO: f32 = 12.0;
 pub const T_MONO_SM: f32 = 11.5;
 pub const T_TINY: f32 = 11.0;
 
-// Warm charcoal surfaces
+struct Palette {
+    canvas: u32,
+    floor: u32,
+    panel: u32,
+    panel_lift: u32,
+    panel_hover: u32,
+    edge: u32,
+    edge_hard: u32,
+    edge_soft: u32,
+    bone: u32,
+    bone_dim: u32,
+    ash: u32,
+    smoke: u32,
+    signal: u32,
+    signal_deep: u32,
+    signal_hot: u32,
+    focus: u32,
+    error: u32,
+    error_wash: u32,
+    live: u32,
+    live_wash: u32,
+    working: u32,
+    data: u32,
+    data_wash: u32,
+}
+
+// The original application palette, now named PiDeck Dark.
+const PIDECK_DARK: Palette = Palette {
+    canvas: 0x0b0a09ff,
+    floor: 0x12100eff,
+    panel: 0x1a1714ff,
+    panel_lift: 0x221e1aff,
+    panel_hover: 0x2a241fff,
+    edge: 0xebe4d618,
+    edge_hard: 0xebe4d62c,
+    edge_soft: 0xebe4d612,
+    bone: 0xefe7d8ff,
+    bone_dim: 0xbbb2a2ff,
+    ash: 0x9a9082ff,
+    smoke: 0x847b70ff,
+    signal: 0xc75a38ff,
+    signal_deep: 0x8a3f28ff,
+    signal_hot: 0xd46a48ff,
+    focus: 0xffd39aff,
+    error: 0xe18263ff,
+    error_wash: 0xe1826314,
+    live: 0xc5d2a8ff,
+    live_wash: 0xc5d2a812,
+    working: 0x78a9d1ff,
+    data: 0xe0b07aff,
+    data_wash: 0xe0b07a16,
+};
+
+// Cursor Dark by Nexmoe, adapted onto a deeper PiDeck-like neutral base with
+// its blue family subdued to keep the interface dark rather than luminous:
+// https://github.com/nexmoe/cursor-themes-for-zed/blob/main/themes/cursor-dark.json
+const CURSOR_DARK: Palette = Palette {
+    canvas: 0x0b0b0bff,      // deepened background / editor.background
+    floor: 0x080808ff,       // deepened surface / panel / title bar
+    panel: 0xe4e4e40a,       // element.background
+    panel_lift: 0xe4e4e41e,  // element.active / selected
+    panel_hover: 0xe4e4e411, // element.hover
+    edge: 0xe4e4e413,        // border
+    edge_hard: 0xe4e4e426,   // border.focused
+    edge_soft: 0xe4e4e413,   // border.variant
+    bone: 0xe4e4e4eb,        // text
+    bone_dim: 0xe4e4e48d,    // text.muted
+    ash: 0xe4e4e48d,         // text.muted
+    smoke: 0xe4e4e45e,       // text.placeholder
+    signal: 0x5a7188ff,      // subdued Cursor blue
+    signal_deep: 0x465a6dff, // pressed Cursor blue
+    signal_hot: 0x657f97ff,  // hover Cursor blue
+    focus: 0x6b8399ff,       // visible, muted blue focus
+    error: 0xe34671ff,       // error
+    error_wash: 0xb8004922,  // error.background
+    live: 0x3fa266ff,        // success
+    live_wash: 0x3fa26622,   // success.background
+    working: 0x557984ff,     // subdued Cursor cyan
+    data: 0xd2943eff,        // modified / yellow accent
+    data_wash: 0x222222cc,   // deepened modified.background
+};
+
+fn color(select: impl FnOnce(&Palette) -> u32) -> Rgba {
+    rgba(select(active().palette()))
+}
+
 pub fn canvas() -> Rgba {
-    rgb(0x0b0a09)
+    color(|palette| palette.canvas)
 }
 
 pub fn floor() -> Rgba {
-    rgb(0x12100e)
+    color(|palette| palette.floor)
 }
 
 pub fn panel() -> Rgba {
-    rgb(0x1a1714)
+    color(|palette| palette.panel)
 }
 
 pub fn panel_lift() -> Rgba {
-    rgb(0x221e1a)
+    color(|palette| palette.panel_lift)
 }
 
 pub fn panel_hover() -> Rgba {
-    rgb(0x2a241f)
+    color(|palette| palette.panel_hover)
 }
 
 pub fn edge() -> Rgba {
-    rgba(0xebe4_d618)
+    color(|palette| palette.edge)
 }
 
 pub fn edge_hard() -> Rgba {
-    rgba(0xebe4_d62c)
+    color(|palette| palette.edge_hard)
 }
 
 pub fn edge_soft() -> Rgba {
-    rgba(0xebe4_d612)
+    color(|palette| palette.edge_soft)
 }
 
-// Text and semantic accents
 pub fn bone() -> Rgba {
-    rgb(0xefe7d8)
+    color(|palette| palette.bone)
 }
 
 pub fn bone_dim() -> Rgba {
-    rgb(0xbbb2a2)
+    color(|palette| palette.bone_dim)
 }
 
 pub fn ash() -> Rgba {
-    rgb(0x9a9082)
+    color(|palette| palette.ash)
 }
 
 pub fn smoke() -> Rgba {
-    rgb(0x847b70)
+    color(|palette| palette.smoke)
 }
 
 pub fn signal() -> Rgba {
-    rgb(0xc75a38)
+    color(|palette| palette.signal)
 }
 
 pub fn signal_deep() -> Rgba {
-    rgb(0x8a3f28)
+    color(|palette| palette.signal_deep)
 }
 
 pub fn signal_hot() -> Rgba {
-    rgb(0xd46a48)
+    color(|palette| palette.signal_hot)
 }
 
 pub fn focus() -> Rgba {
-    rgb(0xffd39a)
+    color(|palette| palette.focus)
 }
 
 pub fn error() -> Rgba {
-    rgb(0xe18263)
+    color(|palette| palette.error)
 }
 
 pub fn error_wash() -> Rgba {
-    rgba(0xe182_6314)
+    color(|palette| palette.error_wash)
 }
 
 pub fn live() -> Rgba {
-    rgb(0xc5d2a8)
+    color(|palette| palette.live)
 }
 
 pub fn live_wash() -> Rgba {
-    rgba(0xc5d2_a812)
+    color(|palette| palette.live_wash)
 }
 
 pub fn working() -> Rgba {
-    rgb(0x78a9d1)
+    color(|palette| palette.working)
 }
 
 pub fn data() -> Rgba {
-    rgb(0xe0b07a)
+    color(|palette| palette.data)
 }
 
 pub fn data_wash() -> Rgba {
-    rgba(0xe0b0_7a16)
+    color(|palette| palette.data_wash)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn theme_names_and_cycle_are_stable() {
+        assert_eq!(ThemeId::PiDeckDark.label(), "PiDeck Dark");
+        assert_eq!(ThemeId::PiDeckDark.next(), ThemeId::CursorDark);
+        assert_eq!(ThemeId::CursorDark.label(), "Cursor Dark");
+        assert_eq!(ThemeId::CursorDark.next(), ThemeId::PiDeckDark);
+    }
+
+    #[test]
+    fn pideck_dark_preserves_the_original_palette() {
+        assert_eq!(PIDECK_DARK.canvas, 0x0b0a09ff);
+        assert_eq!(PIDECK_DARK.floor, 0x12100eff);
+        assert_eq!(PIDECK_DARK.bone, 0xefe7d8ff);
+        assert_eq!(PIDECK_DARK.signal, 0xc75a38ff);
+    }
+
+    #[test]
+    fn cursor_dark_uses_subdued_accents_on_deeper_surfaces() {
+        assert_eq!(CURSOR_DARK.canvas, 0x0b0b0bff);
+        assert_eq!(CURSOR_DARK.floor, 0x080808ff);
+        assert_eq!(CURSOR_DARK.edge, 0xe4e4e413);
+        assert_eq!(CURSOR_DARK.bone, 0xe4e4e4eb);
+        assert_eq!(CURSOR_DARK.signal, 0x5a7188ff);
+        assert_eq!(CURSOR_DARK.working, 0x557984ff);
+        assert_eq!(CURSOR_DARK.error, 0xe34671ff);
+        assert_eq!(CURSOR_DARK.live, 0x3fa266ff);
+        assert_eq!(CURSOR_DARK.data, 0xd2943eff);
+    }
 }

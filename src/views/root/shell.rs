@@ -145,9 +145,11 @@ pub(super) fn titlebar(
         )
         .child(
             div()
+                .min_w(px(290.0))
                 .flex()
                 .flex_row()
                 .items_center()
+                .justify_end()
                 .gap(px(10.0))
                 .flex_shrink_0()
                 .child(
@@ -156,6 +158,7 @@ pub(super) fn titlebar(
                         .flex_row()
                         .items_center()
                         .gap(px(8.0))
+                        .flex_shrink_0()
                         .child(controls::square_status_indicator(
                             0,
                             status.animated,
@@ -171,6 +174,34 @@ pub(super) fn titlebar(
                                 .whitespace_nowrap()
                                 .child(status.label),
                         ),
+                )
+                .child(
+                    div()
+                        .font_family(theme::mono())
+                        .text_size(px(theme::T_TINY))
+                        .text_color(theme::smoke())
+                        .flex_shrink_0()
+                        .child("|"),
+                )
+                .child(
+                    div()
+                        .id("theme-switcher")
+                        .px(px(5.0))
+                        .py(px(3.0))
+                        .rounded(px(2.0))
+                        .font_family(theme::main())
+                        .text_size(px(theme::T_TINY))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(theme::ash())
+                        .whitespace_nowrap()
+                        .flex_shrink_0()
+                        .cursor_pointer()
+                        .hover(|switcher| switcher.bg(theme::panel()).text_color(theme::bone()))
+                        .active(|switcher| switcher.bg(theme::panel_lift()))
+                        .focus(|switcher| switcher.border_1().border_color(theme::focus()))
+                        .tab_index(0)
+                        .on_click(cx.listener(|view, _, window, cx| view.cycle_theme(window, cx)))
+                        .child(theme::active().label()),
                 )
                 .when(action.is_some(), |row| row.child(controls::meta_sep()))
                 .when_some(action, |row, action| {

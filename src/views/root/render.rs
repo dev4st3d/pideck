@@ -14,6 +14,7 @@ use crate::views::diff_summary::diff_overlay;
 
 impl Render for RootView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        theme::set_active(self.active_theme);
         let projection = &self.render_projections.shell;
         let catalog = &self.render_projections.catalog;
         let history = &self.render_projections.history;
