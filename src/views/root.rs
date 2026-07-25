@@ -246,6 +246,8 @@ pub struct RootView {
     slash_intercepts_enter: bool,
     command_palette_scroll: ScrollHandle,
     slash_command_scroll: ScrollHandle,
+    model_switcher_scroll: ScrollHandle,
+    thinking_select_scroll: ScrollHandle,
     runtime_notifications: VecDeque<RuntimeNotification>,
     dismissed_slash_draft: Option<String>,
     last_slash_draft: String,
@@ -333,7 +335,7 @@ impl RootView {
         let import_path_composer =
             cx.new(|cx| Composer::field("import-jsonl", "JSONL path to import…", "Import", cx));
         let model_search_composer = cx.new(|cx| {
-            Composer::field("model-search", "Search models…", "", cx).with_field_height(30.0)
+            Composer::field("model-search", "Search models…", "", cx).with_field_height(26.0)
         });
         let font_search_composer = cx.new(|cx| {
             Composer::field("font-search", "Search system fonts…", "", cx).with_field_height(30.0)
@@ -530,6 +532,8 @@ impl RootView {
             slash_intercepts_enter: false,
             command_palette_scroll: ScrollHandle::new(),
             slash_command_scroll: ScrollHandle::new(),
+            model_switcher_scroll: ScrollHandle::new(),
+            thinking_select_scroll: ScrollHandle::new(),
             runtime_notifications: VecDeque::new(),
             dismissed_slash_draft: None,
             last_slash_draft: String::new(),

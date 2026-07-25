@@ -148,6 +148,8 @@ impl Render for RootView {
                                     slash_commands: &self.slash_command_matches,
                                     command_selection: self.command_selection,
                                     command_scroll: &self.slash_command_scroll,
+                                    model_scroll: &self.model_switcher_scroll,
+                                    thinking_scroll: &self.thinking_select_scroll,
                                     slash_dismissed: self.dismissed_slash_draft.as_deref()
                                         == Some(self.composer.read(cx).draft()),
                                     extension_ui: &self.extension_ui,

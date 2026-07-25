@@ -224,7 +224,7 @@ impl Composer {
             } else {
                 CursorStyle::IBeam
             })
-            .h(px(if panel { 64.0 } else { 88.0 }))
+            .h(px(if panel { 64.0 } else { 68.0 }))
             .px(px(12.0))
             .py(px(if panel { 8.0 } else { 10.0 }))
             .overflow_hidden()

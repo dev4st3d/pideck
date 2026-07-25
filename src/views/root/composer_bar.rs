@@ -11,6 +11,8 @@ pub(super) struct ComposerBarParams<'a> {
     pub(super) slash_commands: &'a [CommandEntry],
     pub(super) command_selection: usize,
     pub(super) command_scroll: &'a ScrollHandle,
+    pub(super) model_scroll: &'a ScrollHandle,
+    pub(super) thinking_scroll: &'a ScrollHandle,
     pub(super) slash_dismissed: bool,
     pub(super) extension_ui: &'a ExtensionUiProjection,
 }
@@ -28,6 +30,8 @@ pub(super) fn composer_bar(
         slash_commands,
         command_selection,
         command_scroll,
+        model_scroll,
+        thinking_scroll,
         slash_dismissed,
         extension_ui,
     } = params;
@@ -85,9 +89,11 @@ pub(super) fn composer_bar(
                             .pb(px(10.0))
                             .occlude()
                             .child(if model_open {
-                                model_switcher_sheet(models, search, cx).into_any_element()
+                                model_switcher_sheet(models, search, model_scroll, cx)
+                                    .into_any_element()
                             } else {
-                                thinking_select_sheet(models, cx).into_any_element()
+                                thinking_select_sheet(models, thinking_scroll, cx)
+                                    .into_any_element()
                             }),
                     )
                 })

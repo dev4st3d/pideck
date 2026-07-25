@@ -410,6 +410,7 @@ fn typography_settings(
 pub(super) fn model_switcher_sheet(
     projection: &ModelRuntimeProjection,
     search: &Entity<Composer>,
+    scroll: &ScrollHandle,
     cx: &mut Context<RootView>,
 ) -> impl IntoElement {
     let query = search.read(cx).draft().to_owned();
@@ -419,7 +420,9 @@ pub(super) fn model_switcher_sheet(
 
     popup_sheet()
         .id("model-switcher-sheet")
-        .max_h(px(300.0))
+        // A definite flex height makes the results pane the overflow owner. With only
+        // max-height, the list kept its intrinsic height and the sheet clipped it.
+        .h(px(300.0))
         .child(
             div()
                 .px(px(10.0))
@@ -469,6 +472,7 @@ pub(super) fn model_switcher_sheet(
                 .min_h_0()
                 .bg(theme::panel())
                 .overflow_y_scroll()
+                .track_scroll(scroll)
                 .scrollbar_width(px(6.0))
                 .when(models.is_empty(), |list| {
                     list.child(
@@ -694,6 +698,7 @@ fn stock_model_matches(model: &ModelSummary, query: &str) -> bool {
 
 pub(super) fn thinking_select_sheet(
     projection: &ModelRuntimeProjection,
+    scroll: &ScrollHandle,
     cx: &mut Context<RootView>,
 ) -> impl IntoElement {
     let levels = thinking_choices(projection);
@@ -705,7 +710,7 @@ pub(super) fn thinking_select_sheet(
 
     popup_sheet()
         .id("thinking-select-sheet")
-        .max_h(px(168.0))
+        .h(px(168.0))
         .child(popup_sheet_header("Thinking", "close-thinking-select", cx))
         .when(!can_change, |sheet| {
             sheet.child(
@@ -728,6 +733,7 @@ pub(super) fn thinking_select_sheet(
                 .min_h_0()
                 .bg(theme::panel())
                 .overflow_y_scroll()
+                .track_scroll(scroll)
                 .scrollbar_width(px(6.0))
                 .children(levels.into_iter().map(|level| {
                     let selected = active == Some(level);
