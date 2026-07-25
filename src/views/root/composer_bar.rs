@@ -51,8 +51,8 @@ pub(super) fn composer_bar(
         .border_t_1()
         .border_color(theme::edge_hard())
         .px(px(theme::STREAM_PAD_X))
-        .pt(px(10.0))
-        .pb(px(14.0))
+        .pt(px(6.0))
+        .pb(px(8.0))
         // Overlay host: popups are absolute and must not grow this bar's layout height.
         .relative()
         .child(
@@ -109,8 +109,8 @@ pub(super) fn composer_bar(
                         .child(
                             div()
                                 .px(px(8.0))
-                                .pt(px(6.0))
-                                .pb(px(6.0))
+                                .pt(px(4.0))
+                                .pb(px(4.0))
                                 .flex()
                                 .flex_row()
                                 .items_center()
@@ -122,7 +122,7 @@ pub(super) fn composer_bar(
                                         .flex()
                                         .flex_row()
                                         .items_center()
-                                        .gap(px(3.0))
+                                        .gap(px(1.0))
                                         .flex_shrink_0()
                                         .child(controls::compact_select(
                                             "prompt-model-picker",
@@ -138,12 +138,19 @@ pub(super) fn composer_bar(
                                                 )
                                             })),
                                         ))
+                                        .child(
+                                            div()
+                                                .w(px(1.0))
+                                                .h(px(14.0))
+                                                .rounded(px(1.0))
+                                                .bg(theme::edge()),
+                                        )
                                         .child(controls::compact_select(
                                             "prompt-thinking-select",
                                             thinking_label,
                                             thinking_open,
                                             can_pick_thinking,
-                                            86.0,
+                                            108.0,
                                             Box::new(cx.listener(|view, _, window, cx| {
                                                 view.toggle_model_panel(
                                                     ModelPanel::Thinking,
@@ -258,15 +265,17 @@ fn short_thinking_label(projection: &ShellProjection, models: &ModelRuntimeProje
         .effective_thinking
         .or(models.active_thinking)
         .or(models.requested_thinking);
-    if let Some(level) = level {
-        return thinking_short(level);
-    }
-    let label = projection.thinking.label();
-    if label == "Unknown" || label == "Loading" || label == "Awaiting" {
-        "Off".to_owned()
+    let value = if let Some(level) = level {
+        thinking_short(level)
     } else {
-        compact_label(&label, 10)
-    }
+        let label = projection.thinking.label();
+        if label == "Unknown" || label == "Loading" || label == "Awaiting" {
+            "Off".to_owned()
+        } else {
+            compact_label(&label, 10)
+        }
+    };
+    format!("Think: {value}")
 }
 
 fn thinking_short(level: ThinkingLevel) -> String {

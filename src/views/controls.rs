@@ -486,32 +486,34 @@ pub fn compact_select(
 ) -> impl IntoElement {
     div()
         .id(id.into())
-        .h(px(22.0))
+        .h(px(26.0))
         .max_w(px(max_width))
-        .px(px(7.0))
+        .px(px(8.0))
         .rounded(px(theme::RADIUS_SM))
         .flex()
         .flex_row()
         .items_center()
-        .gap(px(4.0))
+        .gap(px(6.0))
         .flex_shrink_0()
+        // The prompt already supplies the containing surface. Keep the resting
+        // trigger quiet instead of stacking a dark bordered box inside it.
         .bg(if open {
-            theme::panel_hover()
+            theme::panel_lift()
         } else {
-            theme::canvas()
+            theme::panel()
         })
         .border_1()
         .border_color(if open {
-            theme::edge()
+            theme::edge_hard()
         } else {
-            theme::edge_soft()
+            theme::panel()
         })
         .text_color(if !enabled {
             theme::smoke()
         } else if open {
             theme::bone()
         } else {
-            theme::ash()
+            theme::bone_dim()
         })
         .when(enabled, |button| {
             button
@@ -520,7 +522,7 @@ pub fn compact_select(
                 .hover(|button| {
                     button
                         .bg(theme::panel_lift())
-                        .border_color(theme::edge())
+                        .border_color(theme::panel_lift())
                         .text_color(theme::bone())
                 })
                 .active(|button| button.bg(theme::panel_hover()))
@@ -532,22 +534,23 @@ pub fn compact_select(
                 .min_w_0()
                 .flex_1()
                 .font_family(theme::main())
-                .text_size(px(theme::T_TINY))
-                .font_weight(FontWeight::MEDIUM)
+                .text_size(px(theme::T_LABEL))
+                .font_weight(FontWeight::SEMIBOLD)
                 .overflow_hidden()
                 .text_ellipsis()
                 .whitespace_nowrap()
                 .child(label.into()),
         )
         .child(
-            div()
-                .font_family(theme::mono())
-                .text_size(px(9.0))
-                .line_height(px(12.0))
+            svg()
+                .path(if open {
+                    "icons/chevron-up.svg"
+                } else {
+                    "icons/chevron-down.svg"
+                })
+                .size(px(12.0))
                 .text_color(if open { theme::data() } else { theme::smoke() })
-                .opacity(0.9)
-                .flex_shrink_0()
-                .child(if open { "▴" } else { "▾" }),
+                .flex_shrink_0(),
         )
 }
 

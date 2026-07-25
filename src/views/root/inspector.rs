@@ -378,7 +378,7 @@ fn task_row(
                 .flex_col()
                 .gap(px(4.0))
                 .hover(|row| row.bg(theme::panel_hover()))
-                .focus(|row| row.border_1().border_color(theme::focus()))
+                .focus(|row| row.bg(theme::panel_lift()))
                 .on_click(cx.listener(move |view, _, _, cx| {
                     view.selected_task_id = if view.selected_task_id.as_deref() == Some(&id) {
                         None

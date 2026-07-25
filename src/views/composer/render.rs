@@ -210,6 +210,12 @@ impl Composer {
         let desk = self.chrome == ComposerChrome::Full;
         let status = self.status_text();
         let show_status = !status.is_empty() || !panel;
+        let input_height = if panel { 64.0 } else { 52.0 };
+        let input_padding_x = if panel { 12.0 } else { 10.0 };
+        let input_padding_y = if panel { 8.0 } else { 6.0 };
+        let input_line_height = if panel { 21.0 } else { 20.0 };
+        let action_height = if desk { 28.0 } else { 32.0 };
+        let action_gap = if desk { 6.0 } else { 8.0 };
 
         let mut input = div()
             .id(gpui::SharedString::from(format!(
@@ -224,12 +230,12 @@ impl Composer {
             } else {
                 CursorStyle::IBeam
             })
-            .h(px(if panel { 64.0 } else { 68.0 }))
-            .px(px(12.0))
-            .py(px(if panel { 8.0 } else { 10.0 }))
+            .h(px(input_height))
+            .px(px(input_padding_x))
+            .py(px(input_padding_y))
             .overflow_hidden()
             .text_size(px(theme::T_BODY_SM))
-            .line_height(px(21.0))
+            .line_height(px(input_line_height))
             .text_color(if self.disabled {
                 theme::smoke()
             } else {
@@ -312,8 +318,7 @@ impl Composer {
                 div()
                     .min_h(px(if panel { 28.0 } else { 36.0 }))
                     .px(px(if desk { 10.0 } else { 0.0 }))
-                    .pb(px(if desk { 8.0 } else { 0.0 }))
-                    .pt(px(if desk { 6.0 } else { 0.0 }))
+                    .py(px(if desk { 4.0 } else { 0.0 }))
                     .when(desk, |footer| {
                         footer.border_t_1().border_color(theme::edge_soft())
                     })
@@ -321,17 +326,20 @@ impl Composer {
                     .flex_row()
                     .items_center()
                     .justify_between()
-                    .gap(px(12.0))
+                    .gap(px(10.0))
                     .child(
                         div()
                             .min_w_0()
                             .flex_1()
                             .flex()
-                            .flex_col()
-                            .gap(px(1.0))
-                            .when(show_status, |col| {
-                                col.child(
+                            .flex_row()
+                            .items_baseline()
+                            .gap(px(8.0))
+                            .overflow_hidden()
+                            .when(show_status, |row| {
+                                row.child(
                                     div()
+                                        .min_w_0()
                                         .font_family(theme::sans())
                                         .text_size(px(theme::T_UI_SM))
                                         .font_weight(FontWeight::SEMIBOLD)
@@ -342,9 +350,11 @@ impl Composer {
                                         .child(status),
                                 )
                             })
-                            .when(!panel, |col| {
-                                col.child(
+                            .when(!panel, |row| {
+                                row.child(
                                     div()
+                                        .min_w_0()
+                                        .flex_1()
                                         .font_family(theme::mono())
                                         .text_size(px(theme::T_TINY))
                                         .text_color(theme::smoke())
@@ -361,7 +371,7 @@ impl Composer {
                             .flex()
                             .flex_row()
                             .items_center()
-                            .gap(px(8.0))
+                            .gap(px(action_gap))
                             .when(running || bash_running, |actions| {
                                 actions
                                     .child(
@@ -372,8 +382,8 @@ impl Composer {
                                             )))
                                             .tab_index(0)
                                             .cursor_pointer()
-                                            .h(px(32.0))
-                                            .px(px(8.0))
+                                            .h(px(action_height))
+                                            .px(px(if desk { 7.0 } else { 8.0 }))
                                             .rounded(px(theme::RADIUS_SM))
                                             .flex()
                                             .items_center()
@@ -405,8 +415,8 @@ impl Composer {
                                                     "{}-follow-up",
                                                     self.id_prefix
                                                 )))
-                                                .h(px(32.0))
-                                                .px(px(8.0))
+                                                .h(px(action_height))
+                                                .px(px(if desk { 7.0 } else { 8.0 }))
                                                 .rounded(px(theme::RADIUS_SM))
                                                 .flex()
                                                 .items_center()
@@ -444,9 +454,9 @@ impl Composer {
                                         "{}-submit",
                                         self.id_prefix
                                     )))
-                                    .h(px(32.0))
-                                    .min_w(px(68.0))
-                                    .px(px(14.0))
+                                    .h(px(action_height))
+                                    .min_w(px(if desk { 64.0 } else { 68.0 }))
+                                    .px(px(if desk { 12.0 } else { 14.0 }))
                                     .rounded(px(theme::RADIUS_SM))
                                     .flex()
                                     .items_center()

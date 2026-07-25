@@ -332,6 +332,7 @@ pub(super) struct SessionsPanelParams<'a> {
     pub(super) conversation: &'a ConversationProjection,
     pub(super) history_open: bool,
     pub(super) menu_open: bool,
+    pub(super) scroll: &'a ScrollHandle,
 }
 
 pub(super) fn sessions_panel(
@@ -344,7 +345,9 @@ pub(super) fn sessions_panel(
         conversation,
         history_open,
         menu_open,
+        scroll,
     } = params;
+    let wheel_root = cx.entity();
     let session_actions_enabled = matches!(
         conversation.lifecycle,
         RuntimeLifecycle::Ready | RuntimeLifecycle::Settled
@@ -547,13 +550,40 @@ pub(super) fn sessions_panel(
         })
         .child(
             div()
-                .id("sessions-scroll")
                 .flex_1()
                 .min_h_0()
-                .overflow_y_scroll()
-                .scrollbar_width(px(theme::SCROLLBAR))
+                .relative()
+                .child(
+                    canvas(
+                        |_, _, _| (),
+                        move |bounds, _, window, _| {
+                            window.on_mouse_event(
+                                move |event: &ScrollWheelEvent, phase, window, cx| {
+                                    if phase != DispatchPhase::Capture
+                                        || !bounds.contains(&event.position)
+                                    {
+                                        return;
+                                    }
+                                    let handled = wheel_root.update(cx, |view, cx| {
+                                        view.on_sessions_scroll_wheel(event, window, cx)
+                                    });
+                                    if handled {
+                                        cx.stop_propagation();
+                                    }
+                                },
+                            );
+                        },
+                    )
+                    .absolute()
+                    .size_full(),
+                )
                 .child(
                     div()
+                        .id("sessions-scroll")
+                        .size_full()
+                        .overflow_y_scroll()
+                        .track_scroll(scroll)
+                        .scrollbar_width(px(theme::SCROLLBAR))
                         .w_full()
                         .flex()
                         .flex_col()

@@ -264,6 +264,8 @@ pub struct RootView {
     usage_tooltip_hovered: bool,
     usage_tooltip_visible: bool,
     usage_tooltip_epoch: u64,
+    sessions_scroll: ScrollHandle,
+    sessions_scroll_motion: ConversationScrollMotion,
     subagent_dialog_focus: FocusHandle,
     subagent_dialog_scroll: ScrollHandle,
     window_title: String,
@@ -549,6 +551,8 @@ impl RootView {
             usage_tooltip_hovered: false,
             usage_tooltip_visible: false,
             usage_tooltip_epoch: 0,
+            sessions_scroll: ScrollHandle::new(),
+            sessions_scroll_motion: ConversationScrollMotion::default(),
             subagent_dialog_focus,
             subagent_dialog_scroll: ScrollHandle::new(),
             window_title: "Pideck".to_owned(),
@@ -2215,6 +2219,56 @@ impl RootView {
     fn refresh_sessions(&mut self, cx: &mut Context<Self>) {
         self.controller.update(cx, |controller, cx| {
             controller.refresh_sessions(cx);
+        });
+    }
+
+    fn on_sessions_scroll_wheel(
+        &mut self,
+        event: &ScrollWheelEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if event.delta.precise() {
+            self.sessions_scroll_motion.cancel();
+            return false;
+        }
+
+        let distance = event.delta.pixel_delta(px(20.0)).y;
+        if distance == px(0.0) {
+            return false;
+        }
+
+        let now = Instant::now();
+        if self.sessions_scroll_motion.push(distance, now) {
+            self.advance_sessions_scroll(now, cx);
+            self.schedule_sessions_scroll_frame(window, cx);
+        }
+        true
+    }
+
+    fn advance_sessions_scroll(&mut self, now: Instant, cx: &mut Context<Self>) {
+        let Some(step) = self.sessions_scroll_motion.advance(now) else {
+            return;
+        };
+
+        let before = self.sessions_scroll.offset();
+        let max_offset = self.sessions_scroll.max_offset().height;
+        let next_y = (before.y + step).clamp(-max_offset, Pixels::ZERO);
+        self.sessions_scroll.set_offset(point(before.x, next_y));
+        if (f32::from(next_y) - f32::from(before.y)).abs() < 0.01 {
+            self.sessions_scroll_motion.cancel();
+        }
+        cx.notify();
+    }
+
+    fn schedule_sessions_scroll_frame(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.sessions_scroll_motion.schedule_frame() {
+            return;
+        }
+        cx.on_next_frame(window, |view, window, cx| {
+            view.sessions_scroll_motion.begin_frame();
+            view.advance_sessions_scroll(Instant::now(), cx);
+            view.schedule_sessions_scroll_frame(window, cx);
         });
     }
 

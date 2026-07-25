@@ -10,7 +10,7 @@ use gpui::{
     AnyElement, App, ClipboardItem, Context, CursorStyle, Entity, FocusHandle, Focusable,
     FontStyle, FontWeight, HighlightStyle, IntoElement, MouseButton, MouseDownEvent,
     MouseMoveEvent, MouseUpEvent, Pixels, Render, SharedString, StrikethroughStyle, StyledText,
-    TextLayout, TextRun, TextStyle, UnderlineStyle, Window, div, prelude::*, px, relative,
+    TextLayout, TextRun, TextStyle, UnderlineStyle, Window, div, prelude::*, px, relative, svg,
 };
 
 use crate::actions::{TranscriptCopy, TranscriptSelectAll};
@@ -560,28 +560,17 @@ fn optimistic_turn(
         .border_color(theme::edge_soft())
         .child(
             div()
+                .relative()
                 .w_full()
                 .px(px(18.0))
-                .py(px(14.0))
+                .py(px(11.0))
                 .bg(theme::panel())
                 .flex()
                 .flex_col()
-                .gap(px(8.0))
-                .child(prompt_header(
-                    index,
-                    "You",
-                    optimistic_status(input.kind).to_owned(),
-                    theme::data(),
-                ))
+                .gap(px(6.0))
+                .child(prompt_info(index, optimistic_status(input.kind).to_owned()))
                 .when(!input.text.is_empty(), |turn| {
-                    turn.child(selectable(
-                        &key,
-                        texts,
-                        theme::sans(),
-                        theme::T_BODY,
-                        theme::bone(),
-                        FontWeight::MEDIUM,
-                    ))
+                    turn.child(prompt_selectable(&key, texts))
                 })
                 .children(
                     input
@@ -598,31 +587,21 @@ fn user_prompt(
     texts: &HashMap<String, Entity<TranscriptText>>,
 ) -> impl IntoElement {
     div()
+        .relative()
         .w_full()
         .px(px(18.0))
-        .pt(px(14.0))
-        .pb(px(14.0))
+        .py(px(11.0))
         .bg(theme::panel())
         .border_b_1()
         .border_color(theme::edge_soft())
         .flex()
         .flex_col()
-        .gap(px(8.0))
-        .child(prompt_header(
-            index,
-            "You",
-            format_timestamp(message.timestamp),
-            theme::signal(),
-        ))
+        .gap(px(6.0))
+        .child(prompt_info(index, format_timestamp(message.timestamp)))
         .children(message.content.iter().filter_map(|block| match block {
-            MessageBlock::Text { .. } => Some(selectable(
-                &fragment_key(message, block),
-                texts,
-                theme::sans(),
-                theme::T_BODY,
-                theme::bone(),
-                FontWeight::MEDIUM,
-            )),
+            MessageBlock::Text { .. } => {
+                Some(prompt_selectable(&fragment_key(message, block), texts))
+            }
             MessageBlock::Image { mime_type, .. } => {
                 Some(compact_label(format!("Image · {mime_type}")))
             }
@@ -630,49 +609,51 @@ fn user_prompt(
         }))
 }
 
-fn prompt_header(
-    index: usize,
-    author: &'static str,
-    detail: String,
-    marker: gpui::Rgba,
-) -> impl IntoElement {
+fn prompt_info(index: usize, detail: String) -> impl IntoElement {
+    let tooltip = format!("Message {index:02} · You · {detail}");
     div()
-        .w_full()
+        .id(("prompt-info", index))
+        .absolute()
+        .top(px(10.0))
+        .right(px(17.0))
+        .size(px(16.0))
         .flex()
-        .flex_row()
-        .items_baseline()
-        .justify_between()
-        .gap(px(12.0))
+        .items_center()
+        .justify_center()
+        .text_color(theme::smoke())
+        .hover(|info| info.text_color(theme::bone_dim()))
+        .tooltip(move |_, cx| {
+            cx.new(|_| PromptInfoTooltip {
+                text: tooltip.clone(),
+            })
+            .into()
+        })
         .child(
-            div()
-                .flex()
-                .flex_row()
-                .items_baseline()
-                .gap(px(8.0))
-                .child(
-                    div()
-                        .font_family(theme::mono())
-                        .text_size(px(theme::T_TINY))
-                        .font_weight(FontWeight::BOLD)
-                        .text_color(marker)
-                        .child(format!("{index:02}")),
-                )
-                .child(
-                    div()
-                        .font_family(theme::sans())
-                        .text_size(px(theme::T_UI_SM))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(theme::ash())
-                        .child(author),
-                ),
+            svg()
+                .path("icons/info.svg")
+                .size(px(13.0))
+                .text_color(theme::smoke()),
         )
-        .child(
-            div()
-                .font_family(theme::mono())
-                .text_size(px(theme::T_TINY))
-                .text_color(theme::smoke())
-                .child(detail),
-        )
+}
+
+struct PromptInfoTooltip {
+    text: String,
+}
+
+impl Render for PromptInfoTooltip {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .px(px(8.0))
+            .py(px(6.0))
+            .rounded(px(theme::RADIUS_SM))
+            .bg(theme::panel_lift())
+            .border_1()
+            .border_color(theme::edge_hard())
+            .font_family(theme::mono())
+            .text_size(px(theme::T_TINY))
+            .text_color(theme::bone_dim())
+            .child(self.text.clone())
+    }
 }
 
 /// One spine step inside a turn's activity band.
@@ -924,8 +905,8 @@ fn activity_band(
                 div()
                     .w_full()
                     .px(px(18.0))
-                    .pt(px(12.0))
-                    .pb(px(5.0))
+                    .pt(px(9.0))
+                    .pb(px(2.0))
                     .flex()
                     .flex_col()
                     .children(children),
@@ -935,8 +916,8 @@ fn activity_band(
             div()
                 .w_full()
                 .px(px(18.0))
-                .pt(px(7.0))
-                .pb(if has_reply { px(7.0) } else { px(14.0) })
+                .pt(px(6.0))
+                .pb(if has_reply { px(6.0) } else { px(11.0) })
                 .child(latest),
         )
         .into_any_element()
@@ -964,15 +945,15 @@ fn activity_disclosure(
                 .tab_index(0)
                 .cursor_pointer()
                 .w_full()
-                .min_h(px(38.0))
-                .px(px(16.0))
-                .py(px(8.0))
+                .min_h(px(34.0))
+                .px(px(18.0))
+                .py(px(6.0))
                 .text_color(theme::ash())
                 .flex()
                 .flex_row()
                 .items_center()
                 .justify_between()
-                .gap(px(14.0))
+                .gap(px(12.0))
                 .hover(|row| row.bg(theme::panel()).text_color(theme::bone_dim()))
                 .active(|row| row.bg(theme::panel_lift()))
                 .focus(|row| row.bg(theme::panel()).text_color(theme::focus()))
@@ -987,35 +968,16 @@ fn activity_disclosure(
                 })
                 .child(
                     div()
-                        .min_w_0()
+                        .w(px(14.0))
+                        .h(px(14.0))
+                        .flex_shrink_0()
                         .flex()
-                        .flex_row()
                         .items_center()
-                        .gap(px(9.0))
-                        .child(
-                            div()
-                                .w(px(16.0))
-                                .h(px(16.0))
-                                .flex_shrink_0()
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .font_family(theme::mono())
-                                .text_size(px(theme::T_UI_SM))
-                                .font_weight(FontWeight::BOLD)
-                                .child(if expanded { "−" } else { "+" }),
-                        )
-                        .child(
-                            div()
-                                .min_w_0()
-                                .overflow_hidden()
-                                .text_ellipsis()
-                                .whitespace_nowrap()
-                                .font_family(theme::sans())
-                                .text_size(px(theme::T_UI_SM))
-                                .font_weight(FontWeight::MEDIUM)
-                                .child("Earlier activity"),
-                        ),
+                        .justify_center()
+                        .font_family(theme::mono())
+                        .text_size(px(theme::T_UI_SM))
+                        .font_weight(FontWeight::BOLD)
+                        .child(if expanded { "−" } else { "+" }),
                 )
                 .child(
                     div()
@@ -1098,7 +1060,7 @@ fn render_activity_step(
             div()
                 .flex()
                 .flex_col()
-                .gap(px(4.0))
+                .gap(px(2.0))
                 .child(
                     div()
                         .font_family(theme::mono())
@@ -1107,29 +1069,12 @@ fn render_activity_step(
                         .text_color(theme::smoke())
                         .child("thinking"),
                 )
-                .child(selectable(
-                    key,
-                    texts,
-                    theme::sans(),
-                    theme::T_UI,
-                    theme::bone_dim(),
-                    FontWeight::NORMAL,
-                )),
+                .child(activity_selectable(key, texts)),
         )
         .into_any_element(),
-        ActivityStep::Text { key } => step_shell(
-            is_last,
-            theme::ash(),
-            selectable(
-                key,
-                texts,
-                theme::sans(),
-                theme::T_UI,
-                theme::bone_dim(),
-                FontWeight::NORMAL,
-            ),
-        )
-        .into_any_element(),
+        ActivityStep::Text { key } => {
+            step_shell(is_last, theme::ash(), activity_selectable(key, texts)).into_any_element()
+        }
         ActivityStep::Image { mime_type } => step_shell(
             is_last,
             theme::ash(),
@@ -1157,14 +1102,7 @@ fn render_activity_step(
                         .text_color(theme::bone_dim())
                         .child(*label),
                 )
-                .child(selectable(
-                    key,
-                    texts,
-                    theme::sans(),
-                    theme::T_UI,
-                    theme::bone_dim(),
-                    FontWeight::NORMAL,
-                )),
+                .child(activity_selectable(key, texts)),
         )
         .into_any_element(),
         ActivityStep::Custom { kind, key } => step_shell(
@@ -1173,16 +1111,9 @@ fn render_activity_step(
             div()
                 .flex()
                 .flex_col()
-                .gap(px(4.0))
+                .gap(px(3.0))
                 .child(compact_label(format!("Extension · {kind}")))
-                .child(selectable(
-                    key,
-                    texts,
-                    theme::sans(),
-                    theme::T_UI,
-                    theme::bone_dim(),
-                    FontWeight::NORMAL,
-                )),
+                .child(activity_selectable(key, texts)),
         )
         .into_any_element(),
         ActivityStep::Unsupported { kind } => step_shell(
@@ -1217,7 +1148,7 @@ fn step_shell(is_last: bool, marker: gpui::Rgba, body: impl IntoElement) -> impl
     div()
         .flex()
         .flex_row()
-        .gap(px(11.0))
+        .gap(px(9.0))
         .child(
             div()
                 .w(px(10.0))
@@ -1227,9 +1158,9 @@ fn step_shell(is_last: bool, marker: gpui::Rgba, body: impl IntoElement) -> impl
                 .items_center()
                 .child(
                     div()
-                        .mt(px(6.0))
-                        .w(px(5.0))
-                        .h(px(5.0))
+                        .mt(px(5.0))
+                        .w(px(4.0))
+                        .h(px(4.0))
                         .rounded_full()
                         .bg(marker)
                         .flex_shrink_0(),
@@ -1239,8 +1170,8 @@ fn step_shell(is_last: bool, marker: gpui::Rgba, body: impl IntoElement) -> impl
                         div()
                             .flex_1()
                             .w(px(1.0))
-                            .min_h(px(8.0))
-                            .mt(px(3.0))
+                            .min_h(px(6.0))
+                            .mt(px(2.0))
                             .bg(theme::edge()),
                     )
                 }),
@@ -1249,7 +1180,7 @@ fn step_shell(is_last: bool, marker: gpui::Rgba, body: impl IntoElement) -> impl
             div()
                 .flex_1()
                 .min_w_0()
-                .pb(if is_last { px(6.0) } else { px(12.0) })
+                .pb(if is_last { px(4.0) } else { px(8.0) })
                 .child(body),
         )
 }
@@ -1435,6 +1366,46 @@ fn selectable(
     color: gpui::Rgba,
     weight: FontWeight,
 ) -> AnyElement {
+    selectable_with_leading(key, texts, font, size, color, weight, 1.58)
+}
+
+fn prompt_selectable(key: &str, texts: &HashMap<String, Entity<TranscriptText>>) -> AnyElement {
+    div()
+        .w_full()
+        .pr(px(22.0))
+        .child(selectable_with_leading(
+            key,
+            texts,
+            theme::sans(),
+            theme::T_BODY_SM,
+            theme::bone(),
+            FontWeight::MEDIUM,
+            1.48,
+        ))
+        .into_any_element()
+}
+
+fn activity_selectable(key: &str, texts: &HashMap<String, Entity<TranscriptText>>) -> AnyElement {
+    selectable_with_leading(
+        key,
+        texts,
+        theme::sans(),
+        theme::T_UI_SM,
+        theme::bone_dim(),
+        FontWeight::NORMAL,
+        1.42,
+    )
+}
+
+fn selectable_with_leading(
+    key: &str,
+    texts: &HashMap<String, Entity<TranscriptText>>,
+    font: gpui::SharedString,
+    size: f32,
+    color: gpui::Rgba,
+    weight: FontWeight,
+    leading: f32,
+) -> AnyElement {
     let Some(text) = texts.get(key) else {
         return div().into_any_element();
     };
@@ -1443,7 +1414,7 @@ fn selectable(
         .font_family(font)
         .text_size(px(size))
         .font_weight(weight)
-        .line_height(relative(1.58))
+        .line_height(relative(leading))
         .text_color(color)
         .child(text.clone())
         .into_any_element()

@@ -7,7 +7,10 @@ pub struct Assets;
 impl AssetSource for Assets {
     fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
         let bytes = match path {
+            "icons/chevron-down.svg" => &include_bytes!("../assets/icons/chevron-down.svg")[..],
+            "icons/chevron-up.svg" => &include_bytes!("../assets/icons/chevron-up.svg")[..],
             "icons/cog.svg" => &include_bytes!("../assets/icons/cog.svg")[..],
+            "icons/info.svg" => &include_bytes!("../assets/icons/info.svg")[..],
             _ => return Ok(None),
         };
 
@@ -16,8 +19,27 @@ impl AssetSource for Assets {
 
     fn list(&self, path: &str) -> Result<Vec<SharedString>> {
         Ok(match path {
-            "icons" => vec!["cog.svg".into()],
+            "icons" => vec![
+                "chevron-down.svg".into(),
+                "chevron-up.svg".into(),
+                "cog.svg".into(),
+                "info.svg".into(),
+            ],
             _ => Vec::new(),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_listed_icon_is_embedded() {
+        let assets = Assets;
+        for icon in assets.list("icons").unwrap() {
+            let path = format!("icons/{icon}");
+            assert!(assets.load(&path).unwrap().is_some(), "missing {path}");
+        }
     }
 }
