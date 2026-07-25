@@ -30,6 +30,7 @@ pub struct RpcDeadlines {
     pub readiness: Duration,
     pub read: Duration,
     pub mutation: Duration,
+    pub long_mutation: Duration,
     pub prompt: Duration,
     pub bash: Duration,
     pub urgent: Duration,
@@ -41,8 +42,13 @@ impl Default for RpcDeadlines {
             readiness: Duration::from_secs(10),
             read: Duration::from_secs(15),
             mutation: Duration::from_secs(30),
+            // Compaction and session replacement can legitimately wait on a
+            // provider response or summary prompt. Treating them like small
+            // settings mutations turns ordinary latency into a poisoned RPC
+            // connection and kills the Pi process.
+            long_mutation: Duration::from_secs(30 * 60),
             prompt: Duration::from_secs(30),
-            bash: Duration::from_secs(5 * 60),
+            bash: Duration::from_secs(60 * 60),
             urgent: Duration::from_secs(5),
         }
     }
@@ -54,6 +60,7 @@ impl RpcDeadlines {
             self.readiness,
             self.read,
             self.mutation,
+            self.long_mutation,
             self.prompt,
             self.bash,
             self.urgent,
@@ -71,6 +78,11 @@ impl RpcDeadlines {
             Command::Prompt { .. } | Command::Steer { .. } | Command::FollowUp { .. } => {
                 self.prompt
             }
+            Command::Compact { .. }
+            | Command::NewSession { .. }
+            | Command::SwitchSession { .. }
+            | Command::Fork { .. }
+            | Command::Clone => self.long_mutation,
             Command::Bash { .. } => self.bash,
             Command::Abort | Command::AbortRetry | Command::AbortBash => self.urgent,
             command if command_class(command) == CommandClass::Read => self.read,

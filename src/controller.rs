@@ -56,6 +56,63 @@ fn session_paths_equal(left: &Path, right: &Path) -> bool {
 // whole GPUI shell multiple times inside one frame.
 const RUNTIME_FRAME_BUDGET: Duration = Duration::from_millis(16);
 const MAX_RUNTIME_BATCH: usize = 512;
+const RUNTIME_RECONNECT_BASE_DELAY: Duration = Duration::from_millis(300);
+const RUNTIME_RECONNECT_MAX_DELAY: Duration = Duration::from_secs(8);
+
+fn runtime_reconnect_delay(failure_count: u32) -> Duration {
+    let shift = failure_count.min(5);
+    RUNTIME_RECONNECT_BASE_DELAY
+        .checked_mul(1_u32 << shift)
+        .unwrap_or(RUNTIME_RECONNECT_MAX_DELAY)
+        .min(RUNTIME_RECONNECT_MAX_DELAY)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RuntimeConnectionTransition {
+    None,
+    Connected,
+    Disconnected,
+    RetryableFailure,
+    TerminalFailure,
+}
+
+fn runtime_connection_transition(
+    result: &WorkerResult,
+    current_attempt: AttemptGeneration,
+    current_generation: ConnectionGeneration,
+) -> RuntimeConnectionTransition {
+    match result {
+        WorkerResult::Connected {
+            attempt,
+            generation,
+        } if *attempt == current_attempt && *generation == current_generation => {
+            RuntimeConnectionTransition::Connected
+        }
+        WorkerResult::Input { attempt, input }
+            if *attempt == current_attempt
+                && input.generation == current_generation
+                && matches!(&input.input, RuntimeInput::Disconnected { .. }) =>
+        {
+            RuntimeConnectionTransition::Disconnected
+        }
+        WorkerResult::ConnectionFailed {
+            attempt,
+            generation,
+            failure,
+        } if *attempt == current_attempt && *generation == current_generation => match failure.kind
+        {
+            crate::services::runtime_worker::RuntimeStartFailureKind::Readiness
+            | crate::services::runtime_worker::RuntimeStartFailureKind::Launch => {
+                RuntimeConnectionTransition::RetryableFailure
+            }
+            crate::services::runtime_worker::RuntimeStartFailureKind::MissingPi
+            | crate::services::runtime_worker::RuntimeStartFailureKind::IncompatiblePi => {
+                RuntimeConnectionTransition::TerminalFailure
+            }
+        },
+        _ => RuntimeConnectionTransition::None,
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum ReplaceableRuntimeUpdate {
@@ -109,6 +166,43 @@ fn runtime_batch_delay(elapsed: Duration, replaceable: bool) -> Option<Duration>
     } else {
         Some(RUNTIME_FRAME_BUDGET - elapsed)
     }
+}
+
+fn spawn_runtime_event_task(
+    results: async_channel::Receiver<WorkerResult>,
+    cx: &mut Context<RuntimeController>,
+) -> Task<()> {
+    cx.spawn(async move |controller, cx| {
+        let mut last_dispatch = Instant::now()
+            .checked_sub(RUNTIME_FRAME_BUDGET)
+            .unwrap_or_else(Instant::now);
+        while let Ok(first) = results.recv().await {
+            if let Some(delay) = runtime_batch_delay(
+                last_dispatch.elapsed(),
+                replaceable_runtime_update(&first).is_some(),
+            ) {
+                cx.background_executor().timer(delay).await;
+            }
+            let mut batch = vec![first];
+            while batch.len() < MAX_RUNTIME_BATCH {
+                let Ok(result) = results.try_recv() else {
+                    break;
+                };
+                batch.push(result);
+            }
+            let batch = coalesce_runtime_results(batch);
+            let updated = controller.update(cx, |controller, cx| {
+                for result in batch {
+                    controller.receive(result, cx);
+                }
+                cx.notify();
+            });
+            if updated.is_err() {
+                break;
+            }
+            last_dispatch = Instant::now();
+        }
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -539,7 +633,9 @@ impl ControllerCore {
                         RuntimeLifecycle::Disconnected | RuntimeLifecycle::Failed
                     )
                 })
-                .filter(|input| input.accepted && !input.authoritative_seen)
+                .filter(|input| {
+                    input.display_optimistically && input.accepted && !input.authoritative_seen
+                })
                 .map(|input| AcceptedUserInput {
                     request: input.request.clone(),
                     text: input.text.clone(),
@@ -1040,6 +1136,10 @@ pub struct RuntimeController {
     orchestration_actions_pending: HashMap<u64, OrchestrationAction>,
     requested_thinking: Option<ThinkingLevel>,
     clamp_notice: Option<String>,
+    reconnect_failure_count: u32,
+    reconnect_epoch: u64,
+    reconnect_scheduled: bool,
+    reconnect_task: Option<Task<()>>,
     _event_task: Task<()>,
     _catalog_task: Task<()>,
     _bridge_task: Task<()>,
@@ -1067,38 +1167,7 @@ impl RuntimeController {
             }
         });
         let worker = RuntimeWorkerHandle::spawn(Arc::clone(&service));
-        let results = worker.results();
-        let event_task = cx.spawn(async move |controller, cx| {
-            let mut last_dispatch = Instant::now()
-                .checked_sub(RUNTIME_FRAME_BUDGET)
-                .unwrap_or_else(Instant::now);
-            while let Ok(first) = results.recv().await {
-                if let Some(delay) = runtime_batch_delay(
-                    last_dispatch.elapsed(),
-                    replaceable_runtime_update(&first).is_some(),
-                ) {
-                    cx.background_executor().timer(delay).await;
-                }
-                let mut batch = vec![first];
-                while batch.len() < MAX_RUNTIME_BATCH {
-                    let Ok(result) = results.try_recv() else {
-                        break;
-                    };
-                    batch.push(result);
-                }
-                let batch = coalesce_runtime_results(batch);
-                let updated = controller.update(cx, |controller, cx| {
-                    for result in batch {
-                        controller.receive(result);
-                    }
-                    cx.notify();
-                });
-                if updated.is_err() {
-                    break;
-                }
-                last_dispatch = Instant::now();
-            }
-        });
+        let event_task = spawn_runtime_event_task(worker.results(), cx);
         let catalog_worker = SessionCatalogWorker::spawn(catalog_config);
         let catalog_results = catalog_worker.results();
         let catalog_task = cx.spawn(async move |controller, cx| {
@@ -1141,6 +1210,10 @@ impl RuntimeController {
             orchestration_actions_pending: HashMap::new(),
             requested_thinking: None,
             clamp_notice: None,
+            reconnect_failure_count: 0,
+            reconnect_epoch: 0,
+            reconnect_scheduled: false,
+            reconnect_task: None,
             _event_task: event_task,
             _catalog_task: catalog_task,
             _bridge_task: bridge_task,
@@ -1517,6 +1590,20 @@ impl RuntimeController {
         accepted
     }
 
+    pub fn set_pi_setting(
+        &mut self,
+        key: String,
+        value: serde_json::Value,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let operation = self.model_runtime.take_operation();
+        let accepted = self
+            .bridge_worker
+            .execute(operation, BridgeCommand::SetPiSetting { key, value });
+        cx.notify();
+        accepted
+    }
+
     pub fn submit(
         &mut self,
         text: String,
@@ -1821,7 +1908,13 @@ impl RuntimeController {
         ) {
             return;
         }
-        let resume_session = self.preferred_session_file.clone().or_else(|| {
+        self.cancel_scheduled_reconnect(true);
+        let resume_session = self.resume_session_file();
+        self.start_connection(resume_session, cx);
+    }
+
+    fn resume_session_file(&self) -> Option<PathBuf> {
+        self.preferred_session_file.clone().or_else(|| {
             self.core
                 .runtime
                 .session
@@ -1829,8 +1922,53 @@ impl RuntimeController {
                 .as_ref()
                 .and_then(|session| session.file.as_deref())
                 .map(PathBuf::from)
-        });
-        self.start_connection(resume_session, cx);
+        })
+    }
+
+    fn cancel_scheduled_reconnect(&mut self, reset_failure_count: bool) {
+        self.reconnect_epoch = self.reconnect_epoch.wrapping_add(1);
+        self.reconnect_scheduled = false;
+        self.reconnect_task = None;
+        if reset_failure_count {
+            self.reconnect_failure_count = 0;
+        }
+    }
+
+    fn schedule_reconnect(&mut self, cx: &mut Context<Self>) {
+        if self.reconnect_scheduled
+            || !matches!(
+                self.core.projection().action,
+                Some(crate::state::RecoveryAction::Connect | crate::state::RecoveryAction::Retry)
+            )
+        {
+            return;
+        }
+
+        let delay = runtime_reconnect_delay(self.reconnect_failure_count);
+        self.reconnect_failure_count = self.reconnect_failure_count.saturating_add(1);
+        self.reconnect_epoch = self.reconnect_epoch.wrapping_add(1);
+        let reconnect_epoch = self.reconnect_epoch;
+        self.reconnect_scheduled = true;
+        self.reconnect_task = Some(cx.spawn(async move |controller, cx| {
+            cx.background_executor().timer(delay).await;
+            let _ = controller.update(cx, |controller, cx| {
+                if !controller.reconnect_scheduled || controller.reconnect_epoch != reconnect_epoch
+                {
+                    return;
+                }
+                controller.reconnect_scheduled = false;
+                if !matches!(
+                    controller.core.projection().action,
+                    Some(
+                        crate::state::RecoveryAction::Connect | crate::state::RecoveryAction::Retry
+                    )
+                ) {
+                    return;
+                }
+                let resume_session = controller.resume_session_file();
+                controller.start_connection(resume_session, cx);
+            });
+        }));
     }
 
     fn start_connection(
@@ -1840,7 +1978,16 @@ impl RuntimeController {
     ) -> bool {
         self.service.set_resume_session(resume_session);
         let (attempt, generation) = self.core.begin_connect();
-        let accepted = self.worker.connect(attempt, generation);
+        let mut accepted = self.worker.connect(attempt, generation);
+        if !accepted {
+            // A disconnected coordinator channel cannot recover by retrying
+            // against the same handle. Replace the worker while preserving
+            // the current attempt/generation gate and attach a fresh result
+            // drain before retrying the command.
+            self.worker = RuntimeWorkerHandle::spawn(Arc::clone(&self.service));
+            self._event_task = spawn_runtime_event_task(self.worker.results(), cx);
+            accepted = self.worker.connect(attempt, generation);
+        }
         if !accepted {
             self.core
                 .apply_worker_result(WorkerResult::ConnectionFailed {
@@ -1851,12 +1998,14 @@ impl RuntimeController {
                         "The runtime worker is unavailable.",
                     ),
                 });
+            self.schedule_reconnect(cx);
         }
         cx.notify();
         accepted
     }
 
     pub fn stop(&mut self, cx: &mut Context<Self>) {
+        self.cancel_scheduled_reconnect(true);
         if self.core.begin_stop() {
             let _ = self.worker.stop();
             cx.notify();
@@ -1864,10 +2013,13 @@ impl RuntimeController {
     }
 
     pub fn shutdown(&mut self) {
+        self.cancel_scheduled_reconnect(true);
         let _ = self.worker.request_shutdown();
     }
 
-    fn receive(&mut self, result: WorkerResult) {
+    fn receive(&mut self, result: WorkerResult, cx: &mut Context<Self>) {
+        let transition =
+            runtime_connection_transition(&result, self.core.attempt(), self.core.generation());
         let before = self.catalog_refresh_identity();
         let previous_session = self.orchestration.expected_session_id.clone();
         let effects = self.core.apply_worker_result(result);
@@ -1894,6 +2046,28 @@ impl RuntimeController {
                 .and_then(|session| session.file.as_deref())
                 .map(PathBuf::from);
             self.start_catalog_refresh();
+        }
+
+        match transition {
+            RuntimeConnectionTransition::Connected
+                if self.core.status() == ControllerStatus::Active =>
+            {
+                self.cancel_scheduled_reconnect(true);
+            }
+            RuntimeConnectionTransition::Disconnected
+                if self.core.runtime.lifecycle == RuntimeLifecycle::Disconnected =>
+            {
+                self.schedule_reconnect(cx);
+            }
+            RuntimeConnectionTransition::RetryableFailure
+                if self.core.status() == ControllerStatus::Failed =>
+            {
+                self.schedule_reconnect(cx);
+            }
+            RuntimeConnectionTransition::TerminalFailure => {
+                self.cancel_scheduled_reconnect(false);
+            }
+            _ => {}
         }
     }
 
@@ -2079,7 +2253,8 @@ impl RuntimeController {
                                 | BridgeCommand::AuthRespond { .. }
                                 | BridgeCommand::LogoutProvider { .. }
                                 | BridgeCommand::SetModelDefaults { .. }
-                                | BridgeCommand::SetModelScope { .. } => "Model operation",
+                                | BridgeCommand::SetModelScope { .. }
+                                | BridgeCommand::SetPiSetting { .. } => "Model operation",
                                 BridgeCommand::GetResourceInventory
                                 | BridgeCommand::ReloadResources
                                 | BridgeCommand::SetSkillCommandsEnabled { .. }
@@ -2188,16 +2363,24 @@ impl RuntimeController {
                 }
                 true
             }
-            BridgeCommand::SetModelDefaults { .. } | BridgeCommand::SetModelScope { .. } => {
+            BridgeCommand::SetModelDefaults { .. }
+            | BridgeCommand::SetModelScope { .. }
+            | BridgeCommand::SetPiSetting { .. } => {
                 match result {
                     Ok(value) => {
                         match serde_json::from_value::<ModelCatalogSnapshot>(value.clone()) {
                             Ok(snapshot) => {
                                 self.model_runtime.apply_snapshot(snapshot);
-                                self.model_runtime.feedback = Some(
-                                "Saved Pi defaults for future sessions. The active session is unchanged."
-                                    .to_owned(),
-                            );
+                                self.model_runtime.feedback = Some(match command {
+                                    BridgeCommand::SetPiSetting { .. } => {
+                                        "Saved Pi setting. New and active behavior will follow Pi's setting semantics."
+                                            .to_owned()
+                                    }
+                                    _ => {
+                                        "Saved Pi defaults for future sessions. The active session is unchanged."
+                                            .to_owned()
+                                    }
+                                });
                             }
                             Err(_) => {
                                 self.model_runtime.feedback = Some(
@@ -2282,6 +2465,7 @@ impl RuntimeController {
             | BridgeCommand::LogoutProvider { .. }
             | BridgeCommand::SetModelDefaults { .. }
             | BridgeCommand::SetModelScope { .. }
+            | BridgeCommand::SetPiSetting { .. }
             | BridgeCommand::GetOrchestrationSnapshot { .. }
             | BridgeCommand::OrchestrationAction { .. } => false,
         }
@@ -2393,6 +2577,7 @@ impl RuntimeController {
             | BridgeCommand::LogoutProvider { .. }
             | BridgeCommand::SetModelDefaults { .. }
             | BridgeCommand::SetModelScope { .. }
+            | BridgeCommand::SetPiSetting { .. }
             | BridgeCommand::GetResourceInventory
             | BridgeCommand::ReloadResources
             | BridgeCommand::SetSkillCommandsEnabled { .. }
@@ -2577,6 +2762,38 @@ mod tests {
             message_update("a", 2),
         ]);
         assert_eq!(coalesced.len(), 3);
+    }
+
+    #[test]
+    fn runtime_reconnect_backoff_is_bounded() {
+        assert_eq!(runtime_reconnect_delay(0), Duration::from_millis(300));
+        assert_eq!(runtime_reconnect_delay(1), Duration::from_millis(600));
+        assert_eq!(runtime_reconnect_delay(4), Duration::from_millis(4_800));
+        assert_eq!(runtime_reconnect_delay(5), Duration::from_secs(8));
+        assert_eq!(runtime_reconnect_delay(u32::MAX), Duration::from_secs(8));
+    }
+
+    #[test]
+    fn runtime_connection_transition_ignores_stale_disconnects() {
+        let result = WorkerResult::Input {
+            attempt: AttemptGeneration::new(1),
+            input: Box::new(StampedInput {
+                generation: ConnectionGeneration::new(1),
+                epoch: SessionEpoch::new(1),
+                observed_at: Instant::now(),
+                input: RuntimeInput::Disconnected {
+                    error: SafeError::new(crate::state::runtime::ErrorKind::Disconnected, "closed"),
+                },
+            }),
+        };
+        assert_eq!(
+            runtime_connection_transition(
+                &result,
+                AttemptGeneration::new(2),
+                ConnectionGeneration::new(2),
+            ),
+            RuntimeConnectionTransition::None
+        );
     }
 
     #[test]
@@ -2992,6 +3209,32 @@ mod tests {
                 ref session_path
             })) if session_path == "session.jsonl"
         ));
+    }
+
+    #[test]
+    fn dynamic_commands_do_not_render_optimistic_user_messages() {
+        use crate::state::runtime::{CommandSource, EffectKind};
+
+        let mut core = ready_core();
+        let (_submission, effects) = core
+            .invoke_dynamic_command(
+                "/goal {}".to_owned(),
+                CommandSource::Extension,
+                SubmissionPreference::Default,
+            )
+            .expect("command");
+        let EffectKind::Request(request) = effects[0].effect.clone() else {
+            panic!("expected request");
+        };
+        complete_submission(&mut core, request);
+
+        assert!(
+            core.conversation_projection()
+                .accepted_user_inputs
+                .is_empty()
+        );
+        assert_eq!(core.runtime.optimistic_user_inputs.len(), 1);
+        assert!(!core.runtime.optimistic_user_inputs[0].display_optimistically);
     }
 
     #[test]

@@ -574,6 +574,7 @@ pub struct OptimisticUserInput {
     pub text: String,
     pub images: Vec<PromptImage>,
     pub kind: SubmissionKind,
+    pub display_optimistically: bool,
     pub accepted: bool,
     pub authoritative_seen: bool,
     pub baseline_message_count: usize,

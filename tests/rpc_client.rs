@@ -68,6 +68,7 @@ impl TestEnvironment {
             readiness: Duration::from_secs(2),
             read: Duration::from_millis(250),
             mutation: Duration::from_millis(250),
+            long_mutation: Duration::from_millis(250),
             prompt: Duration::from_millis(250),
             bash: Duration::from_millis(250),
             urgent: Duration::from_millis(250),

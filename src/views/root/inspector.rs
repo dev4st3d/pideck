@@ -1,6 +1,7 @@
 use super::shared::runtime_operation_label;
 use super::shared::{plural, short_path};
 use super::*;
+use crate::views::conversation::{TranscriptText, TranscriptTextCache};
 
 pub(super) struct InspectorParams<'a> {
     pub(super) projection: &'a ShellProjection,
@@ -555,7 +556,6 @@ fn subagent_list(agents: &[SubagentSnapshot], cx: &mut Context<RootView>) -> imp
                         .flex_col()
                         .gap(px(3.0))
                         .hover(|row| row.bg(theme::panel_hover()))
-                        .focus(|row| row.border_1().border_color(theme::focus()))
                         .on_click(cx.listener(move |view, _, window, cx| {
                             view.open_subagent(agent_id.clone(), window, cx);
                         }))
@@ -855,6 +855,7 @@ pub(super) fn subagent_dialog(
     focus: &FocusHandle,
     scroll: &ScrollHandle,
     composer: &Entity<Composer>,
+    transcript_cache: &Entity<TranscriptTextCache>,
     cx: &mut Context<RootView>,
 ) -> impl IntoElement {
     let header = agent
@@ -876,6 +877,32 @@ pub(super) fn subagent_dialog(
         });
     let active = agent.is_some_and(|agent| agent.status.is_active());
     let stop_id = requested_id.to_owned();
+    let (transcript_texts, result_text, error_text) = agent.map_or_else(
+        || (Vec::new(), None, None),
+        |agent| {
+            transcript_cache.update(cx, |cache, cx| {
+                let transcript_texts = agent
+                    .transcript
+                    .iter()
+                    .enumerate()
+                    .map(|(index, entry)| {
+                        cache.entity_for(
+                            format!("subagent:{}:entry:{index}", agent.id),
+                            &entry.content,
+                            cx,
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                let result_text = agent.result.as_ref().map(|result| {
+                    cache.entity_for(format!("subagent:{}:result", agent.id), result, cx)
+                });
+                let error_text = agent.error.as_ref().map(|error| {
+                    cache.entity_for(format!("subagent:{}:error", agent.id), error, cx)
+                });
+                (transcript_texts, result_text, error_text)
+            })
+        },
+    );
 
     div()
         .absolute()
@@ -994,54 +1021,109 @@ pub(super) fn subagent_dialog(
                         .flex_row()
                         .child(
                             div()
-                                .id("subagent-live-transcript")
                                 .flex_1()
                                 .min_w_0()
                                 .h_full()
-                                .overflow_y_scroll()
-                                .scrollbar_width(px(theme::SCROLLBAR))
-                                .track_scroll(scroll)
+                                .relative()
+                                .child(controls::scroll_wheel_capture(scroll))
                                 .child(
                                     div()
-                                        .w_full()
-                                        .max_w(px(720.0))
-                                        .mx_auto()
-                                        .px(px(24.0))
-                                        .py(px(22.0))
-                                        .flex()
-                                        .flex_col()
-                                        .gap(px(18.0))
-                                        .when(agent.is_none(), |transcript| {
-                                            transcript.child(controls::empty_list_note(
-                                                "Close this view and open a current agent from the Inspector.",
-                                            ))
-                                        })
-                                        .when_some(agent, |transcript, agent| {
-                                            transcript
-                                                .when(agent.transcript.is_empty(), |transcript| {
+                                        .id("subagent-live-transcript")
+                                        .size_full()
+                                        .overflow_y_scroll()
+                                        .scrollbar_width(px(theme::SCROLLBAR))
+                                        .track_scroll(scroll)
+                                        .child(
+                                            div()
+                                                .w_full()
+                                                .max_w(px(760.0))
+                                                .mx_auto()
+                                                .px(px(24.0))
+                                                .py(px(22.0))
+                                                .flex()
+                                                .flex_col()
+                                                .gap(px(16.0))
+                                                .when(agent.is_none(), |transcript| {
                                                     transcript.child(controls::empty_list_note(
-                                                        if agent.status == SubagentStatus::Queued {
-                                                            "Queued. Live output will appear when Pi starts the agent."
-                                                        } else {
-                                                            "Pi has not emitted conversation output for this agent yet."
-                                                        },
+                                                        "Close this view and open a current agent from the Inspector.",
                                                     ))
                                                 })
-                                                .children(agent.transcript.iter().map(
-                                                    subagent_transcript_entry,
-                                                ))
-                                                .when(agent.transcript_truncated, |transcript| {
-                                                    transcript.child(
-                                                        div()
-                                                            .font_family(theme::mono())
-                                                            .text_size(px(theme::T_TINY))
-                                                            .text_color(theme::smoke())
-                                                            .child(
-                                                                "Earlier output is truncated; the live tail is shown.",
-                                                            ),
-                                                    )
-                                                })
-                                        }),
+                                                .when_some(agent, |transcript, agent| {
+                                                    transcript
+                                                        .when(
+                                                            agent.transcript.is_empty()
+                                                                && agent.result.is_none()
+                                                                && agent.error.is_none(),
+                                                            |transcript| {
+                                                                transcript.child(
+                                                                    controls::empty_list_note(
+                                                                        if agent.status
+                                                                            == SubagentStatus::Queued
+                                                                        {
+                                                                            "Queued. Live output will appear when Pi starts the agent."
+                                                                        } else {
+                                                                            "Pi has not emitted conversation output for this agent yet."
+                                                                        },
+                                                                    ),
+                                                                )
+                                                            },
+                                                        )
+                                                        .children(
+                                                            agent
+                                                                .transcript
+                                                                .iter()
+                                                                .zip(transcript_texts.iter())
+                                                                .map(|(entry, text)| {
+                                                                    subagent_transcript_entry(
+                                                                        entry,
+                                                                        text.clone(),
+                                                                    )
+                                                                }),
+                                                        )
+                                                        .when(
+                                                            agent.transcript_truncated,
+                                                            |transcript| {
+                                                                transcript.child(
+                                                                    div()
+                                                                        .px(px(10.0))
+                                                                        .py(px(7.0))
+                                                                        .rounded(px(
+                                                                            theme::RADIUS_SM,
+                                                                        ))
+                                                                        .bg(theme::panel())
+                                                                        .font_family(theme::mono())
+                                                                        .text_size(px(
+                                                                            theme::T_TINY,
+                                                                        ))
+                                                                        .text_color(theme::smoke())
+                                                                        .child(
+                                                                            "Earlier output is truncated; the live tail is shown.",
+                                                                        ),
+                                                                )
+                                                            },
+                                                        )
+                                                        .when_some(
+                                                            result_text.clone(),
+                                                            |transcript, result| {
+                                                                transcript.child(
+                                                                    subagent_result_panel(
+                                                                        "Result", result, false,
+                                                                    ),
+                                                                )
+                                                            },
+                                                        )
+                                                        .when_some(
+                                                            error_text.clone(),
+                                                            |transcript, error| {
+                                                                transcript.child(
+                                                                    subagent_result_panel(
+                                                                        "Error", error, true,
+                                                                    ),
+                                                                )
+                                                            },
+                                                        )
+                                                }),
+                                        ),
                                 ),
                         )
                         .when_some(agent, |layout, agent| {
@@ -1065,64 +1147,154 @@ pub(super) fn subagent_dialog(
 
 fn subagent_transcript_entry(
     entry: &crate::orchestration::SubagentTranscriptEntry,
+    content: Entity<TranscriptText>,
 ) -> impl IntoElement {
-    let (label, color, background) = match entry.role {
-        TranscriptRole::User => ("YOU", theme::signal(), theme::panel_lift()),
-        TranscriptRole::Assistant => ("AGENT", theme::live(), theme::panel()),
-        TranscriptRole::ToolResult => ("TOOL", theme::data(), theme::canvas()),
-        TranscriptRole::System => ("SYSTEM", theme::ash(), theme::canvas()),
+    let (label, color, background, border, max_width) = match entry.role {
+        TranscriptRole::User => (
+            "YOU",
+            theme::signal(),
+            theme::user_message(),
+            theme::user_message_edge(),
+            620.0,
+        ),
+        TranscriptRole::Assistant => (
+            "AGENT",
+            theme::live(),
+            theme::canvas(),
+            theme::edge_soft(),
+            760.0,
+        ),
+        TranscriptRole::ToolResult => (
+            "TOOL",
+            theme::data(),
+            theme::panel(),
+            theme::edge_soft(),
+            760.0,
+        ),
+        TranscriptRole::System => (
+            "SYSTEM",
+            theme::ash(),
+            theme::panel(),
+            theme::edge_soft(),
+            760.0,
+        ),
     };
     div()
+        .w_full()
         .flex()
-        .flex_col()
-        .gap(px(6.0))
+        .when(entry.role == TranscriptRole::User, |row| row.justify_end())
         .child(
             div()
+                .w_full()
+                .max_w(px(max_width))
                 .flex()
-                .items_baseline()
-                .gap(px(8.0))
+                .flex_col()
+                .gap(px(6.0))
                 .child(
                     div()
-                        .font_family(theme::mono())
-                        .text_size(px(theme::T_TINY))
-                        .font_weight(FontWeight::BOLD)
-                        .text_color(if entry.is_error {
-                            theme::error()
-                        } else {
-                            color
+                        .flex()
+                        .items_baseline()
+                        .gap(px(8.0))
+                        .child(
+                            div()
+                                .font_family(theme::mono())
+                                .text_size(px(theme::T_TINY))
+                                .font_weight(FontWeight::BOLD)
+                                .text_color(if entry.is_error {
+                                    theme::error()
+                                } else {
+                                    color
+                                })
+                                .child(label),
+                        )
+                        .when_some(entry.tool_name.clone(), |row, tool| {
+                            row.child(
+                                div()
+                                    .font_family(theme::mono())
+                                    .text_size(px(theme::T_TINY))
+                                    .text_color(theme::smoke())
+                                    .child(tool),
+                            )
                         })
-                        .child(label),
+                        .when_some(entry.timestamp.clone(), |row, timestamp| {
+                            row.child(
+                                div()
+                                    .ml_auto()
+                                    .font_family(theme::mono())
+                                    .text_size(px(theme::T_TINY))
+                                    .text_color(theme::smoke())
+                                    .child(timestamp),
+                            )
+                        }),
                 )
-                .when_some(entry.tool_name.clone(), |row, tool| {
-                    row.child(
-                        div()
-                            .font_family(theme::mono())
-                            .text_size(px(theme::T_TINY))
-                            .text_color(theme::smoke())
-                            .child(tool),
-                    )
-                }),
+                .child(
+                    div()
+                        .p(px(if entry.role == TranscriptRole::Assistant {
+                            4.0
+                        } else {
+                            12.0
+                        }))
+                        .rounded(px(theme::RADIUS_SM))
+                        .bg(background)
+                        .when(entry.role != TranscriptRole::Assistant, |body| {
+                            body.border_1().border_color(if entry.is_error {
+                                theme::error()
+                            } else {
+                                border
+                            })
+                        })
+                        .font_family(if entry.role == TranscriptRole::ToolResult {
+                            theme::mono()
+                        } else {
+                            theme::sans()
+                        })
+                        .text_size(px(theme::T_UI))
+                        .line_height(gpui::relative(1.55))
+                        .text_color(theme::bone_dim())
+                        .child(content),
+                ),
+        )
+}
+
+fn subagent_result_panel(
+    label: &'static str,
+    content: Entity<TranscriptText>,
+    error: bool,
+) -> impl IntoElement {
+    let color = if error { theme::error() } else { theme::live() };
+    div()
+        .w_full()
+        .mt(px(4.0))
+        .rounded(px(theme::RADIUS_SM))
+        .border_1()
+        .border_color(color)
+        .bg(theme::panel())
+        .overflow_hidden()
+        .child(
+            div()
+                .px(px(12.0))
+                .py(px(8.0))
+                .border_b_1()
+                .border_color(theme::edge_soft())
+                .font_family(theme::mono())
+                .text_size(px(theme::T_TINY))
+                .font_weight(FontWeight::BOLD)
+                .text_color(color)
+                .child(label),
         )
         .child(
             div()
-                .p(px(12.0))
-                .rounded(px(theme::RADIUS_SM))
-                .bg(background)
-                .border_1()
-                .border_color(if entry.is_error {
+                .px(px(14.0))
+                .py(px(12.0))
+                .font_family(theme::sans())
+                .text_size(px(theme::T_UI))
+                .line_height(gpui::relative(1.55))
+                .text_color(if error {
                     theme::error()
                 } else {
-                    theme::edge_soft()
+                    theme::bone_dim()
                 })
-                .font_family(if entry.role == TranscriptRole::ToolResult {
-                    theme::mono()
-                } else {
-                    theme::sans()
-                })
-                .text_size(px(theme::T_UI))
-                .line_height(gpui::relative(1.5))
-                .text_color(theme::bone_dim())
-                .child(entry.content.clone()),
+                .child(content),
         )
 }
 
@@ -1223,33 +1395,6 @@ fn subagent_metadata_panel(agent: &SubagentSnapshot) -> impl IntoElement {
                                 None => memory.scope.clone(),
                             }),
                     ),
-            )
-        })
-        .when_some(agent.result.clone(), |panel, result| {
-            panel.child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(4.0))
-                    .child(controls::section_label("Result"))
-                    .child(
-                        div()
-                            .font_family(theme::sans())
-                            .text_size(px(theme::T_UI_SM))
-                            .line_height(gpui::relative(1.4))
-                            .text_color(theme::bone_dim())
-                            .child(result),
-                    ),
-            )
-        })
-        .when_some(agent.error.clone(), |panel, error| {
-            panel.child(
-                div()
-                    .font_family(theme::sans())
-                    .text_size(px(theme::T_UI_SM))
-                    .line_height(gpui::relative(1.4))
-                    .text_color(theme::error())
-                    .child(error),
             )
         })
 }

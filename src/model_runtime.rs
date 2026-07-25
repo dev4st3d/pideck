@@ -231,6 +231,64 @@ pub struct ModelDefaults {
     pub scoped_models: Vec<ModelIdentity>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct PiSettingsSnapshot {
+    pub steering_mode: String,
+    pub follow_up_mode: String,
+    pub transport: String,
+    pub compaction_enabled: bool,
+    pub retry_enabled: bool,
+    pub hide_thinking_block: bool,
+    pub show_cache_miss_notices: bool,
+    pub quiet_startup: bool,
+    pub default_project_trust: String,
+    pub collapse_changelog: bool,
+    pub enable_install_telemetry: bool,
+    pub enable_analytics: bool,
+    pub show_images: bool,
+    pub clear_on_shrink: bool,
+    pub image_auto_resize: bool,
+    pub block_images: bool,
+    pub double_escape_action: String,
+    pub tree_filter_mode: String,
+    pub show_hardware_cursor: bool,
+    pub editor_padding_x: u8,
+    pub output_pad: u8,
+    pub autocomplete_max_visible: u8,
+    pub enable_skill_commands: bool,
+}
+
+impl Default for PiSettingsSnapshot {
+    fn default() -> Self {
+        Self {
+            steering_mode: "one-at-a-time".to_owned(),
+            follow_up_mode: "one-at-a-time".to_owned(),
+            transport: "auto".to_owned(),
+            compaction_enabled: true,
+            retry_enabled: true,
+            hide_thinking_block: false,
+            show_cache_miss_notices: false,
+            quiet_startup: false,
+            default_project_trust: "ask".to_owned(),
+            collapse_changelog: false,
+            enable_install_telemetry: true,
+            enable_analytics: false,
+            show_images: true,
+            clear_on_shrink: false,
+            image_auto_resize: true,
+            block_images: false,
+            double_escape_action: "tree".to_owned(),
+            tree_filter_mode: "default".to_owned(),
+            show_hardware_cursor: false,
+            editor_padding_x: 0,
+            output_pad: 1,
+            autocomplete_max_visible: 5,
+            enable_skill_commands: true,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelCatalogSnapshot {
@@ -239,6 +297,8 @@ pub struct ModelCatalogSnapshot {
     #[serde(default)]
     pub models: Vec<ModelCatalogEntry>,
     pub defaults: ModelDefaults,
+    #[serde(default)]
+    pub settings: PiSettingsSnapshot,
     #[serde(default)]
     pub diagnostics: Vec<String>,
 }

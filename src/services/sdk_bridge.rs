@@ -231,6 +231,10 @@ pub enum BridgeCommand {
     SetModelScope {
         models: Vec<ModelIdentity>,
     },
+    SetPiSetting {
+        key: String,
+        value: Value,
+    },
     GetResourceInventory,
     ReloadResources,
     SetSkillCommandsEnabled {
@@ -260,9 +264,9 @@ impl BridgeCommand {
             Self::LoginProvider { .. } | Self::AuthRespond { .. } | Self::LogoutProvider { .. } => {
                 capabilities.provider_auth
             }
-            Self::SetModelDefaults { .. } | Self::SetModelScope { .. } => {
-                capabilities.model_settings
-            }
+            Self::SetModelDefaults { .. }
+            | Self::SetModelScope { .. }
+            | Self::SetPiSetting { .. } => capabilities.model_settings,
             Self::GetResourceInventory => capabilities.resource_inventory,
             Self::ReloadResources => capabilities.resource_reload,
             Self::SetSkillCommandsEnabled { .. } | Self::SetResourceTheme { .. } => {

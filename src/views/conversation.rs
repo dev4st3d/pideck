@@ -5,12 +5,14 @@ use std::collections::{HashMap, HashSet};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::ops::Range;
 use std::sync::Arc;
+use std::time::Duration;
 
 use gpui::{
-    AnyElement, App, ClipboardItem, Context, CursorStyle, Entity, FocusHandle, Focusable,
-    FontStyle, FontWeight, HighlightStyle, IntoElement, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, Pixels, Render, SharedString, StrikethroughStyle, StyledText,
-    TextLayout, TextRun, TextStyle, UnderlineStyle, Window, div, prelude::*, px, relative, svg,
+    Animation, AnimationExt, AnyElement, App, ClipboardItem, Context, CursorStyle, Entity,
+    FocusHandle, Focusable, FontStyle, FontWeight, HighlightStyle, IntoElement, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Render, SharedString, StrikethroughStyle,
+    StyledText, TextLayout, TextRun, TextStyle, UnderlineStyle, Window, div, ease_out_quint,
+    prelude::*, px, relative, svg,
 };
 
 use crate::actions::{TranscriptCopy, TranscriptSelectAll};
@@ -23,7 +25,7 @@ use crate::state::runtime::{
 use crate::theme;
 use crate::views::markdown::{MarkdownDocument, MarkdownStyle};
 use crate::views::tool_card::{
-    ToolPresentation, presentation_for_bash_block, presentation_for_standalone_result,
+    CardStatus, ToolPresentation, presentation_for_bash_block, presentation_for_standalone_result,
     presentation_for_tool_call, render_tool_presentation, status_color, tail_presentations,
 };
 
@@ -95,7 +97,7 @@ impl TranscriptTextCache {
         }
     }
 
-    fn entity_for(
+    pub(super) fn entity_for(
         &mut self,
         key: String,
         text: &str,
@@ -278,7 +280,6 @@ impl Render for TranscriptText {
             .overflow_x_scroll()
             .scrollbar_width(px(4.0))
             .cursor(CursorStyle::IBeam)
-            .focus(|text| text.text_color(theme::focus()))
             .on_action(cx.listener(Self::copy))
             .on_action(cx.listener(Self::select_all))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
@@ -329,13 +330,21 @@ fn markdown_style_for_range(document: &MarkdownDocument, range: &Range<usize>) -
         .filter(|span| span.range.start <= range.start && span.range.end >= range.end)
         .fold(MarkdownStyle::default(), |mut combined, span| {
             combined.heading |= span.style.heading;
+            if span.style.heading_level > 0
+                && (combined.heading_level == 0
+                    || span.style.heading_level < combined.heading_level)
+            {
+                combined.heading_level = span.style.heading_level;
+            }
             combined.strong |= span.style.strong;
             combined.emphasis |= span.style.emphasis;
             combined.code |= span.style.code;
+            combined.code_block |= span.style.code_block;
             combined.link |= span.style.link;
             combined.quote |= span.style.quote;
             combined.strikethrough |= span.style.strikethrough;
             combined.table |= span.style.table;
+            combined.task_marker |= span.style.task_marker;
             combined
         })
 }
@@ -352,10 +361,28 @@ fn markdown_runs(
         if offset < range.start {
             runs.push(default_style.to_run(range.start - offset));
         }
+        let markdown = markdown_style_for_range(document, &range);
         let mut style = default_style.clone().highlight(highlight);
-        if markdown_style_for_range(document, &range).table {
+        if markdown.table {
             style.font_family = theme::mono();
             style.font_size = px(theme::T_UI_SM).into();
+        } else if markdown.code {
+            style.font_family = theme::mono();
+            style.font_size = px(if markdown.code_block {
+                theme::T_MONO
+            } else {
+                theme::T_UI_SM
+            })
+            .into();
+        }
+        if markdown.heading_level > 0 {
+            style.font_size = px(match markdown.heading_level {
+                1 => theme::T_WORDMARK,
+                2 => theme::T_BODY,
+                3 => theme::T_BODY_SM,
+                _ => theme::T_UI,
+            })
+            .into();
         }
         runs.push(style.to_run(range.len()));
         offset = range.end;
@@ -368,10 +395,16 @@ fn markdown_runs(
 
 fn highlight_style(markdown: MarkdownStyle, selected: bool) -> HighlightStyle {
     HighlightStyle {
-        color: if markdown.code {
+        color: if markdown.task_marker {
+            Some(theme::live().into())
+        } else if markdown.code_block {
+            Some(theme::bone_dim().into())
+        } else if markdown.code {
             Some(theme::focus().into())
         } else if markdown.link {
             Some(theme::data().into())
+        } else if markdown.heading {
+            Some(theme::bone().into())
         } else if markdown.quote {
             Some(theme::ash().into())
         } else if markdown.table {
@@ -389,6 +422,8 @@ fn highlight_style(markdown: MarkdownStyle, selected: bool) -> HighlightStyle {
         font_style: markdown.emphasis.then_some(FontStyle::Italic),
         background_color: if selected {
             Some(theme::data_wash().into())
+        } else if markdown.code_block {
+            Some(theme::panel().into())
         } else if markdown.code {
             Some(theme::panel_lift().into())
         } else {
@@ -557,14 +592,14 @@ fn optimistic_turn(
         .rounded(px(theme::RADIUS))
         .overflow_hidden()
         .border_1()
-        .border_color(theme::edge_soft())
+        .border_color(theme::user_message_edge())
         .child(
             div()
                 .relative()
                 .w_full()
                 .px(px(18.0))
                 .py(px(11.0))
-                .bg(theme::panel())
+                .bg(theme::user_message())
                 .flex()
                 .flex_col()
                 .gap(px(6.0))
@@ -591,9 +626,9 @@ fn user_prompt(
         .w_full()
         .px(px(18.0))
         .py(px(11.0))
-        .bg(theme::panel())
+        .bg(theme::user_message())
         .border_b_1()
-        .border_color(theme::edge_soft())
+        .border_color(theme::user_message_edge())
         .flex()
         .flex_col()
         .gap(px(6.0))
@@ -859,7 +894,7 @@ fn activity_band(
     disclosures: &Entity<ActivityDisclosureState>,
     cx: &mut App,
 ) -> impl IntoElement {
-    let Some((latest, history)) = steps.split_last() else {
+    let Some((latest_step, history)) = steps.split_last() else {
         return div().into_any_element();
     };
     let mut children = Vec::new();
@@ -897,7 +932,32 @@ fn activity_band(
     }
 
     let expanded = disclosures.read(cx).is_expanded(disclosure_key);
-    let latest = render_activity_step(latest, true, projection, texts);
+    let animate_latest = !expanded
+        && matches!(
+            latest_step,
+            ActivityStep::Tool { presentation }
+                if matches!(
+                    presentation.status,
+                    CardStatus::Pending | CardStatus::Running | CardStatus::Cancelling
+                )
+        );
+    let latest = render_activity_step(latest_step, true, projection, texts);
+    let latest = if animate_latest {
+        div()
+            .w_full()
+            .child(latest)
+            .with_animation(
+                SharedString::from(format!(
+                    "activity-latest-tool:{disclosure_key}:{}",
+                    steps.len()
+                )),
+                Animation::new(Duration::from_millis(170)).with_easing(ease_out_quint()),
+                |row, delta| row.ml(px(8.0 * (1.0 - delta))).opacity(0.72 + 0.28 * delta),
+            )
+            .into_any_element()
+    } else {
+        latest
+    };
     div()
         .w_full()
         .bg(theme::floor())

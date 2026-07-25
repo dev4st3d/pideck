@@ -61,6 +61,7 @@ export interface ResponseRecord {
       | "incompatible_protocol"
       | "invalid_json"
       | "invalid_request"
+      | "invalid_setting"
       | "operation_failed"
       | "record_too_large"
       | "unsupported_capability"

@@ -121,6 +121,7 @@ impl Render for RootView {
                                 font_catalog: &self.font_catalog,
                                 font_role: self.font_role,
                                 font_feedback: self.font_feedback.as_deref(),
+                                pi_scroll: &self.pi_settings_scroll,
                                 auth_input: &self.auth_input_composer,
                                 auth_secret: &self.auth_secret_composer,
                             },
@@ -243,6 +244,7 @@ impl Render for RootView {
                     &self.subagent_dialog_focus,
                     &self.subagent_dialog_scroll,
                     &self.subagent_composer,
+                    &self.transcript_cache,
                     cx,
                 ))
             })

@@ -85,13 +85,6 @@ impl Composer {
                             } else {
                                 theme::bone()
                             })
-                            .focus(|input| {
-                                input.border_color(theme::focus()).bg(if self.disabled {
-                                    theme::canvas()
-                                } else {
-                                    theme::panel_lift()
-                                })
-                            })
                             .when(handles_composer_keys, |input| {
                                 input
                                     .on_action(cx.listener(Self::backspace))
@@ -156,9 +149,6 @@ impl Composer {
                                         .cursor_pointer()
                                         .hover(|button| button.bg(theme::signal_hot()))
                                         .active(|button| button.bg(theme::signal_deep()))
-                                        .focus(|button| {
-                                            button.border_1().border_color(theme::focus())
-                                        })
                                         .on_click(cx.listener(|view, _, _, cx| {
                                             view.emit_accept(false, cx);
                                         }))
@@ -255,16 +245,9 @@ impl Composer {
                     theme::canvas()
                 } else {
                     theme::panel()
-                })
-                .focus(|input| {
-                    input.border_color(theme::focus()).bg(if self.disabled {
-                        theme::canvas()
-                    } else {
-                        theme::panel_lift()
-                    })
                 });
         } else {
-            // Desk: focus ring via subtle lift so the shared prompt card stays clean.
+            // Desk: preserve keyboard focus feedback with a subtle surface lift.
             input = input.focus(|input| input.bg(theme::panel_lift()));
         }
 
@@ -477,9 +460,6 @@ impl Composer {
                                             .cursor_pointer()
                                             .hover(|button| button.bg(theme::signal_hot()))
                                             .active(|button| button.bg(theme::signal_deep()))
-                                            .focus(|button| {
-                                                button.border_1().border_color(theme::focus())
-                                            })
                                             .on_click(cx.listener(|view, _, _, cx| {
                                                 view.emit_accept(false, cx);
                                             }))

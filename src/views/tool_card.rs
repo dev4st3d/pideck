@@ -10,9 +10,6 @@ pub(super) use self::data::{
 use crate::state::runtime::sanitize_untrusted_text;
 use crate::theme;
 
-// Shared with data::bounded_preview and its unit tests.
-pub(super) const COLLAPSED_PREVIEW_BYTES: usize = 3 * 1024;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CardStatus {
     Pending,

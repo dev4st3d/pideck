@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use gpui::{
     Bounds, ClipboardItem, Context, DispatchPhase, Entity, FocusHandle, Focusable, FontWeight,
-    Image, ImageFormat, IntoElement, ListAlignment, ListOffset, ListState, MouseButton,
+    HitboxBehavior, Image, ImageFormat, IntoElement, ListAlignment, ListOffset, ListState, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit, PathBuilder, Pixels, Render,
     ScrollHandle, ScrollWheelEvent, StyledImage, Subscription, Task, Window, canvas, deferred, div,
     fill, img, list, point, prelude::*, px, size,
@@ -162,6 +162,7 @@ enum ModelSettingsTab {
     Providers,
     Models,
     Thinking,
+    Pi,
     Usage,
     Typography,
     Resources,
@@ -252,6 +253,7 @@ pub struct RootView {
     slash_command_scroll: ScrollHandle,
     model_switcher_scroll: ScrollHandle,
     thinking_select_scroll: ScrollHandle,
+    pi_settings_scroll: ScrollHandle,
     runtime_notifications: VecDeque<RuntimeNotification>,
     dismissed_slash_draft: Option<String>,
     last_slash_draft: String,
@@ -554,6 +556,7 @@ impl RootView {
             slash_command_scroll: ScrollHandle::new(),
             model_switcher_scroll: ScrollHandle::new(),
             thinking_select_scroll: ScrollHandle::new(),
+            pi_settings_scroll: ScrollHandle::new(),
             runtime_notifications: VecDeque::new(),
             dismissed_slash_draft: None,
             last_slash_draft: String::new(),
@@ -2077,6 +2080,17 @@ impl RootView {
         }
         self.controller.update(cx, |controller, cx| {
             controller.set_model_scope(scope, cx);
+        });
+    }
+
+    fn set_pi_setting(
+        &mut self,
+        key: &'static str,
+        value: serde_json::Value,
+        cx: &mut Context<Self>,
+    ) {
+        self.controller.update(cx, |controller, cx| {
+            controller.set_pi_setting(key.to_owned(), value, cx);
         });
     }
 

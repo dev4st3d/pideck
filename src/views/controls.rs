@@ -3,8 +3,9 @@
 use std::{rc::Rc, time::Duration};
 
 use gpui::{
-    Animation, AnimationExt, ClickEvent, FontWeight, IntoElement, SharedString, Window, deferred,
-    div, ease_out_quint, prelude::*, px, relative, rgba, svg,
+    Animation, AnimationExt, ClickEvent, DispatchPhase, FontWeight, HitboxBehavior, IntoElement,
+    ScrollHandle, ScrollWheelEvent, SharedString, Window, canvas, deferred, div, ease_out_quint,
+    point, prelude::*, px, relative, rgba, svg,
 };
 
 use crate::actions::RECOVERY_BUTTON_CONTEXT;
@@ -15,6 +16,43 @@ pub type HoverHandler = Rc<dyn Fn(&bool, &mut Window, &mut gpui::App) + 'static>
 
 fn clear() -> gpui::Rgba {
     rgba(0x0000_0000)
+}
+
+/// Routes wheel input to a scroll handle based on pointer position rather than
+/// keyboard focus. This is intentionally a capture-phase listener so popovers
+/// and modal panes do not leak wheel events into the transcript underneath.
+pub fn scroll_wheel_capture(scroll: &ScrollHandle) -> impl IntoElement {
+    let scroll = scroll.clone();
+    canvas(
+        |bounds, window, _| window.insert_hitbox(bounds, HitboxBehavior::Normal),
+        move |_, hitbox, window, _| {
+            let scroll = scroll.clone();
+            window.on_mouse_event(move |event: &ScrollWheelEvent, phase, window, cx| {
+                if phase != DispatchPhase::Capture || !hitbox.should_handle_scroll(window) {
+                    return;
+                }
+
+                let delta = event.delta.pixel_delta(window.line_height());
+                if delta.x == px(0.0) && delta.y == px(0.0) {
+                    return;
+                }
+
+                let before = scroll.offset();
+                let max = scroll.max_offset();
+                let next = point(
+                    (before.x + delta.x).clamp(-max.width, px(0.0)),
+                    (before.y + delta.y).clamp(-max.height, px(0.0)),
+                );
+                if next != before {
+                    scroll.set_offset(next);
+                    window.refresh();
+                }
+                cx.stop_propagation();
+            });
+        },
+    )
+    .absolute()
+    .size_full()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -189,7 +227,6 @@ pub fn recovery_button(
                         .bg(theme::signal_deep())
                         .border_color(theme::signal_deep())
                 })
-                .focus(|button| button.border_color(theme::focus()))
                 .on_click(move |event, window, cx| on_click(event, window, cx))
         })
         .child(
@@ -245,7 +282,6 @@ pub fn icon_button(
                 .cursor_pointer()
                 .hover(|button| button.bg(theme::panel()).text_color(theme::bone()))
                 .active(|button| button.bg(theme::panel_lift()))
-                .focus(|button| button.border_color(theme::focus()))
                 .on_click(move |event, window, cx| on_click(event, window, cx))
         })
         .child(
@@ -283,7 +319,6 @@ pub fn quiet_button(
                 .cursor_pointer()
                 .hover(|button| button.bg(theme::panel()).text_color(theme::bone()))
                 .active(|button| button.bg(theme::panel_lift()))
-                .focus(|button| button.border_1().border_color(theme::focus()))
                 .on_click(move |event, window, cx| on_click(event, window, cx))
         })
         .child(
@@ -355,7 +390,6 @@ pub fn tone_button(
                         .text_color(hot_text)
                 })
                 .active(|button| button.bg(theme::panel()))
-                .focus(|button| button.border_color(theme::focus()))
                 .on_click(move |event, window, cx| on_click(event, window, cx))
         })
         .child(
@@ -459,7 +493,6 @@ pub fn chip_button(
                     }
                 })
                 .active(|button| button.bg(theme::panel_lift()))
-                .focus(|button| button.border_color(theme::focus()))
                 .on_click(move |event, window, cx| on_click(event, window, cx))
         })
         .child(
@@ -526,7 +559,6 @@ pub fn compact_select(
                         .text_color(theme::bone())
                 })
                 .active(|button| button.bg(theme::panel_hover()))
-                .focus(|button| button.border_color(theme::focus()))
                 .on_click(move |event, window, cx| on_click(event, window, cx))
         })
         .child(
@@ -577,7 +609,6 @@ pub fn chrome_action(
                 .cursor_pointer()
                 .hover(|button| button.bg(theme::canvas()).text_color(theme::bone_dim()))
                 .active(|button| button.bg(theme::panel_lift()))
-                .focus(|button| button.border_1().border_color(theme::focus()))
                 .on_click(move |event, window, cx| on_click(event, window, cx))
         })
         .child(
@@ -611,7 +642,6 @@ pub fn chrome_icon_action(
                 .cursor_pointer()
                 .hover(|button| button.bg(theme::canvas()).text_color(theme::bone_dim()))
                 .active(|button| button.bg(theme::panel_lift()))
-                .focus(|button| button.border_1().border_color(theme::focus()))
                 .on_click(move |event, window, cx| on_click(event, window, cx))
         })
         .child(
@@ -679,7 +709,6 @@ pub fn tab_button(
             }
         })
         .active(|button| button.bg(theme::panel_lift()))
-        .focus(|button| button.border_color(theme::focus()))
         .on_click(move |event, window, cx| on_click(event, window, cx))
         .child(
             div()

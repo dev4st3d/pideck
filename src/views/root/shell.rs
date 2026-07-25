@@ -198,7 +198,6 @@ pub(super) fn titlebar(
                         .cursor_pointer()
                         .hover(|switcher| switcher.bg(theme::panel()).text_color(theme::bone()))
                         .active(|switcher| switcher.bg(theme::panel_lift()))
-                        .focus(|switcher| switcher.border_1().border_color(theme::focus()))
                         .tab_index(0)
                         .on_click(cx.listener(|view, _, window, cx| view.cycle_theme(window, cx)))
                         .child(theme::active().label()),
@@ -586,12 +585,14 @@ pub(super) fn sessions_panel(
                 .relative()
                 .child(
                     canvas(
-                        |_, _, _| (),
-                        move |bounds, _, window, _| {
+                        |bounds, window, _| {
+                            window.insert_hitbox(bounds, HitboxBehavior::Normal)
+                        },
+                        move |_, hitbox, window, _| {
                             window.on_mouse_event(
                                 move |event: &ScrollWheelEvent, phase, window, cx| {
                                     if phase != DispatchPhase::Capture
-                                        || !bounds.contains(&event.position)
+                                        || !hitbox.should_handle_scroll(window)
                                     {
                                         return;
                                     }
@@ -732,7 +733,6 @@ pub(super) fn history_panel(
         .bg(theme::floor())
         .border_r_1()
         .border_color(theme::edge_hard())
-        .focus(|panel| panel.border_color(theme::focus()))
         .child(
             div()
                 .px(px(12.0))

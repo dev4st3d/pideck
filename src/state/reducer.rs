@@ -383,6 +383,7 @@ fn submit(
         text: text.clone(),
         images: images.clone(),
         kind,
+        display_optimistically: dynamic_source.is_none(),
         accepted: false,
         authoritative_seen: false,
         baseline_message_count,

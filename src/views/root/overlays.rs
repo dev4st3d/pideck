@@ -138,12 +138,14 @@ pub(super) fn conversation_area(params: ConversationAreaParams) -> impl IntoElem
                 .overflow_hidden()
                 .child(
                     canvas(
-                        |_, _, _| (),
-                        move |bounds, _, window, _| {
+                        |bounds, window, _| {
+                            window.insert_hitbox(bounds, HitboxBehavior::Normal)
+                        },
+                        move |_, hitbox, window, _| {
                             window.on_mouse_event(
                                 move |event: &ScrollWheelEvent, phase, window, cx| {
                                     if phase != DispatchPhase::Capture
-                                        || !bounds.contains(&event.position)
+                                        || !hitbox.should_handle_scroll(window)
                                     {
                                         return;
                                     }
@@ -805,7 +807,11 @@ fn extension_dialog_button(
             theme::canvas()
         })
         .cursor_pointer()
-        .hover(|button| button.bg(theme::panel_lift()).border_color(theme::focus()))
+        .hover(|button| {
+            button
+                .bg(theme::panel_lift())
+                .border_color(theme::edge_hard())
+        })
         .on_click(move |event, window, cx| on_click(event, window, cx))
         .flex()
         .items_center()
@@ -1241,7 +1247,6 @@ pub(super) fn pasted_image_overlay(
                                 .text_color(theme::bone())
                                 .cursor_pointer()
                                 .hover(|button| button.bg(theme::panel_lift()))
-                                .focus(|button| button.border_color(theme::focus()))
                                 .on_key_down(cx.listener(
                                     |view, event: &gpui::KeyDownEvent, _, cx| {
                                         if matches!(event.keystroke.key.as_str(), "enter" | "space")
@@ -1286,7 +1291,6 @@ pub(super) fn pasted_image_overlay(
                                         })
                                         .bg(gpui::rgb(color.rgb()))
                                         .cursor_pointer()
-                                        .focus(|swatch| swatch.border_color(theme::focus()))
                                         .on_key_down(cx.listener(
                                             move |view, event: &gpui::KeyDownEvent, _, cx| {
                                                 if matches!(
@@ -1324,7 +1328,6 @@ pub(super) fn pasted_image_overlay(
                                         .justify_center()
                                         .cursor_pointer()
                                         .hover(|button| button.bg(theme::panel_lift()))
-                                        .focus(|button| button.border_color(theme::focus()))
                                         .on_key_down(cx.listener(
                                             |view, event: &gpui::KeyDownEvent, _, cx| {
                                                 if matches!(
@@ -1365,7 +1368,6 @@ pub(super) fn pasted_image_overlay(
                                         .justify_center()
                                         .cursor_pointer()
                                         .hover(|button| button.bg(theme::panel_lift()))
-                                        .focus(|button| button.border_color(theme::focus()))
                                         .on_key_down(cx.listener(
                                             |view, event: &gpui::KeyDownEvent, _, cx| {
                                                 if matches!(
@@ -1584,9 +1586,6 @@ pub(super) fn pasted_image_overlay(
                                             .text_size(px(theme::T_BODY))
                                             .text_color(theme::bone())
                                             .hover(|button| button.bg(theme::panel_hover()))
-                                            .focus(|button| {
-                                                button.border_1().border_color(theme::focus())
-                                            })
                                             .on_key_down(cx.listener(
                                                 |view, event: &gpui::KeyDownEvent, _, cx| {
                                                     if matches!(
@@ -1626,9 +1625,6 @@ pub(super) fn pasted_image_overlay(
                                             .text_size(px(theme::T_BODY))
                                             .text_color(theme::bone())
                                             .hover(|button| button.bg(theme::panel_hover()))
-                                            .focus(|button| {
-                                                button.border_1().border_color(theme::focus())
-                                            })
                                             .on_key_down(cx.listener(
                                                 |view, event: &gpui::KeyDownEvent, _, cx| {
                                                     if matches!(

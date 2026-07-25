@@ -6,6 +6,7 @@ import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "
 import { createServer } from "node:net";
 
 import { attachJsonlLineReader, serializeJsonLine } from "./jsonl.mjs";
+import { piSettingsSnapshot, setPiSetting } from "./pi-settings.mjs";
 
 const PROTOCOL_VERSION = 1;
 const MAX_LINE_BYTES = 1024 * 1024;
@@ -43,6 +44,7 @@ const CAPABILITY_BY_COMMAND = Object.freeze({
   logout_provider: "providerAuth",
   set_model_defaults: "modelSettings",
   set_model_scope: "modelSettings",
+  set_pi_setting: "modelSettings",
   get_resource_inventory: "resourceInventory",
   reload_resources: "resourceReload",
   set_skill_commands_enabled: "resourceSettings",
@@ -363,6 +365,7 @@ async function modelSnapshot() {
       thinking: settings.getDefaultThinkingLevel(),
       scopedModels,
     },
+    settings: piSettingsSnapshot(settings),
     diagnostics: [
       ...(runtime.getError() ? ["Model configuration has diagnostics. Details are kept out of the GUI."] : []),
       ...settings.drainErrors().map(() => "A Pi settings operation reported an error."),
@@ -1199,6 +1202,13 @@ async function execute(record) {
         result = await modelSnapshot();
         break;
       }
+      case "set_pi_setting": {
+        const { settings } = await getModelServices();
+        setPiSetting(settings, requireString(params, "key"), params.value);
+        await settings.flush();
+        result = await modelSnapshot();
+        break;
+      }
       case "get_resource_inventory":
         result = await resourceSnapshot(token.abortController.signal);
         break;
@@ -1265,6 +1275,7 @@ async function execute(record) {
       "logout_provider",
       "set_model_defaults",
       "set_model_scope",
+      "set_pi_setting",
       "get_resource_inventory",
       "reload_resources",
       "set_skill_commands_enabled",

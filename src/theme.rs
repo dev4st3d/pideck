@@ -96,6 +96,8 @@ struct Palette {
     panel: u32,
     panel_lift: u32,
     panel_hover: u32,
+    user_message: u32,
+    user_message_edge: u32,
     edge: u32,
     edge_hard: u32,
     edge_soft: u32,
@@ -123,6 +125,8 @@ const PIDECK_DARK: Palette = Palette {
     panel: 0x1a1714ff,
     panel_lift: 0x221e1aff,
     panel_hover: 0x2a241fff,
+    user_message: 0x201a16ff,
+    user_message_edge: 0xc75a3838,
     edge: 0xebe4d618,
     edge_hard: 0xebe4d62c,
     edge_soft: 0xebe4d612,
@@ -147,11 +151,13 @@ const PIDECK_DARK: Palette = Palette {
 // its blue family subdued to keep the interface dark rather than luminous:
 // https://github.com/nexmoe/cursor-themes-for-zed/blob/main/themes/cursor-dark.json
 const CURSOR_DARK: Palette = Palette {
-    canvas: 0x0b0b0bff,      // deepened background / editor.background
-    floor: 0x080808ff,       // deepened surface / panel / title bar
-    panel: 0x121212ff,       // opaque panel; prevents content bleed-through
-    panel_lift: 0x1b1b1bff,  // opaque active / selected surface
-    panel_hover: 0x171717ff, // opaque hover surface
+    canvas: 0x0b0b0bff,       // deepened background / editor.background
+    floor: 0x080808ff,        // deepened surface / panel / title bar
+    panel: 0x121212ff,        // opaque panel; prevents content bleed-through
+    panel_lift: 0x1b1b1bff,   // opaque active / selected surface
+    panel_hover: 0x171717ff,  // opaque hover surface
+    user_message: 0x171a1dff, // subtle cool lift from agent work
+    user_message_edge: 0x5a718842,
     edge: 0xe4e4e413,        // border
     edge_hard: 0xe4e4e426,   // border.focused
     edge_soft: 0xe4e4e413,   // border.variant
@@ -194,6 +200,14 @@ pub fn panel_lift() -> Rgba {
 
 pub fn panel_hover() -> Rgba {
     color(|palette| palette.panel_hover)
+}
+
+pub fn user_message() -> Rgba {
+    color(|palette| palette.user_message)
+}
+
+pub fn user_message_edge() -> Rgba {
+    color(|palette| palette.user_message_edge)
 }
 
 pub fn edge() -> Rgba {
@@ -284,6 +298,7 @@ mod tests {
     fn pideck_dark_preserves_the_original_palette() {
         assert_eq!(PIDECK_DARK.canvas, 0x0b0a09ff);
         assert_eq!(PIDECK_DARK.floor, 0x12100eff);
+        assert_eq!(PIDECK_DARK.user_message, 0x201a16ff);
         assert_eq!(PIDECK_DARK.bone, 0xefe7d8ff);
         assert_eq!(PIDECK_DARK.signal, 0xc75a38ff);
     }
@@ -295,6 +310,7 @@ mod tests {
         assert_eq!(CURSOR_DARK.panel, 0x121212ff);
         assert_eq!(CURSOR_DARK.panel_lift, 0x1b1b1bff);
         assert_eq!(CURSOR_DARK.panel_hover, 0x171717ff);
+        assert_eq!(CURSOR_DARK.user_message, 0x171a1dff);
         assert_eq!(CURSOR_DARK.edge, 0xe4e4e413);
         assert_eq!(CURSOR_DARK.bone, 0xe4e4e4eb);
         assert_eq!(CURSOR_DARK.signal, 0x5a7188ff);

@@ -208,6 +208,27 @@ export class SettingsManager {
   getDefaultModel() { return "synthetic-model"; }
   getDefaultThinkingLevel() { return "high"; }
   getEnabledModels() { return ["synthetic-provider/synthetic-model"]; }
+  getSteeringMode() { return "one-at-a-time"; }
+  getFollowUpMode() { return "one-at-a-time"; }
+  getTransport() { return "auto"; }
+  getCompactionEnabled() { return true; }
+  getRetryEnabled() { return true; }
+  getHideThinkingBlock() { return false; }
+  getShowCacheMissNotices() { return false; }
+  getQuietStartup() { return false; }
+  getCollapseChangelog() { return false; }
+  getEnableInstallTelemetry() { return true; }
+  getEnableAnalytics() { return false; }
+  getShowImages() { return true; }
+  getClearOnShrink() { return false; }
+  getImageAutoResize() { return true; }
+  getBlockImages() { return false; }
+  getDoubleEscapeAction() { return "tree"; }
+  getTreeFilterMode() { return "default"; }
+  getShowHardwareCursor() { return false; }
+  getEditorPaddingX() { return 0; }
+  getOutputPad() { return 1; }
+  getAutocompleteMaxVisible() { return 5; }
   setDefaultModelAndProvider() {}
   setDefaultThinkingLevel() {}
   setEnabledModels() {}

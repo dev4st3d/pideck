@@ -1,18 +1,23 @@
 use std::ops::Range;
 
-use pulldown_cmark::{Alignment, Event, Options, Parser, Tag, TagEnd};
+use pulldown_cmark::{Alignment, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use unicode_width::UnicodeWidthStr;
+
+const MAX_TABLE_COLUMN_WIDTH: usize = 40;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(super) struct MarkdownStyle {
     pub heading: bool,
+    pub heading_level: u8,
     pub strong: bool,
     pub emphasis: bool,
     pub code: bool,
+    pub code_block: bool,
     pub link: bool,
     pub quote: bool,
     pub strikethrough: bool,
     pub table: bool,
+    pub task_marker: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -29,8 +34,11 @@ pub(super) struct MarkdownDocument {
 
 impl MarkdownDocument {
     pub fn parse(source: &str) -> Self {
-        let options =
-            Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS | Options::ENABLE_TABLES;
+        let options = Options::ENABLE_STRIKETHROUGH
+            | Options::ENABLE_TASKLISTS
+            | Options::ENABLE_TABLES
+            | Options::ENABLE_FOOTNOTES
+            | Options::ENABLE_MATH;
         let mut builder = DocumentBuilder::default();
 
         for event in Parser::new_ext(source, options) {
@@ -98,28 +106,39 @@ impl DocumentBuilder {
             }
             Event::Start(tag) => self.start(tag),
             Event::End(tag) => self.end(tag),
-            Event::Text(text) => self.push(&text, self.style),
+            Event::Text(text) => self.push_text(&text, self.style),
             Event::Code(text) => {
                 let mut style = self.style;
                 style.code = true;
-                self.push(&text, style);
+                self.push_text(&text, style);
             }
             Event::SoftBreak | Event::HardBreak => self.newline(),
             Event::Rule => {
                 self.ensure_block_gap();
-                self.push("────────", self.style);
+                let mut style = self.style;
+                style.quote = true;
+                self.push("────────────────────────", style);
                 self.ensure_block_gap();
             }
             Event::TaskListMarker(checked) => {
-                self.push(if checked { "[x] " } else { "[ ] " }, self.style);
+                let mut style = self.style;
+                style.task_marker = true;
+                self.push(if checked { "☑ " } else { "☐ " }, style);
             }
-            Event::InlineMath(text) => self.push(&text, self.style),
+            Event::InlineMath(text) => {
+                let mut style = self.style;
+                style.code = true;
+                self.push_text(&text, style);
+            }
             Event::DisplayMath(text) => {
                 self.ensure_block_gap();
-                self.push(&text, self.style);
+                let mut style = self.style;
+                style.code = true;
+                style.code_block = true;
+                self.push_text(&text, style);
                 self.ensure_block_gap();
             }
-            Event::Html(text) | Event::InlineHtml(text) => self.push(&text, self.style),
+            Event::Html(text) | Event::InlineHtml(text) => self.handle_html(&text),
             Event::FootnoteReference(name) => {
                 self.push("[", self.style);
                 self.push(&name, self.style);
@@ -131,24 +150,30 @@ impl DocumentBuilder {
     fn start(&mut self, tag: Tag<'_>) {
         match tag {
             Tag::Paragraph => self.ensure_line_prefix(),
-            Tag::Heading { .. } => {
+            Tag::Heading { level, .. } => {
                 self.ensure_block_gap();
                 self.style.heading = true;
+                self.style.heading_level = heading_level(level);
                 self.style.strong = true;
                 self.ensure_line_prefix();
             }
             Tag::BlockQuote(_) => {
-                self.ensure_block_gap();
+                if self.quote_depth == 0 {
+                    self.ensure_block_gap();
+                }
                 self.quote_depth += 1;
                 self.style.quote = true;
             }
             Tag::CodeBlock(_) => {
                 self.ensure_block_gap();
                 self.style.code = true;
+                self.style.code_block = true;
                 self.ensure_line_prefix();
             }
             Tag::List(start) => {
-                self.ensure_block_gap();
+                if self.list_stack.is_empty() {
+                    self.ensure_block_gap();
+                }
                 self.list_stack.push(ListState { next_number: start });
             }
             Tag::Item => {
@@ -190,6 +215,7 @@ impl DocumentBuilder {
             TagEnd::Paragraph => self.ensure_block_gap(),
             TagEnd::Heading(_) => {
                 self.style.heading = false;
+                self.style.heading_level = 0;
                 self.style.strong = false;
                 self.ensure_block_gap();
             }
@@ -200,11 +226,14 @@ impl DocumentBuilder {
             }
             TagEnd::CodeBlock => {
                 self.style.code = false;
+                self.style.code_block = false;
                 self.ensure_block_gap();
             }
             TagEnd::List(_) => {
                 self.list_stack.pop();
-                self.ensure_block_gap();
+                if self.list_stack.is_empty() {
+                    self.ensure_block_gap();
+                }
             }
             TagEnd::Item => self.newline(),
             TagEnd::Emphasis => self.style.emphasis = false,
@@ -280,6 +309,7 @@ impl DocumentBuilder {
                     .map(|cell| UnicodeWidthStr::width(cell.as_str()))
                     .max()
                     .unwrap_or(0)
+                    .min(MAX_TABLE_COLUMN_WIDTH)
             })
             .collect::<Vec<_>>();
 
@@ -335,6 +365,40 @@ impl DocumentBuilder {
     fn ensure_line_prefix(&mut self) {
         if self.at_line_start && self.quote_depth > 0 {
             self.push(&"│ ".repeat(self.quote_depth), self.style);
+        }
+    }
+
+    fn push_text(&mut self, text: &str, style: MarkdownStyle) {
+        if text.is_empty() {
+            return;
+        }
+
+        for (index, line) in text.split('\n').enumerate() {
+            if index > 0 {
+                self.newline();
+            }
+            if line.is_empty() {
+                continue;
+            }
+            let line_start = self.at_line_start;
+            self.ensure_line_prefix();
+            if line_start && style.code_block {
+                self.push("  ", style);
+            }
+            self.push(line, style);
+        }
+    }
+
+    fn handle_html(&mut self, html: &str) {
+        let normalized = html.trim().to_ascii_lowercase();
+        if normalized.starts_with("<br") {
+            self.newline();
+        } else if normalized.starts_with("</p")
+            || normalized.starts_with("</div")
+            || normalized.starts_with("</details")
+            || normalized.starts_with("</summary")
+        {
+            self.ensure_block_gap();
         }
     }
 
@@ -406,6 +470,17 @@ fn normalize_cell(cell: &str) -> String {
     cell.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+fn heading_level(level: HeadingLevel) -> u8 {
+    match level {
+        HeadingLevel::H1 => 1,
+        HeadingLevel::H2 => 2,
+        HeadingLevel::H3 => 3,
+        HeadingLevel::H4 => 4,
+        HeadingLevel::H5 => 5,
+        HeadingLevel::H6 => 6,
+    }
+}
+
 fn table_border(left: char, join: char, right: char, widths: &[usize]) -> String {
     let mut border = String::new();
     border.push(left);
@@ -421,7 +496,8 @@ fn table_border(left: char, join: char, right: char, widths: &[usize]) -> String
 }
 
 fn aligned_cell(cell: &str, width: usize, alignment: Alignment) -> String {
-    let content_width = UnicodeWidthStr::width(cell);
+    let cell = truncate_to_width(cell, width);
+    let content_width = UnicodeWidthStr::width(cell.as_str());
     let remaining = width.saturating_sub(content_width);
     let (left, right) = match alignment {
         Alignment::Center => (remaining / 2, remaining - remaining / 2),
@@ -434,6 +510,28 @@ fn aligned_cell(cell: &str, width: usize, alignment: Alignment) -> String {
         cell.replace(' ', "\u{a0}"),
         "\u{a0}".repeat(right)
     )
+}
+
+fn truncate_to_width(value: &str, width: usize) -> String {
+    if UnicodeWidthStr::width(value) <= width {
+        return value.to_owned();
+    }
+    if width == 0 {
+        return String::new();
+    }
+
+    let target = width.saturating_sub(1);
+    let mut output = String::new();
+    for character in value.chars() {
+        let next_width = UnicodeWidthStr::width(output.as_str())
+            + unicode_width::UnicodeWidthChar::width(character).unwrap_or(0);
+        if next_width > target {
+            break;
+        }
+        output.push(character);
+    }
+    output.push('…');
+    output
 }
 
 #[cfg(test)]
@@ -483,9 +581,39 @@ mod tests {
 
         assert_eq!(
             document.text,
-            "│ Think carefully.\n\n1. First\n2. Second\n\n• [x] Done\n• [ ] Next"
+            "│ Think carefully.\n\n1. First\n2. Second\n\n• ☑ Done\n• ☐ Next"
         );
         assert!(document.spans.iter().any(|span| span.style.quote));
+        assert!(document.spans.iter().any(|span| span.style.task_marker));
+    }
+
+    #[test]
+    fn preserves_heading_levels_and_distinguishes_code_blocks() {
+        let document = MarkdownDocument::parse(
+            "# Primary\n\n### Detail\n\nInline `code`.\n\n```rust\nfn main() {\n    println!(\"ok\");\n}\n```",
+        );
+
+        assert!(document.spans.iter().any(|span| {
+            &document.text[span.range.clone()] == "Primary" && span.style.heading_level == 1
+        }));
+        assert!(document.spans.iter().any(|span| {
+            &document.text[span.range.clone()] == "Detail" && span.style.heading_level == 3
+        }));
+        assert!(document.spans.iter().any(|span| {
+            span.style.code_block && document.text[span.range.clone()].contains("println!")
+        }));
+        assert!(document.spans.iter().any(|span| {
+            span.style.code
+                && !span.style.code_block
+                && &document.text[span.range.clone()] == "code"
+        }));
+    }
+
+    #[test]
+    fn hides_raw_html_but_keeps_inner_text() {
+        let document = MarkdownDocument::parse("Before <kbd>Ctrl</kbd><br>After");
+        assert_eq!(document.text, "Before Ctrl\nAfter");
+        assert!(!document.text.contains("<kbd>"));
     }
 
     #[test]

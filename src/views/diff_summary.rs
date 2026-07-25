@@ -14,7 +14,7 @@ use crate::theme;
 
 const MAX_EXPANDED_FILES: usize = 40;
 const MAX_RENDERED_DIFF_LINES: usize = 2_400;
-const DIFF_SIDEBAR_WIDTH: f32 = 292.0;
+const DIFF_SIDEBAR_WIDTH: f32 = 264.0;
 const LINE_NUMBER_WIDTH: f32 = 32.0;
 const LINE_GUTTER_WIDTH: f32 = 76.0;
 
@@ -74,7 +74,6 @@ pub(in crate::views) fn summary_card(
                                 .text_color(theme::ash())
                                 .hover(|button| button.bg(theme::panel()).text_color(theme::bone()))
                                 .active(|button| button.bg(theme::panel_lift()))
-                                .focus(|button| button.border_1().border_color(theme::focus()))
                                 .on_click(move |_, _, cx| {
                                     toggle_root.update(cx, |view, cx| {
                                         view.toggle_workspace_diff_files(cx)
@@ -157,11 +156,10 @@ pub(in crate::views) fn summary_card(
                         .hover(|button| {
                             button
                                 .bg(theme::panel_lift())
-                                .border_color(theme::focus())
+                                .border_color(theme::edge_hard())
                                 .text_color(theme::bone())
                         })
                         .active(|button| button.bg(theme::panel_hover()))
-                        .focus(|button| button.border_color(theme::focus()))
                         .on_click(move |_, window, cx| {
                             open_root.update(cx, |view, cx| view.open_workspace_diff(window, cx));
                         })
@@ -319,7 +317,7 @@ pub(in crate::views) fn diff_overlay(
         .right_0()
         .occlude()
         .bg(gpui::rgba(0x0b0a_09f5))
-        .p(px(22.0))
+        .p(px(14.0))
         .flex()
         .items_center()
         .justify_center()
@@ -337,7 +335,6 @@ pub(in crate::views) fn diff_overlay(
                 .overflow_hidden()
                 .border_1()
                 .border_color(theme::edge_hard())
-                .focus(|dialog| dialog.border_color(theme::focus()))
                 .bg(theme::floor())
                 .flex()
                 .flex_col()
@@ -371,9 +368,9 @@ pub(in crate::views) fn diff_overlay(
 
 fn diff_overlay_header(snapshot: &WorkspaceDiff, cx: &mut Context<RootView>) -> impl IntoElement {
     div()
-        .min_h(px(54.0))
-        .px(px(16.0))
-        .py(px(10.0))
+        .min_h(px(48.0))
+        .px(px(14.0))
+        .py(px(8.0))
         .border_b_1()
         .border_color(theme::edge_hard())
         .bg(theme::panel())
@@ -432,7 +429,7 @@ fn diff_overlay_header(snapshot: &WorkspaceDiff, cx: &mut Context<RootView>) -> 
                 .flex()
                 .flex_row()
                 .items_center()
-                .gap(px(14.0))
+                .gap(px(10.0))
                 .child(
                     div()
                         .font_family(theme::sans())
@@ -493,8 +490,8 @@ fn diff_file_sidebar(
         .flex_col()
         .child(
             div()
-                .h(px(42.0))
-                .px(px(12.0))
+                .h(px(34.0))
+                .px(px(10.0))
                 .flex_shrink_0()
                 .flex()
                 .flex_row()
@@ -518,29 +515,42 @@ fn diff_file_sidebar(
         )
         .child(
             div()
-                .id("workspace-diff-file-list")
                 .flex_1()
                 .min_h_0()
-                .overflow_y_scroll()
-                .track_scroll(scroll)
-                .scrollbar_width(px(theme::SCROLLBAR))
-                .children(rows.into_iter().map(|row| match row {
-                    DiffTreeRow::Folder {
-                        name,
-                        path,
-                        depth,
-                        file_count,
-                        collapsed,
-                    } => diff_folder_row(name, path, depth, file_count, collapsed, root.clone()),
-                    DiffTreeRow::File { name, index, depth } => diff_tree_file_row(
-                        name,
-                        index,
-                        depth,
-                        &snapshot.files[index],
-                        index == selected_index,
-                        root.clone(),
-                    ),
-                })),
+                .relative()
+                .child(controls::scroll_wheel_capture(scroll))
+                .child(
+                    div()
+                        .id("workspace-diff-file-list")
+                        .size_full()
+                        .overflow_y_scroll()
+                        .track_scroll(scroll)
+                        .scrollbar_width(px(theme::SCROLLBAR))
+                        .children(rows.into_iter().map(|row| match row {
+                            DiffTreeRow::Folder {
+                                name,
+                                path,
+                                depth,
+                                file_count,
+                                collapsed,
+                            } => diff_folder_row(
+                                name,
+                                path,
+                                depth,
+                                file_count,
+                                collapsed,
+                                root.clone(),
+                            ),
+                            DiffTreeRow::File { name, index, depth } => diff_tree_file_row(
+                                name,
+                                index,
+                                depth,
+                                &snapshot.files[index],
+                                index == selected_index,
+                                root.clone(),
+                            ),
+                        })),
+                ),
         )
 }
 
@@ -686,14 +696,11 @@ fn diff_folder_row(
     div()
         .id(SharedString::from(format!("workspace-diff-folder-{path}")))
         .tab_index(0)
-        .h(px(34.0))
-        .pl(px(8.0 + depth as f32 * 14.0))
-        .pr(px(10.0))
-        .border_1()
-        .border_color(theme::floor())
+        .h(px(28.0))
+        .pl(px(7.0 + depth as f32 * 10.0))
+        .pr(px(8.0))
         .cursor_pointer()
         .hover(|row| row.bg(theme::panel_lift()))
-        .focus(|row| row.border_color(theme::focus()))
         .on_click(move |_, _, cx| {
             click_root.update(cx, |view, cx| {
                 view.toggle_workspace_diff_folder(&click_path, cx)
@@ -714,7 +721,7 @@ fn diff_folder_row(
         .flex()
         .flex_row()
         .items_center()
-        .gap(px(6.0))
+        .gap(px(5.0))
         .child(
             svg()
                 .path(if collapsed {
@@ -722,14 +729,14 @@ fn diff_folder_row(
                 } else {
                     "icons/chevron-down.svg"
                 })
-                .size(px(12.0))
+                .size(px(10.0))
                 .flex_shrink_0()
                 .text_color(theme::smoke()),
         )
         .child(
             svg()
                 .path("icons/folder.svg")
-                .size(px(14.0))
+                .size(px(13.0))
                 .flex_shrink_0()
                 .text_color(theme::ash()),
         )
@@ -742,7 +749,7 @@ fn diff_folder_row(
                 .whitespace_nowrap()
                 .font_family(theme::sans())
                 .text_size(px(theme::T_UI_SM))
-                .font_weight(FontWeight::SEMIBOLD)
+                .font_weight(FontWeight::MEDIUM)
                 .text_color(theme::bone_dim())
                 .child(name),
         )
@@ -775,12 +782,12 @@ fn diff_tree_file_row(
             file.path
         )))
         .tab_index(0)
-        .min_h(px(38.0))
-        .pl(px(14.0 + depth as f32 * 14.0))
-        .pr(px(10.0))
-        .border_1()
+        .min_h(px(30.0))
+        .pl(px(11.0 + depth as f32 * 10.0))
+        .pr(px(8.0))
+        .border_l_2()
         .border_color(if selected {
-            theme::panel_hover()
+            theme::focus()
         } else {
             theme::floor()
         })
@@ -791,7 +798,6 @@ fn diff_tree_file_row(
         })
         .cursor_pointer()
         .hover(|row| row.bg(theme::panel_lift()))
-        .focus(|row| row.border_color(theme::focus()))
         .on_click(move |_, _, cx| {
             click_root.update(cx, |view, cx| view.select_workspace_diff_file(index, cx));
         })
@@ -804,10 +810,10 @@ fn diff_tree_file_row(
         .flex()
         .flex_row()
         .items_center()
-        .gap(px(7.0))
+        .gap(px(6.0))
         .child(
             div()
-                .w(px(14.0))
+                .w(px(12.0))
                 .flex_shrink_0()
                 .font_family(theme::mono())
                 .text_size(px(theme::T_MONO_SM))
@@ -842,7 +848,7 @@ fn diff_tree_file_row(
                 .flex()
                 .flex_row()
                 .items_center()
-                .gap(px(5.0))
+                .gap(px(4.0))
                 .when(file.additions > 0, |stats| {
                     stats.child(stat_text(format!("+{}", file.additions), theme::live()))
                 })
@@ -881,9 +887,9 @@ fn diff_file_panel(
         .flex_col()
         .child(
             div()
-                .min_h(px(54.0))
-                .px(px(14.0))
-                .py(px(8.0))
+                .min_h(px(46.0))
+                .px(px(12.0))
+                .py(px(6.0))
                 .flex_shrink_0()
                 .border_b_1()
                 .border_color(theme::edge_hard())
@@ -899,7 +905,7 @@ fn diff_file_panel(
                         .flex_1()
                         .flex()
                         .flex_col()
-                        .gap(px(3.0))
+                        .gap(px(2.0))
                         .child(
                             div()
                                 .min_w_0()
@@ -917,7 +923,7 @@ fn diff_file_panel(
                                 .flex()
                                 .flex_row()
                                 .items_center()
-                                .gap(px(9.0))
+                                .gap(px(7.0))
                                 .child(
                                     div()
                                         .font_family(theme::sans())
@@ -955,7 +961,7 @@ fn diff_file_panel(
                         .flex()
                         .flex_row()
                         .items_center()
-                        .gap(px(7.0))
+                        .gap(px(6.0))
                         .child(
                             div()
                                 .font_family(theme::mono())
@@ -985,34 +991,40 @@ fn diff_file_panel(
         )
         .child(
             div()
-                .id("workspace-diff-content-scroll")
                 .flex_1()
                 .min_h_0()
                 .min_w_0()
-                .overflow_x_scroll()
-                .overflow_y_scroll()
-                .track_scroll(scroll)
-                .scrollbar_width(px(theme::SCROLLBAR))
+                .relative()
+                .child(controls::scroll_wheel_capture(scroll))
                 .child(
                     div()
-                        .w_full()
-                        .min_w(px(720.0))
-                        .py(px(8.0))
-                        .when(file.hunks.is_empty(), |body| {
-                            body.child(diff_empty_file(file, snapshot.patch_truncated))
-                        })
-                        .children(rows)
-                        .when(omitted > 0, |body| {
-                            body.child(diff_limit_notice(format!(
-                                "Preview stopped after {MAX_RENDERED_DIFF_LINES} changed and context lines. {omitted} more lines are not rendered."
-                            )))
-                        })
-                        .when(snapshot.patch_truncated, |body| {
-                            body.child(diff_limit_notice(
-                                "The workspace patch reached the safe preview-size limit. This file may be incomplete."
-                                    .to_owned(),
-                            ))
-                        }),
+                        .id("workspace-diff-content-scroll")
+                        .size_full()
+                        .overflow_x_scroll()
+                        .overflow_y_scroll()
+                        .track_scroll(scroll)
+                        .scrollbar_width(px(theme::SCROLLBAR))
+                        .child(
+                            div()
+                                .w_full()
+                                .min_w(px(640.0))
+                                .py(px(6.0))
+                                .when(file.hunks.is_empty(), |body| {
+                                    body.child(diff_empty_file(file, snapshot.patch_truncated))
+                                })
+                                .children(rows)
+                                .when(omitted > 0, |body| {
+                                    body.child(diff_limit_notice(format!(
+                                        "Preview stopped after {MAX_RENDERED_DIFF_LINES} changed and context lines. {omitted} more lines are not rendered."
+                                    )))
+                                })
+                                .when(snapshot.patch_truncated, |body| {
+                                    body.child(diff_limit_notice(
+                                        "The workspace patch reached the safe preview-size limit. This file may be incomplete."
+                                            .to_owned(),
+                                    ))
+                                }),
+                        ),
                 ),
         )
 }
@@ -1028,8 +1040,8 @@ fn file_navigation_button(
     div()
         .id(id)
         .tab_index(if enabled { 0 } else { -1 })
-        .h(px(28.0))
-        .px(px(8.0))
+        .h(px(26.0))
+        .px(px(7.0))
         .rounded(px(theme::RADIUS_SM))
         .border_1()
         .border_color(if enabled {
@@ -1042,8 +1054,11 @@ fn file_navigation_button(
         .when(enabled, |button| {
             button
                 .cursor_pointer()
-                .hover(|button| button.bg(theme::panel_lift()).border_color(theme::focus()))
-                .focus(|button| button.border_color(theme::focus()))
+                .hover(|button| {
+                    button
+                        .bg(theme::panel_lift())
+                        .border_color(theme::edge_hard())
+                })
                 .on_click(move |_, _, cx| {
                     root.update(cx, |view, cx| view.select_workspace_diff_file(index, cx));
                 })
@@ -1101,10 +1116,10 @@ fn diff_hunk_header(index: usize, hunk: &DiffHunk) -> AnyElement {
     div()
         .id(("workspace-diff-hunk", index))
         .min_w_full()
-        .min_h(px(32.0))
-        .mt(px(if index == 0 { 0.0 } else { 10.0 }))
-        .pl(px(LINE_GUTTER_WIDTH + 26.0))
-        .pr(px(16.0))
+        .min_h(px(28.0))
+        .mt(px(if index == 0 { 0.0 } else { 7.0 }))
+        .pl(px(LINE_GUTTER_WIDTH + 22.0))
+        .pr(px(14.0))
         .flex()
         .flex_row()
         .items_center()
@@ -1138,14 +1153,14 @@ fn diff_code_line(index: usize, line: &DiffLine) -> AnyElement {
     div()
         .id(("workspace-diff-code-line", index))
         .min_w_full()
-        .min_h(px(21.0))
+        .min_h(px(20.0))
         .flex()
         .flex_row()
         .bg(background)
         .child(line_number_gutter(line.old_line, line.new_line))
         .child(
             div()
-                .w(px(20.0))
+                .w(px(18.0))
                 .flex_shrink_0()
                 .flex()
                 .items_center()
@@ -1159,11 +1174,11 @@ fn diff_code_line(index: usize, line: &DiffLine) -> AnyElement {
         .child(
             div()
                 .flex_1()
-                .pl(px(6.0))
-                .pr(px(18.0))
+                .pl(px(5.0))
+                .pr(px(14.0))
                 .font_family(theme::mono())
                 .text_size(px(theme::T_MONO_SM))
-                .line_height(relative(1.62))
+                .line_height(relative(1.5))
                 .whitespace_nowrap()
                 .text_color(color)
                 .child(SharedString::from(if line.text.is_empty() {

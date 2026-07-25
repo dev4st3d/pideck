@@ -12,6 +12,7 @@ pub(super) struct ModelSettingsPanelParams<'a> {
     pub(super) font_catalog: &'a FontCatalog,
     pub(super) font_role: FontRole,
     pub(super) font_feedback: Option<&'a str>,
+    pub(super) pi_scroll: &'a ScrollHandle,
     pub(super) auth_input: &'a Entity<Composer>,
     pub(super) auth_secret: &'a Entity<Composer>,
 }
@@ -31,6 +32,7 @@ pub(super) fn model_settings_panel(
         font_catalog,
         font_role,
         font_feedback,
+        pi_scroll,
         auth_input,
         auth_secret,
     } = params;
@@ -78,6 +80,8 @@ pub(super) fn model_settings_panel(
                                             "Resource Center"
                                         } else if tab == ModelSettingsTab::Typography {
                                             "Typography"
+                                        } else if tab == ModelSettingsTab::Pi {
+                                            "Pi settings"
                                         } else {
                                             "Model settings"
                                         }),
@@ -92,6 +96,8 @@ pub(super) fn model_settings_panel(
                                                 "Audited Pi resources, provenance, trust, load state, and active tools."
                                             } else if tab == ModelSettingsTab::Typography {
                                                 "Choose any installed system font for the app's three text roles."
+                                            } else if tab == ModelSettingsTab::Pi {
+                                                "Typed controls backed by Pi's SettingsManager and effective global values."
                                             } else {
                                                 "Providers, defaults, cycle order, and usage. Session model and thinking live in the prompt box."
                                             },
@@ -141,6 +147,7 @@ pub(super) fn model_settings_panel(
                             (ModelSettingsTab::Providers, "Providers"),
                             (ModelSettingsTab::Models, "Models"),
                             (ModelSettingsTab::Thinking, "Thinking"),
+                            (ModelSettingsTab::Pi, "Pi"),
                             (ModelSettingsTab::Usage, "Usage"),
                             (ModelSettingsTab::Typography, "Type"),
                             (ModelSettingsTab::Resources, "Resources"),
@@ -165,6 +172,7 @@ pub(super) fn model_settings_panel(
             }
             ModelSettingsTab::Models => models_settings(projection, search, cx).into_any_element(),
             ModelSettingsTab::Thinking => thinking_settings(projection, cx).into_any_element(),
+            ModelSettingsTab::Pi => pi_settings(projection, pi_scroll, cx),
             ModelSettingsTab::Usage => usage_settings(projection).into_any_element(),
             ModelSettingsTab::Typography => typography_settings(
                 font_catalog,
@@ -262,7 +270,6 @@ fn typography_settings(
                             .tab_index(0)
                             .cursor_pointer()
                             .hover(|card| card.bg(theme::panel_hover()))
-                            .focus(|card| card.border_color(theme::focus()))
                             .on_click(
                                 cx.listener(move |view, _, _, cx| view.set_font_role(role, cx)),
                             )
@@ -370,7 +377,6 @@ fn typography_settings(
                         .tab_index(0)
                         .cursor_pointer()
                         .hover(|row| row.bg(theme::panel_hover()))
-                        .focus(|row| row.border_color(theme::focus()))
                         .on_click(cx.listener(move |view, _, _, cx| {
                             view.select_font(active_role, click_family.clone(), cx)
                         }))
@@ -467,86 +473,57 @@ pub(super) fn model_switcher_sheet(
         })
         .child(
             div()
-                .id("model-switcher-scroll")
                 .flex_1()
                 .min_h_0()
-                .bg(theme::panel())
-                .overflow_y_scroll()
-                .track_scroll(scroll)
-                .scrollbar_width(px(6.0))
-                .when(models.is_empty(), |list| {
-                    list.child(
-                        div()
-                            .px(px(12.0))
-                            .py(px(18.0))
-                            .font_family(theme::sans())
-                            .text_size(px(theme::T_UI_SM))
-                            .text_color(theme::smoke())
-                            .child(match projection.phase {
-                                CatalogPhase::Loading => "Loading models…",
-                                _ => "No matching models.",
-                            }),
-                    )
-                })
-                .children(models.into_iter().map(|model| {
-                    let identity = model.identity.clone();
-                    let selected = active.as_ref() == Some(&identity);
-                    let context = format!("{} ctx", compact_count(model.context_window));
-                    let monogram = model
-                        .name
-                        .chars()
-                        .next()
-                        .unwrap_or('M')
-                        .to_uppercase()
-                        .to_string();
+                .relative()
+                .child(controls::scroll_wheel_capture(scroll))
+                .child(
                     div()
-                        .id(gpui::SharedString::from(format!(
-                            "switch-model-{}-{}",
-                            identity.provider, identity.id
-                        )))
-                        .h(px(48.0))
-                        .mx(px(6.0))
-                        .my(px(2.0))
-                        .px(px(10.0))
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(10.0))
-                        .rounded(px(theme::RADIUS_SM))
-                        .border_1()
-                        .border_color(if selected {
-                            theme::data()
-                        } else {
-                            theme::edge_soft()
+                        .id("model-switcher-scroll")
+                        .size_full()
+                        .bg(theme::panel())
+                        .overflow_y_scroll()
+                        .track_scroll(scroll)
+                        .scrollbar_width(px(6.0))
+                        .when(models.is_empty(), |list| {
+                            list.child(
+                                div()
+                                    .px(px(12.0))
+                                    .py(px(18.0))
+                                    .font_family(theme::sans())
+                                    .text_size(px(theme::T_UI_SM))
+                                    .text_color(theme::smoke())
+                                    .child(match projection.phase {
+                                        CatalogPhase::Loading => "Loading models…",
+                                        _ => "No matching models.",
+                                    }),
+                            )
                         })
-                        .bg(if selected {
-                            theme::data_wash()
-                        } else {
-                            theme::panel()
-                        })
-                        .when(can_change && !selected, |row| {
-                            let identity = identity.clone();
-                            row.tab_index(0)
-                                .cursor_pointer()
-                                .hover(|row| {
-                                    row.bg(theme::panel_lift()).border_color(theme::edge())
-                                })
-                                .active(|row| row.bg(theme::panel_hover()))
-                                .focus(|row| {
-                                    row.bg(theme::panel_lift()).border_color(theme::focus())
-                                })
-                                .on_click(cx.listener(move |view, _, window, cx| {
-                                    view.select_model(identity.clone(), window, cx)
-                                }))
-                        })
-                        .child(
+                        .children(models.into_iter().map(|model| {
+                            let identity = model.identity.clone();
+                            let selected = active.as_ref() == Some(&identity);
+                            let context = format!("{} ctx", compact_count(model.context_window));
+                            let monogram = model
+                                .name
+                                .chars()
+                                .next()
+                                .unwrap_or('M')
+                                .to_uppercase()
+                                .to_string();
                             div()
-                                .size(px(28.0))
-                                .rounded(px(theme::RADIUS_SM))
+                                .id(gpui::SharedString::from(format!(
+                                    "switch-model-{}-{}",
+                                    identity.provider, identity.id
+                                )))
+                                .h(px(48.0))
+                                .mx(px(6.0))
+                                .my(px(2.0))
+                                .px(px(10.0))
                                 .flex()
+                                .flex_row()
                                 .items_center()
-                                .justify_center()
-                                .flex_shrink_0()
+                                .gap(px(10.0))
+                                .rounded(px(theme::RADIUS_SM))
                                 .border_1()
                                 .border_color(if selected {
                                     theme::data()
@@ -556,80 +533,112 @@ pub(super) fn model_switcher_sheet(
                                 .bg(if selected {
                                     theme::data_wash()
                                 } else {
-                                    theme::canvas()
+                                    theme::panel()
                                 })
-                                .font_family(theme::sans())
-                                .text_size(px(theme::T_LABEL))
-                                .font_weight(FontWeight::BOLD)
-                                .text_color(if selected {
-                                    theme::data()
-                                } else {
-                                    theme::ash()
+                                .when(can_change && !selected, |row| {
+                                    let identity = identity.clone();
+                                    row.tab_index(0)
+                                        .cursor_pointer()
+                                        .hover(|row| {
+                                            row.bg(theme::panel_lift()).border_color(theme::edge())
+                                        })
+                                        .active(|row| row.bg(theme::panel_hover()))
+                                        .on_click(cx.listener(move |view, _, window, cx| {
+                                            view.select_model(identity.clone(), window, cx)
+                                        }))
                                 })
-                                .child(monogram),
-                        )
-                        .child(
-                            div()
-                                .min_w_0()
-                                .flex_1()
-                                .flex()
-                                .flex_col()
-                                .gap(px(1.0))
                                 .child(
                                     div()
+                                        .size(px(28.0))
+                                        .rounded(px(theme::RADIUS_SM))
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .flex_shrink_0()
+                                        .border_1()
+                                        .border_color(if selected {
+                                            theme::data()
+                                        } else {
+                                            theme::edge_soft()
+                                        })
+                                        .bg(if selected {
+                                            theme::data_wash()
+                                        } else {
+                                            theme::canvas()
+                                        })
                                         .font_family(theme::sans())
-                                        .text_size(px(theme::T_UI_SM))
-                                        .font_weight(if selected {
-                                            FontWeight::BOLD
-                                        } else {
-                                            FontWeight::SEMIBOLD
-                                        })
+                                        .text_size(px(theme::T_LABEL))
+                                        .font_weight(FontWeight::BOLD)
                                         .text_color(if selected {
-                                            theme::bone()
+                                            theme::data()
                                         } else {
-                                            theme::bone_dim()
+                                            theme::ash()
                                         })
-                                        .overflow_hidden()
-                                        .text_ellipsis()
-                                        .whitespace_nowrap()
-                                        .child(model.name),
+                                        .child(monogram),
+                                )
+                                .child(
+                                    div()
+                                        .min_w_0()
+                                        .flex_1()
+                                        .flex()
+                                        .flex_col()
+                                        .gap(px(1.0))
+                                        .child(
+                                            div()
+                                                .font_family(theme::sans())
+                                                .text_size(px(theme::T_UI_SM))
+                                                .font_weight(if selected {
+                                                    FontWeight::BOLD
+                                                } else {
+                                                    FontWeight::SEMIBOLD
+                                                })
+                                                .text_color(if selected {
+                                                    theme::bone()
+                                                } else {
+                                                    theme::bone_dim()
+                                                })
+                                                .overflow_hidden()
+                                                .text_ellipsis()
+                                                .whitespace_nowrap()
+                                                .child(model.name),
+                                        )
+                                        .child(
+                                            div()
+                                                .font_family(theme::mono())
+                                                .text_size(px(10.0))
+                                                .text_color(theme::smoke())
+                                                .overflow_hidden()
+                                                .text_ellipsis()
+                                                .whitespace_nowrap()
+                                                .child(identity.provider),
+                                        ),
                                 )
                                 .child(
                                     div()
                                         .font_family(theme::mono())
                                         .text_size(px(10.0))
-                                        .text_color(theme::smoke())
-                                        .overflow_hidden()
-                                        .text_ellipsis()
-                                        .whitespace_nowrap()
-                                        .child(identity.provider),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .font_family(theme::mono())
-                                .text_size(px(10.0))
-                                .font_weight(FontWeight::MEDIUM)
-                                .text_color(theme::ash())
-                                .flex_shrink_0()
-                                .child(context),
-                        )
-                        .when(selected, |row| {
-                            row.child(
-                                div()
-                                    .px(px(6.0))
-                                    .py(px(3.0))
-                                    .rounded(px(theme::RADIUS_SM))
-                                    .bg(theme::data_wash())
-                                    .font_family(theme::sans())
-                                    .text_size(px(9.0))
-                                    .font_weight(FontWeight::BOLD)
-                                    .text_color(theme::data())
-                                    .flex_shrink_0()
-                                    .child("Active"),
-                            )
-                        })
-                })),
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .text_color(theme::ash())
+                                        .flex_shrink_0()
+                                        .child(context),
+                                )
+                                .when(selected, |row| {
+                                    row.child(
+                                        div()
+                                            .px(px(6.0))
+                                            .py(px(3.0))
+                                            .rounded(px(theme::RADIUS_SM))
+                                            .bg(theme::data_wash())
+                                            .font_family(theme::sans())
+                                            .text_size(px(9.0))
+                                            .font_weight(FontWeight::BOLD)
+                                            .text_color(theme::data())
+                                            .flex_shrink_0()
+                                            .child("Active"),
+                                    )
+                                })
+                        })),
+                ),
         )
         .when_some(projection.feedback.clone(), |sheet, feedback| {
             sheet.child(
@@ -728,72 +737,80 @@ pub(super) fn thinking_select_sheet(
         })
         .child(
             div()
-                .id("thinking-select-scroll")
                 .flex_1()
                 .min_h_0()
-                .bg(theme::panel())
-                .overflow_y_scroll()
-                .track_scroll(scroll)
-                .scrollbar_width(px(6.0))
-                .children(levels.into_iter().map(|level| {
-                    let selected = active == Some(level);
+                .relative()
+                .child(controls::scroll_wheel_capture(scroll))
+                .child(
                     div()
-                        .id(gpui::SharedString::from(format!(
-                            "thinking-select-{level:?}"
-                        )))
-                        .h(px(28.0))
-                        .px(px(8.0))
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .justify_between()
-                        .gap(px(8.0))
-                        .border_b_1()
-                        .border_color(theme::panel_hover())
-                        .bg(if selected {
-                            theme::panel_lift()
-                        } else {
-                            theme::panel()
-                        })
-                        .text_color(if !can_change {
-                            theme::smoke()
-                        } else if selected {
-                            theme::bone()
-                        } else {
-                            theme::ash()
-                        })
-                        .when(can_change && !selected, |row| {
-                            row.tab_index(0)
-                                .cursor_pointer()
-                                .hover(|row| row.bg(theme::panel_lift()).text_color(theme::bone()))
-                                .active(|row| row.bg(theme::panel_hover()))
-                                .focus(|row| row.bg(theme::panel_lift()))
-                                .on_click(cx.listener(move |view, _, window, cx| {
-                                    view.set_thinking(level, window, cx)
-                                }))
-                        })
-                        .child(
+                        .id("thinking-select-scroll")
+                        .size_full()
+                        .bg(theme::panel())
+                        .overflow_y_scroll()
+                        .track_scroll(scroll)
+                        .scrollbar_width(px(6.0))
+                        .children(levels.into_iter().map(|level| {
+                            let selected = active == Some(level);
                             div()
-                                .font_family(theme::main())
-                                .text_size(px(theme::T_TINY))
-                                .font_weight(if selected {
-                                    FontWeight::SEMIBOLD
+                                .id(gpui::SharedString::from(format!(
+                                    "thinking-select-{level:?}"
+                                )))
+                                .h(px(28.0))
+                                .px(px(8.0))
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .justify_between()
+                                .gap(px(8.0))
+                                .border_b_1()
+                                .border_color(theme::panel_hover())
+                                .bg(if selected {
+                                    theme::panel_lift()
                                 } else {
-                                    FontWeight::MEDIUM
+                                    theme::panel()
                                 })
-                                .child(level.label()),
-                        )
-                        .when(selected, |row| {
-                            row.child(
-                                div()
-                                    .w(px(5.0))
-                                    .h(px(5.0))
-                                    .rounded_full()
-                                    .bg(theme::data())
-                                    .flex_shrink_0(),
-                            )
-                        })
-                })),
+                                .text_color(if !can_change {
+                                    theme::smoke()
+                                } else if selected {
+                                    theme::bone()
+                                } else {
+                                    theme::ash()
+                                })
+                                .when(can_change && !selected, |row| {
+                                    row.tab_index(0)
+                                        .cursor_pointer()
+                                        .hover(|row| {
+                                            row.bg(theme::panel_lift()).text_color(theme::bone())
+                                        })
+                                        .active(|row| row.bg(theme::panel_hover()))
+                                        .focus(|row| row.bg(theme::panel_lift()))
+                                        .on_click(cx.listener(move |view, _, window, cx| {
+                                            view.set_thinking(level, window, cx)
+                                        }))
+                                })
+                                .child(
+                                    div()
+                                        .font_family(theme::main())
+                                        .text_size(px(theme::T_TINY))
+                                        .font_weight(if selected {
+                                            FontWeight::SEMIBOLD
+                                        } else {
+                                            FontWeight::MEDIUM
+                                        })
+                                        .child(level.label()),
+                                )
+                                .when(selected, |row| {
+                                    row.child(
+                                        div()
+                                            .w(px(5.0))
+                                            .h(px(5.0))
+                                            .rounded_full()
+                                            .bg(theme::data())
+                                            .flex_shrink_0(),
+                                    )
+                                })
+                        })),
+                ),
         )
 }
 
@@ -1373,6 +1390,492 @@ fn thinking_settings(
                 ),
         )
         )
+}
+
+fn pi_settings(
+    projection: &ModelRuntimeProjection,
+    scroll: &ScrollHandle,
+    cx: &mut Context<RootView>,
+) -> gpui::AnyElement {
+    let Some(settings) = projection
+        .catalog
+        .as_ref()
+        .map(|catalog| catalog.settings.clone())
+    else {
+        return div()
+            .flex_1()
+            .min_h_0()
+            .px(px(18.0))
+            .py(px(18.0))
+            .child(controls::panel_note(
+                "Pi settings are unavailable until the model bridge finishes loading.",
+                controls::ControlTone::Normal,
+            ))
+            .into_any_element();
+    };
+
+    div()
+        .flex_1()
+        .min_h_0()
+        .relative()
+        .child(controls::scroll_wheel_capture(scroll))
+        .child(
+            div()
+                .id("pi-settings-scroll")
+                .size_full()
+                .overflow_y_scroll()
+                .track_scroll(scroll)
+                .scrollbar_width(px(theme::SCROLLBAR))
+                .child(
+                    div()
+                        .w_full()
+                        .max_w(px(980.0))
+                        .mx_auto()
+                        .px(px(18.0))
+                        .pt(px(14.0))
+                        .pb(px(28.0))
+                        .flex()
+                        .flex_col()
+                        .gap(px(18.0))
+                        .child(controls::panel_note(
+                            "These controls write Pi's global settings through SettingsManager. Project-local overrides remain owned by trusted Pi projects and are never rewritten here.",
+                            controls::ControlTone::Normal,
+                        ))
+                        .child(pi_settings_group(
+                            "Message delivery",
+                            "How Pi queues messages and chooses its provider transport.",
+                            vec![
+                                pi_select_setting_row(
+                                    "Steering delivery",
+                                    "Messages sent during a run can be delivered together or one at a time.",
+                                    "steeringMode",
+                                    &settings.steering_mode,
+                                    &[
+                                        ("One at a time", "one-at-a-time"),
+                                        ("All queued", "all"),
+                                    ],
+                                    cx,
+                                ),
+                                pi_select_setting_row(
+                                    "Follow-up delivery",
+                                    "Messages queued for the next turn can be delivered together or sequentially.",
+                                    "followUpMode",
+                                    &settings.follow_up_mode,
+                                    &[
+                                        ("One at a time", "one-at-a-time"),
+                                        ("All queued", "all"),
+                                    ],
+                                    cx,
+                                ),
+                                pi_select_setting_row(
+                                    "Provider transport",
+                                    "Choose Pi's preferred transport when a provider supports more than one.",
+                                    "transport",
+                                    &settings.transport,
+                                    &[
+                                        ("Auto", "auto"),
+                                        ("SSE", "sse"),
+                                        ("WebSocket", "websocket"),
+                                        ("WS cached", "websocket-cached"),
+                                    ],
+                                    cx,
+                                ),
+                            ],
+                        ))
+                        .child(pi_settings_group(
+                            "Agent behavior",
+                            "Recovery, compaction, and transcript behavior controlled by Pi.",
+                            vec![
+                                pi_toggle_setting_row(
+                                    "Automatic compaction",
+                                    "Allow Pi to compact context when it approaches configured limits.",
+                                    "compaction.enabled",
+                                    settings.compaction_enabled,
+                                    cx,
+                                ),
+                                pi_toggle_setting_row(
+                                    "Automatic retry",
+                                    "Retry transient agent-level failures with Pi's configured backoff.",
+                                    "retry.enabled",
+                                    settings.retry_enabled,
+                                    cx,
+                                ),
+                                pi_toggle_setting_row(
+                                    "Hide thinking blocks",
+                                    "Keep reasoning blocks out of Pi's rendered transcript output.",
+                                    "hideThinkingBlock",
+                                    settings.hide_thinking_block,
+                                    cx,
+                                ),
+                                pi_toggle_setting_row(
+                                    "Cache-miss notices",
+                                    "Show transcript notices for significant prompt-cache misses.",
+                                    "showCacheMissNotices",
+                                    settings.show_cache_miss_notices,
+                                    cx,
+                                ),
+                            ],
+                        ))
+                        .child(pi_settings_group(
+                            "Interaction",
+                            "Navigation defaults and editor density for Pi-managed interfaces.",
+                            vec![
+                                pi_select_setting_row(
+                                    "Default project trust",
+                                    "Fallback used by non-interactive Pi modes when no saved trust decision applies.",
+                                    "defaultProjectTrust",
+                                    &settings.default_project_trust,
+                                    &[("Ask", "ask"), ("Always", "always"), ("Never", "never")],
+                                    cx,
+                                ),
+                                pi_select_setting_row(
+                                    "Double escape",
+                                    "Choose the action Pi runs when Escape is pressed twice with an empty editor.",
+                                    "doubleEscapeAction",
+                                    &settings.double_escape_action,
+                                    &[("Tree", "tree"), ("Fork", "fork"), ("None", "none")],
+                                    cx,
+                                ),
+                                pi_select_setting_row(
+                                    "Tree filter",
+                                    "Default message filter when Pi opens its session tree.",
+                                    "treeFilterMode",
+                                    &settings.tree_filter_mode,
+                                    &[
+                                        ("Default", "default"),
+                                        ("No tools", "no-tools"),
+                                        ("User only", "user-only"),
+                                        ("Labeled", "labeled-only"),
+                                        ("All", "all"),
+                                    ],
+                                    cx,
+                                ),
+                                pi_stepper_setting_row(
+                                    "Autocomplete rows",
+                                    "Maximum visible entries in Pi's autocomplete menu.",
+                                    "autocompleteMaxVisible",
+                                    settings.autocomplete_max_visible,
+                                    3,
+                                    20,
+                                    cx,
+                                ),
+                            ],
+                        ))
+                        .child(pi_settings_group(
+                            "Display",
+                            "Terminal-facing presentation settings retained for Pi compatibility.",
+                            vec![
+                                pi_toggle_setting_row(
+                                    "Quiet startup",
+                                    "Hide Pi's startup header.",
+                                    "quietStartup",
+                                    settings.quiet_startup,
+                                    cx,
+                                ),
+                                pi_toggle_setting_row(
+                                    "Condensed changelog",
+                                    "Show the compact changelog after Pi updates.",
+                                    "collapseChangelog",
+                                    settings.collapse_changelog,
+                                    cx,
+                                ),
+                                pi_toggle_setting_row(
+                                    "Hardware cursor",
+                                    "Keep the terminal cursor visible for IME support in Pi's TUI.",
+                                    "showHardwareCursor",
+                                    settings.show_hardware_cursor,
+                                    cx,
+                                ),
+                                pi_stepper_setting_row(
+                                    "Editor padding",
+                                    "Horizontal padding used by Pi's input editor.",
+                                    "editorPaddingX",
+                                    settings.editor_padding_x,
+                                    0,
+                                    3,
+                                    cx,
+                                ),
+                                pi_stepper_setting_row(
+                                    "Output padding",
+                                    "Horizontal padding around Pi transcript messages.",
+                                    "outputPad",
+                                    settings.output_pad,
+                                    0,
+                                    1,
+                                    cx,
+                                ),
+                            ],
+                        ))
+                        .child(pi_settings_group(
+                            "Images and resources",
+                            "Control image handling and whether installed skills become slash commands.",
+                            vec![
+                                pi_toggle_setting_row(
+                                    "Show terminal images",
+                                    "Render inline images when the terminal supports them.",
+                                    "terminal.showImages",
+                                    settings.show_images,
+                                    cx,
+                                ),
+                                pi_toggle_setting_row(
+                                    "Auto-resize images",
+                                    "Resize oversized images before sending them to providers.",
+                                    "images.autoResize",
+                                    settings.image_auto_resize,
+                                    cx,
+                                ),
+                                pi_toggle_setting_row(
+                                    "Block image input",
+                                    "Prevent images from being sent to language-model providers.",
+                                    "images.blockImages",
+                                    settings.block_images,
+                                    cx,
+                                ),
+                                pi_toggle_setting_row(
+                                    "Clear on terminal shrink",
+                                    "Clear empty terminal rows after Pi output becomes shorter.",
+                                    "terminal.clearOnShrink",
+                                    settings.clear_on_shrink,
+                                    cx,
+                                ),
+                                pi_toggle_setting_row(
+                                    "Skill slash commands",
+                                    "Register installed Pi skills as slash commands.",
+                                    "enableSkillCommands",
+                                    settings.enable_skill_commands,
+                                    cx,
+                                ),
+                            ],
+                        ))
+                        .child(pi_settings_group(
+                            "Privacy",
+                            "Pi's independent telemetry preferences. Update checks are configured separately.",
+                            vec![
+                                pi_toggle_setting_row(
+                                    "Install telemetry",
+                                    "Allow Pi's anonymous install and update version ping.",
+                                    "enableInstallTelemetry",
+                                    settings.enable_install_telemetry,
+                                    cx,
+                                ),
+                                pi_toggle_setting_row(
+                                    "Analytics",
+                                    "Opt in to Pi analytics and create a tracking identifier if needed.",
+                                    "enableAnalytics",
+                                    settings.enable_analytics,
+                                    cx,
+                                ),
+                            ],
+                        )),
+                ),
+        )
+        .into_any_element()
+}
+
+fn pi_settings_group(
+    title: &'static str,
+    detail: &'static str,
+    rows: Vec<gpui::AnyElement>,
+) -> gpui::AnyElement {
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(7.0))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(2.0))
+                .child(controls::section_label(title))
+                .child(
+                    div()
+                        .font_family(theme::sans())
+                        .text_size(px(theme::T_TINY))
+                        .line_height(gpui::relative(1.35))
+                        .text_color(theme::smoke())
+                        .child(detail),
+                ),
+        )
+        .child(controls::divider_list().children(rows))
+        .into_any_element()
+}
+
+fn pi_setting_row(
+    label: &'static str,
+    detail: &'static str,
+    control: gpui::AnyElement,
+) -> gpui::AnyElement {
+    div()
+        .min_h(px(56.0))
+        .px(px(12.0))
+        .py(px(9.0))
+        .border_b_1()
+        .border_color(theme::edge_soft())
+        .flex()
+        .flex_row()
+        .items_center()
+        .justify_between()
+        .gap(px(18.0))
+        .child(
+            div()
+                .min_w_0()
+                .flex_1()
+                .max_w(px(520.0))
+                .flex()
+                .flex_col()
+                .gap(px(2.0))
+                .child(
+                    div()
+                        .font_family(theme::sans())
+                        .text_size(px(theme::T_UI_SM))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(theme::bone_dim())
+                        .child(label),
+                )
+                .child(
+                    div()
+                        .font_family(theme::sans())
+                        .text_size(px(theme::T_TINY))
+                        .line_height(gpui::relative(1.35))
+                        .text_color(theme::smoke())
+                        .child(detail),
+                ),
+        )
+        .child(
+            div()
+                .min_w_0()
+                .max_w(px(440.0))
+                .flex_shrink_0()
+                .child(control),
+        )
+        .into_any_element()
+}
+
+fn pi_toggle_setting_row(
+    label: &'static str,
+    detail: &'static str,
+    key: &'static str,
+    enabled: bool,
+    cx: &mut Context<RootView>,
+) -> gpui::AnyElement {
+    let id = key.replace('.', "-");
+    let on_id = gpui::SharedString::from(format!("pi-setting-{id}-on"));
+    let off_id = gpui::SharedString::from(format!("pi-setting-{id}-off"));
+    let control = div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(5.0))
+        .child(controls::chip_button(
+            on_id,
+            "On",
+            enabled,
+            !enabled,
+            Box::new(cx.listener(move |view, _, _, cx| {
+                view.set_pi_setting(key, serde_json::Value::Bool(true), cx)
+            })),
+        ))
+        .child(controls::chip_button(
+            off_id,
+            "Off",
+            !enabled,
+            enabled,
+            Box::new(cx.listener(move |view, _, _, cx| {
+                view.set_pi_setting(key, serde_json::Value::Bool(false), cx)
+            })),
+        ))
+        .into_any_element();
+    pi_setting_row(label, detail, control)
+}
+
+fn pi_select_setting_row(
+    label: &'static str,
+    detail: &'static str,
+    key: &'static str,
+    current: &str,
+    options: &'static [(&'static str, &'static str)],
+    cx: &mut Context<RootView>,
+) -> gpui::AnyElement {
+    let id = key.replace('.', "-");
+    let control = div()
+        .flex()
+        .flex_row()
+        .flex_wrap()
+        .justify_end()
+        .gap(px(5.0))
+        .children(options.iter().map(|(option_label, value)| {
+            let option_label = *option_label;
+            let value = *value;
+            let selected = current == value;
+            controls::chip_button(
+                gpui::SharedString::from(format!("pi-setting-{id}-{value}")),
+                option_label,
+                selected,
+                !selected,
+                Box::new(cx.listener(move |view, _, _, cx| {
+                    view.set_pi_setting(key, serde_json::Value::String(value.to_owned()), cx)
+                })),
+            )
+        }))
+        .into_any_element();
+    pi_setting_row(label, detail, control)
+}
+
+fn pi_stepper_setting_row(
+    label: &'static str,
+    detail: &'static str,
+    key: &'static str,
+    value: u8,
+    minimum: u8,
+    maximum: u8,
+    cx: &mut Context<RootView>,
+) -> gpui::AnyElement {
+    let id = key.replace('.', "-");
+    let decrease = value.saturating_sub(1).max(minimum);
+    let increase = value.saturating_add(1).min(maximum);
+    let control = div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(5.0))
+        .child(controls::chip_button(
+            gpui::SharedString::from(format!("pi-setting-{id}-decrease")),
+            "−",
+            false,
+            value > minimum,
+            Box::new(cx.listener(move |view, _, _, cx| {
+                view.set_pi_setting(key, serde_json::Value::from(decrease), cx)
+            })),
+        ))
+        .child(
+            div()
+                .min_w(px(38.0))
+                .h(px(28.0))
+                .px(px(9.0))
+                .rounded(px(theme::RADIUS_SM))
+                .border_1()
+                .border_color(theme::edge_soft())
+                .bg(theme::canvas())
+                .flex()
+                .items_center()
+                .justify_center()
+                .font_family(theme::mono())
+                .text_size(px(theme::T_MONO_SM))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(theme::bone_dim())
+                .child(value.to_string()),
+        )
+        .child(controls::chip_button(
+            gpui::SharedString::from(format!("pi-setting-{id}-increase")),
+            "+",
+            false,
+            value < maximum,
+            Box::new(cx.listener(move |view, _, _, cx| {
+                view.set_pi_setting(key, serde_json::Value::from(increase), cx)
+            })),
+        ))
+        .into_any_element();
+    pi_setting_row(label, detail, control)
 }
 
 fn usage_settings(projection: &ModelRuntimeProjection) -> impl IntoElement {

@@ -2,81 +2,12 @@ use std::collections::HashSet;
 
 use serde_json::Value;
 
-use super::{COLLAPSED_PREVIEW_BYTES, CardImage, CardStatus, ToolPayload};
+use super::{CardImage, CardStatus, ToolPayload};
 use crate::controller::ConversationProjection;
 use crate::services::rpc::{RequestId, ToolCallId};
 use crate::state::runtime::{
     BashExecution, BashStatus, MessageBlock, ToolImage, ToolStatus, sanitize_untrusted_text,
 };
-
-#[cfg_attr(not(test), allow(dead_code))]
-pub(super) fn format_json(value: &Value) -> String {
-    let value = sanitized_json_value(value);
-    serde_json::to_string_pretty(&value).unwrap_or_else(|_| "Unrenderable JSON".to_owned())
-}
-
-fn sanitized_json_value(value: &Value) -> Value {
-    match value {
-        Value::Null | Value::Bool(_) | Value::Number(_) => value.clone(),
-        Value::String(text) => Value::String(sanitize_untrusted_text(text)),
-        Value::Array(values) => Value::Array(values.iter().map(sanitized_json_value).collect()),
-        Value::Object(object) => Value::Object(
-            object
-                .iter()
-                .map(|(key, value)| (sanitize_untrusted_text(key), sanitized_json_value(value)))
-                .collect(),
-        ),
-    }
-}
-
-#[allow(dead_code)]
-pub(super) fn payload_copy_text(payload: &ToolPayload, error: Option<&str>) -> String {
-    let mut parts = Vec::new();
-    if !payload.text.is_empty() {
-        parts.push(payload.text.clone());
-    }
-    if let Some(diff) = payload.diff.as_ref() {
-        parts.push(diff.clone());
-    }
-    if let Some(error) = error {
-        parts.push(sanitize_untrusted_text(error));
-    }
-    parts.join("\n")
-}
-
-#[cfg_attr(not(test), allow(dead_code))]
-pub(super) fn bounded_preview(text: &str, limit: usize) -> (String, usize) {
-    let max_lines = if limit <= COLLAPSED_PREVIEW_BYTES {
-        28
-    } else {
-        400
-    };
-    let mut end = text.len().min(limit);
-    while !text.is_char_boundary(end) {
-        end = end.saturating_sub(1);
-    }
-    let mut lines = 1usize;
-    for (index, character) in text[..end].char_indices() {
-        if character == '\n' {
-            lines = lines.saturating_add(1);
-            if lines > max_lines {
-                end = index;
-                break;
-            }
-        }
-    }
-    let mut preview = sanitize_untrusted_text(&text[..end]);
-    let mut safe_end = preview.len().min(limit);
-    while !preview.is_char_boundary(safe_end) {
-        safe_end = safe_end.saturating_sub(1);
-    }
-    let omitted = text
-        .len()
-        .saturating_sub(end)
-        .saturating_add(preview.len().saturating_sub(safe_end));
-    preview.truncate(safe_end);
-    (preview, omitted)
-}
 
 pub(super) fn payload_from_value(value: &Value) -> ToolPayload {
     let mut payload = ToolPayload::default();
@@ -685,16 +616,6 @@ mod tests {
     }
 
     #[test]
-    fn scalar_and_malformed_argument_fallbacks_remain_visible_and_sanitized() {
-        let payload = payload_from_value(&Value::String("bad\u{1b}[31m\u{202e}".to_owned()));
-        assert_eq!(bounded_preview(&payload.text, 1_024).0, "bad�[31m�");
-        assert_eq!(
-            format_json(&Value::String("{not-json}\u{7}".to_owned())),
-            "\"{not-json}�\""
-        );
-    }
-
-    #[test]
     fn read_presentation_builds_tree_rows_and_group_titles() {
         let payload = ToolPayload {
             text: "line1\nline2\nline3\n".to_owned(),
@@ -721,21 +642,5 @@ mod tests {
         assert_eq!(bash.rows[0].label, "$ cargo test");
         assert!(!bash.groupable());
         assert!(one.groupable());
-    }
-
-    #[test]
-    fn large_preview_is_bounded_on_bytes_lines_and_a_utf8_boundary() {
-        let source = "a".repeat(100_000) + "😀";
-        let (preview, omitted) = bounded_preview(&source, 24_001);
-        assert_eq!(preview.len(), 24_001);
-        assert!(omitted > 70_000);
-        assert!(preview.is_char_boundary(preview.len()));
-
-        let many_lines = "line\n".repeat((8 * 1024 * 1024) / 5);
-        let payload = payload_from_value(&Value::String(many_lines));
-        let (preview, omitted) = bounded_preview(&payload.text, COLLAPSED_PREVIEW_BYTES);
-        assert!(preview.len() <= COLLAPSED_PREVIEW_BYTES);
-        assert!(preview.lines().count() <= 400);
-        assert!(omitted > 8_000_000);
     }
 }
