@@ -89,16 +89,35 @@ mod conversation_scrollbar_tests {
     }
 }
 
-pub(super) fn conversation_area(
-    conversation_projection: Arc<ConversationProjection>,
-    conversation_list: Arc<ConversationListModel>,
-    conversation_list_state: ListState,
-    transcript_cache: Entity<TranscriptTextCache>,
-    activity_disclosures: Entity<ActivityDisclosureState>,
-    root: Entity<RootView>,
-) -> impl IntoElement {
+pub(super) struct ConversationAreaParams {
+    pub(super) projection: Arc<ConversationProjection>,
+    pub(super) list: Arc<ConversationListModel>,
+    pub(super) list_state: ListState,
+    pub(super) transcript_cache: Entity<TranscriptTextCache>,
+    pub(super) activity_disclosures: Entity<ActivityDisclosureState>,
+    pub(super) workspace_diff: Option<Arc<WorkspaceDiff>>,
+    pub(super) workspace_diff_files_expanded: bool,
+    pub(super) root: Entity<RootView>,
+}
+
+pub(super) fn conversation_area(params: ConversationAreaParams) -> impl IntoElement {
+    let ConversationAreaParams {
+        projection,
+        list: conversation_list,
+        list_state: conversation_list_state,
+        transcript_cache,
+        activity_disclosures,
+        workspace_diff,
+        workspace_diff_files_expanded,
+        root,
+    } = params;
     let wheel_root = root.clone();
     let scrollbar_state = conversation_list_state.clone();
+    let diff_summary = ConversationDiffSummary {
+        snapshot: workspace_diff,
+        files_expanded: workspace_diff_files_expanded,
+        root: root.clone(),
+    };
 
     // The transcript shares the center column with the composer and must yield
     // height to it on every lifecycle-driven rerender.
@@ -145,9 +164,10 @@ pub(super) fn conversation_area(
                     list(conversation_list_state, move |item_index, _, cx| {
                         conversation_list.render_item(
                             item_index,
-                            &conversation_projection,
+                            &projection,
                             &transcript_cache,
                             &activity_disclosures,
+                            &diff_summary,
                             cx,
                         )
                     })

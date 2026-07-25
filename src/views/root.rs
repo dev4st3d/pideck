@@ -2,6 +2,7 @@
 
 use std::cell::Cell;
 use std::collections::{HashSet, VecDeque};
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -42,6 +43,7 @@ use crate::orchestration::{
 use crate::resource_center::{
     ResourceLoadState, ResourcePhase, ResourceScopeFilter, ResourceStateFilter,
 };
+use crate::services::git_diff::{WorkspaceDiff, load_workspace_diff};
 use crate::state::history::{HistoryBrowser, HistoryFilter};
 use crate::state::runtime::{
     BashStatus, CompactionState, DialogAnswer, DialogRequest, MessageBlock, MessageRole,
@@ -54,7 +56,8 @@ use crate::theme;
 use crate::views::composer::{Composer, ComposerAvailability, ComposerEvent, ComposerFeedback};
 use crate::views::controls;
 use crate::views::conversation::{
-    ActivityDisclosureState, ConversationListModel, ConversationScrollMotion, TranscriptTextCache,
+    ActivityDisclosureState, ConversationDiffSummary, ConversationListModel,
+    ConversationScrollMotion, TranscriptTextCache, latest_completed_response_key,
 };
 
 mod composer_bar;
@@ -284,6 +287,16 @@ pub struct RootView {
     conversation_scrollbar_drag_offset: Option<Pixels>,
     transcript_cache: Entity<TranscriptTextCache>,
     activity_disclosures: Entity<ActivityDisclosureState>,
+    workspace_diff: Option<Arc<WorkspaceDiff>>,
+    workspace_diff_identity: Option<(u64, String)>,
+    workspace_diff_generation: u64,
+    workspace_diff_files_expanded: bool,
+    workspace_diff_open: bool,
+    workspace_diff_selected: usize,
+    workspace_diff_collapsed_folders: HashSet<String>,
+    workspace_diff_files_scroll: ScrollHandle,
+    workspace_diff_scroll: ScrollHandle,
+    workspace_diff_focus: FocusHandle,
     pending_draft: Option<PendingDraft>,
     pending_bash: Option<crate::services::rpc::RequestId>,
     pending_compaction_focus: Option<String>,
@@ -379,6 +392,7 @@ impl RootView {
         let history_focus = cx.focus_handle();
         let extension_dialog_focus = cx.focus_handle();
         let subagent_dialog_focus = cx.focus_handle();
+        let workspace_diff_focus = cx.focus_handle();
         let (conversation, extension_ui, render_projections, command_catalog_source) = {
             let controller = controller.read(cx);
             (
@@ -571,6 +585,16 @@ impl RootView {
             conversation_scrollbar_drag_offset: None,
             transcript_cache,
             activity_disclosures,
+            workspace_diff: None,
+            workspace_diff_identity: None,
+            workspace_diff_generation: 0,
+            workspace_diff_files_expanded: false,
+            workspace_diff_open: false,
+            workspace_diff_selected: 0,
+            workspace_diff_collapsed_folders: HashSet::new(),
+            workspace_diff_files_scroll: ScrollHandle::new(),
+            workspace_diff_scroll: ScrollHandle::new(),
+            workspace_diff_focus,
             pending_draft: None,
             pending_bash: None,
             pending_compaction_focus: None,
@@ -2345,6 +2369,256 @@ impl RootView {
         });
     }
 
+    fn sync_workspace_diff(
+        &mut self,
+        conversation: &ConversationProjection,
+        workspace: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let identity = latest_completed_response_key(conversation)
+            .map(|key| (conversation.epoch.value(), key));
+        if identity == self.workspace_diff_identity {
+            return;
+        }
+
+        self.workspace_diff_identity = identity.clone();
+        self.workspace_diff = None;
+        self.workspace_diff_files_expanded = false;
+        self.workspace_diff_open = false;
+        self.workspace_diff_selected = 0;
+        self.workspace_diff_collapsed_folders.clear();
+        self.workspace_diff_files_scroll = ScrollHandle::new();
+        self.workspace_diff_scroll = ScrollHandle::new();
+        self.workspace_diff_generation = self.workspace_diff_generation.wrapping_add(1);
+        self.conversation_list
+            .refresh_trailing(&self.conversation_list_state);
+        let generation = self.workspace_diff_generation;
+        let Some(_) = identity else {
+            cx.notify();
+            return;
+        };
+
+        let workspace = PathBuf::from(workspace);
+        let scan = cx
+            .background_executor()
+            .spawn(async move { load_workspace_diff(&workspace) });
+        cx.spawn(async move |view, cx| {
+            let result = scan.await;
+            let _ = view.update(cx, |view, cx| {
+                if view.workspace_diff_generation != generation {
+                    return;
+                }
+                view.workspace_diff = result
+                    .ok()
+                    .filter(|snapshot| !snapshot.is_empty())
+                    .map(Arc::new);
+                view.conversation_list
+                    .refresh_trailing(&view.conversation_list_state);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    pub(in crate::views) fn toggle_workspace_diff_files(&mut self, cx: &mut Context<Self>) {
+        if self.workspace_diff.is_none() {
+            return;
+        }
+        self.workspace_diff_files_expanded = !self.workspace_diff_files_expanded;
+        self.conversation_list
+            .refresh_trailing(&self.conversation_list_state);
+        cx.notify();
+    }
+
+    pub(in crate::views) fn open_workspace_diff(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.workspace_diff.is_none() {
+            return;
+        }
+        self.workspace_diff_selected = self.workspace_diff_selected.min(
+            self.workspace_diff
+                .as_ref()
+                .map_or(0, |diff| diff.files.len().saturating_sub(1)),
+        );
+        self.workspace_diff_scroll = ScrollHandle::new();
+        self.workspace_diff_open = true;
+        window.focus(&self.workspace_diff_focus);
+        cx.notify();
+    }
+
+    pub(in crate::views) fn select_workspace_diff_file(
+        &mut self,
+        index: usize,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(snapshot) = self.workspace_diff.clone() else {
+            return;
+        };
+        let Some(file) = snapshot.files.get(index) else {
+            return;
+        };
+
+        let selection_changed = index != self.workspace_diff_selected;
+        let mut folder_path = String::new();
+        let mut expanded = false;
+        let target_path = file.path.rsplit(" → ").next().unwrap_or(&file.path);
+        let mut parts = target_path.split('/').collect::<Vec<_>>();
+        parts.pop();
+        for folder in parts {
+            if !folder_path.is_empty() {
+                folder_path.push('/');
+            }
+            folder_path.push_str(folder);
+            expanded |= self.workspace_diff_collapsed_folders.remove(&folder_path);
+        }
+
+        if !selection_changed && !expanded {
+            return;
+        }
+        self.workspace_diff_selected = index;
+        if let Some(row) = crate::views::diff_summary::file_tree_row_index(
+            &snapshot,
+            &self.workspace_diff_collapsed_folders,
+            index,
+        ) {
+            self.workspace_diff_files_scroll.scroll_to_item(row);
+        }
+        if selection_changed {
+            self.workspace_diff_scroll = ScrollHandle::new();
+        }
+        cx.notify();
+    }
+
+    pub(in crate::views) fn toggle_workspace_diff_folder(
+        &mut self,
+        path: &str,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.workspace_diff_collapsed_folders.remove(path) {
+            self.workspace_diff_collapsed_folders
+                .insert(path.to_owned());
+        }
+        cx.notify();
+    }
+
+    fn set_selected_workspace_diff_folder_collapsed(
+        &mut self,
+        collapsed: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(file) = self
+            .workspace_diff
+            .as_ref()
+            .and_then(|snapshot| snapshot.files.get(self.workspace_diff_selected))
+        else {
+            return;
+        };
+        let target_path = file.path.rsplit(" → ").next().unwrap_or(&file.path);
+        let mut parts = target_path.split('/').collect::<Vec<_>>();
+        parts.pop();
+        let mut folder_path = String::new();
+        let mut folders = Vec::new();
+        for folder in parts {
+            if !folder_path.is_empty() {
+                folder_path.push('/');
+            }
+            folder_path.push_str(folder);
+            folders.push(folder_path.clone());
+        }
+
+        let changed = if collapsed {
+            folders
+                .last()
+                .is_some_and(|folder| self.workspace_diff_collapsed_folders.insert(folder.clone()))
+        } else {
+            folders
+                .iter()
+                .find(|folder| self.workspace_diff_collapsed_folders.contains(*folder))
+                .cloned()
+                .is_some_and(|folder| self.workspace_diff_collapsed_folders.remove(&folder))
+        };
+        if changed {
+            cx.notify();
+        }
+    }
+
+    fn move_workspace_diff_file(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let Some(snapshot) = self.workspace_diff.as_ref() else {
+            return;
+        };
+        let Some(next) = crate::views::diff_summary::adjacent_file_tree_index(
+            snapshot,
+            &self.workspace_diff_collapsed_folders,
+            self.workspace_diff_selected,
+            delta,
+        ) else {
+            return;
+        };
+        self.select_workspace_diff_file(next, cx);
+    }
+
+    pub(in crate::views) fn on_workspace_diff_key_down(
+        &mut self,
+        event: &gpui::KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match event.keystroke.key.as_str() {
+            "escape" => {
+                cx.stop_propagation();
+                self.close_workspace_diff(window, cx);
+            }
+            "up" | "k" => {
+                cx.stop_propagation();
+                self.move_workspace_diff_file(-1, cx);
+            }
+            "down" | "j" => {
+                cx.stop_propagation();
+                self.move_workspace_diff_file(1, cx);
+            }
+            "left" => {
+                cx.stop_propagation();
+                self.set_selected_workspace_diff_folder_collapsed(true, cx);
+            }
+            "right" => {
+                cx.stop_propagation();
+                self.set_selected_workspace_diff_folder_collapsed(false, cx);
+            }
+            "home" | "end" => {
+                cx.stop_propagation();
+                let last = event.keystroke.key == "end";
+                let index = self.workspace_diff.as_ref().and_then(|snapshot| {
+                    crate::views::diff_summary::edge_file_tree_index(
+                        snapshot,
+                        &self.workspace_diff_collapsed_folders,
+                        last,
+                    )
+                });
+                if let Some(index) = index {
+                    self.select_workspace_diff_file(index, cx);
+                }
+            }
+            "tab" => cx.stop_propagation(),
+            _ => {}
+        }
+    }
+
+    pub(in crate::views) fn close_workspace_diff(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.workspace_diff_open {
+            return;
+        }
+        self.workspace_diff_open = false;
+        window.focus(&self.composer.read(cx).focus_handle(cx));
+        cx.notify();
+    }
+
     fn sync_runtime(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         cx.defer_in(window, |view, _, cx| view.collect_runtime_notifications(cx));
         let (
@@ -2364,6 +2638,14 @@ impl RootView {
             )
         };
         self.sync_extension_ui(extension_ui, window, cx);
+        self.sync_workspace_diff(&conversation, &render_projections.shell.workspace, cx);
+        if !matches!(
+            conversation.lifecycle,
+            RuntimeLifecycle::Ready | RuntimeLifecycle::Settled
+        ) && self.workspace_diff_open
+        {
+            self.close_workspace_diff(window, cx);
+        }
         let epoch_changed = conversation.epoch != self.conversation.epoch;
         if epoch_changed {
             self.conversation_scroll_motion.cancel();

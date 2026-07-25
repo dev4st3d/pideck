@@ -15,6 +15,7 @@ The visible shell now shows only live or explicitly Loading, Awaiting, Unknown, 
 - a native multiline composer with model and thinking pickers in the prompt chrome, grapheme-safe editing, IME, clipboard, selection, undo, wrapping, scrolling, and visible pending/accepted/rejected/uncertain delivery state;
 - the authoritative current transcript with Markdown-rendered user input, assistant output, and thinking; visible custom messages; branch/compaction summaries; generic running/success/error/cancelled tool and Bash cards; lifecycle notices; and in-place accumulated partial updates;
 - expandable sanitized tool arguments, bounded text/diff previews, image results, opaque detail fallback, copy controls, elapsed time, truncation metadata, and explicit full-output Reveal/Open folder actions;
+- a read-only Git workspace change summary after completed responses, with per-file counts, untracked and binary awareness, expandable file rows, and a bounded file-oriented diff viewer with a scrollable folder tree, navigation, readable hunks, and compact line numbers;
 - provider/model/time/stop/usage metadata with raw provider diagnostics and private payloads excluded from normalized diagnostics;
 - selectable transcript text and near-bottom-only auto-follow, preserving manual scroll and selection during streaming.
 - complete steering/follow-up queue visibility and delivery modes, scoped abort controls, retry countdown/attempt/final-error state, manual compaction with optional focus instructions, and auto-compaction/auto-retry controls;
@@ -105,6 +106,7 @@ Typography uses installed system fonts. Open `/settings` and choose separate Mai
 - `src/controller.rs` - GPUI-owned controller plus pure attempt/generation gate
 - `src/services/runtime_worker.rs` - injectable GPUI-independent service boundary and responsive worker coordinator
 - `src/services/session_catalog.rs` - strict streaming v1-v3 JSONL metadata scanner, directory precedence, canonical workspace filtering, corruption reporting, and stale-scan worker
+- `src/services/git_diff.rs` - bounded read-only Git and untracked-file inspection for post-response workspace change snapshots
 - `src/model_runtime.rs` - secret-free provider/model catalog, cached refresh, auth prompt state machine, sparse thinking, pricing-tier, and streaming-change policy
 - `src/services/sdk_bridge.rs`, `bridge/pi-bridge.mjs`, and `bridge/protocol.schema.json` - negotiated, versioned, cancellable stdio JSONL SDK sidecar for the Phase 11 session gaps, Phase 12 ModelRuntime/settings/auth gaps, Phase 15 resource inventory/reload plane, and Phase 16 orchestration adapter transport
 - `src/orchestration.rs`, `bridge/orchestration-adapter.mjs`, and `bridge/orchestration-core.mjs` - typed task/subagent/goal snapshots, stale/session guards, Pi event-bus actions, task DAG checks, schedule restoration, and bounded live subagent transcripts
@@ -117,6 +119,7 @@ Typography uses installed system fonts. Open `/settings` and choose separate Mai
 - `src/views/root.rs` - observed runtime shell, conversation ownership, scroll pinning, and draft/acceptance correlation
 - `src/views/conversation.rs` and `src/views/markdown.rs` - turn-grouped live transcript, stable selectable text entities, safe CommonMark presentation, metadata, and notices
 - `src/views/tool_card.rs` - generic tool/Bash payload normalization, bounded previews, image/diff rendering, copy, and explicit output-path actions
+- `src/views/diff_summary.rs` - response-tail changed-file disclosure and bounded file-oriented diff viewer
 - `src/views/composer/` - native GPUI input handler, text buffer, multiline layout/paint, and focused tests
 - `src/views/controls.rs` - focus-visible recovery control and inspector rows
 

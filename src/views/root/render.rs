@@ -2,14 +2,15 @@ use super::composer_bar::{ComposerBarParams, composer_bar};
 use super::inspector::{InspectorParams, inspector, subagent_dialog};
 use super::model_panels::{ModelSettingsPanelParams, model_settings_panel};
 use super::overlays::{
-    PastedImageOverlayParams, command_palette_overlay, compaction_dialog, conversation_area,
-    extension_dialog_overlay, hotkey_help_overlay, pasted_image_overlay,
+    ConversationAreaParams, PastedImageOverlayParams, command_palette_overlay, compaction_dialog,
+    conversation_area, extension_dialog_overlay, hotkey_help_overlay, pasted_image_overlay,
     runtime_notification_stack,
 };
 use super::shell::{
     HistoryPanelParams, SessionsPanelParams, history_panel, sessions_panel, titlebar,
 };
 use super::*;
+use crate::views::diff_summary::diff_overlay;
 
 impl Render for RootView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -131,14 +132,21 @@ impl Render for RootView {
                             .h_full()
                             .flex()
                             .flex_col()
-                            .child(conversation_area(
-                                Arc::clone(&self.conversation),
-                                Arc::clone(&self.conversation_list),
-                                self.conversation_list_state.clone(),
-                                self.transcript_cache.clone(),
-                                self.activity_disclosures.clone(),
-                                cx.entity(),
-                            ))
+                            .child(conversation_area(ConversationAreaParams {
+                                projection: Arc::clone(&self.conversation),
+                                list: Arc::clone(&self.conversation_list),
+                                list_state: self.conversation_list_state.clone(),
+                                transcript_cache: self.transcript_cache.clone(),
+                                activity_disclosures: self.activity_disclosures.clone(),
+                                workspace_diff: matches!(
+                                    self.conversation.lifecycle,
+                                    RuntimeLifecycle::Ready | RuntimeLifecycle::Settled
+                                )
+                                .then(|| self.workspace_diff.clone())
+                                .flatten(),
+                                workspace_diff_files_expanded: self.workspace_diff_files_expanded,
+                                root: cx.entity(),
+                            }))
                             .child(composer_bar(
                                 ComposerBarParams {
                                     composer: &self.composer,
@@ -208,6 +216,22 @@ impl Render for RootView {
             .when(!self.runtime_notifications.is_empty(), |shell| {
                 shell.child(runtime_notification_stack(&self.runtime_notifications, cx))
             })
+            .when_some(
+                self.workspace_diff_open
+                    .then(|| self.workspace_diff.clone())
+                    .flatten(),
+                |shell, snapshot| {
+                    shell.child(diff_overlay(
+                        &snapshot,
+                        self.workspace_diff_selected,
+                        &self.workspace_diff_collapsed_folders,
+                        &self.workspace_diff_focus,
+                        &self.workspace_diff_files_scroll,
+                        &self.workspace_diff_scroll,
+                        cx,
+                    ))
+                },
+            )
             .when_some(self.selected_subagent_id.clone(), |shell, agent_id| {
                 shell.child(subagent_dialog(
                     orchestration

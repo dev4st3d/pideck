@@ -109,8 +109,16 @@ pub fn error() -> Rgba {
     rgb(0xe18263)
 }
 
+pub fn error_wash() -> Rgba {
+    rgba(0xe182_6314)
+}
+
 pub fn live() -> Rgba {
     rgb(0xc5d2a8)
+}
+
+pub fn live_wash() -> Rgba {
+    rgba(0xc5d2_a812)
 }
 
 pub fn working() -> Rgba {

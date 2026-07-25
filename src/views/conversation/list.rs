@@ -8,6 +8,7 @@ use gpui::{
 
 use super::{ActivityDisclosureState, TranscriptText, TranscriptTextCache};
 use crate::controller::ConversationProjection;
+use crate::services::git_diff::WorkspaceDiff;
 use crate::state::runtime::{FacetStatus, MessageRole};
 use crate::theme;
 
@@ -25,6 +26,13 @@ enum ConversationItem {
         key: String,
     },
     Trailing,
+}
+
+#[derive(Clone)]
+pub(in crate::views) struct ConversationDiffSummary {
+    pub(in crate::views) snapshot: Option<Arc<WorkspaceDiff>>,
+    pub(in crate::views) files_expanded: bool,
+    pub(in crate::views) root: Entity<crate::views::RootView>,
 }
 
 #[derive(Debug, Clone)]
@@ -95,6 +103,11 @@ impl ConversationListModel {
         self.items.len()
     }
 
+    pub(in crate::views) fn refresh_trailing(&self, state: &ListState) {
+        let index = self.items.len().saturating_sub(1);
+        state.splice(index..self.items.len(), 1);
+    }
+
     pub(in crate::views) fn reconcile(
         &self,
         previous: &Self,
@@ -138,6 +151,7 @@ impl ConversationListModel {
         projection: &ConversationProjection,
         cache: &Entity<TranscriptTextCache>,
         disclosures: &Entity<ActivityDisclosureState>,
+        diff_summary: &ConversationDiffSummary,
         cx: &mut App,
     ) -> AnyElement {
         let Some(item) = self.items.get(item_index) else {
@@ -189,7 +203,15 @@ impl ConversationListModel {
             }
             ConversationItem::Trailing => {
                 let texts = super::cached_optimistic_texts(projection, cache, cx);
-                trailing(projection, self.turn_count, &texts, disclosures, cx).into_any_element()
+                trailing(
+                    projection,
+                    self.turn_count,
+                    &texts,
+                    disclosures,
+                    diff_summary,
+                    cx,
+                )
+                .into_any_element()
             }
         }
     }
@@ -249,6 +271,7 @@ fn trailing(
     completed_turns: usize,
     texts: &HashMap<String, Entity<TranscriptText>>,
     disclosures: &Entity<ActivityDisclosureState>,
+    diff_summary: &ConversationDiffSummary,
     cx: &mut App,
 ) -> impl IntoElement {
     stream_gutter()
@@ -268,6 +291,17 @@ fn trailing(
             super::tail_activity(projection, disclosures, cx),
             |tail, activity| tail.child(activity),
         )
+        .when_some(diff_summary.snapshot.clone(), |tail, snapshot| {
+            tail.child(
+                div()
+                    .pt(px(14.0))
+                    .child(crate::views::diff_summary::summary_card(
+                        &snapshot,
+                        diff_summary.files_expanded,
+                        diff_summary.root.clone(),
+                    )),
+            )
+        })
         .when(
             projection.messages.is_empty()
                 && projection.accepted_user_inputs.is_empty()

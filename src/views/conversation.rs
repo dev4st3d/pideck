@@ -30,7 +30,7 @@ use crate::views::tool_card::{
 mod list;
 mod scroll;
 
-pub(super) use list::ConversationListModel;
+pub(super) use list::{ConversationDiffSummary, ConversationListModel};
 pub(super) use scroll::ConversationScrollMotion;
 
 const MAX_CACHED_TRANSCRIPT_BLOCKS: usize = 256;
@@ -745,6 +745,17 @@ fn is_final_assistant_reply(message: &RuntimeMessage) -> bool {
         && message.terminal
         && message.stop_reason != Some(MessageStopReason::ToolUse)
         && has_reply_text(message)
+}
+
+pub(in crate::views) fn latest_completed_response_key(
+    projection: &ConversationProjection,
+) -> Option<String> {
+    projection
+        .messages
+        .iter()
+        .rev()
+        .find(|message| is_final_assistant_reply(message))
+        .map(|message| message.key.0.clone())
 }
 
 fn push_message_activity<'a>(
@@ -1679,5 +1690,9 @@ mod tests {
         assert!(matches!(activity[1], ActivityStep::Text { .. }));
         assert!(matches!(activity[2], ActivityStep::Tool { .. }));
         assert_eq!(reply.map(|m| m.key.0.as_str()), Some("a2"));
+        assert_eq!(
+            latest_completed_response_key(&projection).as_deref(),
+            Some("a2")
+        );
     }
 }
