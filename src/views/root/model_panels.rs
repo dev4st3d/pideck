@@ -1744,8 +1744,11 @@ fn pi_setting_row(
         .child(
             div()
                 .min_w_0()
+                .w_full()
                 .max_w(px(440.0))
                 .flex_shrink_0()
+                .flex()
+                .justify_end()
                 .child(control),
         )
         .into_any_element()
@@ -1798,9 +1801,9 @@ fn pi_select_setting_row(
 ) -> gpui::AnyElement {
     let id = key.replace('.', "-");
     let control = div()
+        .w_full()
         .flex()
         .flex_row()
-        .flex_wrap()
         .justify_end()
         .gap(px(5.0))
         .children(options.iter().map(|(option_label, value)| {
