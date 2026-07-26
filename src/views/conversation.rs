@@ -20,7 +20,7 @@ use crate::controller::{AcceptedUserInput, ConversationProjection};
 use crate::services::rpc::{SessionEpoch, ToolCallId};
 use crate::state::runtime::{
     MessageBlock, MessageRole, MessageStopReason, RuntimeLifecycle, RuntimeMessage, SubmissionKind,
-    ToolImage,
+    ToolImage, sanitize_untrusted_text,
 };
 use crate::theme;
 use crate::views::markdown::{MarkdownDocument, MarkdownStyle};
@@ -533,16 +533,22 @@ struct TurnPosition {
     is_last: bool,
 }
 
+struct ConversationRenderContext<'a> {
+    projection: &'a ConversationProjection,
+    texts: &'a HashMap<String, Entity<TranscriptText>>,
+    disclosures: &'a Entity<ActivityDisclosureState>,
+    root: &'a Entity<crate::views::RootView>,
+}
+
 fn turn_card(
     position: TurnPosition,
     user: &RuntimeMessage,
     messages: &[Arc<RuntimeMessage>],
-    projection: &ConversationProjection,
-    texts: &HashMap<String, Entity<TranscriptText>>,
-    disclosures: &Entity<ActivityDisclosureState>,
+    render: &ConversationRenderContext<'_>,
     cx: &mut App,
 ) -> impl IntoElement {
-    let (activity, reply) = split_turn(messages, projection);
+    let prompt = message_prompt_text(user);
+    let (activity, reply) = split_turn(messages, render.projection, Some(&prompt));
     div()
         .id(SharedString::from(format!("turn-{}", user.key.0)))
         .w_full()
@@ -560,20 +566,18 @@ fn turn_card(
         .bg(theme::floor())
         .border_1()
         .border_color(theme::edge_soft())
-        .child(user_prompt(position.index, user, texts))
+        .child(user_prompt(position.index, user, render.texts))
         .when(!activity.is_empty(), |turn| {
             turn.child(activity_band(
                 &format!("turn:{}", user.key.0),
                 &activity,
                 reply.is_some(),
-                projection,
-                texts,
-                disclosures,
+                render,
                 cx,
             ))
         })
         .when_some(reply, |turn, message| {
-            turn.child(assistant_reply(message, texts))
+            turn.child(assistant_reply(message, render.texts))
         })
 }
 
@@ -693,14 +697,53 @@ impl Render for PromptInfoTooltip {
 
 /// One spine step inside a turn's activity band.
 enum ActivityStep<'a> {
-    Thinking { key: String, redacted: bool },
-    Text { key: String },
-    Image { mime_type: &'a str },
-    Tool { presentation: ToolPresentation },
-    Summary { label: &'static str, key: String },
-    Custom { kind: &'a str, key: String },
-    Unsupported { kind: &'a str },
-    Notice { text: String, error: bool },
+    Thinking {
+        key: String,
+        redacted: bool,
+        detail: ActivityDetail,
+    },
+    Text {
+        key: String,
+    },
+    Image {
+        mime_type: &'a str,
+    },
+    Tool {
+        presentation: Box<ToolPresentation>,
+        detail: ActivityDetail,
+    },
+    Summary {
+        label: &'static str,
+        key: String,
+    },
+    Custom {
+        kind: &'a str,
+        key: String,
+    },
+    Unsupported {
+        kind: &'a str,
+    },
+    Notice {
+        text: String,
+        error: bool,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(in crate::views) struct ActivityDetail {
+    pub(in crate::views) title: String,
+    pub(in crate::views) prompt: Option<String>,
+    pub(in crate::views) records: Vec<ActivityDetailRecord>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(in crate::views) struct ActivityDetailRecord {
+    pub(in crate::views) id: String,
+    pub(in crate::views) kind: &'static str,
+    pub(in crate::views) label: String,
+    pub(in crate::views) parameters: Option<String>,
+    pub(in crate::views) result: String,
+    pub(in crate::views) metadata: Vec<(String, String)>,
 }
 
 type PersistedToolResult<'a> = (
@@ -713,6 +756,7 @@ type PersistedToolResult<'a> = (
 fn split_turn<'a, M>(
     messages: &'a [M],
     projection: &ConversationProjection,
+    prompt: Option<&str>,
 ) -> (Vec<ActivityStep<'a>>, Option<&'a RuntimeMessage>)
 where
     M: Borrow<RuntimeMessage>,
@@ -762,6 +806,7 @@ where
             &call_ids,
             &persisted_results,
             is_reply,
+            prompt,
         );
     }
     let reply = reply_index.map(|index| messages[index].borrow());
@@ -800,6 +845,7 @@ fn push_message_activity<'a>(
     call_ids: &HashSet<ToolCallId>,
     persisted_results: &HashMap<ToolCallId, PersistedToolResult<'a>>,
     is_reply: bool,
+    prompt: Option<&str>,
 ) {
     for block in &message.content {
         match block {
@@ -807,10 +853,14 @@ fn push_message_activity<'a>(
             MessageBlock::Text { .. } => activity.push(ActivityStep::Text {
                 key: fragment_key(message, block),
             }),
-            MessageBlock::Thinking { redacted, .. } => activity.push(ActivityStep::Thinking {
-                key: fragment_key(message, block),
-                redacted: *redacted,
-            }),
+            MessageBlock::Thinking { text, redacted, .. } => {
+                let key = fragment_key(message, block);
+                activity.push(ActivityStep::Thinking {
+                    detail: thinking_detail(message, &key, text, *redacted, prompt),
+                    key,
+                    redacted: *redacted,
+                })
+            }
             MessageBlock::Image { mime_type, .. } => activity.push(ActivityStep::Image {
                 mime_type: mime_type.as_str(),
             }),
@@ -819,15 +869,19 @@ fn push_message_activity<'a>(
                 name,
                 arguments,
                 ..
-            } => activity.push(ActivityStep::Tool {
-                presentation: presentation_for_tool_call(
+            } => {
+                let presentation = presentation_for_tool_call(
                     projection,
                     id,
                     name,
                     arguments,
                     persisted_results.get(id).copied(),
-                ),
-            }),
+                );
+                activity.push(ActivityStep::Tool {
+                    detail: tool_detail(&presentation, Some(message), prompt, None),
+                    presentation: Box::new(presentation),
+                });
+            }
             MessageBlock::ToolResult {
                 id,
                 name,
@@ -838,14 +892,17 @@ fn push_message_activity<'a>(
                 ..
             } => {
                 if !call_ids.contains(id) {
+                    let presentation = presentation_for_standalone_result(
+                        id,
+                        name,
+                        content,
+                        images,
+                        details.as_ref(),
+                        *is_error,
+                    );
                     activity.push(ActivityStep::Tool {
-                        presentation: presentation_for_standalone_result(
-                            name,
-                            content,
-                            images,
-                            details.as_ref(),
-                            *is_error,
-                        ),
+                        detail: tool_detail(&presentation, Some(message), prompt, None),
+                        presentation: Box::new(presentation),
                     });
                 }
             }
@@ -854,10 +911,22 @@ fn push_message_activity<'a>(
                 output,
                 cancelled,
                 exit_code,
+                exclude_from_context,
                 ..
-            } => activity.push(ActivityStep::Tool {
-                presentation: presentation_for_bash_block(command, output, *cancelled, *exit_code),
-            }),
+            } => {
+                let presentation = presentation_for_bash_block(
+                    command,
+                    output,
+                    *cancelled,
+                    *exit_code,
+                    *exclude_from_context,
+                );
+                let detail_id = fragment_key(message, block);
+                activity.push(ActivityStep::Tool {
+                    detail: tool_detail(&presentation, Some(message), prompt, Some(&detail_id)),
+                    presentation: Box::new(presentation),
+                });
+            }
             MessageBlock::Summary { .. } => activity.push(ActivityStep::Summary {
                 label: match message.role {
                     MessageRole::BranchSummary => "Branch summary",
@@ -885,13 +954,273 @@ fn push_message_activity<'a>(
     }
 }
 
+fn thinking_detail(
+    message: &RuntimeMessage,
+    id: &str,
+    text: &str,
+    redacted: bool,
+    prompt: Option<&str>,
+) -> ActivityDetail {
+    let parameters = Some(message.assistant.as_ref().map_or_else(
+        || "{}".to_owned(),
+        |assistant| {
+            pretty_json(&serde_json::json!({
+                "api": assistant.api,
+                "provider": assistant.provider,
+                "model": assistant.model,
+                "responseModel": assistant.response_model,
+                "terminal": message.terminal,
+                "stopReason": stop_reason_value(message.stop_reason),
+            }))
+        },
+    ));
+    let result = if redacted {
+        "Thinking was redacted by the provider.".to_owned()
+    } else if text.trim().is_empty() {
+        "No thinking text was recorded.".to_owned()
+    } else {
+        sanitize_untrusted_text(text)
+    };
+    ActivityDetail {
+        title: "Thinking details".to_owned(),
+        prompt: Some(prompt.map(sanitize_untrusted_text).unwrap_or_else(|| {
+            "The originating prompt was not recorded for this entry.".to_owned()
+        })),
+        records: vec![ActivityDetailRecord {
+            id: format!("thinking:{id}"),
+            kind: "Thinking",
+            label: "Model reasoning".to_owned(),
+            parameters,
+            result,
+            metadata: assistant_metadata_rows(message),
+        }],
+    }
+}
+
+fn tool_detail(
+    presentation: &ToolPresentation,
+    message: Option<&RuntimeMessage>,
+    prompt: Option<&str>,
+    id_override: Option<&str>,
+) -> ActivityDetail {
+    let parameters = presentation
+        .arguments
+        .as_ref()
+        .map(pretty_json)
+        .or_else(|| Some("{}".to_owned()));
+    let result = tool_result_text(presentation);
+    let id = id_override
+        .map(str::to_owned)
+        .or_else(|| presentation.call_id.clone())
+        .unwrap_or_else(|| {
+            format!(
+                "tool:{}:{:016x}",
+                presentation.name,
+                source_hash(&format!(
+                    "{}\n{result}",
+                    parameters.as_deref().unwrap_or("")
+                ))
+            )
+        });
+    let mut metadata = vec![(
+        "Status".to_owned(),
+        activity_status_label(presentation.status).to_owned(),
+    )];
+    if let Some(call_id) = presentation.call_id.as_ref() {
+        metadata.push(("Call ID".to_owned(), sanitize_untrusted_text(call_id)));
+    }
+    if let Some(elapsed) = presentation.elapsed_ms {
+        metadata.push(("Elapsed".to_owned(), format_activity_elapsed(elapsed)));
+    }
+    metadata.push((
+        "Context".to_owned(),
+        if presentation.context_excluded {
+            "Excluded".to_owned()
+        } else {
+            "Included".to_owned()
+        },
+    ));
+    if presentation.payload.truncated {
+        metadata.push(("Output".to_owned(), "Truncated".to_owned()));
+    }
+    if let Some(path) = presentation.payload.full_output_path.as_ref() {
+        metadata.push(("Full output".to_owned(), sanitize_untrusted_text(path)));
+    }
+    if let Some(message) = message {
+        metadata.extend(assistant_metadata_rows(message));
+    }
+
+    ActivityDetail {
+        title: format!("{} details", sanitize_untrusted_text(&presentation.name)),
+        prompt: Some(prompt.map(sanitize_untrusted_text).unwrap_or_else(|| {
+            "The originating prompt was not recorded for this entry.".to_owned()
+        })),
+        records: vec![ActivityDetailRecord {
+            id,
+            kind: "Tool use",
+            label: sanitize_untrusted_text(&presentation.name),
+            parameters,
+            result,
+            metadata,
+        }],
+    }
+}
+
+fn grouped_tool_detail(details: &[ActivityDetail]) -> ActivityDetail {
+    let records = details
+        .iter()
+        .flat_map(|detail| detail.records.iter().cloned())
+        .collect::<Vec<_>>();
+    let name = records
+        .first()
+        .map(|record| record.label.as_str())
+        .unwrap_or("Tool use");
+    ActivityDetail {
+        title: format!(
+            "{} details · {} calls",
+            sanitize_untrusted_text(name),
+            records.len()
+        ),
+        prompt: details.iter().find_map(|detail| detail.prompt.clone()),
+        records,
+    }
+}
+
+fn tool_result_text(presentation: &ToolPresentation) -> String {
+    let payload = &presentation.payload;
+    let mut sections = Vec::new();
+    if !payload.text.trim().is_empty() {
+        sections.push(sanitize_untrusted_text(&payload.text));
+    }
+    if let Some(diff) = payload.diff.as_deref()
+        && !diff.trim().is_empty()
+        && !payload.text.contains(diff)
+    {
+        sections.push(format!("Diff\n{}", sanitize_untrusted_text(diff)));
+    }
+    if !payload.images.is_empty() {
+        let images = payload
+            .images
+            .iter()
+            .enumerate()
+            .map(|(index, image)| {
+                format!(
+                    "{}. {}",
+                    index + 1,
+                    sanitize_untrusted_text(&image.mime_type)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        sections.push(format!("Images\n{images}"));
+    }
+    if let Some(details) = payload.details.as_ref() {
+        sections.push(format!("Details\n{}", pretty_json(details)));
+    }
+    if let Some(note) = payload.truncation_note.as_ref() {
+        sections.push(sanitize_untrusted_text(note));
+    } else if payload.truncated {
+        sections.push("The displayed result is truncated.".to_owned());
+    }
+    if sections.is_empty() {
+        if matches!(
+            presentation.status,
+            CardStatus::Pending | CardStatus::Running
+        ) {
+            "Waiting for the tool result.".to_owned()
+        } else {
+            "The tool returned no displayable result.".to_owned()
+        }
+    } else {
+        sections.join("\n\n")
+    }
+}
+
+fn pretty_json(value: &serde_json::Value) -> String {
+    sanitize_untrusted_text(
+        &serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string()),
+    )
+}
+
+fn assistant_metadata_rows(message: &RuntimeMessage) -> Vec<(String, String)> {
+    let mut rows = vec![
+        ("Timestamp".to_owned(), format_timestamp(message.timestamp)),
+        (
+            "Response".to_owned(),
+            if message.terminal {
+                "Completed".to_owned()
+            } else {
+                "Streaming".to_owned()
+            },
+        ),
+    ];
+    let Some(assistant) = message.assistant.as_ref() else {
+        return rows;
+    };
+    rows.extend([
+        (
+            "Model".to_owned(),
+            assistant
+                .response_model
+                .as_deref()
+                .filter(|model| !model.is_empty())
+                .unwrap_or(&assistant.model)
+                .to_owned(),
+        ),
+        ("Provider".to_owned(), assistant.provider.clone()),
+        ("API".to_owned(), assistant.api.clone()),
+        (
+            "Tokens".to_owned(),
+            format!(
+                "{} in · {} out · {} total",
+                format_count(assistant.usage.input),
+                format_count(assistant.usage.output),
+                format_count(assistant.usage.total_tokens)
+            ),
+        ),
+        ("Cost".to_owned(), format_cost(assistant.usage.total_cost)),
+    ]);
+    if let Some(reasoning) = assistant.usage.reasoning {
+        rows.push(("Reasoning tokens".to_owned(), format_count(reasoning)));
+    }
+    rows
+}
+
+fn activity_status_label(status: CardStatus) -> &'static str {
+    match status {
+        CardStatus::Pending => "Pending",
+        CardStatus::Running => "Running",
+        CardStatus::Success => "Succeeded",
+        CardStatus::Error => "Failed",
+        CardStatus::Cancelled => "Cancelled",
+        CardStatus::Cancelling => "Cancelling",
+        CardStatus::Uncertain => "Unknown outcome",
+    }
+}
+
+fn stop_reason_value(reason: Option<MessageStopReason>) -> Option<&'static str> {
+    reason.map(|reason| match reason {
+        MessageStopReason::Stop => "stop",
+        MessageStopReason::Length => "length",
+        MessageStopReason::ToolUse => "tool_use",
+        MessageStopReason::Error => "error",
+        MessageStopReason::Aborted => "aborted",
+    })
+}
+
+fn format_activity_elapsed(elapsed_ms: u128) -> String {
+    if elapsed_ms < 1_000 {
+        format!("{elapsed_ms} ms")
+    } else {
+        format!("{:.1} s", elapsed_ms as f64 / 1_000.0)
+    }
+}
+
 fn activity_band(
     disclosure_key: &str,
     steps: &[ActivityStep<'_>],
     has_reply: bool,
-    projection: &ConversationProjection,
-    texts: &HashMap<String, Entity<TranscriptText>>,
-    disclosures: &Entity<ActivityDisclosureState>,
+    render: &ConversationRenderContext<'_>,
     cx: &mut App,
 ) -> impl IntoElement {
     let Some((latest_step, history)) = steps.split_last() else {
@@ -900,23 +1229,32 @@ fn activity_band(
     let mut children = Vec::new();
     let mut index = 0;
     while index < history.len() {
-        if let ActivityStep::Tool { presentation } = &history[index]
+        if let ActivityStep::Tool {
+            presentation,
+            detail,
+        } = &history[index]
             && presentation.groupable()
         {
-            let mut group = vec![presentation.clone()];
+            let mut group = vec![presentation.as_ref().clone()];
+            let mut details = vec![detail.clone()];
             let mut end = index + 1;
             while end < history.len() {
-                let ActivityStep::Tool { presentation: next } = &history[end] else {
+                let ActivityStep::Tool {
+                    presentation: next,
+                    detail: next_detail,
+                } = &history[end]
+                else {
                     break;
                 };
                 if next.name != presentation.name || !next.groupable() {
                     break;
                 }
-                group.push(next.clone());
+                group.push(next.as_ref().clone());
+                details.push(next_detail.clone());
                 end += 1;
             }
             let is_last = end == history.len();
-            children.push(render_tool_group(&group, is_last));
+            children.push(render_tool_group(&group, &details, is_last, render.root));
             index = end;
             continue;
         }
@@ -925,23 +1263,23 @@ fn activity_band(
         children.push(render_activity_step(
             &history[index],
             is_last,
-            projection,
-            texts,
+            render.texts,
+            render.root,
         ));
         index += 1;
     }
 
-    let expanded = disclosures.read(cx).is_expanded(disclosure_key);
+    let expanded = render.disclosures.read(cx).is_expanded(disclosure_key);
     let animate_latest = !expanded
         && matches!(
             latest_step,
-            ActivityStep::Tool { presentation }
+            ActivityStep::Tool { presentation, .. }
                 if matches!(
                     presentation.status,
                     CardStatus::Pending | CardStatus::Running | CardStatus::Cancelling
                 )
         );
-    let latest = render_activity_step(latest_step, true, projection, texts);
+    let latest = render_activity_step(latest_step, true, render.texts, render.root);
     let latest = if animate_latest {
         div()
             .w_full()
@@ -968,7 +1306,7 @@ fn activity_band(
                 disclosure_key,
                 history.len(),
                 expanded,
-                disclosures,
+                render.disclosures,
             ))
         })
         .when(expanded && !history.is_empty(), |band| {
@@ -1074,7 +1412,12 @@ fn activity_disclosure(
         )
 }
 
-fn render_tool_group(items: &[ToolPresentation], is_last: bool) -> AnyElement {
+fn render_tool_group(
+    items: &[ToolPresentation],
+    details: &[ActivityDetail],
+    is_last: bool,
+    root: &Entity<crate::views::RootView>,
+) -> AnyElement {
     let marker = items
         .iter()
         .map(|item| status_color(item.status))
@@ -1091,10 +1434,27 @@ fn render_tool_group(items: &[ToolPresentation], is_last: bool) -> AnyElement {
             }
         })
         .unwrap_or_else(theme::live);
+    let detail = grouped_tool_detail(details);
+    let trigger_id = format!(
+        "tool-group:{:016x}",
+        source_hash(
+            &detail
+                .records
+                .iter()
+                .map(|record| record.id.as_str())
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
+    );
     step_shell(
         is_last,
         marker,
-        render_tool_presentation(items, None, false, None),
+        tool_detail_trigger(
+            &trigger_id,
+            render_tool_presentation(items, None, false, None),
+            detail,
+            root,
+        ),
     )
     .into_any_element()
 }
@@ -1102,29 +1462,36 @@ fn render_tool_group(items: &[ToolPresentation], is_last: bool) -> AnyElement {
 fn render_activity_step(
     step: &ActivityStep<'_>,
     is_last: bool,
-    _projection: &ConversationProjection,
     texts: &HashMap<String, Entity<TranscriptText>>,
+    root: &Entity<crate::views::RootView>,
 ) -> AnyElement {
     match step {
         ActivityStep::Thinking {
             key: _,
             redacted: true,
-            ..
+            detail,
         } => step_shell(
             is_last,
             theme::smoke(),
             div()
-                .font_family(theme::sans())
-                .text_size(theme::text_size(theme::T_UI_SM))
-                .font_weight(FontWeight::MEDIUM)
-                .text_color(theme::smoke())
-                .child("Thinking was redacted by the provider."),
+                .flex()
+                .flex_col()
+                .gap(px(4.0))
+                .child(thinking_detail_header(detail, root))
+                .child(
+                    div()
+                        .font_family(theme::sans())
+                        .text_size(theme::text_size(theme::T_UI_SM))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(theme::smoke())
+                        .child("Thinking was redacted by the provider."),
+                ),
         )
         .into_any_element(),
         ActivityStep::Thinking {
             key,
             redacted: false,
-            ..
+            detail,
         } => step_shell(
             is_last,
             theme::smoke(),
@@ -1132,14 +1499,7 @@ fn render_activity_step(
                 .flex()
                 .flex_col()
                 .gap(px(2.0))
-                .child(
-                    div()
-                        .font_family(theme::mono())
-                        .text_size(theme::text_size(theme::T_TINY))
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(theme::smoke())
-                        .child("thinking"),
-                )
+                .child(thinking_detail_header(detail, root))
                 .child(activity_selectable(key, texts)),
         )
         .into_any_element(),
@@ -1152,12 +1512,32 @@ fn render_activity_step(
             compact_label(format!("Image · {mime_type}")),
         )
         .into_any_element(),
-        ActivityStep::Tool { presentation } => step_shell(
-            is_last,
-            status_color(presentation.status),
-            render_tool_presentation(std::slice::from_ref(presentation), None, false, None),
-        )
-        .into_any_element(),
+        ActivityStep::Tool {
+            presentation,
+            detail,
+        } => {
+            let detail_id = detail
+                .records
+                .first()
+                .map(|record| record.id.as_str())
+                .unwrap_or("tool");
+            step_shell(
+                is_last,
+                status_color(presentation.status),
+                tool_detail_trigger(
+                    detail_id,
+                    render_tool_presentation(
+                        std::slice::from_ref(presentation.as_ref()),
+                        None,
+                        false,
+                        None,
+                    ),
+                    detail.clone(),
+                    root,
+                ),
+            )
+            .into_any_element()
+        }
         ActivityStep::Summary { label, key } => step_shell(
             is_last,
             theme::data(),
@@ -1213,6 +1593,135 @@ fn render_activity_step(
         )
         .into_any_element(),
     }
+}
+
+fn thinking_detail_header(
+    detail: &ActivityDetail,
+    root: &Entity<crate::views::RootView>,
+) -> impl IntoElement {
+    div()
+        .w_full()
+        .flex()
+        .flex_row()
+        .items_center()
+        .justify_between()
+        .gap(px(12.0))
+        .child(
+            div()
+                .font_family(theme::mono())
+                .text_size(theme::text_size(theme::T_TINY))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(theme::smoke())
+                .child("thinking"),
+        )
+        .child(activity_detail_link(detail, root))
+}
+
+fn activity_detail_link(
+    detail: &ActivityDetail,
+    root: &Entity<crate::views::RootView>,
+) -> AnyElement {
+    let id = detail
+        .records
+        .first()
+        .map(|record| record.id.clone())
+        .unwrap_or_else(|| "activity".to_owned());
+    let click_detail = detail.clone();
+    let click_root = root.clone();
+    let keyboard_detail = detail.clone();
+    let keyboard_root = root.clone();
+    div()
+        .id(SharedString::from(format!("activity-detail-link:{id}")))
+        .tab_index(0)
+        .cursor_pointer()
+        .h(px(20.0))
+        .px(px(6.0))
+        .flex_shrink_0()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(theme::RADIUS_SM))
+        // Locked geometry for the thinking "details" chip. Same border/fill
+        // always — no active/focus fill or border retints (those read as grow).
+        .border_1()
+        .border_color(theme::edge())
+        .overflow_hidden()
+        .whitespace_nowrap()
+        .font_family(theme::mono())
+        .text_size(theme::text_size(theme::T_TINY))
+        .font_weight(FontWeight::MEDIUM)
+        .bg(theme::canvas())
+        .text_color(theme::ash())
+        .hover(|link| link.text_color(theme::bone_dim()))
+        .focus(|link| link.text_color(theme::bone_dim()))
+        // Skip GPUI's mouse-down focus + active refresh on this chip. Click still
+        // fires; keyboard focus via Tab is unchanged. Prevents a one-frame pop
+        // before the detail overlay steals focus.
+        .capture_any_mouse_down(|event, window, _| {
+            if event.button == MouseButton::Left {
+                window.prevent_default();
+            }
+        })
+        .on_click(move |_, window, cx| {
+            click_root.update(cx, |view, cx| {
+                view.open_activity_detail(click_detail.clone(), window, cx)
+            });
+        })
+        .on_key_down(move |event: &gpui::KeyDownEvent, window, cx| {
+            if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                cx.stop_propagation();
+                keyboard_root.update(cx, |view, cx| {
+                    view.open_activity_detail(keyboard_detail.clone(), window, cx)
+                });
+            }
+        })
+        .child("details ↗")
+        .into_any_element()
+}
+
+fn tool_detail_trigger(
+    id: &str,
+    body: impl IntoElement,
+    detail: ActivityDetail,
+    root: &Entity<crate::views::RootView>,
+) -> AnyElement {
+    let click_detail = detail.clone();
+    let click_root = root.clone();
+    let keyboard_root = root.clone();
+    div()
+        .id(SharedString::from(format!("activity-detail-tool:{id}")))
+        .tab_index(0)
+        .cursor_pointer()
+        .w_full()
+        .min_h(px(28.0))
+        .px(px(4.0))
+        .py(px(3.0))
+        .rounded(px(theme::RADIUS_SM))
+        .border_1()
+        .border_color(gpui::rgba(0x0000_0000))
+        .bg(theme::panel())
+        .hover(|trigger| trigger.bg(theme::panel_hover()))
+        // Recess on press — a lighter active fill makes nested chips look bigger.
+        .active(|trigger| trigger.bg(theme::canvas()))
+        .focus(|trigger| {
+            trigger
+                .bg(theme::panel())
+                .border_color(theme::edge_hard())
+        })
+        .on_click(move |_, window, cx| {
+            click_root.update(cx, |view, cx| {
+                view.open_activity_detail(click_detail.clone(), window, cx)
+            });
+        })
+        .on_key_down(move |event: &gpui::KeyDownEvent, window, cx| {
+            if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                cx.stop_propagation();
+                let detail = detail.clone();
+                keyboard_root.update(cx, |view, cx| view.open_activity_detail(detail, window, cx));
+            }
+        })
+        .child(body)
+        .into_any_element()
 }
 
 fn step_shell(is_last: bool, marker: gpui::Rgba, body: impl IntoElement) -> impl IntoElement {
@@ -1331,17 +1840,15 @@ fn assistant_reply(
 
 fn preamble(
     message: &RuntimeMessage,
-    projection: &ConversationProjection,
-    texts: &HashMap<String, Entity<TranscriptText>>,
-    disclosures: &Entity<ActivityDisclosureState>,
+    render: &ConversationRenderContext<'_>,
     cx: &mut App,
 ) -> AnyElement {
     match message.role {
         MessageRole::Assistant if is_final_assistant_reply(message) => {
             let messages = [message];
-            let (activity, _) = split_turn(&messages, projection);
+            let (activity, _) = split_turn(&messages, render.projection, None);
             if activity.is_empty() {
-                assistant_reply(message, texts).into_any_element()
+                assistant_reply(message, render.texts).into_any_element()
             } else {
                 div()
                     .w_full()
@@ -1356,12 +1863,10 @@ fn preamble(
                         &format!("preamble:{}", message.key.0),
                         &activity,
                         true,
-                        projection,
-                        texts,
-                        disclosures,
+                        render,
                         cx,
                     ))
-                    .child(assistant_reply(message, texts))
+                    .child(assistant_reply(message, render.texts))
                     .into_any_element()
             }
         }
@@ -1373,7 +1878,7 @@ fn preamble(
         | MessageRole::CompactionSummary
         | MessageRole::Unknown => {
             let messages = [message];
-            let (activity, _) = split_turn(&messages, projection);
+            let (activity, _) = split_turn(&messages, render.projection, None);
             if activity.is_empty() {
                 return div().into_any_element();
             }
@@ -1384,9 +1889,7 @@ fn preamble(
                     &format!("preamble:{}", message.key.0),
                     &activity,
                     false,
-                    projection,
-                    texts,
-                    disclosures,
+                    render,
                     cx,
                 ))
                 .into_any_element()
@@ -1395,14 +1898,13 @@ fn preamble(
     }
 }
 
-fn tail_activity(
-    projection: &ConversationProjection,
-    disclosures: &Entity<ActivityDisclosureState>,
-    cx: &mut App,
-) -> Option<AnyElement> {
-    let activity = tail_presentations(projection)
+fn tail_activity(render: &ConversationRenderContext<'_>, cx: &mut App) -> Option<AnyElement> {
+    let activity = tail_presentations(render.projection)
         .into_iter()
-        .map(|presentation| ActivityStep::Tool { presentation })
+        .map(|presentation| ActivityStep::Tool {
+            detail: tool_detail(&presentation, None, None, None),
+            presentation: Box::new(presentation),
+        })
         .collect::<Vec<_>>();
     if activity.is_empty() {
         return None;
@@ -1417,12 +1919,10 @@ fn tail_activity(
             .border_1()
             .border_color(theme::edge_soft())
             .child(activity_band(
-                &format!("tail:{}", projection.epoch.value()),
+                &format!("tail:{}", render.projection.epoch.value()),
                 &activity,
                 false,
-                projection,
-                &HashMap::new(),
-                disclosures,
+                render,
                 cx,
             ))
             .into_any_element(),
@@ -1499,6 +1999,25 @@ fn compact_label(text: String) -> AnyElement {
         .text_color(theme::smoke())
         .child(text)
         .into_any_element()
+}
+
+fn message_prompt_text(message: &RuntimeMessage) -> String {
+    let parts = message
+        .content
+        .iter()
+        .filter_map(|block| match block {
+            MessageBlock::Text { text, .. } => Some(sanitize_untrusted_text(text)),
+            MessageBlock::Image { mime_type, .. } => {
+                Some(format!("[Image: {}]", sanitize_untrusted_text(mime_type)))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if parts.is_empty() {
+        "No user prompt text was recorded.".to_owned()
+    } else {
+        parts.join("\n\n")
+    }
 }
 
 fn fragment_key(message: &RuntimeMessage, block: &MessageBlock) -> String {
@@ -1668,6 +2187,34 @@ mod tests {
     }
 
     #[test]
+    fn tool_activity_details_keep_prompt_parameters_and_result() {
+        let presentation =
+            presentation_for_bash_block("printf complete", "complete", false, Some(0), true);
+        let detail = tool_detail(
+            &presentation,
+            None,
+            Some("Run the diagnostic"),
+            Some("message:block"),
+        );
+
+        assert_eq!(detail.prompt.as_deref(), Some("Run the diagnostic"));
+        assert_eq!(detail.records[0].id, "message:block");
+        assert_eq!(detail.records.len(), 1);
+        assert!(
+            detail.records[0]
+                .parameters
+                .as_deref()
+                .is_some_and(|parameters| parameters.contains("printf complete"))
+        );
+        assert!(detail.records[0].result.contains("complete"));
+        assert!(
+            detail.records[0]
+                .metadata
+                .contains(&("Context".to_owned(), "Excluded".to_owned()))
+        );
+    }
+
+    #[test]
     fn split_turn_puts_tools_and_thinking_on_spine_before_reply() {
         use crate::services::rpc::ToolCallId;
         use crate::state::runtime::{
@@ -1744,11 +2291,22 @@ mod tests {
         };
         assert!(!is_final_assistant_reply(&assistant_tools));
         assert!(is_final_assistant_reply(&assistant_reply));
-        let (activity, reply) = split_turn(&projection.messages, &projection);
+        let (activity, reply) = split_turn(&projection.messages, &projection, Some("show files"));
         assert_eq!(activity.len(), 3);
         assert!(matches!(activity[0], ActivityStep::Thinking { .. }));
         assert!(matches!(activity[1], ActivityStep::Text { .. }));
         assert!(matches!(activity[2], ActivityStep::Tool { .. }));
+        let ActivityStep::Thinking { detail, .. } = &activity[0] else {
+            unreachable!();
+        };
+        assert_eq!(detail.prompt.as_deref(), Some("show files"));
+        assert_eq!(detail.records[0].id, "thinking:a1:th");
+        assert_eq!(detail.records[0].result, "plan");
+        let ActivityStep::Tool { detail, .. } = &activity[2] else {
+            unreachable!();
+        };
+        assert_eq!(detail.prompt.as_deref(), Some("show files"));
+        assert_eq!(detail.records[0].parameters.as_deref(), Some("{}"));
         assert_eq!(reply.map(|m| m.key.0.as_str()), Some("a2"));
         assert_eq!(
             latest_completed_response_key(&projection).as_deref(),

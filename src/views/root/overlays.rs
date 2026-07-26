@@ -1,3 +1,5 @@
+use gpui::{AnyElement, StatefulInteractiveElement, relative};
+
 use super::shared::{plural, popup_sheet};
 use super::*;
 
@@ -560,6 +562,302 @@ pub(super) fn extension_status_bar(extension_ui: &ExtensionUiProjection) -> impl
                         .child(status.text.clone()),
                 )
         }))
+}
+
+pub(super) fn activity_detail_overlay(
+    detail: &ActivityDetail,
+    focus: &FocusHandle,
+    scroll: &ScrollHandle,
+    cx: &mut Context<RootView>,
+) -> impl IntoElement {
+    let record_count = detail.records.len();
+    let records = detail
+        .records
+        .iter()
+        .enumerate()
+        .map(|(index, record)| activity_detail_record(record, index, record_count))
+        .collect::<Vec<_>>();
+
+    div()
+        .id("activity-detail-overlay")
+        .absolute()
+        .top_0()
+        .right_0()
+        .bottom_0()
+        .left_0()
+        .occlude()
+        .bg(gpui::rgba(0x0b0a_09e6))
+        .p(px(24.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .key_context("ActivityDetail")
+        .on_key_down(cx.listener(RootView::on_activity_detail_key_down))
+        .child(
+            div()
+                .id("activity-detail-dialog")
+                .w_full()
+                .h_full()
+                .max_w(px(980.0))
+                .max_h(px(760.0))
+                .rounded(px(theme::RADIUS))
+                .overflow_hidden()
+                .border_1()
+                .border_color(theme::edge_hard())
+                .bg(theme::floor())
+                .flex()
+                .flex_col()
+                .child(
+                    div()
+                        .min_h(px(52.0))
+                        .px(px(16.0))
+                        .py(px(9.0))
+                        .bg(theme::panel())
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .justify_between()
+                        .gap(px(16.0))
+                        .child(
+                            div()
+                                .min_w_0()
+                                .flex_1()
+                                .flex()
+                                .flex_col()
+                                .gap(px(2.0))
+                                .child(
+                                    div()
+                                        .overflow_hidden()
+                                        .text_ellipsis()
+                                        .whitespace_nowrap()
+                                        .font_family(theme::sans())
+                                        .text_size(theme::text_size(theme::T_BODY))
+                                        .font_weight(FontWeight::BOLD)
+                                        .text_color(theme::bone())
+                                        .child(detail.title.clone()),
+                                )
+                                .child(
+                                    div()
+                                        .overflow_hidden()
+                                        .text_ellipsis()
+                                        .whitespace_nowrap()
+                                        .font_family(theme::sans())
+                                        .text_size(theme::text_size(theme::T_TINY))
+                                        .text_color(theme::smoke())
+                                        .child(format!(
+                                            "Prompt, request parameters, metadata, and {}",
+                                            if record_count == 1 {
+                                                "result"
+                                            } else {
+                                                "results"
+                                            }
+                                        )),
+                                ),
+                        )
+                        .child(activity_detail_close_button(focus, cx)),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_h_0()
+                        .relative()
+                        .child(controls::scroll_wheel_capture(scroll))
+                        .child(
+                            div()
+                                .id("activity-detail-scroll")
+                                .size_full()
+                                .overflow_y_scroll()
+                                .track_scroll(scroll)
+                                .scrollbar_width(px(theme::SCROLLBAR))
+                                .p(px(16.0))
+                                .flex()
+                                .flex_col()
+                                .gap(px(16.0))
+                                .when_some(detail.prompt.clone(), |body, prompt| {
+                                    body.child(activity_detail_section("Prompt", prompt, false))
+                                })
+                                .children(records),
+                        ),
+                ),
+        )
+}
+
+fn activity_detail_close_button(focus: &FocusHandle, cx: &mut Context<RootView>) -> AnyElement {
+    div()
+        .id("close-activity-detail")
+        .track_focus(focus)
+        .h(px(28.0))
+        .px(px(8.0))
+        .flex_shrink_0()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(theme::RADIUS_SM))
+        .tab_index(0)
+        .cursor_pointer()
+        .whitespace_nowrap()
+        .font_family(theme::main())
+        .text_size(theme::text_size(theme::T_TINY))
+        .font_weight(FontWeight::SEMIBOLD)
+        .bg(theme::canvas())
+        .text_color(theme::ash())
+        .hover(|button| button.bg(theme::panel_hover()).text_color(theme::bone()))
+        .active(|button| button.bg(theme::panel_lift()))
+        .focus(|button| button.bg(theme::panel_hover()).text_color(theme::focus()))
+        .on_click(cx.listener(|view, _, window, cx| view.close_activity_detail(window, cx)))
+        .on_key_down(cx.listener(|view, event: &gpui::KeyDownEvent, window, cx| {
+            if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                cx.stop_propagation();
+                view.close_activity_detail(window, cx);
+            }
+        }))
+        .child("Close · Esc")
+        .into_any_element()
+}
+
+fn activity_detail_record(
+    record: &crate::views::conversation::ActivityDetailRecord,
+    index: usize,
+    record_count: usize,
+) -> AnyElement {
+    div()
+        .w_full()
+        .p(px(14.0))
+        .rounded(px(theme::RADIUS_SM))
+        .bg(theme::panel())
+        .flex()
+        .flex_col()
+        .gap(px(12.0))
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_baseline()
+                .justify_between()
+                .gap(px(12.0))
+                .child(
+                    div()
+                        .min_w_0()
+                        .flex_1()
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .whitespace_nowrap()
+                        .font_family(theme::sans())
+                        .text_size(theme::text_size(theme::T_UI))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(theme::bone_dim())
+                        .child(if record_count == 1 {
+                            record.label.clone()
+                        } else {
+                            format!("{:02} · {}", index + 1, record.label)
+                        }),
+                )
+                .child(
+                    div()
+                        .flex_shrink_0()
+                        .whitespace_nowrap()
+                        .font_family(theme::sans())
+                        .text_size(theme::text_size(theme::T_TINY))
+                        .text_color(theme::ash())
+                        .child(record.kind),
+                ),
+        )
+        .when_some(record.parameters.clone(), |body, parameters| {
+            body.child(activity_detail_section("Parameters", parameters, true))
+        })
+        .child(activity_detail_section(
+            "Result",
+            record.result.clone(),
+            true,
+        ))
+        .when(!record.metadata.is_empty(), |body| {
+            body.child(activity_detail_metadata(&record.metadata))
+        })
+        .into_any_element()
+}
+
+fn activity_detail_section(label: &'static str, text: String, mono: bool) -> AnyElement {
+    div()
+        .w_full()
+        .flex()
+        .flex_col()
+        .gap(px(5.0))
+        .child(
+            div()
+                .font_family(theme::sans())
+                .text_size(theme::text_size(theme::T_TINY))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(theme::ash())
+                .child(label),
+        )
+        .child(
+            div()
+                .w_full()
+                .min_w_0()
+                .p(px(10.0))
+                .rounded(px(theme::RADIUS_SM))
+                .bg(theme::canvas())
+                .font_family(if mono { theme::mono() } else { theme::sans() })
+                .text_size(theme::text_size(if mono {
+                    theme::T_MONO
+                } else {
+                    theme::T_UI_SM
+                }))
+                .line_height(relative(1.5))
+                .text_color(theme::bone_dim())
+                .child(sanitize_untrusted_text(&text)),
+        )
+        .into_any_element()
+}
+
+fn activity_detail_metadata(rows: &[(String, String)]) -> AnyElement {
+    div()
+        .w_full()
+        .flex()
+        .flex_col()
+        .gap(px(5.0))
+        .child(
+            div()
+                .font_family(theme::sans())
+                .text_size(theme::text_size(theme::T_TINY))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(theme::ash())
+                .child("Metadata"),
+        )
+        .child(
+            div()
+                .w_full()
+                .p(px(10.0))
+                .rounded(px(theme::RADIUS_SM))
+                .bg(theme::canvas())
+                .flex()
+                .flex_col()
+                .gap(px(6.0))
+                .children(rows.iter().map(|(label, value)| {
+                    div()
+                        .w_full()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .gap(px(2.0))
+                        .child(
+                            div()
+                                .font_family(theme::sans())
+                                .text_size(theme::text_size(theme::T_TINY))
+                                .text_color(theme::smoke())
+                                .child(sanitize_untrusted_text(label)),
+                        )
+                        .child(
+                            div()
+                                .min_w_0()
+                                .font_family(theme::mono())
+                                .text_size(theme::text_size(theme::T_MONO_SM))
+                                .text_color(theme::bone_dim())
+                                .child(sanitize_untrusted_text(value)),
+                        )
+                })),
+        )
+        .into_any_element()
 }
 
 pub(super) fn extension_dialog_overlay(

@@ -168,11 +168,15 @@ impl ConversationListModel {
                     cache,
                     cx,
                 );
+                let render = super::ConversationRenderContext {
+                    projection,
+                    texts: &texts,
+                    disclosures,
+                    root: &diff_summary.root,
+                };
                 row(super::preamble(
                     &projection.messages[*message_index],
-                    projection,
-                    &texts,
-                    disclosures,
+                    &render,
                     cx,
                 ))
             }
@@ -185,6 +189,12 @@ impl ConversationListModel {
                 let texts =
                     super::cached_message_texts(projection, *user_index..body.end, cache, cx);
                 let messages = &projection.messages[body.clone()];
+                let render = super::ConversationRenderContext {
+                    projection,
+                    texts: &texts,
+                    disclosures,
+                    root: &diff_summary.root,
+                };
                 connected_row(
                     super::turn_card(
                         super::TurnPosition {
@@ -193,9 +203,7 @@ impl ConversationListModel {
                         },
                         &projection.messages[*user_index],
                         messages,
-                        projection,
-                        &texts,
-                        disclosures,
+                        &render,
                         cx,
                     )
                     .into_any_element(),
@@ -274,6 +282,12 @@ fn trailing(
     diff_summary: &ConversationDiffSummary,
     cx: &mut App,
 ) -> impl IntoElement {
+    let render = super::ConversationRenderContext {
+        projection,
+        texts,
+        disclosures,
+        root: &diff_summary.root,
+    };
     stream_gutter()
         .flex()
         .flex_col()
@@ -287,10 +301,9 @@ fn trailing(
                     super::optimistic_turn(completed_turns + index + 1, input, texts)
                 }),
         )
-        .when_some(
-            super::tail_activity(projection, disclosures, cx),
-            |tail, activity| tail.child(activity),
-        )
+        .when_some(super::tail_activity(&render, cx), |tail, activity| {
+            tail.child(activity)
+        })
         .when_some(diff_summary.snapshot.clone(), |tail, snapshot| {
             tail.child(
                 div()

@@ -66,12 +66,13 @@ pub(super) fn render_tool_presentation(
                 .w_full()
                 .flex()
                 .flex_row()
-                .items_baseline()
+                .items_center()
                 .justify_between()
                 .gap(px(12.0))
                 .child(
                     div()
                         .min_w_0()
+                        .flex_1()
                         .overflow_hidden()
                         .text_ellipsis()
                         .whitespace_nowrap()
@@ -87,6 +88,7 @@ pub(super) fn render_tool_presentation(
                         .flex_row()
                         .items_center()
                         .gap(px(10.0))
+                        .flex_shrink_0()
                         .when_some(elapsed_ms, |row, elapsed| {
                             row.child(meta_text(format_elapsed(elapsed)))
                         })
@@ -95,11 +97,14 @@ pub(super) fn render_tool_presentation(
                         })
                         .child(
                             div()
+                                .flex_shrink_0()
+                                .whitespace_nowrap()
                                 .font_family(theme::mono())
                                 .text_size(theme::text_size(theme::T_TINY))
                                 .text_color(marker)
                                 .child(status_label(status)),
-                        ),
+                        )
+                        .child(detail_hint()),
                 ),
         )
         .children(rows.iter().enumerate().map(|(index, row)| {
@@ -173,10 +178,33 @@ fn worse_status(a: CardStatus, b: CardStatus) -> CardStatus {
 
 fn meta_text(text: String) -> impl IntoElement {
     div()
+        .flex_shrink_0()
+        .whitespace_nowrap()
         .font_family(theme::mono())
         .text_size(theme::text_size(theme::T_TINY))
         .text_color(theme::smoke())
         .child(text)
+}
+
+fn detail_hint() -> impl IntoElement {
+    div()
+        .h(px(20.0))
+        .px(px(6.0))
+        .flex_shrink_0()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(theme::RADIUS_SM))
+        .border_1()
+        .border_color(theme::edge_soft())
+        .overflow_hidden()
+        .bg(theme::canvas())
+        .whitespace_nowrap()
+        .font_family(theme::mono())
+        .text_size(theme::text_size(theme::T_TINY))
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(theme::ash())
+        .child("details ↗")
 }
 
 fn status_label(status: CardStatus) -> &'static str {

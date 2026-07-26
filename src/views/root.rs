@@ -60,7 +60,7 @@ use crate::theme;
 use crate::views::composer::{Composer, ComposerAvailability, ComposerEvent, ComposerFeedback};
 use crate::views::controls;
 use crate::views::conversation::{
-    ActivityDisclosureState, ConversationDiffSummary, ConversationListModel,
+    ActivityDetail, ActivityDisclosureState, ConversationDiffSummary, ConversationListModel,
     ConversationScrollMotion, TranscriptTextCache, latest_completed_response_key,
 };
 
@@ -328,6 +328,10 @@ pub struct RootView {
     conversation_scrollbar_drag_offset: Option<Pixels>,
     transcript_cache: Entity<TranscriptTextCache>,
     activity_disclosures: Entity<ActivityDisclosureState>,
+    activity_detail: Option<ActivityDetail>,
+    activity_detail_focus: FocusHandle,
+    activity_detail_restore_focus: Option<FocusHandle>,
+    activity_detail_scroll: ScrollHandle,
     workspace_diff: Option<Arc<WorkspaceDiff>>,
     workspace_diff_identity: Option<(u64, String)>,
     workspace_diff_generation: u64,
@@ -440,6 +444,7 @@ impl RootView {
         let history_focus = cx.focus_handle();
         let extension_dialog_focus = cx.focus_handle();
         let subagent_dialog_focus = cx.focus_handle();
+        let activity_detail_focus = cx.focus_handle();
         let workspace_diff_focus = cx.focus_handle();
         let (conversation, extension_ui, render_projections, command_catalog_source) = {
             let controller = controller.read(cx);
@@ -653,6 +658,10 @@ impl RootView {
             conversation_scrollbar_drag_offset: None,
             transcript_cache,
             activity_disclosures,
+            activity_detail: None,
+            activity_detail_focus,
+            activity_detail_restore_focus: None,
+            activity_detail_scroll: ScrollHandle::new(),
             workspace_diff: None,
             workspace_diff_identity: None,
             workspace_diff_generation: 0,
@@ -794,6 +803,10 @@ impl RootView {
     }
 
     fn on_abort_run(&mut self, _: &AbortRun, window: &mut Window, cx: &mut Context<Self>) {
+        if self.activity_detail.is_some() {
+            self.close_activity_detail(window, cx);
+            return;
+        }
         if self.pasted_image_preview.is_some() {
             self.close_pasted_image(window, cx);
             return;
@@ -1559,6 +1572,8 @@ impl RootView {
             return;
         };
 
+        self.activity_detail = None;
+        self.activity_detail_restore_focus = None;
         self.command_palette_open = false;
         self.hotkey_help_open = false;
         self.model_panel = None;
@@ -3116,6 +3131,51 @@ impl RootView {
         self.select_workspace_diff_file(next, cx);
     }
 
+    pub(in crate::views) fn open_activity_detail(
+        &mut self,
+        detail: ActivityDetail,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.activity_detail_restore_focus = window.focused(cx);
+        self.activity_detail = Some(detail);
+        self.activity_detail_scroll
+            .set_offset(point(px(0.0), px(0.0)));
+        window.focus(&self.activity_detail_focus);
+        cx.notify();
+    }
+
+    fn close_activity_detail(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.activity_detail.take().is_none() {
+            return;
+        }
+        if let Some(focus) = self.activity_detail_restore_focus.take() {
+            window.focus(&focus);
+        } else {
+            window.focus(&self.composer.read(cx).focus_handle(cx));
+        }
+        cx.notify();
+    }
+
+    pub(in crate::views) fn on_activity_detail_key_down(
+        &mut self,
+        event: &gpui::KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match event.keystroke.key.as_str() {
+            "escape" => {
+                cx.stop_propagation();
+                self.close_activity_detail(window, cx);
+            }
+            "tab" => {
+                cx.stop_propagation();
+                window.focus(&self.activity_detail_focus);
+            }
+            _ => {}
+        }
+    }
+
     pub(in crate::views) fn on_workspace_diff_key_down(
         &mut self,
         event: &gpui::KeyDownEvent,
@@ -3245,6 +3305,10 @@ impl RootView {
         if epoch_changed {
             self.conversation_scroll_motion.cancel();
             self.conversation_follow.set(true);
+            if self.activity_detail.take().is_some() {
+                self.activity_detail_restore_focus = None;
+                window.focus(&self.composer.read(cx).focus_handle(cx));
+            }
         }
         self.transcript_cache
             .update(cx, |cache, _| cache.prepare_epoch(conversation.epoch));
@@ -3602,6 +3666,10 @@ impl RootView {
     }
 
     fn on_focus_next(&mut self, _: &FocusNext, window: &mut Window, cx: &mut Context<Self>) {
+        if self.activity_detail.is_some() {
+            window.focus(&self.activity_detail_focus);
+            return;
+        }
         if self.pasted_image_preview.is_some() {
             window.focus(&self.focus_handle);
             return;
@@ -3624,6 +3692,10 @@ impl RootView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.activity_detail.is_some() {
+            window.focus(&self.activity_detail_focus);
+            return;
+        }
         if self.pasted_image_preview.is_some() {
             window.focus(&self.focus_handle);
             return;
@@ -3645,7 +3717,10 @@ impl RootView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.pasted_image_preview.is_some() || self.extension_ui.active_dialog.is_some() {
+        if self.activity_detail.is_some()
+            || self.pasted_image_preview.is_some()
+            || self.extension_ui.active_dialog.is_some()
+        {
             return;
         }
         if self.command_palette_open {
@@ -3656,7 +3731,10 @@ impl RootView {
     }
 
     fn on_show_hotkeys(&mut self, _: &ShowHotkeys, window: &mut Window, cx: &mut Context<Self>) {
-        if self.pasted_image_preview.is_some() || self.extension_ui.active_dialog.is_some() {
+        if self.activity_detail.is_some()
+            || self.pasted_image_preview.is_some()
+            || self.extension_ui.active_dialog.is_some()
+        {
             return;
         }
         if self.hotkey_help_open {

@@ -2,9 +2,9 @@ use super::composer_bar::{ComposerBarParams, composer_bar};
 use super::inspector::{InspectorParams, inspector, subagent_dialog};
 use super::model_panels::{ModelSettingsPanelParams, model_settings_panel};
 use super::overlays::{
-    ConversationAreaParams, PastedImageOverlayParams, command_palette_overlay, compaction_dialog,
-    conversation_area, extension_dialog_overlay, hotkey_help_overlay, pasted_image_overlay,
-    runtime_notification_stack,
+    ConversationAreaParams, PastedImageOverlayParams, activity_detail_overlay,
+    command_palette_overlay, compaction_dialog, conversation_area, extension_dialog_overlay,
+    hotkey_help_overlay, pasted_image_overlay, runtime_notification_stack,
 };
 use super::shell::{
     HistoryPanelParams, SessionsPanelParams, history_panel, sessions_panel, titlebar,
@@ -195,6 +195,14 @@ impl Render for RootView {
                         cx,
                     )),
             )
+            .when_some(self.activity_detail.clone(), |shell, detail| {
+                shell.child(activity_detail_overlay(
+                    &detail,
+                    &self.activity_detail_focus,
+                    &self.activity_detail_scroll,
+                    cx,
+                ))
+            })
             .when_some(pasted_image_preview, |shell, (image, index, count)| {
                 shell.child(pasted_image_overlay(
                     PastedImageOverlayParams {

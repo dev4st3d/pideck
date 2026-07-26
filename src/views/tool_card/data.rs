@@ -199,6 +199,11 @@ pub struct ToolPresentation {
     pub name: String,
     pub status: CardStatus,
     pub rows: Vec<ToolTreeRow>,
+    pub call_id: Option<String>,
+    pub arguments: Option<Value>,
+    pub payload: ToolPayload,
+    pub elapsed_ms: Option<u128>,
+    pub context_excluded: bool,
 }
 
 impl ToolPresentation {
@@ -263,10 +268,14 @@ pub(crate) fn presentation_for_tool_call(
         .map(payload_from_value)
         .or_else(|| persisted.map(|(payload, _)| payload))
         .unwrap_or_default();
-    presentation(name, Some(arguments), &payload, status)
+    let mut presentation = presentation(name, Some(arguments), &payload, status);
+    presentation.call_id = Some(id.as_str().to_owned());
+    presentation.elapsed_ms = live.map(|tool| tool.elapsed_ms());
+    presentation
 }
 
 pub(crate) fn presentation_for_standalone_result(
+    id: &ToolCallId,
     name: &str,
     content: &str,
     images: &[ToolImage],
@@ -274,7 +283,7 @@ pub(crate) fn presentation_for_standalone_result(
     is_error: bool,
 ) -> ToolPresentation {
     let payload = payload_from_persisted(content, images, details);
-    presentation(
+    let mut presentation = presentation(
         name,
         None,
         &payload,
@@ -283,7 +292,9 @@ pub(crate) fn presentation_for_standalone_result(
         } else {
             CardStatus::Success
         },
-    )
+    );
+    presentation.call_id = Some(id.as_str().to_owned());
+    presentation
 }
 
 pub(crate) fn presentation_for_bash_block(
@@ -291,6 +302,7 @@ pub(crate) fn presentation_for_bash_block(
     output: &str,
     cancelled: bool,
     exit_code: Option<i32>,
+    context_excluded: bool,
 ) -> ToolPresentation {
     let status = if cancelled {
         CardStatus::Cancelled
@@ -303,12 +315,14 @@ pub(crate) fn presentation_for_bash_block(
         text: bash_body(command, output),
         ..ToolPayload::default()
     };
-    presentation(
+    let mut presentation = presentation(
         "bash",
         Some(&serde_json::json!({ "command": command })),
         &payload,
         status,
-    )
+    );
+    presentation.context_excluded = context_excluded;
+    presentation
 }
 
 pub(crate) fn presentation_for_local_bash(execution: &BashExecution) -> ToolPresentation {
@@ -326,12 +340,16 @@ pub(crate) fn presentation_for_local_bash(execution: &BashExecution) -> ToolPres
         full_output_path: execution.full_output_path.clone(),
         ..ToolPayload::default()
     };
-    presentation(
+    let mut presentation = presentation(
         "bash",
         Some(&serde_json::json!({ "command": execution.command })),
         &payload,
         status,
-    )
+    );
+    presentation.call_id = Some(execution.request.as_str().to_owned());
+    presentation.elapsed_ms = Some(execution.elapsed_ms());
+    presentation.context_excluded = execution.exclude_from_context;
+    presentation
 }
 
 fn presentation(
@@ -352,6 +370,11 @@ fn presentation(
         name: name.to_owned(),
         status,
         rows,
+        call_id: None,
+        arguments: arguments.cloned(),
+        payload: payload.clone(),
+        elapsed_ms: None,
+        context_excluded: false,
     }
 }
 
