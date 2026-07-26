@@ -299,7 +299,9 @@ pub struct RootView {
     usage_tooltip_visible: bool,
     usage_tooltip_epoch: u64,
     projects: ProjectRegistry,
+    project_controllers: HashMap<String, Entity<RuntimeController>>,
     project_catalogs: HashMap<String, ProjectCatalogCache>,
+    pending_project_session: Option<PathBuf>,
     project_feedback: Option<String>,
     project_picker_pending: bool,
     project_scan_generation: u64,
@@ -554,6 +556,8 @@ impl RootView {
                 view.on_goal_edit_event(event, cx)
             });
         window.set_window_title("Pideck");
+        let mut project_controllers = HashMap::new();
+        project_controllers.insert(project_key(projects.active_path()), controller.clone());
         let mut view = Self {
             controller,
             render_projections,
@@ -620,7 +624,9 @@ impl RootView {
             usage_tooltip_visible: false,
             usage_tooltip_epoch: 0,
             projects,
+            project_controllers,
             project_catalogs: HashMap::new(),
+            pending_project_session: None,
             project_feedback,
             project_picker_pending: false,
             project_scan_generation: 0,
@@ -682,6 +688,7 @@ impl RootView {
             _subagent_subscription: subagent_subscription,
             _goal_edit_subscription: goal_edit_subscription,
         };
+        view.warm_project_controllers(cx);
         view.refresh_project_catalogs(cx);
         if projects_need_save {
             view.persist_projects(cx);
@@ -2568,6 +2575,7 @@ impl RootView {
                                 if added == 1 { "" } else { "s" }
                             ));
                             view.persist_projects(cx);
+                            view.warm_project_controllers(cx);
                             view.refresh_project_catalogs(cx);
                         } else if duplicates > 0 {
                             view.project_feedback =
@@ -2618,6 +2626,7 @@ impl RootView {
         self.pending_bash = None;
         self.pending_compaction_focus = None;
         self.pending_session_name = None;
+        self.pending_project_session = None;
         self.sessions_scroll_motion.cancel();
         self.conversation_scroll_motion.cancel();
         self.conversation_follow.set(true);
@@ -2627,6 +2636,35 @@ impl RootView {
         window.focus(&self.focus_handle);
     }
 
+    fn warm_project_controllers(&mut self, cx: &mut Context<Self>) {
+        let projects = self
+            .projects
+            .projects()
+            .iter()
+            .filter(|project| project.path.is_dir())
+            .map(|project| {
+                (
+                    project.path.clone(),
+                    project
+                        .last_session
+                        .clone()
+                        .filter(|session| session.is_file()),
+                )
+            })
+            .collect::<Vec<_>>();
+        for (path, preferred_session) in projects {
+            let key = project_key(&path);
+            if self.project_controllers.contains_key(&key) {
+                continue;
+            }
+            let controller = cx.new(|cx| RuntimeController::for_workspace(path, cx));
+            controller.update(cx, |controller, cx| {
+                controller.connect_to_session(preferred_session, cx)
+            });
+            self.project_controllers.insert(key, controller);
+        }
+    }
+
     fn open_project_controller(
         &mut self,
         path: PathBuf,
@@ -2634,17 +2672,25 @@ impl RootView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let controller = cx.new(|cx| RuntimeController::for_workspace(path, cx));
+        let key = project_key(&path);
+        let controller = if let Some(controller) = self.project_controllers.get(&key) {
+            controller.clone()
+        } else {
+            let controller = cx.new(|cx| RuntimeController::for_workspace(path, cx));
+            controller.update(cx, |controller, cx| {
+                controller.connect_to_session(preferred_session.clone(), cx)
+            });
+            self.project_controllers.insert(key, controller.clone());
+            controller
+        };
         let observation = cx.observe_in(&controller, window, |view, _, window, cx| {
             view.sync_runtime(window, cx)
         });
-        self.controller = controller.clone();
+        self.controller = controller;
         self._controller_observation = observation;
         self.reset_for_project_switch(window, cx);
+        self.pending_project_session = preferred_session;
         self.sync_runtime_state(true, window, cx);
-        controller.update(cx, |controller, cx| {
-            controller.connect_to_session(preferred_session, cx)
-        });
         self.refresh_project_catalogs(cx);
     }
 
@@ -2721,6 +2767,9 @@ impl RootView {
             }
         }
         self.project_catalogs.remove(&project_key(&path));
+        if let Some(controller) = self.project_controllers.remove(&project_key(&path)) {
+            controller.update(cx, |controller, _| controller.shutdown());
+        }
         if let Some(next) = next_available
             && was_active
         {
@@ -3130,6 +3179,36 @@ impl RootView {
         self.sync_runtime_state(false, window, cx);
     }
 
+    fn sync_pending_project_session(&mut self, cx: &mut Context<Self>) {
+        let Some(requested) = self.pending_project_session.clone() else {
+            return;
+        };
+        if self
+            .render_projections
+            .catalog
+            .current_session_file
+            .as_ref()
+            .is_some_and(|current| project_key(current) == project_key(&requested))
+        {
+            self.pending_project_session = None;
+            return;
+        }
+        if !matches!(
+            self.conversation.lifecycle,
+            RuntimeLifecycle::Ready | RuntimeLifecycle::Settled
+        ) || self.conversation.pending_operation.is_some()
+            || self.render_projections.catalog.switching
+        {
+            return;
+        }
+        let accepted = self.controller.update(cx, |controller, cx| {
+            controller.switch_session(requested, cx)
+        });
+        if accepted {
+            self.pending_project_session = None;
+        }
+    }
+
     fn sync_runtime_state(
         &mut self,
         force_epoch_reset: bool,
@@ -3347,6 +3426,7 @@ impl RootView {
             self.command_catalog_source = command_catalog_source;
         }
         self.render_projections = render_projections;
+        self.sync_pending_project_session(cx);
         if command_catalog_changed {
             self.refresh_command_palette_matches(cx);
             self.sync_slash_completion(cx);
