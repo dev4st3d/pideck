@@ -7,11 +7,13 @@ pub(super) struct ComposerBarParams<'a> {
     pub(super) models: &'a ModelRuntimeProjection,
     pub(super) projection: &'a ShellProjection,
     pub(super) panel: Option<ModelPanel>,
+    pub(super) provider_filter: Option<&'a str>,
     pub(super) search: &'a Entity<Composer>,
     pub(super) slash_commands: &'a [CommandEntry],
     pub(super) command_selection: usize,
     pub(super) command_scroll: &'a ScrollHandle,
     pub(super) model_scroll: &'a ScrollHandle,
+    pub(super) provider_scroll: &'a ScrollHandle,
     pub(super) thinking_scroll: &'a ScrollHandle,
     pub(super) slash_dismissed: bool,
     pub(super) extension_ui: &'a ExtensionUiProjection,
@@ -26,11 +28,13 @@ pub(super) fn composer_bar(
         models,
         projection,
         panel,
+        provider_filter,
         search,
         slash_commands,
         command_selection,
         command_scroll,
         model_scroll,
+        provider_scroll,
         thinking_scroll,
         slash_dismissed,
         extension_ui,
@@ -88,9 +92,18 @@ pub(super) fn composer_bar(
                             .bottom_full()
                             .pb(px(10.0))
                             .occlude()
+                            .flex()
+                            .justify_center()
                             .child(if model_open {
-                                model_switcher_sheet(models, search, model_scroll, cx)
-                                    .into_any_element()
+                                model_switcher_sheet(
+                                    models,
+                                    provider_filter,
+                                    search,
+                                    model_scroll,
+                                    provider_scroll,
+                                    cx,
+                                )
+                                .into_any_element()
                             } else {
                                 thinking_select_sheet(models, thinking_scroll, cx)
                                     .into_any_element()

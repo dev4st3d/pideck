@@ -415,267 +415,609 @@ fn typography_settings(
 
 pub(super) fn model_switcher_sheet(
     projection: &ModelRuntimeProjection,
+    provider_filter: Option<&str>,
     search: &Entity<Composer>,
-    scroll: &ScrollHandle,
+    model_scroll: &ScrollHandle,
+    provider_scroll: &ScrollHandle,
     cx: &mut Context<RootView>,
 ) -> impl IntoElement {
+    let mut providers = model_provider_choices(projection);
+    if let Some(active_provider) = projection
+        .active_model
+        .as_ref()
+        .map(|identity| identity.provider.as_str())
+        && let Some(index) = providers
+            .iter()
+            .position(|provider| provider.id == active_provider)
+        && index > 0
+    {
+        let active = providers.remove(index);
+        providers.insert(0, active);
+    }
+    let selected_provider =
+        provider_filter.filter(|provider| providers.iter().any(|choice| choice.id == *provider));
+    let selected_provider_name = selected_provider
+        .and_then(|provider| providers.iter().find(|choice| choice.id == provider))
+        .map(|provider| provider.name.clone())
+        .unwrap_or_else(|| "All models".to_owned());
     let query = search.read(cx).draft().to_owned();
-    let models = model_choices(projection, &query);
+    let models = model_choices(projection, selected_provider, &query);
     let active = projection.active_model.clone();
     let can_change = projection.model_change_policy == ModelChangePolicy::Allowed;
+    let total_models = providers.iter().map(|provider| provider.model_count).sum();
+    let empty_message = match projection.phase {
+        CatalogPhase::Loading => "Loading models…".to_owned(),
+        _ if query.trim().is_empty() => selected_provider
+            .and_then(|provider| providers.iter().find(|choice| choice.id == provider))
+            .map(|provider| format!("No available {} models.", provider.name))
+            .unwrap_or_else(|| "No available models.".to_owned()),
+        _ => "No models match this search.".to_owned(),
+    };
+    let policy_note = match projection.model_change_policy {
+        ModelChangePolicy::Allowed => None,
+        ModelChangePolicy::WaitUntilIdle => {
+            Some("Wait for the current response to finish before switching models.")
+        }
+        ModelChangePolicy::RuntimeUnavailable => Some("Reconnect Pi before switching models."),
+    };
 
     popup_sheet()
         .id("model-switcher-sheet")
-        // A definite flex height makes the results pane the overflow owner. With only
-        // max-height, the list kept its intrinsic height and the sheet clipped it.
-        .h(px(300.0))
+        .on_key_down(cx.listener(|view, event: &gpui::KeyDownEvent, window, cx| {
+            if event.keystroke.key == "escape" {
+                cx.stop_propagation();
+                view.close_model_panel(window, cx);
+            }
+        }))
+        // Definite flex height keeps both independent scroll panes inside the sheet.
+        .h(px(410.0))
+        .max_w(px(720.0))
         .child(
             div()
-                .px(px(10.0))
-                .py(px(8.0))
+                .size_full()
+                .min_h_0()
                 .flex()
                 .flex_row()
-                .items_center()
-                .gap(px(10.0))
-                .bg(theme::panel())
-                .border_b_1()
-                .border_color(theme::edge_soft())
                 .child(
                     div()
-                        .font_family(theme::sans())
-                        .text_size(px(theme::T_LABEL))
-                        .font_weight(FontWeight::BOLD)
-                        .text_color(theme::bone_dim())
+                        .w(px(62.0))
+                        .h_full()
                         .flex_shrink_0()
-                        .child("Model"),
+                        .flex()
+                        .flex_col()
+                        .bg(theme::floor())
+                        .border_r_1()
+                        .border_color(theme::edge_soft())
+                        .child(model_provider_button(
+                            None,
+                            selected_provider.is_none(),
+                            total_models,
+                            cx,
+                        ))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_h_0()
+                                .relative()
+                                .child(controls::scroll_wheel_capture(provider_scroll))
+                                .child(
+                                    div()
+                                        .id("model-provider-scroll")
+                                        .size_full()
+                                        .pt(px(4.0))
+                                        .overflow_y_scroll()
+                                        .track_scroll(provider_scroll)
+                                        .scrollbar_width(px(4.0))
+                                        .children(providers.iter().map(|provider| {
+                                            model_provider_button(
+                                                Some(provider),
+                                                selected_provider == Some(provider.id.as_str()),
+                                                provider.model_count,
+                                                cx,
+                                            )
+                                        })),
+                                ),
+                        ),
                 )
-                .child(div().flex_1().min_w_0().child(search.clone()))
-                .child(controls::chrome_action(
-                    "close-model-switcher",
-                    "Close",
-                    true,
-                    Box::new(cx.listener(|view, _, window, cx| view.close_model_panel(window, cx))),
-                )),
-        )
-        .when(!can_change, |sheet| {
-            sheet.child(
-                div()
-                    .px(px(8.0))
-                    .py(px(4.0))
-                    .bg(theme::panel())
-                    .border_b_1()
-                    .border_color(theme::panel_hover())
-                    .font_family(theme::sans())
-                    .text_size(px(theme::T_TINY))
-                    .text_color(theme::smoke())
-                    .child("Settle stream to change"),
-            )
-        })
-        .child(
-            div()
-                .flex_1()
-                .min_h_0()
-                .relative()
-                .child(controls::scroll_wheel_capture(scroll))
                 .child(
                     div()
-                        .id("model-switcher-scroll")
-                        .size_full()
+                        .flex_1()
+                        .min_w_0()
+                        .min_h_0()
+                        .flex()
+                        .flex_col()
                         .bg(theme::panel())
-                        .overflow_y_scroll()
-                        .track_scroll(scroll)
-                        .scrollbar_width(px(6.0))
-                        .when(models.is_empty(), |list| {
-                            list.child(
-                                div()
-                                    .px(px(12.0))
-                                    .py(px(18.0))
-                                    .font_family(theme::sans())
-                                    .text_size(px(theme::T_UI_SM))
-                                    .text_color(theme::smoke())
-                                    .child(match projection.phase {
-                                        CatalogPhase::Loading => "Loading models…",
-                                        _ => "No matching models.",
-                                    }),
-                            )
-                        })
-                        .children(models.into_iter().map(|model| {
-                            let identity = model.identity.clone();
-                            let selected = active.as_ref() == Some(&identity);
-                            let context = format!("{} ctx", compact_count(model.context_window));
-                            let monogram = model
-                                .name
-                                .chars()
-                                .next()
-                                .unwrap_or('M')
-                                .to_uppercase()
-                                .to_string();
+                        .child(
                             div()
-                                .id(gpui::SharedString::from(format!(
-                                    "switch-model-{}-{}",
-                                    identity.provider, identity.id
-                                )))
                                 .h(px(48.0))
-                                .mx(px(6.0))
-                                .my(px(2.0))
-                                .px(px(10.0))
+                                .px(px(12.0))
+                                .flex_shrink_0()
                                 .flex()
                                 .flex_row()
                                 .items_center()
                                 .gap(px(10.0))
-                                .rounded(px(theme::RADIUS_SM))
-                                .border_1()
-                                .border_color(if selected {
-                                    theme::data()
-                                } else {
-                                    theme::edge_soft()
-                                })
-                                .bg(if selected {
-                                    theme::data_wash()
-                                } else {
-                                    theme::panel()
-                                })
-                                .when(can_change && !selected, |row| {
-                                    let identity = identity.clone();
-                                    row.tab_index(0)
-                                        .cursor_pointer()
-                                        .hover(|row| {
-                                            row.bg(theme::panel_lift()).border_color(theme::edge())
-                                        })
-                                        .active(|row| row.bg(theme::panel_hover()))
-                                        .on_click(cx.listener(move |view, _, window, cx| {
-                                            view.select_model(identity.clone(), window, cx)
-                                        }))
-                                })
+                                .border_b_1()
+                                .border_color(theme::edge_soft())
                                 .child(
                                     div()
-                                        .size(px(28.0))
-                                        .rounded(px(theme::RADIUS_SM))
-                                        .flex()
-                                        .items_center()
-                                        .justify_center()
+                                        .w(px(116.0))
                                         .flex_shrink_0()
-                                        .border_1()
-                                        .border_color(if selected {
-                                            theme::data()
-                                        } else {
-                                            theme::edge_soft()
-                                        })
-                                        .bg(if selected {
-                                            theme::data_wash()
-                                        } else {
-                                            theme::canvas()
-                                        })
                                         .font_family(theme::sans())
                                         .text_size(px(theme::T_LABEL))
-                                        .font_weight(FontWeight::BOLD)
-                                        .text_color(if selected {
-                                            theme::data()
-                                        } else {
-                                            theme::ash()
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(theme::bone_dim())
+                                        .overflow_hidden()
+                                        .text_ellipsis()
+                                        .whitespace_nowrap()
+                                        .child(selected_provider_name),
+                                )
+                                .child(div().flex_1().min_w_0().child(search.clone()))
+                                .child(model_switcher_close_button(cx)),
+                        )
+                        .when_some(policy_note, |list, note| {
+                            list.child(
+                                div()
+                                    .px(px(12.0))
+                                    .py(px(7.0))
+                                    .flex_shrink_0()
+                                    .bg(theme::canvas())
+                                    .border_b_1()
+                                    .border_color(theme::edge_soft())
+                                    .font_family(theme::sans())
+                                    .text_size(px(theme::T_TINY))
+                                    .text_color(theme::ash())
+                                    .child(note),
+                            )
+                        })
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_h_0()
+                                .relative()
+                                .child(controls::scroll_wheel_capture(model_scroll))
+                                .child(
+                                    div()
+                                        .id("model-switcher-scroll")
+                                        .size_full()
+                                        .py(px(6.0))
+                                        .bg(theme::panel())
+                                        .overflow_y_scroll()
+                                        .track_scroll(model_scroll)
+                                        .scrollbar_width(px(6.0))
+                                        .when(models.is_empty(), |list| {
+                                            list.child(
+                                                div()
+                                                    .px(px(16.0))
+                                                    .py(px(18.0))
+                                                    .font_family(theme::sans())
+                                                    .text_size(px(theme::T_UI_SM))
+                                                    .text_color(theme::smoke())
+                                                    .child(empty_message.clone()),
+                                            )
                                         })
-                                        .child(monogram),
-                                )
-                                .child(
-                                    div()
-                                        .min_w_0()
-                                        .flex_1()
-                                        .flex()
-                                        .flex_col()
-                                        .gap(px(1.0))
-                                        .child(
+                                        .children(models.into_iter().map(|model| {
+                                            let click_identity = model.identity.clone();
+                                            let keyboard_identity = model.identity.clone();
+                                            let selected = active.as_ref() == Some(&model.identity);
+                                            let context = format!(
+                                                "{} context",
+                                                compact_count(model.context_window)
+                                            );
                                             div()
-                                                .font_family(theme::sans())
-                                                .text_size(px(theme::T_UI_SM))
-                                                .font_weight(if selected {
-                                                    FontWeight::BOLD
+                                                .id(gpui::SharedString::from(format!(
+                                                    "switch-model-{}-{}",
+                                                    model.identity.provider, model.identity.id
+                                                )))
+                                                .min_h(px(58.0))
+                                                .mx(px(8.0))
+                                                .my(px(2.0))
+                                                .px(px(12.0))
+                                                .py(px(8.0))
+                                                .flex()
+                                                .flex_row()
+                                                .items_center()
+                                                .gap(px(12.0))
+                                                .rounded(px(theme::RADIUS))
+                                                .border_1()
+                                                .border_color(if selected {
+                                                    theme::edge_hard()
                                                 } else {
-                                                    FontWeight::SEMIBOLD
+                                                    theme::panel()
                                                 })
-                                                .text_color(if selected {
-                                                    theme::bone()
+                                                .bg(if selected {
+                                                    theme::panel_lift()
                                                 } else {
-                                                    theme::bone_dim()
+                                                    theme::panel()
                                                 })
-                                                .overflow_hidden()
-                                                .text_ellipsis()
-                                                .whitespace_nowrap()
-                                                .child(model.name),
-                                        )
-                                        .child(
-                                            div()
-                                                .font_family(theme::mono())
-                                                .text_size(px(10.0))
-                                                .text_color(theme::smoke())
-                                                .overflow_hidden()
-                                                .text_ellipsis()
-                                                .whitespace_nowrap()
-                                                .child(identity.provider),
-                                        ),
-                                )
-                                .child(
-                                    div()
-                                        .font_family(theme::mono())
-                                        .text_size(px(10.0))
-                                        .font_weight(FontWeight::MEDIUM)
-                                        .text_color(theme::ash())
-                                        .flex_shrink_0()
-                                        .child(context),
-                                )
-                                .when(selected, |row| {
-                                    row.child(
-                                        div()
-                                            .px(px(6.0))
-                                            .py(px(3.0))
-                                            .rounded(px(theme::RADIUS_SM))
-                                            .bg(theme::data_wash())
-                                            .font_family(theme::sans())
-                                            .text_size(px(9.0))
-                                            .font_weight(FontWeight::BOLD)
-                                            .text_color(theme::data())
-                                            .flex_shrink_0()
-                                            .child("Active"),
-                                    )
-                                })
-                        })),
+                                                .when(can_change && !selected, |row| {
+                                                    row.tab_index(0)
+                                                        .cursor_pointer()
+                                                        .hover(|row| row.bg(theme::panel_lift()))
+                                                        .active(|row| row.bg(theme::panel_hover()))
+                                                        .focus(|row| {
+                                                            row.bg(theme::panel_lift())
+                                                                .border_color(theme::focus())
+                                                        })
+                                                        .on_click(cx.listener(
+                                                            move |view, _, window, cx| {
+                                                                view.select_model(
+                                                                    click_identity.clone(),
+                                                                    window,
+                                                                    cx,
+                                                                )
+                                                            },
+                                                        ))
+                                                        .on_key_down(cx.listener(
+                                                            move |view,
+                                                                  event: &gpui::KeyDownEvent,
+                                                                  window,
+                                                                  cx| {
+                                                                if matches!(
+                                                                    event.keystroke.key.as_str(),
+                                                                    "enter" | "space"
+                                                                ) {
+                                                                    cx.stop_propagation();
+                                                                    view.select_model(
+                                                                        keyboard_identity.clone(),
+                                                                        window,
+                                                                        cx,
+                                                                    );
+                                                                }
+                                                            },
+                                                        ))
+                                                })
+                                                .child(
+                                                    div()
+                                                        .min_w_0()
+                                                        .flex_1()
+                                                        .flex()
+                                                        .flex_col()
+                                                        .gap(px(3.0))
+                                                        .child(
+                                                            div()
+                                                                .font_family(theme::sans())
+                                                                .text_size(px(theme::T_UI))
+                                                                .font_weight(if selected {
+                                                                    FontWeight::BOLD
+                                                                } else {
+                                                                    FontWeight::SEMIBOLD
+                                                                })
+                                                                .text_color(if !can_change {
+                                                                    theme::smoke()
+                                                                } else if selected {
+                                                                    theme::bone()
+                                                                } else {
+                                                                    theme::bone_dim()
+                                                                })
+                                                                .overflow_hidden()
+                                                                .text_ellipsis()
+                                                                .whitespace_nowrap()
+                                                                .child(model.name),
+                                                        )
+                                                        .child(
+                                                            div()
+                                                                .font_family(theme::sans())
+                                                                .text_size(px(theme::T_LABEL))
+                                                                .text_color(theme::smoke())
+                                                                .overflow_hidden()
+                                                                .text_ellipsis()
+                                                                .whitespace_nowrap()
+                                                                .child(model.provider_name),
+                                                        ),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .flex_shrink_0()
+                                                        .flex()
+                                                        .flex_col()
+                                                        .items_end()
+                                                        .gap(px(3.0))
+                                                        .child(
+                                                            div()
+                                                                .font_family(theme::mono())
+                                                                .text_size(px(theme::T_TINY))
+                                                                .font_weight(FontWeight::MEDIUM)
+                                                                .text_color(theme::ash())
+                                                                .child(context),
+                                                        )
+                                                        .when(selected, |meta| {
+                                                            meta.child(
+                                                                div()
+                                                                    .font_family(theme::sans())
+                                                                    .text_size(px(theme::T_TINY))
+                                                                    .font_weight(
+                                                                        FontWeight::SEMIBOLD,
+                                                                    )
+                                                                    .text_color(theme::data())
+                                                                    .child("Active"),
+                                                            )
+                                                        }),
+                                                )
+                                        })),
+                                ),
+                        )
+                        .when_some(projection.feedback.clone(), |list, feedback| {
+                            list.child(
+                                div()
+                                    .px(px(10.0))
+                                    .py(px(6.0))
+                                    .flex_shrink_0()
+                                    .bg(theme::panel())
+                                    .border_t_1()
+                                    .border_color(theme::edge_soft())
+                                    .font_family(theme::mono())
+                                    .text_size(px(theme::T_TINY))
+                                    .text_color(theme::smoke())
+                                    .overflow_hidden()
+                                    .text_ellipsis()
+                                    .whitespace_nowrap()
+                                    .child(feedback),
+                            )
+                        }),
                 ),
         )
-        .when_some(projection.feedback.clone(), |sheet, feedback| {
-            sheet.child(
+}
+
+fn model_switcher_close_button(cx: &mut Context<RootView>) -> gpui::AnyElement {
+    div()
+        .id("close-model-switcher")
+        .h(px(26.0))
+        .px(px(8.0))
+        .flex_shrink_0()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(theme::RADIUS_SM))
+        .tab_index(0)
+        .cursor_pointer()
+        .font_family(theme::main())
+        .text_size(px(theme::T_TINY))
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(theme::ash())
+        .hover(|button| button.bg(theme::canvas()).text_color(theme::bone()))
+        .active(|button| button.bg(theme::panel_lift()))
+        .focus(|button| button.bg(theme::canvas()).text_color(theme::focus()))
+        .on_click(cx.listener(|view, _, window, cx| view.close_model_panel(window, cx)))
+        .on_key_down(cx.listener(|view, event: &gpui::KeyDownEvent, window, cx| {
+            if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                cx.stop_propagation();
+                view.close_model_panel(window, cx);
+            }
+        }))
+        .child("Close")
+        .into_any_element()
+}
+
+fn model_provider_button(
+    provider: Option<&ModelProviderChoice>,
+    selected: bool,
+    model_count: usize,
+    cx: &mut Context<RootView>,
+) -> gpui::AnyElement {
+    let provider_id = provider.map(|provider| provider.id.clone());
+    let click_provider = provider_id.clone();
+    let keyboard_provider = provider_id.clone();
+    let name = provider
+        .map(|provider| provider.name.clone())
+        .unwrap_or_else(|| "All providers".to_owned());
+    let mark = provider
+        .map(|provider| provider_mark(&provider.id, &provider.name))
+        .unwrap_or_else(|| "ALL".to_owned());
+    let detail = format!(
+        "{model_count} available model{}",
+        if model_count == 1 { "" } else { "s" }
+    );
+    let tooltip_name = name.clone();
+    let tooltip_detail = detail.clone();
+
+    div()
+        .id(gpui::SharedString::from(match provider_id {
+            Some(provider) => format!("model-provider-{provider}"),
+            None => "model-provider-all".to_owned(),
+        }))
+        .relative()
+        .h(px(48.0))
+        .w_full()
+        .flex_shrink_0()
+        .flex()
+        .items_center()
+        .justify_center()
+        .tab_index(0)
+        .cursor_pointer()
+        .bg(if selected {
+            theme::panel_lift()
+        } else {
+            theme::floor()
+        })
+        .text_color(if selected {
+            theme::bone()
+        } else {
+            theme::ash()
+        })
+        .hover(move |button| {
+            button
+                .bg(if selected {
+                    theme::panel_hover()
+                } else {
+                    theme::panel()
+                })
+                .text_color(if selected {
+                    theme::bone()
+                } else {
+                    theme::bone_dim()
+                })
+        })
+        .active(|button| button.bg(theme::panel_hover()))
+        .focus(|button| button.bg(theme::panel()).text_color(theme::focus()))
+        .on_click(cx.listener(move |view, _, _, cx| {
+            view.set_model_provider_filter(click_provider.clone(), cx)
+        }))
+        .on_key_down(cx.listener(move |view, event: &gpui::KeyDownEvent, _, cx| {
+            if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                cx.stop_propagation();
+                view.set_model_provider_filter(keyboard_provider.clone(), cx);
+            }
+        }))
+        .tooltip(move |_, cx| {
+            cx.new(|_| ModelProviderTooltip {
+                name: tooltip_name.clone(),
+                detail: tooltip_detail.clone(),
+            })
+            .into()
+        })
+        .child(
+            div()
+                .font_family(theme::main())
+                .text_size(px(if mark.chars().count() > 2 { 9.5 } else { 11.5 }))
+                .font_weight(FontWeight::BOLD)
+                .child(mark),
+        )
+        .when(selected, |button| {
+            button.child(
                 div()
-                    .px(px(8.0))
-                    .py(px(5.0))
-                    .bg(theme::panel())
-                    .border_t_1()
-                    .border_color(theme::panel_hover())
-                    .font_family(theme::mono())
-                    .text_size(px(theme::T_TINY))
-                    .text_color(theme::smoke())
-                    .overflow_hidden()
-                    .text_ellipsis()
-                    .whitespace_nowrap()
-                    .child(feedback),
+                    .absolute()
+                    .right_0()
+                    .top(px(11.0))
+                    .bottom(px(11.0))
+                    .w(px(2.0))
+                    .rounded(px(1.0))
+                    .bg(theme::focus()),
             )
         })
+        .into_any_element()
+}
+
+struct ModelProviderTooltip {
+    name: String,
+    detail: String,
+}
+
+impl Render for ModelProviderTooltip {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .px(px(9.0))
+            .py(px(7.0))
+            .rounded(px(theme::RADIUS_SM))
+            .bg(theme::panel_lift())
+            .border_1()
+            .border_color(theme::edge_hard())
+            .flex()
+            .flex_col()
+            .gap(px(2.0))
+            .child(
+                div()
+                    .font_family(theme::sans())
+                    .text_size(px(theme::T_LABEL))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(theme::bone())
+                    .child(self.name.clone()),
+            )
+            .child(
+                div()
+                    .font_family(theme::sans())
+                    .text_size(px(theme::T_TINY))
+                    .text_color(theme::ash())
+                    .child(self.detail.clone()),
+            )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ModelProviderChoice {
+    pub(super) id: String,
+    pub(super) name: String,
+    pub(super) model_count: usize,
+}
+
+pub(super) fn model_provider_choices(
+    projection: &ModelRuntimeProjection,
+) -> Vec<ModelProviderChoice> {
+    if let Some(catalog) = projection.catalog.as_ref() {
+        let mut choices = Vec::new();
+        let mut known = HashSet::new();
+        for provider in &catalog.providers {
+            let model_count = catalog
+                .models
+                .iter()
+                .filter(|model| model.available && model.identity.provider == provider.id)
+                .count();
+            if model_count > 0 && known.insert(provider.id.clone()) {
+                choices.push(ModelProviderChoice {
+                    id: provider.id.clone(),
+                    name: provider.name.clone(),
+                    model_count,
+                });
+            }
+        }
+        for model in catalog.models.iter().filter(|model| model.available) {
+            if known.insert(model.identity.provider.clone()) {
+                choices.push(ModelProviderChoice {
+                    id: model.identity.provider.clone(),
+                    name: provider_display_name(&model.identity.provider),
+                    model_count: catalog
+                        .models
+                        .iter()
+                        .filter(|candidate| {
+                            candidate.available
+                                && candidate.identity.provider == model.identity.provider
+                        })
+                        .count(),
+                });
+            }
+        }
+        return choices;
+    }
+
+    let mut choices = Vec::<ModelProviderChoice>::new();
+    for model in projection.stock_models.iter() {
+        if let Some(provider) = choices
+            .iter_mut()
+            .find(|provider| provider.id == model.provider)
+        {
+            provider.model_count += 1;
+        } else {
+            choices.push(ModelProviderChoice {
+                id: model.provider.clone(),
+                name: provider_display_name(&model.provider),
+                model_count: 1,
+            });
+        }
+    }
+    choices
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct ModelChoice {
     pub(super) identity: ModelIdentity,
     pub(super) name: String,
+    pub(super) provider_name: String,
     pub(super) context_window: u64,
 }
 
-pub(super) fn model_choices(projection: &ModelRuntimeProjection, query: &str) -> Vec<ModelChoice> {
+pub(super) fn model_choices(
+    projection: &ModelRuntimeProjection,
+    provider: Option<&str>,
+    query: &str,
+) -> Vec<ModelChoice> {
     if let Some(catalog) = projection.catalog.as_ref() {
         return catalog
             .models
             .iter()
-            .filter(|model| model.available && model.search_matches(query))
-            .take(48)
+            .filter(|model| {
+                model.available
+                    && provider.is_none_or(|provider| model.identity.provider == provider)
+                    && model.search_matches(query)
+            })
+            .take(64)
             .map(|model| ModelChoice {
                 identity: model.identity.clone(),
                 name: model.name.clone(),
+                provider_name: catalog
+                    .providers
+                    .iter()
+                    .find(|provider| provider.id == model.identity.provider)
+                    .map(|provider| provider.name.clone())
+                    .unwrap_or_else(|| provider_display_name(&model.identity.provider)),
                 context_window: model.context_window,
             })
             .collect();
@@ -684,14 +1026,18 @@ pub(super) fn model_choices(projection: &ModelRuntimeProjection, query: &str) ->
     projection
         .stock_models
         .iter()
-        .filter(|model| stock_model_matches(model, query))
-        .take(48)
+        .filter(|model| {
+            provider.is_none_or(|provider| model.provider == provider)
+                && stock_model_matches(model, query)
+        })
+        .take(64)
         .map(|model| ModelChoice {
             identity: ModelIdentity {
                 provider: model.provider.clone(),
                 id: model.id.clone(),
             },
             name: model.name.clone(),
+            provider_name: provider_display_name(&model.provider),
             context_window: model.context_window,
         })
         .collect()
@@ -703,6 +1049,64 @@ fn stock_model_matches(model: &ModelSummary, query: &str) -> bool {
         || model.name.to_lowercase().contains(&query)
         || model.provider.to_lowercase().contains(&query)
         || model.id.to_lowercase().contains(&query)
+}
+
+fn provider_display_name(provider: &str) -> String {
+    provider
+        .split(['-', '_'])
+        .filter(|part| !part.is_empty())
+        .map(|part| {
+            let mut chars = part.chars();
+            let Some(first) = chars.next() else {
+                return String::new();
+            };
+            let first = first.to_uppercase().collect::<String>();
+            format!("{first}{}", chars.as_str())
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn provider_mark(id: &str, name: &str) -> String {
+    let known = match id {
+        "amazon-bedrock" => Some("AWS"),
+        "anthropic" | "ant-ling" => Some("AN"),
+        "azure-openai-responses" | "openai" | "openai-codex" => Some("OA"),
+        "cerebras" => Some("CE"),
+        "cloudflare-workers-ai" => Some("CF"),
+        "deepseek" => Some("DS"),
+        "github-copilot" => Some("GH"),
+        "google" | "google-vertex" => Some("G"),
+        "groq" => Some("GQ"),
+        "huggingface" => Some("HF"),
+        "mistral" => Some("MI"),
+        "nvidia" => Some("NV"),
+        "openrouter" => Some("OR"),
+        "vercel-ai-gateway" => Some("V"),
+        "xai" => Some("xAI"),
+        _ => None,
+    };
+    if let Some(mark) = known {
+        return mark.to_owned();
+    }
+
+    let words = name
+        .split(|character: char| !character.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .collect::<Vec<_>>();
+    if words.len() > 1 {
+        return words
+            .iter()
+            .take(2)
+            .filter_map(|word| word.chars().next())
+            .flat_map(char::to_uppercase)
+            .collect();
+    }
+    name.chars()
+        .filter(|character| character.is_alphanumeric())
+        .take(2)
+        .flat_map(char::to_uppercase)
+        .collect()
 }
 
 pub(super) fn thinking_select_sheet(

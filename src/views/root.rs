@@ -252,6 +252,7 @@ pub struct RootView {
     subagent_composer: Entity<Composer>,
     goal_edit_composer: Entity<Composer>,
     model_panel: Option<ModelPanel>,
+    model_provider_filter: Option<String>,
     resource_scope_filter: ResourceScopeFilter,
     resource_state_filter: ResourceStateFilter,
     font_catalog: FontCatalog,
@@ -277,6 +278,7 @@ pub struct RootView {
     command_palette_scroll: ScrollHandle,
     slash_command_scroll: ScrollHandle,
     model_switcher_scroll: ScrollHandle,
+    model_provider_scroll: ScrollHandle,
     thinking_select_scroll: ScrollHandle,
     pi_settings_scroll: ScrollHandle,
     runtime_notifications: VecDeque<RuntimeNotification>,
@@ -502,7 +504,10 @@ impl RootView {
                 view.on_import_path_event(event, cx)
             });
         let model_search_observation =
-            cx.observe_in(&model_search_composer, window, |_, _, _, cx| cx.notify());
+            cx.observe_in(&model_search_composer, window, |view, _, _, cx| {
+                view.model_switcher_scroll.scroll_to_item(0);
+                cx.notify();
+            });
         let font_search_observation =
             cx.observe_in(&font_search_composer, window, |_, _, _, cx| cx.notify());
         let composer_observation = cx.observe_in(&composer, window, |view, _, _, cx| {
@@ -566,6 +571,7 @@ impl RootView {
             subagent_composer,
             goal_edit_composer,
             model_panel: None,
+            model_provider_filter: None,
             resource_scope_filter: ResourceScopeFilter::All,
             resource_state_filter: ResourceStateFilter::All,
             font_feedback: font_catalog.load_warning.clone(),
@@ -591,6 +597,7 @@ impl RootView {
             command_palette_scroll: ScrollHandle::new(),
             slash_command_scroll: ScrollHandle::new(),
             model_switcher_scroll: ScrollHandle::new(),
+            model_provider_scroll: ScrollHandle::new(),
             thinking_select_scroll: ScrollHandle::new(),
             pi_settings_scroll: ScrollHandle::new(),
             runtime_notifications: VecDeque::new(),
@@ -1927,7 +1934,19 @@ impl RootView {
     fn show_model_panel(&mut self, panel: ModelPanel, window: &mut Window, cx: &mut Context<Self>) {
         self.model_panel = Some(panel);
         match panel {
-            ModelPanel::Switcher | ModelPanel::Settings(ModelSettingsTab::Models) => {
+            ModelPanel::Switcher => {
+                self.model_provider_filter = self
+                    .render_projections
+                    .models
+                    .active_model
+                    .as_ref()
+                    .map(|identity| identity.provider.clone());
+                self.model_switcher_scroll.scroll_to_item(0);
+                self.model_search_composer
+                    .update(cx, |search, cx| search.set_draft("", cx));
+                window.focus(&self.model_search_composer.read(cx).focus_handle(cx));
+            }
+            ModelPanel::Settings(ModelSettingsTab::Models) => {
                 window.focus(&self.model_search_composer.read(cx).focus_handle(cx));
             }
             ModelPanel::Settings(ModelSettingsTab::Typography) => {
@@ -2012,6 +2031,15 @@ impl RootView {
             });
         })
         .detach();
+        cx.notify();
+    }
+
+    fn set_model_provider_filter(&mut self, provider: Option<String>, cx: &mut Context<Self>) {
+        if self.model_provider_filter == provider {
+            return;
+        }
+        self.model_provider_filter = provider;
+        self.model_switcher_scroll.scroll_to_item(0);
         cx.notify();
     }
 
@@ -3697,7 +3725,7 @@ mod tests {
 
     use super::{
         ExtensionDialogKey,
-        model_panels::{model_choices, thinking_choices},
+        model_panels::{model_choices, model_provider_choices, thinking_choices},
         overlays::{extension_dialog_key, wrapped_index},
         shared::short_path,
     };
@@ -3727,24 +3755,36 @@ mod tests {
     }
 
     #[test]
-    fn model_choices_fall_back_to_stock_rpc_models() {
+    fn model_choices_group_and_filter_stock_rpc_models() {
         let projection = ModelRuntimeProjection {
             phase: CatalogPhase::Failed("SDK catalog unavailable".into()),
             catalog: None,
-            stock_models: Arc::new(vec![ModelSummary {
-                provider: "openai".into(),
-                id: "gpt-test".into(),
-                name: "GPT Test".into(),
-                reasoning: true,
-                supported_thinking: vec![
-                    RuntimeThinkingLevel::Off,
-                    RuntimeThinkingLevel::Low,
-                    RuntimeThinkingLevel::High,
-                ],
-                context_window: 128_000,
-                max_tokens: 8_192,
-                supports_images: true,
-            }]),
+            stock_models: Arc::new(vec![
+                ModelSummary {
+                    provider: "openai".into(),
+                    id: "gpt-test".into(),
+                    name: "GPT Test".into(),
+                    reasoning: true,
+                    supported_thinking: vec![
+                        RuntimeThinkingLevel::Off,
+                        RuntimeThinkingLevel::Low,
+                        RuntimeThinkingLevel::High,
+                    ],
+                    context_window: 128_000,
+                    max_tokens: 8_192,
+                    supports_images: true,
+                },
+                ModelSummary {
+                    provider: "anthropic".into(),
+                    id: "claude-test".into(),
+                    name: "Claude Test".into(),
+                    reasoning: true,
+                    supported_thinking: vec![RuntimeThinkingLevel::Off],
+                    context_window: 200_000,
+                    max_tokens: 8_192,
+                    supports_images: true,
+                },
+            ]),
             auth: None,
             feedback: None,
             active_model: Some(ModelIdentity {
@@ -3771,11 +3811,27 @@ mod tests {
             },
         };
 
-        let choices = model_choices(&projection, "gpt");
+        let choices = model_choices(&projection, Some("openai"), "gpt");
         assert_eq!(choices.len(), 1);
         assert_eq!(choices[0].identity.provider, "openai");
         assert_eq!(choices[0].identity.id, "gpt-test");
         assert_eq!(choices[0].context_window, 128_000);
+        assert!(model_choices(&projection, Some("anthropic"), "gpt").is_empty());
+        assert_eq!(
+            model_choices(&projection, None, "test")
+                .into_iter()
+                .map(|choice| choice.identity.provider)
+                .collect::<Vec<_>>(),
+            vec!["openai", "anthropic"]
+        );
+        let providers = model_provider_choices(&projection);
+        assert_eq!(
+            providers
+                .iter()
+                .map(|provider| (provider.id.as_str(), provider.model_count))
+                .collect::<Vec<_>>(),
+            vec![("openai", 1), ("anthropic", 1)]
+        );
         assert_eq!(
             thinking_choices(&projection),
             vec![ThinkingLevel::Off, ThinkingLevel::Low, ThinkingLevel::High]
