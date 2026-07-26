@@ -2,7 +2,7 @@
 
 use std::sync::atomic::{AtomicU8, Ordering};
 
-use gpui::{Rgba, SharedString, rgba};
+use gpui::{Pixels, Rems, Rgba, SharedString, px, rems, rgba};
 
 use crate::fonts::{self, FontRole};
 
@@ -79,6 +79,55 @@ pub const STREAM_PAD_X: f32 = 32.0;
 pub const SCROLLBAR: f32 = 8.0;
 
 // Type scale
+const DEFAULT_REM_SIZE: f32 = 16.0;
+const MIN_FONT_SCALE_LEVEL: i8 = -2;
+const MAX_FONT_SCALE_LEVEL: i8 = 3;
+const FONT_SCALE_STEP_PERCENT: i8 = 10;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct FontScale {
+    level: i8,
+}
+
+impl FontScale {
+    pub fn increase(&mut self) -> bool {
+        self.adjust(1)
+    }
+
+    pub fn decrease(&mut self) -> bool {
+        self.adjust(-1)
+    }
+
+    pub fn rem_size(self) -> Pixels {
+        px(DEFAULT_REM_SIZE * self.factor())
+    }
+
+    pub fn percent(self) -> u16 {
+        (100 + i16::from(self.level) * i16::from(FONT_SCALE_STEP_PERCENT)) as u16
+    }
+
+    fn factor(self) -> f32 {
+        self.percent() as f32 / 100.0
+    }
+
+    fn adjust(&mut self, delta: i8) -> bool {
+        let next = (self.level + delta).clamp(MIN_FONT_SCALE_LEVEL, MAX_FONT_SCALE_LEVEL);
+        if next == self.level {
+            return false;
+        }
+        self.level = next;
+        true
+    }
+}
+
+/// Converts a pixel-based type token into a window-relative text size.
+///
+/// Keeping typography in rems lets `Window::set_rem_size` scale all text while
+/// preserving the existing type hierarchy.
+pub fn text_size(base_pixels: f32) -> Rems {
+    rems(base_pixels / DEFAULT_REM_SIZE)
+}
+
 pub const T_WORDMARK: f32 = 17.0;
 pub const T_TITLE: f32 = 15.0;
 pub const T_BODY: f32 = 15.5;
@@ -285,6 +334,26 @@ pub fn data_wash() -> Rgba {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn font_scale_is_bounded_and_keeps_default_typography_unchanged() {
+        let mut scale = FontScale::default();
+        assert_eq!(scale.percent(), 100);
+        assert_eq!(scale.rem_size(), px(16.0));
+        assert_eq!(text_size(T_BODY), rems(T_BODY / 16.0));
+
+        for _ in 0..10 {
+            scale.increase();
+        }
+        assert_eq!(scale.percent(), 130);
+        assert!(!scale.increase());
+
+        for _ in 0..10 {
+            scale.decrease();
+        }
+        assert_eq!(scale.percent(), 80);
+        assert!(!scale.decrease());
+    }
 
     #[test]
     fn theme_names_and_cycle_are_stable() {

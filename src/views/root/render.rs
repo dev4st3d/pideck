@@ -43,6 +43,8 @@ impl Render for RootView {
             .on_action(cx.listener(Self::on_focus_previous))
             .on_action(cx.listener(Self::on_open_command_palette))
             .on_action(cx.listener(Self::on_show_hotkeys))
+            .on_action(cx.listener(Self::on_increase_font_size))
+            .on_action(cx.listener(Self::on_decrease_font_size))
             .on_action(cx.listener(Self::on_image_preview_previous))
             .on_action(cx.listener(Self::on_image_preview_next))
             .on_action(cx.listener(Self::on_image_preview_close))
@@ -62,6 +64,7 @@ impl Render for RootView {
             .flex_col()
             .bg(theme::canvas())
             .font_family(theme::sans())
+            .text_size(theme::text_size(16.0))
             .text_color(theme::bone())
             .child(titlebar(
                 projection,

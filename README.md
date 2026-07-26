@@ -81,6 +81,8 @@ If no model is available, open Settings > Providers, authenticate, refresh catal
 | Stop | `Ctrl+Alt+S` |
 | Open command palette | `Ctrl+Shift+P` |
 | Show native hotkey help | `Ctrl+/` |
+| Increase font size | `Ctrl++` (or `Ctrl+=`) |
+| Decrease font size | `Ctrl+-` |
 | Send while idle / steer while running | `Enter` |
 | Insert newline | `Shift+Enter` |
 | Queue follow-up while running | `Alt+Enter` |
@@ -96,7 +98,7 @@ If no model is available, open Settings > Providers, authenticate, refresh catal
 | Next focus | `Tab` |
 | Previous focus | `Shift+Tab` |
 
-Typography uses installed system fonts. Open `/settings` and choose separate Main, Sans, and Mono families in the Type tab; selections apply immediately and persist locally.
+Typography uses installed system fonts. Open `/settings` and choose separate Main, Sans, and Mono families in the Type tab; selections apply immediately and persist locally. Use `Ctrl++` or `Ctrl+-` to adjust the overall font size for the current run.
 
 ## Architecture
 

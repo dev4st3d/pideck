@@ -40,6 +40,8 @@ actions!(
         AbortRun,
         OpenCommandPalette,
         ShowHotkeys,
+        IncreaseFontSize,
+        DecreaseFontSize,
         TranscriptCopy,
         TranscriptSelectAll,
         HistoryNext,

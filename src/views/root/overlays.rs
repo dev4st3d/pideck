@@ -313,7 +313,7 @@ pub(super) fn command_suggestion_sheet(
                 .child(
                     div()
                         .font_family(theme::mono())
-                        .text_size(px(theme::T_TINY))
+                        .text_size(theme::text_size(theme::T_TINY))
                         .text_color(theme::smoke())
                         .child("↑↓ choose · Enter run · Esc close"),
                 ),
@@ -370,7 +370,7 @@ fn command_row(
                 .w(px(76.0))
                 .flex_shrink_0()
                 .font_family(theme::mono())
-                .text_size(px(theme::T_TINY))
+                .text_size(theme::text_size(theme::T_TINY))
                 .text_color(theme::data())
                 .child(entry.group.label()),
         )
@@ -384,14 +384,14 @@ fn command_row(
                 .child(
                     div()
                         .font_family(theme::mono())
-                        .text_size(px(theme::T_BODY))
+                        .text_size(theme::text_size(theme::T_BODY))
                         .text_color(theme::bone())
                         .child(format!("/{}{}", entry.name, hint)),
                 )
                 .child(
                     div()
                         .font_family(theme::sans())
-                        .text_size(px(theme::T_TINY))
+                        .text_size(theme::text_size(theme::T_TINY))
                         .text_color(theme::smoke())
                         .overflow_hidden()
                         .text_ellipsis()
@@ -403,7 +403,7 @@ fn command_row(
             div()
                 .max_w(px(260.0))
                 .font_family(theme::mono())
-                .text_size(px(theme::T_TINY))
+                .text_size(theme::text_size(theme::T_TINY))
                 .text_color(theme::ash())
                 .overflow_hidden()
                 .text_ellipsis()
@@ -448,7 +448,7 @@ pub(super) fn runtime_notification_stack(
                             div()
                                 .font_family(theme::mono())
                                 .font_weight(FontWeight::SEMIBOLD)
-                                .text_size(px(theme::T_TINY))
+                                .text_size(theme::text_size(theme::T_TINY))
                                 .text_color(color)
                                 .child(label),
                         )
@@ -464,8 +464,8 @@ pub(super) fn runtime_notification_stack(
                 .child(
                     div()
                         .font_family(theme::sans())
-                        .text_size(px(theme::T_UI_SM))
-                        .line_height(px(18.0))
+                        .text_size(theme::text_size(theme::T_UI_SM))
+                        .line_height(theme::text_size(18.0))
                         .text_color(theme::bone_dim())
                         .child(notification.message.clone()),
                 )
@@ -508,15 +508,15 @@ pub(super) fn extension_widgets(
                         .child(
                             div()
                                 .font_family(theme::mono())
-                                .text_size(px(theme::T_TINY))
+                                .text_size(theme::text_size(theme::T_TINY))
                                 .text_color(theme::data())
                                 .child(sanitize_untrusted_text(key)),
                         )
                         .children(widget.lines.iter().map(|line| {
                             div()
                                 .font_family(theme::mono())
-                                .text_size(px(theme::T_MONO_SM))
-                                .line_height(px(17.0))
+                                .text_size(theme::text_size(theme::T_MONO_SM))
+                                .line_height(theme::text_size(17.0))
                                 .text_color(theme::bone_dim())
                                 .child(line.clone())
                         }))
@@ -544,7 +544,7 @@ pub(super) fn extension_status_bar(extension_ui: &ExtensionUiProjection) -> impl
                 .child(
                     div()
                         .font_family(theme::mono())
-                        .text_size(px(theme::T_TINY))
+                        .text_size(theme::text_size(theme::T_TINY))
                         .text_color(theme::data())
                         .child(sanitize_untrusted_text(key)),
                 )
@@ -552,7 +552,7 @@ pub(super) fn extension_status_bar(extension_ui: &ExtensionUiProjection) -> impl
                     div()
                         .min_w_0()
                         .font_family(theme::sans())
-                        .text_size(px(theme::T_TINY))
+                        .text_size(theme::text_size(theme::T_TINY))
                         .text_color(theme::ash())
                         .overflow_hidden()
                         .text_ellipsis()
@@ -586,7 +586,7 @@ pub(super) fn extension_dialog_overlay(
             .when(options.is_empty(), |list| {
                 list.child(
                     div()
-                        .text_size(px(theme::T_UI_SM))
+                        .text_size(theme::text_size(theme::T_UI_SM))
                         .text_color(theme::error())
                         .child("This request has no selectable options."),
                 )
@@ -621,7 +621,7 @@ pub(super) fn extension_dialog_overlay(
                     .child(
                         div()
                             .font_family(theme::sans())
-                            .text_size(px(theme::T_UI))
+                            .text_size(theme::text_size(theme::T_UI))
                             .text_color(theme::bone())
                             .child(option.clone()),
                     )
@@ -634,8 +634,8 @@ pub(super) fn extension_dialog_overlay(
             .child(
                 div()
                     .font_family(theme::sans())
-                    .text_size(px(theme::T_BODY_SM))
-                    .line_height(px(21.0))
+                    .text_size(theme::text_size(theme::T_BODY_SM))
+                    .line_height(theme::text_size(21.0))
                     .text_color(theme::bone_dim())
                     .child(message.clone()),
             )
@@ -713,7 +713,7 @@ pub(super) fn extension_dialog_overlay(
                                 .child(
                                     div()
                                         .font_family(theme::mono())
-                                        .text_size(px(theme::T_TINY))
+                                        .text_size(theme::text_size(theme::T_TINY))
                                         .text_color(theme::focus())
                                         .child(format!(
                                             "Extension {} · untrusted UI",
@@ -723,7 +723,7 @@ pub(super) fn extension_dialog_overlay(
                                 .child(
                                     div()
                                         .font_family(theme::sans())
-                                        .text_size(px(theme::T_TITLE))
+                                        .text_size(theme::text_size(theme::T_TITLE))
                                         .font_weight(FontWeight::BOLD)
                                         .text_color(theme::bone())
                                         .child(dialog.title().to_owned()),
@@ -741,8 +741,8 @@ pub(super) fn extension_dialog_overlay(
                 .child(
                     div()
                         .font_family(theme::sans())
-                        .text_size(px(theme::T_UI_SM))
-                        .line_height(px(18.0))
+                        .text_size(theme::text_size(theme::T_UI_SM))
+                        .line_height(theme::text_size(18.0))
                         .text_color(theme::smoke())
                         .child(
                             "This content comes from an extension. It is not a secure permission prompt and has no verified provenance.",
@@ -759,7 +759,7 @@ pub(super) fn extension_dialog_overlay(
                         .child(
                             div()
                                 .font_family(theme::mono())
-                                .text_size(px(theme::T_TINY))
+                                .text_size(theme::text_size(theme::T_TINY))
                                 .text_color(theme::smoke())
                                 .child(match queued_dialogs {
                                     0 => "No queued extension dialogs".to_owned(),
@@ -773,7 +773,7 @@ pub(super) fn extension_dialog_overlay(
                             row.child(
                                 div()
                                     .font_family(theme::mono())
-                                    .text_size(px(theme::T_TINY))
+                                    .text_size(theme::text_size(theme::T_TINY))
                                     .text_color(theme::data())
                                     .child(deadline),
                             )
@@ -818,7 +818,7 @@ fn extension_dialog_button(
             div()
                 .font_family(theme::main())
                 .font_weight(FontWeight::SEMIBOLD)
-                .text_size(px(theme::T_UI_SM))
+                .text_size(theme::text_size(theme::T_UI_SM))
                 .text_color(theme::bone())
                 .child(label.into()),
         )
@@ -1169,7 +1169,7 @@ pub(super) fn pasted_image_overlay(
                         .child(
                             div()
                                 .font_family(theme::sans())
-                                .text_size(px(theme::T_UI_SM))
+                                .text_size(theme::text_size(theme::T_UI_SM))
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .text_color(theme::bone_dim())
                                 .child(if count > 1 {
@@ -1205,7 +1205,7 @@ pub(super) fn pasted_image_overlay(
                                 .child(
                                     div()
                                         .font_family(theme::main())
-                                        .text_size(px(theme::T_UI_SM))
+                                        .text_size(theme::text_size(theme::T_UI_SM))
                                         .font_weight(FontWeight::SEMIBOLD)
                                         .child("Close · Esc"),
                                 ),
@@ -1241,7 +1241,7 @@ pub(super) fn pasted_image_overlay(
                                 })
                                 .font_family(theme::main())
                                 .font_weight(FontWeight::SEMIBOLD)
-                                .text_size(px(theme::T_UI_SM))
+                                .text_size(theme::text_size(theme::T_UI_SM))
                                 .text_color(theme::bone())
                                 .cursor_pointer()
                                 .hover(|button| button.bg(theme::panel_lift()))
@@ -1266,7 +1266,7 @@ pub(super) fn pasted_image_overlay(
                                 .child(
                                     div()
                                         .font_family(theme::sans())
-                                        .text_size(px(theme::T_TINY))
+                                        .text_size(theme::text_size(theme::T_TINY))
                                         .text_color(theme::smoke())
                                         .child(format!("Color: {}", pencil_color.label())),
                                 )
@@ -1307,7 +1307,7 @@ pub(super) fn pasted_image_overlay(
                                 .child(
                                     div()
                                         .font_family(theme::sans())
-                                        .text_size(px(theme::T_TINY))
+                                        .text_size(theme::text_size(theme::T_TINY))
                                         .text_color(theme::smoke())
                                         .child("Pixels"),
                                 )
@@ -1346,7 +1346,7 @@ pub(super) fn pasted_image_overlay(
                                     div()
                                         .w(px(44.0))
                                         .font_family(theme::mono())
-                                        .text_size(px(theme::T_TINY))
+                                        .text_size(theme::text_size(theme::T_TINY))
                                         .text_color(theme::bone_dim())
                                         .text_align(gpui::TextAlign::Center)
                                         .child(format!("{pencil_size} px")),
@@ -1391,7 +1391,7 @@ pub(super) fn pasted_image_overlay(
                                         .rounded(px(theme::RADIUS_SM))
                                         .font_family(theme::main())
                                         .font_weight(FontWeight::SEMIBOLD)
-                                        .text_size(px(theme::T_TINY))
+                                        .text_size(theme::text_size(theme::T_TINY))
                                         .text_color(if can_undo {
                                             theme::bone_dim()
                                         } else {
@@ -1538,7 +1538,7 @@ pub(super) fn pasted_image_overlay(
                             frame.child(
                                 div()
                                     .px(px(24.0))
-                                    .text_size(px(theme::T_BODY))
+                                    .text_size(theme::text_size(theme::T_BODY))
                                     .text_color(theme::error())
                                     .child("This pasted image could not be decoded."),
                             )
@@ -1557,7 +1557,7 @@ pub(super) fn pasted_image_overlay(
                             footer.child(
                                 div()
                                     .font_family(theme::sans())
-                                    .text_size(px(theme::T_TINY))
+                                    .text_size(theme::text_size(theme::T_TINY))
                                     .text_color(theme::error())
                                     .child(message.to_owned()),
                             )
@@ -1581,7 +1581,7 @@ pub(super) fn pasted_image_overlay(
                                             .justify_center()
                                             .bg(theme::panel_lift())
                                             .font_family(theme::sans())
-                                            .text_size(px(theme::T_BODY))
+                                            .text_size(theme::text_size(theme::T_BODY))
                                             .text_color(theme::bone())
                                             .hover(|button| button.bg(theme::panel_hover()))
                                             .on_key_down(cx.listener(
@@ -1603,7 +1603,7 @@ pub(super) fn pasted_image_overlay(
                                     .child(
                                         div()
                                             .font_family(theme::mono())
-                                            .text_size(px(theme::T_TINY))
+                                            .text_size(theme::text_size(theme::T_TINY))
                                             .text_color(theme::smoke())
                                             .child(format!("{} / {}", index + 1, count)),
                                     )
@@ -1620,7 +1620,7 @@ pub(super) fn pasted_image_overlay(
                                             .justify_center()
                                             .bg(theme::panel_lift())
                                             .font_family(theme::sans())
-                                            .text_size(px(theme::T_BODY))
+                                            .text_size(theme::text_size(theme::T_BODY))
                                             .text_color(theme::bone())
                                             .hover(|button| button.bg(theme::panel_hover()))
                                             .on_key_down(cx.listener(
@@ -1677,7 +1677,7 @@ pub(super) fn compaction_dialog(
                             div()
                                 .font_family(theme::sans())
                                 .font_weight(FontWeight::BOLD)
-                                .text_size(px(theme::T_BODY))
+                                .text_size(theme::text_size(theme::T_BODY))
                                 .text_color(theme::bone())
                                 .child("Compact context"),
                         )
@@ -1696,7 +1696,7 @@ pub(super) fn compaction_dialog(
                         .px(px(14.0))
                         .pb(px(10.0))
                         .font_family(theme::sans())
-                        .text_size(px(theme::T_UI_SM))
+                        .text_size(theme::text_size(theme::T_UI_SM))
                         .line_height(gpui::relative(1.4))
                         .text_color(theme::smoke())
                         .child(
@@ -1726,7 +1726,7 @@ pub(super) fn command_palette_overlay(
                     .pb(px(5.0))
                     .font_family(theme::sans())
                     .font_weight(FontWeight::SEMIBOLD)
-                    .text_size(px(theme::T_TINY))
+                    .text_size(theme::text_size(theme::T_TINY))
                     .text_color(theme::data())
                     .child(entry.group.label())
                     .into_any_element(),
@@ -1769,7 +1769,7 @@ pub(super) fn command_palette_overlay(
                             div()
                                 .font_family(theme::sans())
                                 .font_weight(FontWeight::SEMIBOLD)
-                                .text_size(px(theme::T_BODY))
+                                .text_size(theme::text_size(theme::T_BODY))
                                 .child("Command palette"),
                         )
                         .child(controls::chrome_action(
@@ -1795,7 +1795,7 @@ pub(super) fn command_palette_overlay(
                             list.child(
                                 div()
                                     .p(px(18.0))
-                                    .text_size(px(theme::T_BODY))
+                                    .text_size(theme::text_size(theme::T_BODY))
                                     .text_color(theme::smoke())
                                     .child("No matching commands."),
                             )
@@ -1808,6 +1808,8 @@ pub(super) fn hotkey_help_overlay(cx: &mut Context<RootView>) -> impl IntoElemen
     let shortcuts = [
         ("Command palette", "Ctrl+Shift+P"),
         ("Hotkey help", "Ctrl+/"),
+        ("Increase font size", "Ctrl++"),
+        ("Decrease font size", "Ctrl+-"),
         ("Send / steer", "Enter"),
         ("Queue follow-up", "Alt+Enter"),
         ("Insert newline", "Shift+Enter"),
@@ -1840,7 +1842,7 @@ pub(super) fn hotkey_help_overlay(cx: &mut Context<RootView>) -> impl IntoElemen
                         .child(
                             div()
                                 .font_weight(FontWeight::SEMIBOLD)
-                                .text_size(px(theme::T_BODY))
+                                .text_size(theme::text_size(theme::T_BODY))
                                 .child("Native hotkeys"),
                         )
                         .child(controls::chrome_action(
@@ -1866,14 +1868,14 @@ pub(super) fn hotkey_help_overlay(cx: &mut Context<RootView>) -> impl IntoElemen
                         .border_color(theme::edge_soft())
                         .child(
                             div()
-                                .text_size(px(theme::T_BODY))
+                                .text_size(theme::text_size(theme::T_BODY))
                                 .text_color(theme::bone())
                                 .child(label),
                         )
                         .child(
                             div()
                                 .font_family(theme::mono())
-                                .text_size(px(theme::T_UI_SM))
+                                .text_size(theme::text_size(theme::T_UI_SM))
                                 .text_color(theme::data())
                                 .child(keys),
                         )

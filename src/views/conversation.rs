@@ -365,10 +365,10 @@ fn markdown_runs(
         let mut style = default_style.clone().highlight(highlight);
         if markdown.table {
             style.font_family = theme::mono();
-            style.font_size = px(theme::T_UI_SM).into();
+            style.font_size = theme::text_size(theme::T_UI_SM).into();
         } else if markdown.code {
             style.font_family = theme::mono();
-            style.font_size = px(if markdown.code_block {
+            style.font_size = theme::text_size(if markdown.code_block {
                 theme::T_MONO
             } else {
                 theme::T_UI_SM
@@ -376,7 +376,7 @@ fn markdown_runs(
             .into();
         }
         if markdown.heading_level > 0 {
-            style.font_size = px(match markdown.heading_level {
+            style.font_size = theme::text_size(match markdown.heading_level {
                 1 => theme::T_WORDMARK,
                 2 => theme::T_BODY,
                 3 => theme::T_BODY_SM,
@@ -685,7 +685,7 @@ impl Render for PromptInfoTooltip {
             .border_1()
             .border_color(theme::edge_hard())
             .font_family(theme::mono())
-            .text_size(px(theme::T_TINY))
+            .text_size(theme::text_size(theme::T_TINY))
             .text_color(theme::bone_dim())
             .child(self.text.clone())
     }
@@ -1046,7 +1046,7 @@ fn activity_disclosure(
                         .items_center()
                         .justify_center()
                         .font_family(theme::mono())
-                        .text_size(px(theme::T_UI_SM))
+                        .text_size(theme::text_size(theme::T_UI_SM))
                         .font_weight(FontWeight::BOLD)
                         .child(if expanded { "−" } else { "+" }),
                 )
@@ -1054,7 +1054,7 @@ fn activity_disclosure(
                     div()
                         .flex_shrink_0()
                         .font_family(theme::mono())
-                        .text_size(px(theme::T_TINY))
+                        .text_size(theme::text_size(theme::T_TINY))
                         .font_weight(FontWeight::MEDIUM)
                         .text_color(theme::smoke())
                         .child(format!(
@@ -1115,7 +1115,7 @@ fn render_activity_step(
             theme::smoke(),
             div()
                 .font_family(theme::sans())
-                .text_size(px(theme::T_UI_SM))
+                .text_size(theme::text_size(theme::T_UI_SM))
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(theme::smoke())
                 .child("Thinking was redacted by the provider."),
@@ -1135,7 +1135,7 @@ fn render_activity_step(
                 .child(
                     div()
                         .font_family(theme::mono())
-                        .text_size(px(theme::T_TINY))
+                        .text_size(theme::text_size(theme::T_TINY))
                         .font_weight(FontWeight::MEDIUM)
                         .text_color(theme::smoke())
                         .child("thinking"),
@@ -1168,7 +1168,7 @@ fn render_activity_step(
                 .child(
                     div()
                         .font_family(theme::sans())
-                        .text_size(px(theme::T_UI_SM))
+                        .text_size(theme::text_size(theme::T_UI_SM))
                         .font_weight(FontWeight::MEDIUM)
                         .text_color(theme::bone_dim())
                         .child(*label),
@@ -1202,7 +1202,7 @@ fn render_activity_step(
             },
             div()
                 .font_family(theme::sans())
-                .text_size(px(theme::T_UI_SM))
+                .text_size(theme::text_size(theme::T_UI_SM))
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(if *error {
                     theme::error()
@@ -1283,7 +1283,7 @@ fn assistant_reply(
                 .child(
                     div()
                         .font_family(theme::sans())
-                        .text_size(px(theme::T_UI_SM))
+                        .text_size(theme::text_size(theme::T_UI_SM))
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(theme::ash())
                         .child("Pi"),
@@ -1295,7 +1295,7 @@ fn assistant_reply(
                         .text_ellipsis()
                         .whitespace_nowrap()
                         .font_family(theme::mono())
-                        .text_size(px(theme::T_TINY))
+                        .text_size(theme::text_size(theme::T_TINY))
                         .text_color(theme::smoke())
                         .child(metadata),
                 ),
@@ -1321,7 +1321,7 @@ fn assistant_reply(
             reply.child(
                 div()
                     .font_family(theme::sans())
-                    .text_size(px(theme::T_UI_SM))
+                    .text_size(theme::text_size(theme::T_UI_SM))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(stop_color(message.stop_reason))
                     .child(stop),
@@ -1483,7 +1483,7 @@ fn selectable_with_leading(
     div()
         .w_full()
         .font_family(font)
-        .text_size(px(size))
+        .text_size(theme::text_size(size))
         .font_weight(weight)
         .line_height(relative(leading))
         .text_color(color)
@@ -1494,7 +1494,7 @@ fn selectable_with_leading(
 fn compact_label(text: String) -> AnyElement {
     div()
         .font_family(theme::mono())
-        .text_size(px(theme::T_TINY))
+        .text_size(theme::text_size(theme::T_TINY))
         .font_weight(FontWeight::MEDIUM)
         .text_color(theme::smoke())
         .child(text)
@@ -1554,7 +1554,7 @@ fn stop_color(reason: Option<MessageStopReason>) -> gpui::Rgba {
 fn error_text(error: String) -> impl IntoElement {
     div()
         .font_family(theme::sans())
-        .text_size(px(theme::T_UI_SM))
+        .text_size(theme::text_size(theme::T_UI_SM))
         .font_weight(FontWeight::SEMIBOLD)
         .text_color(theme::error())
         .child(error)
@@ -1583,7 +1583,7 @@ fn empty_state(projection: &ConversationProjection) -> impl IntoElement {
         .child(
             div()
                 .font_family(theme::sans())
-                .text_size(px(theme::T_TITLE))
+                .text_size(theme::text_size(theme::T_TITLE))
                 .font_weight(FontWeight::BOLD)
                 .text_color(theme::bone_dim())
                 .child(title),
@@ -1591,7 +1591,7 @@ fn empty_state(projection: &ConversationProjection) -> impl IntoElement {
         .child(
             div()
                 .font_family(theme::sans())
-                .text_size(px(theme::T_UI))
+                .text_size(theme::text_size(theme::T_UI))
                 .text_color(theme::smoke())
                 .child(body),
         )

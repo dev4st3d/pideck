@@ -73,7 +73,7 @@ pub(super) fn titlebar(
                 .child(
                     div()
                         .font_family(theme::main())
-                        .text_size(px(theme::T_WORDMARK))
+                        .text_size(theme::text_size(theme::T_WORDMARK))
                         .font_weight(FontWeight::NORMAL)
                         .text_color(theme::bone())
                         .flex_shrink_0()
@@ -98,7 +98,7 @@ pub(super) fn titlebar(
                             div()
                                 .min_w_0()
                                 .font_family(theme::sans())
-                                .text_size(px(theme::T_TITLE))
+                                .text_size(theme::text_size(theme::T_TITLE))
                                 .font_weight(FontWeight::BOLD)
                                 .text_color(theme::bone())
                                 .overflow_hidden()
@@ -138,7 +138,7 @@ pub(super) fn titlebar(
                     row.child(
                         div()
                             .font_family(theme::mono())
-                            .text_size(px(theme::T_TINY))
+                            .text_size(theme::text_size(theme::T_TINY))
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(theme::smoke())
                             .flex_shrink_0()
@@ -171,7 +171,7 @@ pub(super) fn titlebar(
                         .child(
                             div()
                                 .font_family(theme::main())
-                                .text_size(px(theme::T_UI_SM))
+                                .text_size(theme::text_size(theme::T_UI_SM))
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .text_color(status_color)
                                 .whitespace_nowrap()
@@ -181,7 +181,7 @@ pub(super) fn titlebar(
                 .child(
                     div()
                         .font_family(theme::mono())
-                        .text_size(px(theme::T_TINY))
+                        .text_size(theme::text_size(theme::T_TINY))
                         .text_color(theme::smoke())
                         .flex_shrink_0()
                         .child("|"),
@@ -193,7 +193,7 @@ pub(super) fn titlebar(
                         .py(px(3.0))
                         .rounded(px(2.0))
                         .font_family(theme::main())
-                        .text_size(px(theme::T_TINY))
+                        .text_size(theme::text_size(theme::T_TINY))
                         .font_weight(FontWeight::MEDIUM)
                         .text_color(theme::ash())
                         .whitespace_nowrap()
@@ -445,7 +445,7 @@ pub(super) fn sessions_panel(
                             div()
                                 .min_w(px(18.0))
                                 .font_family(theme::mono())
-                                .text_size(px(theme::T_TINY))
+                                .text_size(theme::text_size(theme::T_TINY))
                                 .text_color(theme::smoke())
                                 .text_align(gpui::TextAlign::Right)
                                 .child(project_count),
@@ -567,7 +567,7 @@ pub(super) fn sessions_panel(
                         .rounded(px(theme::RADIUS_SM))
                         .bg(theme::panel())
                         .font_family(theme::sans())
-                        .text_size(px(theme::T_TINY))
+                        .text_size(theme::text_size(theme::T_TINY))
                         .line_height(gpui::relative(1.35))
                         .text_color(theme::bone_dim())
                         .child(feedback),
@@ -663,7 +663,7 @@ pub(super) fn sessions_panel(
                 .child(
                     div()
                         .font_family(theme::mono())
-                        .text_size(px(theme::T_TINY))
+                        .text_size(theme::text_size(theme::T_TINY))
                         .line_height(gpui::relative(1.35))
                         .font_weight(FontWeight::MEDIUM)
                         .text_color(theme::data())
@@ -850,7 +850,7 @@ fn project_group(params: ProjectGroupParams<'_>, cx: &mut Context<RootView>) -> 
                         .text_ellipsis()
                         .whitespace_nowrap()
                         .font_family(theme::sans())
-                        .text_size(px(theme::T_UI_SM))
+                        .text_size(theme::text_size(theme::T_UI_SM))
                         .font_weight(if active {
                             FontWeight::BOLD
                         } else {
@@ -884,7 +884,7 @@ fn project_group(params: ProjectGroupParams<'_>, cx: &mut Context<RootView>) -> 
                         .child(
                             div()
                                 .font_family(theme::mono())
-                                .text_size(px(theme::T_TINY))
+                                .text_size(theme::text_size(theme::T_TINY))
                                 .text_color(
                                     if matches!(
                                         status,
@@ -945,7 +945,7 @@ fn project_group(params: ProjectGroupParams<'_>, cx: &mut Context<RootView>) -> 
                             .child(
                                 div()
                                     .font_family(theme::sans())
-                                    .text_size(px(theme::T_TINY))
+                                    .text_size(theme::text_size(theme::T_TINY))
                                     .line_height(gpui::relative(1.35))
                                     .text_color(theme::error())
                                     .child(error),
@@ -1082,7 +1082,7 @@ fn project_thread_row(
                         .text_ellipsis()
                         .whitespace_nowrap()
                         .font_family(theme::sans())
-                        .text_size(px(theme::T_UI_SM))
+                        .text_size(theme::text_size(theme::T_UI_SM))
                         .font_weight(if selected {
                             FontWeight::BOLD
                         } else {
@@ -1115,7 +1115,7 @@ fn project_thread_row(
                 .justify_between()
                 .gap(px(8.0))
                 .font_family(theme::mono())
-                .text_size(px(theme::T_TINY))
+                .text_size(theme::text_size(theme::T_TINY))
                 .text_color(if switching {
                     theme::working()
                 } else if selected {
@@ -1195,7 +1195,7 @@ fn project_tree_loading_note(animation_key: usize, text: &'static str) -> AnyEle
         .items_center()
         .gap(px(8.0))
         .font_family(theme::sans())
-        .text_size(px(theme::T_TINY))
+        .text_size(theme::text_size(theme::T_TINY))
         .text_color(theme::smoke())
         .child(controls::square_status_indicator(
             animation_key.wrapping_add(1),
@@ -1213,7 +1213,7 @@ fn project_tree_note(text: impl Into<SharedString>) -> AnyElement {
         .pr(px(10.0))
         .py(px(7.0))
         .font_family(theme::sans())
-        .text_size(px(theme::T_TINY))
+        .text_size(theme::text_size(theme::T_TINY))
         .line_height(gpui::relative(1.35))
         .text_color(theme::smoke())
         .child(text.into())
@@ -1295,7 +1295,7 @@ pub(super) fn history_panel(
                 .child(
                     div()
                         .font_family(theme::mono())
-                        .text_size(px(theme::T_TINY))
+                        .text_size(theme::text_size(theme::T_TINY))
                         .text_color(theme::smoke())
                         .child(format!("{}", rows.len())),
                 ),
@@ -1396,7 +1396,7 @@ pub(super) fn history_panel(
                                 div()
                                     .w(px(10.0))
                                     .font_family(theme::mono())
-                                    .text_size(px(theme::T_TINY))
+                                    .text_size(theme::text_size(theme::T_TINY))
                                     .text_color(if row.active_path {
                                         theme::signal_hot()
                                     } else {
@@ -1410,7 +1410,7 @@ pub(super) fn history_panel(
                                     .flex_1()
                                     .child(
                                         div()
-                                            .text_size(px(theme::T_TINY))
+                                            .text_size(theme::text_size(theme::T_TINY))
                                             .font_weight(FontWeight::BOLD)
                                             .text_color(if row.contextual {
                                                 theme::smoke()
@@ -1421,7 +1421,7 @@ pub(super) fn history_panel(
                                     )
                                     .child(
                                         div()
-                                            .text_size(px(theme::T_TINY))
+                                            .text_size(theme::text_size(theme::T_TINY))
                                             .text_color(theme::bone_dim())
                                             .overflow_hidden()
                                             .text_ellipsis()
@@ -1446,7 +1446,7 @@ pub(super) fn history_panel(
                     .child(
                         div()
                             .font_family(theme::mono())
-                            .text_size(px(theme::T_TINY))
+                            .text_size(theme::text_size(theme::T_TINY))
                             .text_color(theme::data())
                             .child(format!(
                                 "{} · {} child{} · {}",
@@ -1459,7 +1459,7 @@ pub(super) fn history_panel(
                     .when(!body.is_empty(), |block| {
                         block.child(
                             div()
-                                .text_size(px(theme::T_TINY))
+                                .text_size(theme::text_size(theme::T_TINY))
                                 .line_height(gpui::relative(1.4))
                                 .text_color(theme::bone_dim())
                                 .child(body),
@@ -1601,14 +1601,14 @@ pub(super) fn history_panel(
                     .child(
                         div()
                             .font_family(theme::sans())
-                            .text_size(px(theme::T_UI_SM))
+                            .text_size(theme::text_size(theme::T_UI_SM))
                             .font_weight(FontWeight::BOLD)
                             .text_color(theme::bone())
                             .child(title),
                     )
                     .child(
                         div()
-                            .text_size(px(theme::T_TINY))
+                            .text_size(theme::text_size(theme::T_TINY))
                             .line_height(gpui::relative(1.4))
                             .text_color(theme::bone_dim())
                             .child(copy),

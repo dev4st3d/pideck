@@ -231,7 +231,7 @@ fn header(turn_count: usize) -> impl IntoElement {
             .child(
                 div()
                     .font_family(theme::sans())
-                    .text_size(px(theme::T_UI_SM))
+                    .text_size(theme::text_size(theme::T_UI_SM))
                     .font_weight(FontWeight::BOLD)
                     .text_color(theme::ash())
                     .child("Conversation"),
@@ -239,7 +239,7 @@ fn header(turn_count: usize) -> impl IntoElement {
             .child(
                 div()
                     .font_family(theme::mono())
-                    .text_size(px(theme::T_TINY))
+                    .text_size(theme::text_size(theme::T_TINY))
                     .text_color(theme::smoke())
                     .child(format!(
                         "{turn_count} turn{}",

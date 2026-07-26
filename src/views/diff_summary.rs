@@ -105,7 +105,7 @@ pub(in crate::views) fn summary_card(
                                         .text_ellipsis()
                                         .whitespace_nowrap()
                                         .font_family(theme::sans())
-                                        .text_size(px(theme::T_UI))
+                                        .text_size(theme::text_size(theme::T_UI))
                                         .font_weight(FontWeight::SEMIBOLD)
                                         .text_color(theme::bone_dim())
                                         .child(format!(
@@ -120,7 +120,7 @@ pub(in crate::views) fn summary_card(
                                         div()
                                             .flex_shrink_0()
                                             .font_family(theme::sans())
-                                            .text_size(px(theme::T_TINY))
+                                            .text_size(theme::text_size(theme::T_TINY))
                                             .text_color(theme::smoke())
                                             .child("partial counts"),
                                     )
@@ -129,7 +129,7 @@ pub(in crate::views) fn summary_card(
                                     div()
                                         .flex_shrink_0()
                                         .font_family(theme::sans())
-                                        .text_size(px(theme::T_UI_SM))
+                                        .text_size(theme::text_size(theme::T_UI_SM))
                                         .font_weight(FontWeight::MEDIUM)
                                         .text_color(theme::ash())
                                         .child(if expanded { "Hide files" } else { "Show files" }),
@@ -179,7 +179,7 @@ pub(in crate::views) fn summary_card(
                         .child(
                             div()
                                 .font_family(theme::sans())
-                                .text_size(px(theme::T_UI_SM))
+                                .text_size(theme::text_size(theme::T_UI_SM))
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .child("Open diff"),
                         ),
@@ -210,7 +210,7 @@ pub(in crate::views) fn summary_card(
                                 .border_t_1()
                                 .border_color(theme::edge_soft())
                                 .font_family(theme::sans())
-                                .text_size(px(theme::T_TINY))
+                                .text_size(theme::text_size(theme::T_TINY))
                                 .text_color(theme::smoke())
                                 .child(format!(
                                     "{} more files are available in the full diff.",
@@ -226,7 +226,7 @@ fn stat_text(text: String, color: gpui::Rgba) -> impl IntoElement {
     div()
         .flex_shrink_0()
         .font_family(theme::mono())
-        .text_size(px(theme::T_MONO_SM))
+        .text_size(theme::text_size(theme::T_MONO_SM))
         .font_weight(FontWeight::SEMIBOLD)
         .text_color(color)
         .child(text)
@@ -256,7 +256,7 @@ fn file_row(index: usize, file: &DiffFile) -> AnyElement {
                 .text_ellipsis()
                 .whitespace_nowrap()
                 .font_family(theme::mono())
-                .text_size(px(theme::T_MONO_SM))
+                .text_size(theme::text_size(theme::T_MONO_SM))
                 .text_color(theme::bone_dim())
                 .child(file.path.clone()),
         )
@@ -271,7 +271,7 @@ fn file_row(index: usize, file: &DiffFile) -> AnyElement {
                     stats.child(
                         div()
                             .font_family(theme::sans())
-                            .text_size(px(theme::T_TINY))
+                            .text_size(theme::text_size(theme::T_TINY))
                             .text_color(theme::data())
                             .child("new"),
                     )
@@ -280,7 +280,7 @@ fn file_row(index: usize, file: &DiffFile) -> AnyElement {
                     stats.child(
                         div()
                             .font_family(theme::sans())
-                            .text_size(px(theme::T_TINY))
+                            .text_size(theme::text_size(theme::T_TINY))
                             .text_color(theme::smoke())
                             .child("binary"),
                     )
@@ -389,7 +389,7 @@ fn diff_overlay_header(snapshot: &WorkspaceDiff, cx: &mut Context<RootView>) -> 
                 .child(
                     div()
                         .font_family(theme::sans())
-                        .text_size(px(theme::T_BODY))
+                        .text_size(theme::text_size(theme::T_BODY))
                         .font_weight(FontWeight::BOLD)
                         .text_color(theme::bone())
                         .child("Workspace changes"),
@@ -397,7 +397,7 @@ fn diff_overlay_header(snapshot: &WorkspaceDiff, cx: &mut Context<RootView>) -> 
                 .child(
                     div()
                         .font_family(theme::sans())
-                        .text_size(px(theme::T_UI_SM))
+                        .text_size(theme::text_size(theme::T_UI_SM))
                         .text_color(theme::ash())
                         .child(format!(
                             "{} file{}",
@@ -417,7 +417,7 @@ fn diff_overlay_header(snapshot: &WorkspaceDiff, cx: &mut Context<RootView>) -> 
                     header.child(
                         div()
                             .font_family(theme::sans())
-                            .text_size(px(theme::T_TINY))
+                            .text_size(theme::text_size(theme::T_TINY))
                             .text_color(theme::smoke())
                             .child("counts partial"),
                     )
@@ -433,7 +433,7 @@ fn diff_overlay_header(snapshot: &WorkspaceDiff, cx: &mut Context<RootView>) -> 
                 .child(
                     div()
                         .font_family(theme::sans())
-                        .text_size(px(theme::T_TINY))
+                        .text_size(theme::text_size(theme::T_TINY))
                         .text_color(theme::smoke())
                         .child("↑↓ files · ←→ folders · Esc close"),
                 )
@@ -500,7 +500,7 @@ fn diff_file_sidebar(
                 .child(
                     div()
                         .font_family(theme::sans())
-                        .text_size(px(theme::T_UI_SM))
+                        .text_size(theme::text_size(theme::T_UI_SM))
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(theme::bone_dim())
                         .child("Changed files"),
@@ -508,7 +508,7 @@ fn diff_file_sidebar(
                 .child(
                     div()
                         .font_family(theme::mono())
-                        .text_size(px(theme::T_TINY))
+                        .text_size(theme::text_size(theme::T_TINY))
                         .text_color(theme::smoke())
                         .child(snapshot.files.len().to_string()),
                 ),
@@ -748,7 +748,7 @@ fn diff_folder_row(
                 .text_ellipsis()
                 .whitespace_nowrap()
                 .font_family(theme::sans())
-                .text_size(px(theme::T_UI_SM))
+                .text_size(theme::text_size(theme::T_UI_SM))
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(theme::bone_dim())
                 .child(name),
@@ -757,7 +757,7 @@ fn diff_folder_row(
             div()
                 .flex_shrink_0()
                 .font_family(theme::mono())
-                .text_size(px(theme::T_TINY))
+                .text_size(theme::text_size(theme::T_TINY))
                 .text_color(theme::smoke())
                 .child(file_count.to_string()),
         )
@@ -816,7 +816,7 @@ fn diff_tree_file_row(
                 .w(px(12.0))
                 .flex_shrink_0()
                 .font_family(theme::mono())
-                .text_size(px(theme::T_MONO_SM))
+                .text_size(theme::text_size(theme::T_MONO_SM))
                 .font_weight(FontWeight::BOLD)
                 .text_color(marker_color)
                 .child(marker),
@@ -829,7 +829,7 @@ fn diff_tree_file_row(
                 .text_ellipsis()
                 .whitespace_nowrap()
                 .font_family(theme::sans())
-                .text_size(px(theme::T_UI_SM))
+                .text_size(theme::text_size(theme::T_UI_SM))
                 .font_weight(if selected {
                     FontWeight::SEMIBOLD
                 } else {
@@ -859,7 +859,7 @@ fn diff_tree_file_row(
                     stats.child(
                         div()
                             .font_family(theme::sans())
-                            .text_size(px(theme::T_TINY))
+                            .text_size(theme::text_size(theme::T_TINY))
                             .text_color(theme::smoke())
                             .child("bin"),
                     )
@@ -913,7 +913,7 @@ fn diff_file_panel(
                                 .text_ellipsis()
                                 .whitespace_nowrap()
                                 .font_family(theme::mono())
-                                .text_size(px(theme::T_MONO))
+                                .text_size(theme::text_size(theme::T_MONO))
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .text_color(theme::bone())
                                 .child(file.path.clone()),
@@ -927,7 +927,7 @@ fn diff_file_panel(
                                 .child(
                                     div()
                                         .font_family(theme::sans())
-                                        .text_size(px(theme::T_TINY))
+                                        .text_size(theme::text_size(theme::T_TINY))
                                         .font_weight(FontWeight::SEMIBOLD)
                                         .text_color(kind_color)
                                         .child(kind_label),
@@ -936,7 +936,7 @@ fn diff_file_panel(
                                     meta.child(
                                         div()
                                             .font_family(theme::sans())
-                                            .text_size(px(theme::T_TINY))
+                                            .text_size(theme::text_size(theme::T_TINY))
                                             .text_color(theme::smoke())
                                             .child("Binary"),
                                     )
@@ -965,7 +965,7 @@ fn diff_file_panel(
                         .child(
                             div()
                                 .font_family(theme::mono())
-                                .text_size(px(theme::T_TINY))
+                                .text_size(theme::text_size(theme::T_TINY))
                                 .text_color(theme::smoke())
                                 .child(format!(
                                     "{} / {}",
@@ -1073,7 +1073,7 @@ fn file_navigation_button(
         .items_center()
         .justify_center()
         .font_family(theme::sans())
-        .text_size(px(theme::T_TINY))
+        .text_size(theme::text_size(theme::T_TINY))
         .font_weight(FontWeight::SEMIBOLD)
         .text_color(if enabled {
             theme::bone_dim()
@@ -1125,7 +1125,7 @@ fn diff_hunk_header(index: usize, hunk: &DiffHunk) -> AnyElement {
         .items_center()
         .bg(theme::data_wash())
         .font_family(theme::sans())
-        .text_size(px(theme::T_UI_SM))
+        .text_size(theme::text_size(theme::T_UI_SM))
         .font_weight(FontWeight::SEMIBOLD)
         .text_color(theme::data())
         .child(hunk_context(&hunk.header))
@@ -1166,7 +1166,7 @@ fn diff_code_line(index: usize, line: &DiffLine) -> AnyElement {
                 .items_center()
                 .justify_center()
                 .font_family(theme::mono())
-                .text_size(px(theme::T_MONO_SM))
+                .text_size(theme::text_size(theme::T_MONO_SM))
                 .font_weight(FontWeight::BOLD)
                 .text_color(color)
                 .child(marker),
@@ -1177,7 +1177,7 @@ fn diff_code_line(index: usize, line: &DiffLine) -> AnyElement {
                 .pl(px(5.0))
                 .pr(px(14.0))
                 .font_family(theme::mono())
-                .text_size(px(theme::T_MONO_SM))
+                .text_size(theme::text_size(theme::T_MONO_SM))
                 .line_height(relative(1.5))
                 .whitespace_nowrap()
                 .text_color(color)
@@ -1213,7 +1213,7 @@ fn line_number(value: Option<u64>) -> impl IntoElement {
         .items_center()
         .justify_end()
         .font_family(theme::mono())
-        .text_size(px(theme::T_TINY))
+        .text_size(theme::text_size(theme::T_TINY))
         .text_color(theme::smoke())
         .child(value.map(|line| line.to_string()).unwrap_or_default())
 }
@@ -1245,7 +1245,7 @@ fn diff_empty_file(file: &DiffFile, patch_truncated: bool) -> impl IntoElement {
         .child(
             div()
                 .font_family(theme::sans())
-                .text_size(px(theme::T_BODY_SM))
+                .text_size(theme::text_size(theme::T_BODY_SM))
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(theme::bone_dim())
                 .child(title),
@@ -1253,7 +1253,7 @@ fn diff_empty_file(file: &DiffFile, patch_truncated: bool) -> impl IntoElement {
         .child(
             div()
                 .font_family(theme::sans())
-                .text_size(px(theme::T_UI_SM))
+                .text_size(theme::text_size(theme::T_UI_SM))
                 .text_color(theme::smoke())
                 .child(detail),
         )
@@ -1264,7 +1264,7 @@ fn diff_limit_notice(message: String) -> impl IntoElement {
         .px(px(14.0))
         .py(px(10.0))
         .font_family(theme::sans())
-        .text_size(px(theme::T_UI_SM))
+        .text_size(theme::text_size(theme::T_UI_SM))
         .font_weight(FontWeight::SEMIBOLD)
         .text_color(theme::data())
         .child(message)

@@ -17,10 +17,10 @@ use gpui::{
 };
 
 use crate::actions::{
-    AbortRun, ActivateRecovery, Connect, FocusNext, FocusPrevious, HistoryActivate, HistoryFirst,
-    HistoryFold, HistoryLast, HistoryNext, HistoryPrevious, HistoryUnfold, ImagePreviewClose,
-    ImagePreviewNext, ImagePreviewPrevious, ORCHESTRATION_ROW_CONTEXT, OpenCommandPalette,
-    OrchestrationActivate, Retry, ShowHotkeys, Stop,
+    AbortRun, ActivateRecovery, Connect, DecreaseFontSize, FocusNext, FocusPrevious,
+    HistoryActivate, HistoryFirst, HistoryFold, HistoryLast, HistoryNext, HistoryPrevious,
+    HistoryUnfold, ImagePreviewClose, ImagePreviewNext, ImagePreviewPrevious, IncreaseFontSize,
+    ORCHESTRATION_ROW_CONTEXT, OpenCommandPalette, OrchestrationActivate, Retry, ShowHotkeys, Stop,
 };
 use crate::command_catalog::{
     CommandCatalog, CommandEntry, CommandTarget, InvocationResolution, NativeAction,
@@ -236,6 +236,7 @@ pub struct RootView {
     controller: Entity<RuntimeController>,
     render_projections: RenderProjections,
     active_theme: theme::ThemeId,
+    font_scale: theme::FontScale,
     composer: Entity<Composer>,
     compaction_composer: Entity<Composer>,
     session_name_composer: Entity<Composer>,
@@ -373,6 +374,8 @@ impl RootView {
     ) -> Self {
         let active_theme = theme::ThemeId::PiDeckDark;
         theme::set_active(active_theme);
+        let font_scale = theme::FontScale::default();
+        window.set_rem_size(font_scale.rem_size());
         let focus_handle = cx.focus_handle();
         let composer = cx.new(Composer::new);
         let compaction_composer = cx.new(|cx| {
@@ -555,6 +558,7 @@ impl RootView {
             controller,
             render_projections,
             active_theme,
+            font_scale,
             composer,
             compaction_composer,
             session_name_composer,
@@ -690,6 +694,38 @@ impl RootView {
         theme::set_active(self.active_theme);
         window.refresh();
         cx.notify();
+    }
+
+    fn adjust_font_scale(&mut self, increase: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let changed = if increase {
+            self.font_scale.increase()
+        } else {
+            self.font_scale.decrease()
+        };
+        if !changed {
+            return;
+        }
+        window.set_rem_size(self.font_scale.rem_size());
+        window.refresh();
+        cx.notify();
+    }
+
+    fn on_increase_font_size(
+        &mut self,
+        _: &IncreaseFontSize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.adjust_font_scale(true, window, cx);
+    }
+
+    fn on_decrease_font_size(
+        &mut self,
+        _: &DecreaseFontSize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.adjust_font_scale(false, window, cx);
     }
 
     fn connect(&mut self, cx: &mut Context<Self>) {

@@ -73,7 +73,7 @@ pub(super) fn model_settings_panel(
                                 .child(
                                     div()
                                         .font_family(theme::sans())
-                                        .text_size(px(theme::T_UI))
+                                        .text_size(theme::text_size(theme::T_UI))
                                         .font_weight(FontWeight::BOLD)
                                         .text_color(theme::bone())
                                         .child(if tab == ModelSettingsTab::Resources {
@@ -89,7 +89,7 @@ pub(super) fn model_settings_panel(
                                 .child(
                                     div()
                                         .font_family(theme::sans())
-                                        .text_size(px(theme::T_TINY))
+                                        .text_size(theme::text_size(theme::T_TINY))
                                         .text_color(theme::ash())
                                         .child(
                                             if tab == ModelSettingsTab::Resources {
@@ -284,7 +284,7 @@ fn typography_settings(
                             .child(
                                 div()
                                     .font_family(theme::main())
-                                    .text_size(px(theme::T_UI_SM))
+                                    .text_size(theme::text_size(theme::T_UI_SM))
                                     .font_weight(FontWeight::BOLD)
                                     .text_color(if selected {
                                         theme::bone()
@@ -297,7 +297,7 @@ fn typography_settings(
                                 div()
                                     .mt(px(2.0))
                                     .font_family(family.clone())
-                                    .text_size(px(theme::T_UI_SM))
+                                    .text_size(theme::text_size(theme::T_UI_SM))
                                     .text_color(theme::ash())
                                     .overflow_hidden()
                                     .text_ellipsis()
@@ -308,7 +308,7 @@ fn typography_settings(
                                 div()
                                     .mt(px(3.0))
                                     .font_family(theme::sans())
-                                    .text_size(px(theme::T_TINY))
+                                    .text_size(theme::text_size(theme::T_TINY))
                                     .text_color(theme::smoke())
                                     .child(role.description()),
                             )
@@ -325,7 +325,7 @@ fn typography_settings(
                             div()
                                 .flex_shrink_0()
                                 .font_family(theme::mono())
-                                .text_size(px(theme::T_TINY))
+                                .text_size(theme::text_size(theme::T_TINY))
                                 .text_color(theme::smoke())
                                 .child(format!("{count} fonts")),
                         ),
@@ -344,7 +344,7 @@ fn typography_settings(
                             .px(px(18.0))
                             .py(px(16.0))
                             .font_family(theme::sans())
-                            .text_size(px(theme::T_UI_SM))
+                            .text_size(theme::text_size(theme::T_UI_SM))
                             .text_color(theme::smoke())
                             .child("No installed fonts match this search."),
                     )
@@ -391,7 +391,7 @@ fn typography_settings(
                                 .min_w_0()
                                 .flex_1()
                                 .font_family(family.clone())
-                                .text_size(px(theme::T_BODY))
+                                .text_size(theme::text_size(theme::T_BODY))
                                 .text_color(theme::bone_dim())
                                 .overflow_hidden()
                                 .text_ellipsis()
@@ -403,7 +403,7 @@ fn typography_settings(
                                 div()
                                     .flex_shrink_0()
                                     .font_family(theme::main())
-                                    .text_size(px(theme::T_TINY))
+                                    .text_size(theme::text_size(theme::T_TINY))
                                     .font_weight(FontWeight::BOLD)
                                     .text_color(theme::focus())
                                     .child("Selected"),
@@ -543,7 +543,7 @@ pub(super) fn model_switcher_sheet(
                                         .w(px(116.0))
                                         .flex_shrink_0()
                                         .font_family(theme::sans())
-                                        .text_size(px(theme::T_LABEL))
+                                        .text_size(theme::text_size(theme::T_LABEL))
                                         .font_weight(FontWeight::SEMIBOLD)
                                         .text_color(theme::bone_dim())
                                         .overflow_hidden()
@@ -564,7 +564,7 @@ pub(super) fn model_switcher_sheet(
                                     .border_b_1()
                                     .border_color(theme::edge_soft())
                                     .font_family(theme::sans())
-                                    .text_size(px(theme::T_TINY))
+                                    .text_size(theme::text_size(theme::T_TINY))
                                     .text_color(theme::ash())
                                     .child(note),
                             )
@@ -590,7 +590,7 @@ pub(super) fn model_switcher_sheet(
                                                     .px(px(16.0))
                                                     .py(px(18.0))
                                                     .font_family(theme::sans())
-                                                    .text_size(px(theme::T_UI_SM))
+                                                    .text_size(theme::text_size(theme::T_UI_SM))
                                                     .text_color(theme::smoke())
                                                     .child(empty_message.clone()),
                                             )
@@ -676,7 +676,9 @@ pub(super) fn model_switcher_sheet(
                                                         .child(
                                                             div()
                                                                 .font_family(theme::sans())
-                                                                .text_size(px(theme::T_UI))
+                                                                .text_size(theme::text_size(
+                                                                    theme::T_UI,
+                                                                ))
                                                                 .font_weight(if selected {
                                                                     FontWeight::BOLD
                                                                 } else {
@@ -697,7 +699,9 @@ pub(super) fn model_switcher_sheet(
                                                         .child(
                                                             div()
                                                                 .font_family(theme::sans())
-                                                                .text_size(px(theme::T_LABEL))
+                                                                .text_size(theme::text_size(
+                                                                    theme::T_LABEL,
+                                                                ))
                                                                 .text_color(theme::smoke())
                                                                 .overflow_hidden()
                                                                 .text_ellipsis()
@@ -715,7 +719,9 @@ pub(super) fn model_switcher_sheet(
                                                         .child(
                                                             div()
                                                                 .font_family(theme::mono())
-                                                                .text_size(px(theme::T_TINY))
+                                                                .text_size(theme::text_size(
+                                                                    theme::T_TINY,
+                                                                ))
                                                                 .font_weight(FontWeight::MEDIUM)
                                                                 .text_color(theme::ash())
                                                                 .child(context),
@@ -724,7 +730,9 @@ pub(super) fn model_switcher_sheet(
                                                             meta.child(
                                                                 div()
                                                                     .font_family(theme::sans())
-                                                                    .text_size(px(theme::T_TINY))
+                                                                    .text_size(theme::text_size(
+                                                                        theme::T_TINY,
+                                                                    ))
                                                                     .font_weight(
                                                                         FontWeight::SEMIBOLD,
                                                                     )
@@ -746,7 +754,7 @@ pub(super) fn model_switcher_sheet(
                                     .border_t_1()
                                     .border_color(theme::edge_soft())
                                     .font_family(theme::mono())
-                                    .text_size(px(theme::T_TINY))
+                                    .text_size(theme::text_size(theme::T_TINY))
                                     .text_color(theme::smoke())
                                     .overflow_hidden()
                                     .text_ellipsis()
@@ -771,7 +779,7 @@ fn model_switcher_close_button(cx: &mut Context<RootView>) -> gpui::AnyElement {
         .tab_index(0)
         .cursor_pointer()
         .font_family(theme::main())
-        .text_size(px(theme::T_TINY))
+        .text_size(theme::text_size(theme::T_TINY))
         .font_weight(FontWeight::SEMIBOLD)
         .text_color(theme::ash())
         .hover(|button| button.bg(theme::canvas()).text_color(theme::bone()))
@@ -868,7 +876,11 @@ fn model_provider_button(
         .child(
             div()
                 .font_family(theme::main())
-                .text_size(px(if mark.chars().count() > 2 { 9.5 } else { 11.5 }))
+                .text_size(theme::text_size(if mark.chars().count() > 2 {
+                    9.5
+                } else {
+                    11.5
+                }))
                 .font_weight(FontWeight::BOLD)
                 .child(mark),
         )
@@ -907,7 +919,7 @@ impl Render for ModelProviderTooltip {
             .child(
                 div()
                     .font_family(theme::sans())
-                    .text_size(px(theme::T_LABEL))
+                    .text_size(theme::text_size(theme::T_LABEL))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(theme::bone())
                     .child(self.name.clone()),
@@ -915,7 +927,7 @@ impl Render for ModelProviderTooltip {
             .child(
                 div()
                     .font_family(theme::sans())
-                    .text_size(px(theme::T_TINY))
+                    .text_size(theme::text_size(theme::T_TINY))
                     .text_color(theme::ash())
                     .child(self.detail.clone()),
             )
@@ -1134,7 +1146,7 @@ pub(super) fn thinking_select_sheet(
                     .border_b_1()
                     .border_color(theme::panel_hover())
                     .font_family(theme::sans())
-                    .text_size(px(theme::T_TINY))
+                    .text_size(theme::text_size(theme::T_TINY))
                     .text_color(theme::smoke())
                     .child("Settle stream to change"),
             )
@@ -1195,7 +1207,7 @@ pub(super) fn thinking_select_sheet(
                                 .child(
                                     div()
                                         .font_family(theme::main())
-                                        .text_size(px(theme::T_TINY))
+                                        .text_size(theme::text_size(theme::T_TINY))
                                         .font_weight(if selected {
                                             FontWeight::SEMIBOLD
                                         } else {
@@ -1321,7 +1333,7 @@ fn providers_settings(
                                 .child(
                                     div()
                                         .font_family(theme::sans())
-                                        .text_size(px(theme::T_UI_SM))
+                                        .text_size(theme::text_size(theme::T_UI_SM))
                                         .font_weight(FontWeight::SEMIBOLD)
                                         .text_color(theme::bone())
                                         .child(provider.name),
@@ -1619,7 +1631,7 @@ fn model_settings_row(
                         .child(
                             div()
                                 .font_family(theme::sans())
-                                .text_size(px(theme::T_UI_SM))
+                                .text_size(theme::text_size(theme::T_UI_SM))
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .text_color(theme::bone())
                                 .overflow_hidden()
@@ -2094,7 +2106,7 @@ fn pi_settings_group(
                 .child(
                     div()
                         .font_family(theme::sans())
-                        .text_size(px(theme::T_TINY))
+                        .text_size(theme::text_size(theme::T_TINY))
                         .line_height(gpui::relative(1.35))
                         .text_color(theme::smoke())
                         .child(detail),
@@ -2131,7 +2143,7 @@ fn pi_setting_row(
                 .child(
                     div()
                         .font_family(theme::sans())
-                        .text_size(px(theme::T_UI_SM))
+                        .text_size(theme::text_size(theme::T_UI_SM))
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(theme::bone_dim())
                         .child(label),
@@ -2139,7 +2151,7 @@ fn pi_setting_row(
                 .child(
                     div()
                         .font_family(theme::sans())
-                        .text_size(px(theme::T_TINY))
+                        .text_size(theme::text_size(theme::T_TINY))
                         .line_height(gpui::relative(1.35))
                         .text_color(theme::smoke())
                         .child(detail),
@@ -2267,7 +2279,7 @@ fn pi_stepper_setting_row(
                 .items_center()
                 .justify_center()
                 .font_family(theme::mono())
-                .text_size(px(theme::T_MONO_SM))
+                .text_size(theme::text_size(theme::T_MONO_SM))
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(theme::bone_dim())
                 .child(value.to_string()),
@@ -2555,7 +2567,7 @@ fn resource_center_row(item: crate::resource_center::ResourceItem) -> impl IntoE
                     div()
                         .min_w_0()
                         .font_family(theme::sans())
-                        .text_size(px(theme::T_UI_SM))
+                        .text_size(theme::text_size(theme::T_UI_SM))
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(theme::bone())
                         .overflow_hidden()
@@ -2567,7 +2579,7 @@ fn resource_center_row(item: crate::resource_center::ResourceItem) -> impl IntoE
                     div()
                         .flex_shrink_0()
                         .font_family(theme::mono())
-                        .text_size(px(theme::T_TINY))
+                        .text_size(theme::text_size(theme::T_TINY))
                         .text_color(state_color)
                         .child(item.state.label()),
                 ),
@@ -2577,7 +2589,7 @@ fn resource_center_row(item: crate::resource_center::ResourceItem) -> impl IntoE
             row.child(
                 div()
                     .font_family(theme::sans())
-                    .text_size(px(theme::T_TINY))
+                    .text_size(theme::text_size(theme::T_TINY))
                     .line_height(gpui::relative(1.4))
                     .text_color(theme::bone_dim())
                     .child(description),
@@ -2588,7 +2600,7 @@ fn resource_center_row(item: crate::resource_center::ResourceItem) -> impl IntoE
         .children(item.diagnostics.into_iter().map(|diagnostic| {
             div()
                 .font_family(theme::sans())
-                .text_size(px(theme::T_TINY))
+                .text_size(theme::text_size(theme::T_TINY))
                 .line_height(gpui::relative(1.4))
                 .text_color(theme::error())
                 .child(diagnostic)

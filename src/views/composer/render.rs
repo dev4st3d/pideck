@@ -78,8 +78,8 @@ impl Composer {
                             } else {
                                 theme::panel_lift()
                             })
-                            .text_size(px(theme::T_UI_SM))
-                            .line_height(px(20.0))
+                            .text_size(theme::text_size(theme::T_UI_SM))
+                            .line_height(theme::text_size(20.0))
                             .text_color(if self.disabled {
                                 theme::smoke()
                             } else {
@@ -154,7 +154,7 @@ impl Composer {
                                         }))
                                 })
                                 .font_family(theme::main())
-                                .text_size(px(theme::T_TINY))
+                                .text_size(theme::text_size(theme::T_TINY))
                                 .font_weight(FontWeight::BOLD)
                                 .child(self.action_label.clone()),
                         )
@@ -164,7 +164,7 @@ impl Composer {
                 col.child(
                     div()
                         .font_family(theme::sans())
-                        .text_size(px(theme::T_TINY))
+                        .text_size(theme::text_size(theme::T_TINY))
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(status_color)
                         .overflow_hidden()
@@ -224,8 +224,8 @@ impl Composer {
             .px(px(input_padding_x))
             .py(px(input_padding_y))
             .overflow_hidden()
-            .text_size(px(theme::T_BODY_SM))
-            .line_height(px(input_line_height))
+            .text_size(theme::text_size(theme::T_BODY_SM))
+            .line_height(theme::text_size(input_line_height))
             .text_color(if self.disabled {
                 theme::smoke()
             } else {
@@ -324,7 +324,7 @@ impl Composer {
                                     div()
                                         .min_w_0()
                                         .font_family(theme::sans())
-                                        .text_size(px(theme::T_UI_SM))
+                                        .text_size(theme::text_size(theme::T_UI_SM))
                                         .font_weight(FontWeight::SEMIBOLD)
                                         .text_color(status_color)
                                         .overflow_hidden()
@@ -339,7 +339,7 @@ impl Composer {
                                         .min_w_0()
                                         .flex_1()
                                         .font_family(theme::mono())
-                                        .text_size(px(theme::T_TINY))
+                                        .text_size(theme::text_size(theme::T_TINY))
                                         .text_color(theme::smoke())
                                         .overflow_hidden()
                                         .text_ellipsis()
@@ -371,7 +371,7 @@ impl Composer {
                                             .flex()
                                             .items_center()
                                             .font_family(theme::main())
-                                            .text_size(px(theme::T_UI_SM))
+                                            .text_size(theme::text_size(theme::T_UI_SM))
                                             .font_weight(FontWeight::SEMIBOLD)
                                             .text_color(theme::bone_dim())
                                             .hover(|button| {
@@ -404,7 +404,7 @@ impl Composer {
                                                 .flex()
                                                 .items_center()
                                                 .font_family(theme::main())
-                                                .text_size(px(theme::T_UI_SM))
+                                                .text_size(theme::text_size(theme::T_UI_SM))
                                                 .font_weight(FontWeight::SEMIBOLD)
                                                 .text_color(if can_submit {
                                                     theme::bone_dim()
@@ -465,7 +465,7 @@ impl Composer {
                                             }))
                                     })
                                     .font_family(theme::main())
-                                    .text_size(px(theme::T_UI_SM))
+                                    .text_size(theme::text_size(theme::T_UI_SM))
                                     .font_weight(FontWeight::BOLD)
                                     .child(primary_label),
                             ),
@@ -507,7 +507,7 @@ impl Composer {
                             .child(
                                 div()
                                     .font_family(theme::sans())
-                                    .text_size(px(theme::T_UI_SM))
+                                    .text_size(theme::text_size(theme::T_UI_SM))
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .text_color(theme::bone_dim())
                                     .child(format!("Image {}", index + 1)),
@@ -515,7 +515,7 @@ impl Composer {
                             .child(
                                 div()
                                     .font_family(theme::mono())
-                                    .text_size(px(theme::T_TINY))
+                                    .text_size(theme::text_size(theme::T_TINY))
                                     .text_color(theme::smoke())
                                     .child(format!("{format} · {}", format_image_bytes(bytes))),
                             ),
@@ -556,7 +556,7 @@ impl Composer {
                                     .child(
                                         div()
                                             .font_family(theme::main())
-                                            .text_size(px(theme::T_TINY))
+                                            .text_size(theme::text_size(theme::T_TINY))
                                             .font_weight(FontWeight::SEMIBOLD)
                                             .child("View"),
                                     ),
@@ -591,7 +591,7 @@ impl Composer {
                                     .child(
                                         div()
                                             .font_family(theme::main())
-                                            .text_size(px(theme::T_TINY))
+                                            .text_size(theme::text_size(theme::T_TINY))
                                             .font_weight(FontWeight::SEMIBOLD)
                                             .child("Remove"),
                                     ),
