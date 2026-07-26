@@ -22,6 +22,7 @@ impl Render for RootView {
         let models = &self.render_projections.models;
         let resources = &self.render_projections.resources;
         let orchestration = &self.render_projections.orchestration;
+        let project_switch_enabled = self.project_switch_enabled();
         let pasted_image_preview = self.pasted_image_preview.and_then(|index| {
             let images = self.composer.read(cx).images();
             images
@@ -65,6 +66,7 @@ impl Render for RootView {
             .child(titlebar(
                 projection,
                 &self.conversation,
+                catalog.pending_session_file.is_some(),
                 &self.session_name_composer,
                 self.session_rename_open,
                 matches!(
@@ -84,7 +86,11 @@ impl Render for RootView {
                     .child(sessions_panel(
                         SessionsPanelParams {
                             catalog,
-                            projection,
+                            projects: &self.projects,
+                            project_catalogs: &self.project_catalogs,
+                            project_feedback: self.project_feedback.as_deref(),
+                            project_picker_pending: self.project_picker_pending,
+                            project_switch_enabled,
                             conversation: &self.conversation,
                             history_open: self.history_open,
                             menu_open: self.session_menu_open,

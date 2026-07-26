@@ -1,6 +1,7 @@
 pub mod git_diff;
 pub mod path_actions;
 pub mod pi_process;
+pub mod projects;
 pub mod rpc;
 pub mod runtime_worker;
 pub mod sdk_bridge;

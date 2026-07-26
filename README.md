@@ -9,7 +9,7 @@ Phases 9 through 16 complete run-control recovery UX, Pi's persisted session lif
 The visible shell now shows only live or explicitly Loading, Awaiting, Unknown, stale, stopped, and error values:
 
 - active session, lifecycle, and cost in the title bar;
-- canonical current workspace and connection/recovery state in the main area;
+- a persistent, collapsible project sidebar with background thread catalogs, native folder picking, project switching/removal, and canonical active-workspace state;
 - context, input/output tokens, cache usage, cost, model, and thinking in the inspector;
 - one applicable Connect, Retry, or Stop action with pointer and keyboard paths;
 - a native multiline composer with model and thinking pickers in the prompt chrome, grapheme-safe editing, IME, clipboard, selection, undo, wrapping, scrolling, and visible pending/accepted/rejected/uncertain delivery state;
@@ -19,7 +19,7 @@ The visible shell now shows only live or explicitly Loading, Awaiting, Unknown, 
 - provider/model/time/stop/usage metadata with raw provider diagnostics and private payloads excluded from normalized diagnostics;
 - selectable transcript text and near-bottom-only auto-follow, preserving manual scroll and selection during streaming.
 - complete steering/follow-up queue visibility and delivery modes, scoped abort controls, retry countdown/attempt/final-error state, manual compaction with optional focus instructions, and auto-compaction/auto-retry controls;
-- a real workspace-filtered v1-v3 JSONL session catalog with loading, empty, inaccessible, corrupt, refreshing/stale, and active-switch states;
+- real workspace-filtered v1-v3 JSONL thread catalogs for every saved project, with loading, empty, inaccessible, corrupt, refreshing/stale, and active-switch states;
 - atomic new/switch/rename/export operations that retain the old transcript read-only until Pi confirms a replacement and never replay an uncertain prompt.
 - a searchable, foldable, filterable session tree with the authoritative active leaf, keyboard navigation, entry details, stock fork-before-message and clone-path actions, and explicit same-file/new-file confirmations;
 - a negotiated Pi SDK 0.82.0 stdio JSONL bridge for same-file navigation, optional branch summaries, labels, active-path JSONL export, and safe import into a new session file. Unsupported bridge actions stay hidden.
@@ -59,7 +59,7 @@ If Cargo is not on `PATH` on Windows:
 & "$env:USERPROFILE\.cargo\bin\cargo.exe" run
 ```
 
-The app connects automatically using the canonical current working directory with:
+The launch folder is added to the persistent project sidebar. The app reopens the last available active project and stores project expansion and last-thread state in `pideck-projects.json` under Pi's agent directory. The active project connects with:
 
 - `ProjectTrust::Reject` (`--no-approve`);
 - a persisted session directory resolved with Pi precedence (`PI_CODING_AGENT_SESSION_DIR`, configured `sessionDir`, then the encoded default under the agent directory);

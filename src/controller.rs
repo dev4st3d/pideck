@@ -18,7 +18,7 @@ use crate::orchestration::{
 use crate::resource_center::{ResourceCenterState, ResourceInventorySnapshot, ResourcePhase};
 use crate::services::rpc::{ConnectionGeneration, RequestId, SessionEpoch};
 use crate::services::runtime_worker::{
-    AttemptGeneration, RuntimeService, RuntimeWorkerHandle, WorkerResult,
+    AttemptGeneration, RpcRuntimeService, RuntimeService, RuntimeWorkerHandle, WorkerResult,
 };
 use crate::services::sdk_bridge::{
     BridgeCapabilities, BridgeCommand, BridgeErrorKind, BridgeEvent, BridgeWorkerResult,
@@ -303,6 +303,7 @@ pub struct CatalogProjection {
     pub current_session_id: Option<String>,
     pub current_session_name: Option<String>,
     pub current_session_file: Option<PathBuf>,
+    pub pending_session_file: Option<PathBuf>,
     pub switching: bool,
 }
 
@@ -1114,6 +1115,7 @@ pub struct RuntimeController {
     service: Arc<dyn RuntimeService>,
     worker: RuntimeWorkerHandle,
     preferred_session_file: Option<PathBuf>,
+    pending_session_file: Option<PathBuf>,
     catalog_worker: SessionCatalogWorker,
     catalog_generation: u64,
     catalog_status: CatalogStatus,
@@ -1146,6 +1148,21 @@ pub struct RuntimeController {
 }
 
 impl RuntimeController {
+    pub fn for_workspace(workspace: PathBuf, cx: &mut Context<Self>) -> Self {
+        let catalog_config = SessionCatalogConfig::from_environment(workspace.clone());
+        let session_root = catalog_config.resolve_root().path;
+        let service: Arc<dyn RuntimeService> = Arc::new(RpcRuntimeService::persisted_profile(
+            workspace.clone(),
+            session_root,
+        ));
+        Self::new(
+            workspace.to_string_lossy().into_owned(),
+            service,
+            catalog_config,
+            cx,
+        )
+    }
+
     pub fn new(
         workspace: impl Into<String>,
         service: Arc<dyn RuntimeService>,
@@ -1188,6 +1205,7 @@ impl RuntimeController {
             service,
             worker,
             preferred_session_file: None,
+            pending_session_file: None,
             catalog_worker,
             catalog_generation,
             catalog_status: CatalogStatus::Loading,
@@ -1268,6 +1286,10 @@ impl RuntimeController {
             current_session_file: session
                 .and_then(|session| session.file.as_deref())
                 .map(PathBuf::from),
+            pending_session_file: (self.core.runtime.replacement_awaiting_state
+                || self.core.runtime.lifecycle == RuntimeLifecycle::Loading)
+                .then(|| self.pending_session_file.clone())
+                .flatten(),
             switching: self.core.runtime.replacement_awaiting_state,
         }
     }
@@ -1883,7 +1905,8 @@ impl RuntimeController {
         let session_path = path.to_string_lossy().into_owned();
         let accepted = self.send_core_effects(|core| core.switch_session(session_path), cx);
         if accepted {
-            self.preferred_session_file = Some(path);
+            self.preferred_session_file = Some(path.clone());
+            self.pending_session_file = Some(path);
         }
         accepted
     }
@@ -1899,6 +1922,13 @@ impl RuntimeController {
     pub fn refresh_sessions(&mut self, cx: &mut Context<Self>) {
         self.start_catalog_refresh();
         cx.notify();
+    }
+
+    pub fn connect_to_session(&mut self, session_file: Option<PathBuf>, cx: &mut Context<Self>) {
+        self.preferred_session_file = session_file
+            .map(|path| crate::services::session_catalog::without_windows_verbatim_prefix(&path));
+        self.pending_session_file = self.preferred_session_file.clone();
+        self.connect(cx);
     }
 
     pub fn connect(&mut self, cx: &mut Context<Self>) {
@@ -2024,6 +2054,11 @@ impl RuntimeController {
         let previous_session = self.orchestration.expected_session_id.clone();
         let effects = self.core.apply_worker_result(result);
         self.send_effects(effects);
+        if !self.core.runtime.replacement_awaiting_state
+            && self.core.runtime.lifecycle != RuntimeLifecycle::Loading
+        {
+            self.pending_session_file = None;
+        }
         let active_session = self
             .core
             .runtime

@@ -1,3 +1,5 @@
+use gpui::{AnyElement, SharedString, svg};
+
 use super::shared::{action_id, runtime_operation_label, short_path};
 use super::*;
 
@@ -40,13 +42,14 @@ impl TitlebarStatus {
 pub(super) fn titlebar(
     projection: &ShellProjection,
     conversation: &ConversationProjection,
+    opening_thread: bool,
     name_composer: &Entity<Composer>,
     rename_open: bool,
     rename_enabled: bool,
     cx: &mut Context<RootView>,
 ) -> impl IntoElement {
     let action = projection.action;
-    let status = titlebar_status(projection, conversation);
+    let status = titlebar_status(projection, conversation, opening_thread);
     let status_color = status.color();
     div()
         .h(px(theme::TITLE_H))
@@ -220,30 +223,45 @@ pub(super) fn titlebar(
 fn titlebar_status(
     projection: &ShellProjection,
     conversation: &ConversationProjection,
+    opening_thread: bool,
 ) -> TitlebarStatus {
-    titlebar_status_for(
-        &projection.lifecycle,
-        conversation.lifecycle,
-        matches!(
+    titlebar_status_for(TitlebarStatusInput {
+        shell_lifecycle: &projection.lifecycle,
+        lifecycle: conversation.lifecycle,
+        conversation_loading: matches!(
             conversation.status,
             crate::state::runtime::FacetStatus::Loading
         ),
-        conversation.error.is_some(),
-        &conversation.retry,
-        &conversation.compaction,
-        conversation.pending_operation.as_ref(),
-    )
+        has_error: conversation.error.is_some(),
+        opening_thread,
+        retry: &conversation.retry,
+        compaction: &conversation.compaction,
+        pending_operation: conversation.pending_operation.as_ref(),
+    })
 }
 
-fn titlebar_status_for(
-    shell_lifecycle: &str,
+struct TitlebarStatusInput<'a> {
+    shell_lifecycle: &'a str,
     lifecycle: RuntimeLifecycle,
     conversation_loading: bool,
     has_error: bool,
-    retry: &RetryState,
-    compaction: &CompactionState,
-    pending_operation: Option<&RuntimeOperation>,
-) -> TitlebarStatus {
+    opening_thread: bool,
+    retry: &'a RetryState,
+    compaction: &'a CompactionState,
+    pending_operation: Option<&'a RuntimeOperation>,
+}
+
+fn titlebar_status_for(input: TitlebarStatusInput<'_>) -> TitlebarStatus {
+    let TitlebarStatusInput {
+        shell_lifecycle,
+        lifecycle,
+        conversation_loading,
+        has_error,
+        opening_thread,
+        retry,
+        compaction,
+        pending_operation,
+    } = input;
     match shell_lifecycle {
         "Not connected" | "Stopped" => {
             return TitlebarStatus::new("Disconnected", TitlebarStatusTone::Idle, false);
@@ -317,6 +335,9 @@ fn titlebar_status_for(
     if has_error {
         return TitlebarStatus::new("Conversation error", TitlebarStatusTone::Error, false);
     }
+    if opening_thread {
+        return TitlebarStatus::new("Opening thread", TitlebarStatusTone::Working, true);
+    }
     if lifecycle == RuntimeLifecycle::Running {
         return TitlebarStatus::new("Working", TitlebarStatusTone::Working, true);
     }
@@ -358,7 +379,11 @@ fn titlebar_status_for(
 
 pub(super) struct SessionsPanelParams<'a> {
     pub(super) catalog: &'a CatalogProjection,
-    pub(super) projection: &'a ShellProjection,
+    pub(super) projects: &'a ProjectRegistry,
+    pub(super) project_catalogs: &'a HashMap<String, ProjectCatalogCache>,
+    pub(super) project_feedback: Option<&'a str>,
+    pub(super) project_picker_pending: bool,
+    pub(super) project_switch_enabled: bool,
     pub(super) conversation: &'a ConversationProjection,
     pub(super) history_open: bool,
     pub(super) menu_open: bool,
@@ -371,7 +396,11 @@ pub(super) fn sessions_panel(
 ) -> impl IntoElement {
     let SessionsPanelParams {
         catalog,
-        projection,
+        projects,
+        project_catalogs,
+        project_feedback,
+        project_picker_pending,
+        project_switch_enabled,
         conversation,
         history_open,
         menu_open,
@@ -384,15 +413,8 @@ pub(super) fn sessions_panel(
     ) && conversation.pending_operation.is_none()
         && !catalog.switching;
     let current_path = catalog.current_session_file.as_ref();
-    let state_copy = match catalog.status {
-        CatalogStatus::Loading if catalog.sessions.is_empty() => "Scanning…".to_owned(),
-        CatalogStatus::Loading => "Refreshing".to_owned(),
-        CatalogStatus::Ready => format!("{}", catalog.sessions.len()),
-        CatalogStatus::Empty => "0".to_owned(),
-        CatalogStatus::Inaccessible => "Error".to_owned(),
-        CatalogStatus::Stale => "Stale".to_owned(),
-    };
-    let folder = short_path(&projection.workspace);
+    let pending_path = catalog.pending_session_file.as_ref();
+    let project_count = projects.projects().len().to_string();
 
     div()
         .w(px(theme::SIDE_W))
@@ -412,24 +434,30 @@ pub(super) fn sessions_panel(
                 .flex_row()
                 .items_center()
                 .justify_between()
-                .child(controls::section_label("Sessions"))
+                .child(controls::section_label("Projects"))
                 .child(
                     div()
                         .flex()
                         .flex_row()
                         .items_center()
-                        .gap(px(2.0))
+                        .gap(px(1.0))
                         .child(
                             div()
-                                .min_w(px(20.0))
+                                .min_w(px(18.0))
                                 .font_family(theme::mono())
                                 .text_size(px(theme::T_TINY))
                                 .text_color(theme::smoke())
                                 .text_align(gpui::TextAlign::Right)
-                                .child(state_copy),
+                                .child(project_count),
                         )
+                        .child(controls::quiet_button(
+                            "add-project",
+                            "Add",
+                            !project_picker_pending,
+                            Box::new(cx.listener(|view, _, _, cx| view.choose_projects(cx))),
+                        ))
                         .child(controls::icon_button(
-                            "refresh-sessions",
+                            "refresh-projects",
                             "↻",
                             false,
                             catalog.status != CatalogStatus::Loading,
@@ -452,7 +480,7 @@ pub(super) fn sessions_panel(
                         .gap(px(6.0))
                         .child(controls::tone_button(
                             "new-session",
-                            "New session",
+                            "New thread",
                             session_actions_enabled,
                             controls::ControlTone::Normal,
                             Box::new(cx.listener(|view, _, window, cx| {
@@ -527,57 +555,25 @@ pub(super) fn sessions_panel(
                         ),
                 ),
         )
-        .when(
-            matches!(
-                catalog.status,
-                CatalogStatus::Inaccessible | CatalogStatus::Stale
-            ),
-            |panel| {
+        .when_some(
+            project_feedback.map(ToOwned::to_owned),
+            |panel, feedback| {
                 panel.child(
                     div()
                         .mx(px(12.0))
                         .mb(px(8.0))
-                        .px(px(10.0))
-                        .py(px(8.0))
+                        .px(px(9.0))
+                        .py(px(7.0))
                         .rounded(px(theme::RADIUS_SM))
                         .bg(theme::panel())
-                        .border_1()
-                        .border_color(theme::edge_soft())
                         .font_family(theme::sans())
                         .text_size(px(theme::T_TINY))
-                        .line_height(gpui::relative(1.4))
+                        .line_height(gpui::relative(1.35))
                         .text_color(theme::bone_dim())
-                        .child(
-                            catalog
-                                .error
-                                .clone()
-                                .unwrap_or_else(|| "Session catalog needs attention.".to_owned()),
-                        ),
+                        .child(feedback),
                 )
             },
         )
-        .when(!catalog.corrupt.is_empty(), |panel| {
-            panel.child(
-                div()
-                    .mx(px(12.0))
-                    .mb(px(8.0))
-                    .px(px(10.0))
-                    .py(px(8.0))
-                    .rounded(px(theme::RADIUS_SM))
-                    .bg(theme::panel())
-                    .border_1()
-                    .border_color(theme::error())
-                    .font_family(theme::sans())
-                    .text_size(px(theme::T_TINY))
-                    .line_height(gpui::relative(1.4))
-                    .text_color(theme::bone_dim())
-                    .child(format!(
-                        "{} corrupt file{} skipped.",
-                        catalog.corrupt.len(),
-                        if catalog.corrupt.len() == 1 { "" } else { "s" }
-                    )),
-            )
-        })
         .child(
             div()
                 .flex_1()
@@ -585,9 +581,7 @@ pub(super) fn sessions_panel(
                 .relative()
                 .child(
                     canvas(
-                        |bounds, window, _| {
-                            window.insert_hitbox(bounds, HitboxBehavior::Normal)
-                        },
+                        |bounds, window, _| window.insert_hitbox(bounds, HitboxBehavior::Normal),
                         move |_, hitbox, window, _| {
                             window.on_mouse_event(
                                 move |event: &ScrollWheelEvent, phase, window, cx| {
@@ -619,55 +613,611 @@ pub(super) fn sessions_panel(
                         .w_full()
                         .flex()
                         .flex_col()
-                        .when(catalog.sessions.is_empty(), |list| {
-                            list.child(controls::empty_list_note(match catalog.status {
-                                CatalogStatus::Loading => "Scanning sessions…",
-                                CatalogStatus::Empty => "No saved sessions yet.",
-                                CatalogStatus::Inaccessible => "Catalog unavailable.",
-                                _ => "No sessions to show.",
-                            }))
-                        })
-                        .children(catalog.sessions.iter().map(|session| {
-                            let selected = current_path.is_some_and(|path| path == &session.path);
-                            let path = session.path.clone();
-                            let title = session
-                                .name
-                                .clone()
-                                .or_else(|| session.first_user_summary.clone())
-                                .unwrap_or_else(|| "Untitled session".to_owned());
-                            let detail = format!(
-                                "{} msg · v{} · {}",
-                                session.counts.messages, session.version, session.updated_at
-                            );
-                            controls::interactive_list_row(
-                                gpui::SharedString::from(format!("session-{}", session.id)),
-                                session_actions_enabled && !selected,
-                                Box::new(cx.listener(move |view, _, _, cx| {
-                                    view.switch_session(path.clone(), cx)
-                                })),
-                                controls::session_row(title, detail, selected),
+                        .children(projects.projects().iter().map(|project| {
+                            project_group(
+                                ProjectGroupParams {
+                                    project,
+                                    active: projects.is_active(&project.path),
+                                    active_catalog: catalog,
+                                    cached_catalog: project_catalogs
+                                        .get(&project_key(&project.path)),
+                                    current_path,
+                                    pending_path,
+                                    session_actions_enabled,
+                                    project_switch_enabled,
+                                    can_remove: projects.projects().len() > 1,
+                                },
+                                cx,
                             )
                         })),
                 ),
         )
         .child(
             div()
-                .px(px(14.0))
-                .py(px(12.0))
+                .px(px(12.0))
+                .py(px(10.0))
                 .border_t_1()
                 .border_color(theme::edge_soft())
-                .child(controls::section_label("Folder"))
+                .flex()
+                .flex_col()
+                .gap(px(6.0))
                 .child(
                     div()
-                        .mt(px(5.0))
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .gap(px(8.0))
+                        .child(controls::section_label("Active project"))
+                        .child(controls::quiet_button(
+                            "remove-active-project",
+                            "Remove",
+                            projects.projects().len() > 1 && project_switch_enabled,
+                            {
+                                let path = projects.active_path().to_path_buf();
+                                Box::new(cx.listener(move |view, _, window, cx| {
+                                    view.remove_project(path.clone(), window, cx)
+                                }))
+                            },
+                        )),
+                )
+                .child(
+                    div()
                         .font_family(theme::mono())
                         .text_size(px(theme::T_TINY))
-                        .line_height(gpui::relative(1.4))
+                        .line_height(gpui::relative(1.35))
                         .font_weight(FontWeight::MEDIUM)
                         .text_color(theme::data())
-                        .child(folder),
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .whitespace_nowrap()
+                        .child(short_path(&projects.active_path().to_string_lossy())),
                 ),
         )
+}
+
+struct ProjectGroupParams<'a> {
+    project: &'a ProjectEntry,
+    active: bool,
+    active_catalog: &'a CatalogProjection,
+    cached_catalog: Option<&'a ProjectCatalogCache>,
+    current_path: Option<&'a PathBuf>,
+    pending_path: Option<&'a PathBuf>,
+    session_actions_enabled: bool,
+    project_switch_enabled: bool,
+    can_remove: bool,
+}
+
+fn project_group(params: ProjectGroupParams<'_>, cx: &mut Context<RootView>) -> AnyElement {
+    let ProjectGroupParams {
+        project,
+        active,
+        active_catalog,
+        cached_catalog,
+        current_path,
+        pending_path,
+        session_actions_enabled,
+        project_switch_enabled,
+        can_remove,
+    } = params;
+    let cached_while_loading = cached_catalog.filter(|catalog| {
+        active
+            && active_catalog.status == CatalogStatus::Loading
+            && active_catalog.sessions.is_empty()
+            && !catalog.sessions.is_empty()
+    });
+    let (status, sessions, corrupt_count, error) = if let Some(catalog) = cached_while_loading {
+        (
+            CatalogStatus::Loading,
+            Arc::clone(&catalog.sessions),
+            catalog.corrupt_count,
+            None,
+        )
+    } else if active {
+        (
+            active_catalog.status,
+            Arc::clone(&active_catalog.sessions),
+            active_catalog.corrupt.len(),
+            active_catalog.error.clone(),
+        )
+    } else if let Some(catalog) = cached_catalog {
+        (
+            catalog.status,
+            Arc::clone(&catalog.sessions),
+            catalog.corrupt_count,
+            catalog.error.clone(),
+        )
+    } else {
+        (CatalogStatus::Loading, Arc::new(Vec::new()), 0, None)
+    };
+    let count = match status {
+        CatalogStatus::Inaccessible => "!".to_owned(),
+        CatalogStatus::Stale => format!("{}!", sessions.len()),
+        CatalogStatus::Loading | CatalogStatus::Ready | CatalogStatus::Empty => {
+            sessions.len().to_string()
+        }
+    };
+    let path = project.path.clone();
+    let click_path = path.clone();
+    let key_path = path.clone();
+    let left_path = path.clone();
+    let right_path = path.clone();
+    let toggle_path = path.clone();
+    let click_root = cx.entity();
+    let key_root = click_root.clone();
+    let left_root = click_root.clone();
+    let right_root = click_root.clone();
+    let toggle_root = click_root.clone();
+    let expanded = project.expanded;
+    let activity_key = list_animation_key(&project_key(&path));
+
+    div()
+        .w_full()
+        .flex()
+        .flex_col()
+        .mb(px(3.0))
+        .child(
+            div()
+                .id(SharedString::from(format!(
+                    "project-{}",
+                    project_key(&path)
+                )))
+                .h(px(36.0))
+                .px(px(10.0))
+                .tab_index(0)
+                .cursor_pointer()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(7.0))
+                .bg(if active {
+                    theme::panel_lift()
+                } else {
+                    gpui::rgba(0x0000_0000)
+                })
+                .hover(|row| row.bg(theme::panel()))
+                .focus(|row| row.bg(theme::panel_lift()).text_color(theme::focus()))
+                .on_click(move |_, window, cx| {
+                    click_root.update(cx, |view, cx| {
+                        view.activate_project(click_path.clone(), None, window, cx)
+                    });
+                })
+                .on_key_down(move |event: &gpui::KeyDownEvent, window, cx| {
+                    match event.keystroke.key.as_str() {
+                        "enter" | "space" => {
+                            cx.stop_propagation();
+                            key_root.update(cx, |view, cx| {
+                                view.activate_project(key_path.clone(), None, window, cx)
+                            });
+                        }
+                        "left" if expanded => {
+                            cx.stop_propagation();
+                            left_root.update(cx, |view, cx| {
+                                view.set_project_expanded(left_path.clone(), false, cx)
+                            });
+                        }
+                        "right" if !expanded => {
+                            cx.stop_propagation();
+                            right_root.update(cx, |view, cx| {
+                                view.set_project_expanded(right_path.clone(), true, cx)
+                            });
+                        }
+                        _ => {}
+                    }
+                })
+                .child(
+                    div()
+                        .id(SharedString::from(format!(
+                            "toggle-project-{}",
+                            project_key(&path)
+                        )))
+                        .ml(px(-4.0))
+                        .size(px(22.0))
+                        .flex_shrink_0()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(px(theme::RADIUS_SM))
+                        .hover(|button| button.bg(theme::panel_hover()))
+                        .on_click(move |_, _, cx| {
+                            cx.stop_propagation();
+                            toggle_root.update(cx, |view, cx| {
+                                view.toggle_project(toggle_path.clone(), cx)
+                            });
+                        })
+                        .child(
+                            svg()
+                                .path(if expanded {
+                                    "icons/chevron-down.svg"
+                                } else {
+                                    "icons/chevron-right.svg"
+                                })
+                                .size(px(10.0))
+                                .text_color(theme::smoke()),
+                        ),
+                )
+                .child(
+                    svg()
+                        .path("icons/folder.svg")
+                        .size(px(14.0))
+                        .flex_shrink_0()
+                        .text_color(if active { theme::data() } else { theme::ash() }),
+                )
+                .child(
+                    div()
+                        .min_w_0()
+                        .flex_1()
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .whitespace_nowrap()
+                        .font_family(theme::sans())
+                        .text_size(px(theme::T_UI_SM))
+                        .font_weight(if active {
+                            FontWeight::BOLD
+                        } else {
+                            FontWeight::MEDIUM
+                        })
+                        .text_color(if active {
+                            theme::bone()
+                        } else {
+                            theme::bone_dim()
+                        })
+                        .child(project.name()),
+                )
+                .child(
+                    div()
+                        .flex_shrink_0()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(7.0))
+                        .when(
+                            status == CatalogStatus::Loading && !sessions.is_empty(),
+                            |meta| {
+                                meta.child(controls::square_status_indicator(
+                                    activity_key,
+                                    true,
+                                    Duration::from_millis(900),
+                                    theme::working(),
+                                ))
+                            },
+                        )
+                        .child(
+                            div()
+                                .font_family(theme::mono())
+                                .text_size(px(theme::T_TINY))
+                                .text_color(
+                                    if matches!(
+                                        status,
+                                        CatalogStatus::Inaccessible | CatalogStatus::Stale
+                                    ) {
+                                        theme::error()
+                                    } else {
+                                        theme::smoke()
+                                    },
+                                )
+                                .child(count),
+                        ),
+                ),
+        )
+        .when(project.expanded, |group| {
+            group
+                .when(sessions.is_empty(), |group| match status {
+                    CatalogStatus::Loading => {
+                        group.child(project_tree_loading_note(activity_key, "Scanning threads"))
+                    }
+                    CatalogStatus::Empty | CatalogStatus::Ready => {
+                        group.child(project_tree_note("No saved threads yet."))
+                    }
+                    CatalogStatus::Inaccessible | CatalogStatus::Stale => {
+                        group.child(project_tree_note("Project threads are unavailable."))
+                    }
+                })
+                .children(sessions.iter().map(|session| {
+                    project_thread_row(
+                        project.path.clone(),
+                        session,
+                        active,
+                        active
+                            && pending_path
+                                .or(current_path)
+                                .is_some_and(|path| sidebar_paths_match(path, &session.path)),
+                        active
+                            && pending_path
+                                .is_some_and(|path| sidebar_paths_match(path, &session.path)),
+                        if active {
+                            session_actions_enabled
+                        } else {
+                            project_switch_enabled
+                        },
+                        cx,
+                    )
+                }))
+                .when_some(error, |group, error| {
+                    let remove_path = project.path.clone();
+                    group.child(
+                        div()
+                            .pl(px(34.0))
+                            .pr(px(8.0))
+                            .pb(px(6.0))
+                            .flex()
+                            .flex_col()
+                            .gap(px(4.0))
+                            .child(
+                                div()
+                                    .font_family(theme::sans())
+                                    .text_size(px(theme::T_TINY))
+                                    .line_height(gpui::relative(1.35))
+                                    .text_color(theme::error())
+                                    .child(error),
+                            )
+                            .when(!active, |note| {
+                                note.child(controls::quiet_button(
+                                    SharedString::from(format!(
+                                        "remove-project-{}",
+                                        project_key(&remove_path)
+                                    )),
+                                    "Remove from sidebar",
+                                    can_remove,
+                                    Box::new(cx.listener(move |view, _, window, cx| {
+                                        view.remove_project(remove_path.clone(), window, cx)
+                                    })),
+                                ))
+                            }),
+                    )
+                })
+                .when(corrupt_count > 0, |group| {
+                    group.child(project_tree_note(format!(
+                        "{corrupt_count} corrupt thread{} skipped.",
+                        if corrupt_count == 1 { "" } else { "s" }
+                    )))
+                })
+        })
+        .into_any_element()
+}
+
+fn project_thread_row(
+    project_path: PathBuf,
+    session: &SessionSummary,
+    active_project: bool,
+    selected: bool,
+    switching: bool,
+    enabled: bool,
+    cx: &mut Context<RootView>,
+) -> AnyElement {
+    let session_path = session.path.clone();
+    let click_project = project_path.clone();
+    let click_session = session_path.clone();
+    let key_project = project_path;
+    let key_session = session_path;
+    let click_root = cx.entity();
+    let key_root = click_root.clone();
+    let title = session
+        .name
+        .clone()
+        .or_else(|| session.first_user_summary.clone())
+        .unwrap_or_else(|| "Untitled thread".to_owned());
+    let activity_key = list_animation_key(&session.id);
+    let message_count = match session.counts.messages {
+        1 => "1 message".to_owned(),
+        count => format!("{count} messages"),
+    };
+    let status = if switching {
+        "Opening thread".to_owned()
+    } else if selected {
+        "Current thread".to_owned()
+    } else {
+        message_count
+    };
+    let updated = compact_session_timestamp(&session.updated_at);
+
+    div()
+        .id(SharedString::from(format!(
+            "project-thread-{}-{}",
+            project_key(&click_project),
+            session.id
+        )))
+        .min_h(px(52.0))
+        .pl(px(34.0))
+        .pr(px(10.0))
+        .py(px(7.0))
+        .flex()
+        .flex_col()
+        .justify_center()
+        .gap(px(4.0))
+        .bg(if selected {
+            theme::panel_lift()
+        } else {
+            gpui::rgba(0x0000_0000)
+        })
+        .when(enabled && !selected, |row| {
+            row.tab_index(0)
+                .cursor_pointer()
+                .hover(|row| row.bg(theme::panel()))
+                .active(|row| row.bg(theme::panel_hover()))
+                .focus(|row| row.bg(theme::panel_lift()).text_color(theme::focus()))
+                .on_click(move |_, window, cx| {
+                    click_root.update(cx, |view, cx| {
+                        if active_project {
+                            view.switch_session(click_session.clone(), cx);
+                        } else {
+                            view.activate_project(
+                                click_project.clone(),
+                                Some(click_session.clone()),
+                                window,
+                                cx,
+                            );
+                        }
+                    });
+                })
+                .on_key_down(move |event: &gpui::KeyDownEvent, window, cx| {
+                    if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                        cx.stop_propagation();
+                        key_root.update(cx, |view, cx| {
+                            if active_project {
+                                view.switch_session(key_session.clone(), cx);
+                            } else {
+                                view.activate_project(
+                                    key_project.clone(),
+                                    Some(key_session.clone()),
+                                    window,
+                                    cx,
+                                );
+                            }
+                        });
+                    }
+                })
+        })
+        .child(
+            div()
+                .min_w_0()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(8.0))
+                .child(
+                    div()
+                        .min_w_0()
+                        .flex_1()
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .whitespace_nowrap()
+                        .font_family(theme::sans())
+                        .text_size(px(theme::T_UI_SM))
+                        .font_weight(if selected {
+                            FontWeight::BOLD
+                        } else {
+                            FontWeight::MEDIUM
+                        })
+                        .text_color(if selected {
+                            theme::bone()
+                        } else if enabled {
+                            theme::bone_dim()
+                        } else {
+                            theme::ash()
+                        })
+                        .child(title),
+                )
+                .when(switching, |title| {
+                    title.child(controls::square_status_indicator(
+                        activity_key,
+                        true,
+                        Duration::from_millis(720),
+                        theme::working(),
+                    ))
+                }),
+        )
+        .child(
+            div()
+                .min_w_0()
+                .flex()
+                .flex_row()
+                .items_center()
+                .justify_between()
+                .gap(px(8.0))
+                .font_family(theme::mono())
+                .text_size(px(theme::T_TINY))
+                .text_color(if switching {
+                    theme::working()
+                } else if selected {
+                    theme::data()
+                } else {
+                    theme::smoke()
+                })
+                .child(div().whitespace_nowrap().child(status))
+                .child(
+                    div()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .whitespace_nowrap()
+                        .child(updated),
+                ),
+        )
+        .into_any_element()
+}
+
+fn sidebar_paths_match(left: &std::path::Path, right: &std::path::Path) -> bool {
+    project_key(left) == project_key(right)
+}
+
+fn list_animation_key(value: &str) -> usize {
+    value.bytes().fold(1_009_usize, |key, byte| {
+        key.wrapping_mul(131).wrapping_add(byte as usize)
+    })
+}
+
+fn compact_session_timestamp(timestamp: &str) -> String {
+    let bytes = timestamp.as_bytes();
+    let iso_shape = bytes.len() >= 16
+        && bytes.get(4) == Some(&b'-')
+        && bytes.get(7) == Some(&b'-')
+        && matches!(bytes.get(10), Some(b'T' | b' '))
+        && bytes.get(13) == Some(&b':');
+    if !iso_shape {
+        return timestamp.to_owned();
+    }
+
+    let Some(month_digits) = timestamp.get(5..7) else {
+        return timestamp.to_owned();
+    };
+    let month = match month_digits {
+        "01" => "Jan",
+        "02" => "Feb",
+        "03" => "Mar",
+        "04" => "Apr",
+        "05" => "May",
+        "06" => "Jun",
+        "07" => "Jul",
+        "08" => "Aug",
+        "09" => "Sep",
+        "10" => "Oct",
+        "11" => "Nov",
+        "12" => "Dec",
+        _ => return timestamp.to_owned(),
+    };
+    let (Some(day), Some(time)) = (timestamp.get(8..10), timestamp.get(11..16)) else {
+        return timestamp.to_owned();
+    };
+    let day = day.trim_start_matches('0');
+    if day.is_empty() {
+        return timestamp.to_owned();
+    }
+    format!("{month} {day}, {time}")
+}
+
+fn project_tree_loading_note(animation_key: usize, text: &'static str) -> AnyElement {
+    div()
+        .pl(px(34.0))
+        .pr(px(10.0))
+        .py(px(8.0))
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(8.0))
+        .font_family(theme::sans())
+        .text_size(px(theme::T_TINY))
+        .text_color(theme::smoke())
+        .child(controls::square_status_indicator(
+            animation_key.wrapping_add(1),
+            true,
+            Duration::from_millis(900),
+            theme::working(),
+        ))
+        .child(text)
+        .into_any_element()
+}
+
+fn project_tree_note(text: impl Into<SharedString>) -> AnyElement {
+    div()
+        .pl(px(34.0))
+        .pr(px(10.0))
+        .py(px(7.0))
+        .font_family(theme::sans())
+        .text_size(px(theme::T_TINY))
+        .line_height(gpui::relative(1.35))
+        .text_color(theme::smoke())
+        .child(text.into())
+        .into_any_element()
 }
 
 pub(super) struct HistoryPanelParams<'a> {
@@ -1124,7 +1674,43 @@ mod tests {
         retry: RetryState,
         compaction: CompactionState,
     ) -> TitlebarStatus {
-        titlebar_status_for("Ready", lifecycle, false, false, &retry, &compaction, None)
+        titlebar_status_for(TitlebarStatusInput {
+            shell_lifecycle: "Ready",
+            lifecycle,
+            conversation_loading: false,
+            has_error: false,
+            opening_thread: false,
+            retry: &retry,
+            compaction: &compaction,
+            pending_operation: None,
+        })
+    }
+
+    #[test]
+    fn opening_thread_has_specific_animated_feedback() {
+        let status = titlebar_status_for(TitlebarStatusInput {
+            shell_lifecycle: "Ready",
+            lifecycle: RuntimeLifecycle::Loading,
+            conversation_loading: true,
+            has_error: false,
+            opening_thread: true,
+            retry: &RetryState::Idle,
+            compaction: &CompactionState::Idle,
+            pending_operation: None,
+        });
+        assert_eq!(
+            status,
+            TitlebarStatus::new("Opening thread", TitlebarStatusTone::Working, true)
+        );
+    }
+
+    #[test]
+    fn session_timestamp_is_compact_without_losing_unknown_formats() {
+        assert_eq!(
+            compact_session_timestamp("2026-07-26T14:08:51.000Z"),
+            "Jul 26, 14:08"
+        );
+        assert_eq!(compact_session_timestamp("recently"), "recently");
     }
 
     #[test]
@@ -1188,20 +1774,21 @@ mod tests {
             TitlebarStatus::new("Compaction failed", TitlebarStatusTone::Error, false)
         );
 
-        let disconnected = titlebar_status_for(
-            "Connection error",
-            RuntimeLifecycle::Disconnected,
-            false,
-            true,
-            &RetryState::Waiting {
+        let disconnected = titlebar_status_for(TitlebarStatusInput {
+            shell_lifecycle: "Connection error",
+            lifecycle: RuntimeLifecycle::Disconnected,
+            conversation_loading: false,
+            has_error: true,
+            opening_thread: false,
+            retry: &RetryState::Waiting {
                 attempt: 1,
                 max_attempts: 3,
                 delay_ms: 500,
                 started_at: Instant::now(),
             },
-            &CompactionState::Idle,
-            None,
-        );
+            compaction: &CompactionState::Idle,
+            pending_operation: None,
+        });
         assert_eq!(
             disconnected,
             TitlebarStatus::new("Disconnected", TitlebarStatusTone::Error, false)

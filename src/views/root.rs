@@ -1,7 +1,7 @@
 //! Live Pi shell with an authoritative streaming conversation.
 
 use std::cell::Cell;
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -10,10 +10,10 @@ use std::time::{Duration, Instant};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use gpui::{
     Bounds, ClipboardItem, Context, DispatchPhase, Entity, FocusHandle, Focusable, FontWeight,
-    HitboxBehavior, Image, ImageFormat, IntoElement, ListAlignment, ListOffset, ListState, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit, PathBuilder, Pixels, Render,
-    ScrollHandle, ScrollWheelEvent, StyledImage, Subscription, Task, Window, canvas, deferred, div,
-    fill, img, list, point, prelude::*, px, size,
+    HitboxBehavior, Image, ImageFormat, IntoElement, ListAlignment, ListOffset, ListState,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit, PathBuilder,
+    PathPromptOptions, Pixels, Render, ScrollHandle, ScrollWheelEvent, StyledImage, Subscription,
+    Task, Window, canvas, deferred, div, fill, img, list, point, prelude::*, px, size,
 };
 
 use crate::actions::{
@@ -44,6 +44,10 @@ use crate::resource_center::{
     ResourceLoadState, ResourcePhase, ResourceScopeFilter, ResourceStateFilter,
 };
 use crate::services::git_diff::{WorkspaceDiff, load_workspace_diff};
+use crate::services::projects::{
+    AddProjectOutcome, ProjectEntry, ProjectRegistry, ProjectRegistryError, project_key,
+};
+use crate::services::session_catalog::{SessionCatalogConfig, SessionSummary, scan_sessions};
 use crate::state::history::{HistoryBrowser, HistoryFilter};
 use crate::state::runtime::{
     BashStatus, CompactionState, DialogAnswer, DialogRequest, MessageBlock, MessageRole,
@@ -73,6 +77,27 @@ use overlays::{annotate_prompt_image, extension_dialog_key, single_line_title, w
 struct PendingDraft {
     request: crate::services::rpc::RequestId,
     text: String,
+}
+
+#[derive(Debug, Clone)]
+struct ProjectCatalogCache {
+    status: CatalogStatus,
+    sessions: Arc<Vec<SessionSummary>>,
+    corrupt_count: usize,
+    error: Option<String>,
+}
+
+impl ProjectCatalogCache {
+    fn loading(previous: Option<&Self>) -> Self {
+        Self {
+            status: CatalogStatus::Loading,
+            sessions: previous
+                .map(|catalog| Arc::clone(&catalog.sessions))
+                .unwrap_or_default(),
+            corrupt_count: previous.map_or(0, |catalog| catalog.corrupt_count),
+            error: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -270,6 +295,14 @@ pub struct RootView {
     usage_tooltip_hovered: bool,
     usage_tooltip_visible: bool,
     usage_tooltip_epoch: u64,
+    projects: ProjectRegistry,
+    project_catalogs: HashMap<String, ProjectCatalogCache>,
+    project_feedback: Option<String>,
+    project_picker_pending: bool,
+    project_scan_generation: u64,
+    project_scan_task: Option<Task<()>>,
+    project_save_generation: u64,
+    project_save_task: Option<Task<()>>,
     sessions_scroll: ScrollHandle,
     sessions_scroll_motion: ConversationScrollMotion,
     subagent_dialog_focus: FocusHandle,
@@ -330,6 +363,9 @@ impl RootView {
     pub fn new(
         window: &mut Window,
         controller: Entity<RuntimeController>,
+        projects: ProjectRegistry,
+        project_feedback: Option<String>,
+        projects_need_save: bool,
         font_catalog: FontCatalog,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -510,7 +546,7 @@ impl RootView {
                 view.on_goal_edit_event(event, cx)
             });
         window.set_window_title("Pideck");
-        Self {
+        let mut view = Self {
             controller,
             render_projections,
             active_theme,
@@ -572,6 +608,14 @@ impl RootView {
             usage_tooltip_hovered: false,
             usage_tooltip_visible: false,
             usage_tooltip_epoch: 0,
+            projects,
+            project_catalogs: HashMap::new(),
+            project_feedback,
+            project_picker_pending: false,
+            project_scan_generation: 0,
+            project_scan_task: None,
+            project_save_generation: 0,
+            project_save_task: None,
             sessions_scroll: ScrollHandle::new(),
             sessions_scroll_motion: ConversationScrollMotion::default(),
             subagent_dialog_focus,
@@ -626,7 +670,12 @@ impl RootView {
             _extension_editor_subscription: extension_editor_subscription,
             _subagent_subscription: subagent_subscription,
             _goal_edit_subscription: goal_edit_subscription,
+        };
+        view.refresh_project_catalogs(cx);
+        if projects_need_save {
+            view.persist_projects(cx);
         }
+        view
     }
 
     fn cycle_theme(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -2259,6 +2308,374 @@ impl RootView {
         });
     }
 
+    fn project_switch_enabled(&self) -> bool {
+        !matches!(
+            self.conversation.lifecycle,
+            RuntimeLifecycle::Loading | RuntimeLifecycle::Running | RuntimeLifecycle::Cancelling
+        ) && self.conversation.pending_operation.is_none()
+            && !self.render_projections.catalog.switching
+            && self.pending_draft.is_none()
+            && self.pending_bash.is_none()
+    }
+
+    fn persist_projects(&mut self, cx: &mut Context<Self>) {
+        self.project_save_generation = self.project_save_generation.wrapping_add(1);
+        let generation = self.project_save_generation;
+        let projects = self.projects.clone();
+        let previous = self.project_save_task.take();
+        self.project_save_task = Some(cx.spawn(async move |view, cx| {
+            if let Some(previous) = previous {
+                previous.await;
+            }
+            let save = cx
+                .background_executor()
+                .spawn(async move { projects.save() });
+            let result = save.await;
+            let _ = view.update(cx, |view, cx| {
+                if view.project_save_generation != generation {
+                    return;
+                }
+                match result {
+                    Ok(()) => {
+                        if view.project_feedback.as_deref()
+                            == Some(ProjectRegistryError::InaccessibleStorage.message())
+                        {
+                            view.project_feedback = None;
+                        }
+                    }
+                    Err(error) => view.project_feedback = Some(error.message().to_owned()),
+                }
+                cx.notify();
+            });
+        }));
+    }
+
+    fn refresh_project_catalogs(&mut self, cx: &mut Context<Self>) {
+        self.project_scan_generation = self.project_scan_generation.wrapping_add(1);
+        let generation = self.project_scan_generation;
+        let paths = self
+            .projects
+            .projects()
+            .iter()
+            .filter(|project| !self.projects.is_active(&project.path))
+            .map(|project| project.path.clone())
+            .collect::<Vec<_>>();
+
+        for path in &paths {
+            let key = project_key(path);
+            let loading = ProjectCatalogCache::loading(self.project_catalogs.get(&key));
+            self.project_catalogs.insert(key, loading);
+        }
+        if paths.is_empty() {
+            self.project_scan_task = None;
+            cx.notify();
+            return;
+        }
+
+        let scan = cx.background_executor().spawn(async move {
+            paths
+                .into_iter()
+                .map(|path| {
+                    let result = if path.is_dir() {
+                        scan_sessions(&SessionCatalogConfig::from_environment(path.clone()))
+                            .map_err(|error| error.summary)
+                    } else {
+                        Err("Project folder is unavailable.".to_owned())
+                    };
+                    (path, result)
+                })
+                .collect::<Vec<_>>()
+        });
+        self.project_scan_task = Some(cx.spawn(async move |view, cx| {
+            let results = scan.await;
+            let _ = view.update(cx, |view, cx| {
+                if view.project_scan_generation != generation {
+                    return;
+                }
+                for (path, result) in results {
+                    let key = project_key(&path);
+                    match result {
+                        Ok(scan) => {
+                            let status = if scan.sessions.is_empty() {
+                                CatalogStatus::Empty
+                            } else {
+                                CatalogStatus::Ready
+                            };
+                            view.project_catalogs.insert(
+                                key,
+                                ProjectCatalogCache {
+                                    status,
+                                    sessions: Arc::new(scan.sessions),
+                                    corrupt_count: scan.corrupt.len(),
+                                    error: None,
+                                },
+                            );
+                        }
+                        Err(error) => {
+                            let previous = view.project_catalogs.get(&key);
+                            let sessions = previous
+                                .map(|catalog| Arc::clone(&catalog.sessions))
+                                .unwrap_or_default();
+                            let status = if sessions.is_empty() {
+                                CatalogStatus::Inaccessible
+                            } else {
+                                CatalogStatus::Stale
+                            };
+                            view.project_catalogs.insert(
+                                key,
+                                ProjectCatalogCache {
+                                    status,
+                                    sessions,
+                                    corrupt_count: previous
+                                        .map_or(0, |catalog| catalog.corrupt_count),
+                                    error: Some(error),
+                                },
+                            );
+                        }
+                    }
+                }
+                cx.notify();
+            });
+        }));
+        cx.notify();
+    }
+
+    fn cache_active_project_catalog(&mut self) {
+        let catalog = &self.render_projections.catalog;
+        self.project_catalogs.insert(
+            project_key(self.projects.active_path()),
+            ProjectCatalogCache {
+                status: catalog.status,
+                sessions: Arc::clone(&catalog.sessions),
+                corrupt_count: catalog.corrupt.len(),
+                error: catalog.error.clone(),
+            },
+        );
+    }
+
+    fn set_project_expanded(&mut self, path: PathBuf, expanded: bool, cx: &mut Context<Self>) {
+        match self.projects.set_expanded(&path, expanded) {
+            Ok(true) => self.persist_projects(cx),
+            Ok(false) => {}
+            Err(error) => self.project_feedback = Some(error.message().to_owned()),
+        }
+        cx.notify();
+    }
+
+    fn toggle_project(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        match self.projects.toggle_expanded(&path) {
+            Ok(_) => self.persist_projects(cx),
+            Err(error) => self.project_feedback = Some(error.message().to_owned()),
+        }
+        cx.notify();
+    }
+
+    fn choose_projects(&mut self, cx: &mut Context<Self>) {
+        if self.project_picker_pending {
+            return;
+        }
+        self.project_picker_pending = true;
+        let receiver = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: true,
+            prompt: Some("Add project folders".into()),
+        });
+        cx.spawn(async move |view, cx| {
+            let selection = receiver.await;
+            let _ = view.update(cx, |view, cx| {
+                view.project_picker_pending = false;
+                match selection {
+                    Ok(Ok(Some(paths))) => {
+                        let mut added = 0usize;
+                        let mut duplicates = 0usize;
+                        for path in paths {
+                            match view.projects.add(path) {
+                                Ok(AddProjectOutcome::Added) => added += 1,
+                                Ok(AddProjectOutcome::AlreadyPresent) => duplicates += 1,
+                                Err(error) => {
+                                    view.project_feedback = Some(error.message().to_owned())
+                                }
+                            }
+                        }
+                        if added > 0 {
+                            view.project_feedback = Some(format!(
+                                "Added {added} project{}.",
+                                if added == 1 { "" } else { "s" }
+                            ));
+                            view.persist_projects(cx);
+                            view.refresh_project_catalogs(cx);
+                        } else if duplicates > 0 {
+                            view.project_feedback =
+                                Some("That project is already in the sidebar.".to_owned());
+                        }
+                    }
+                    Ok(Ok(None)) => {}
+                    Ok(Err(_)) | Err(_) => {
+                        view.project_feedback =
+                            Some("The folder picker could not be opened.".to_owned())
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn reset_for_project_switch(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.model_panel = None;
+        self.command_palette_open = false;
+        self.hotkey_help_open = false;
+        self.compaction_modal_open = false;
+        self.pasted_image_preview = None;
+        self.pencil_stroke = None;
+        self.pencil_undo.clear();
+        self.pencil_error = None;
+        self.session_rename_open = false;
+        self.session_menu_open = false;
+        self.history_open = false;
+        self.history = HistoryBrowser::default();
+        self.history_confirmation = None;
+        self.active_auth_prompt_id = None;
+        self.active_extension_dialog_id = None;
+        self.extension_dialog_timeout_task = None;
+        self.runtime_notifications.clear();
+        self.selected_task_id = None;
+        self.selected_subagent_id = None;
+        self.workspace_diff = None;
+        self.workspace_diff_identity = None;
+        self.workspace_diff_generation = self.workspace_diff_generation.wrapping_add(1);
+        self.workspace_diff_files_expanded = false;
+        self.workspace_diff_open = false;
+        self.workspace_diff_selected = 0;
+        self.workspace_diff_collapsed_folders.clear();
+        self.pending_draft = None;
+        self.pending_bash = None;
+        self.pending_compaction_focus = None;
+        self.pending_session_name = None;
+        self.sessions_scroll_motion.cancel();
+        self.conversation_scroll_motion.cancel();
+        self.conversation_follow.set(true);
+        self.composer.update(cx, |composer, cx| {
+            composer.set_feedback(ComposerFeedback::Ready, cx)
+        });
+        window.focus(&self.focus_handle);
+    }
+
+    fn open_project_controller(
+        &mut self,
+        path: PathBuf,
+        preferred_session: Option<PathBuf>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let controller = cx.new(|cx| RuntimeController::for_workspace(path, cx));
+        let observation = cx.observe_in(&controller, window, |view, _, window, cx| {
+            view.sync_runtime(window, cx)
+        });
+        self.controller = controller.clone();
+        self._controller_observation = observation;
+        self.reset_for_project_switch(window, cx);
+        self.sync_runtime_state(true, window, cx);
+        controller.update(cx, |controller, cx| {
+            controller.connect_to_session(preferred_session, cx)
+        });
+        self.refresh_project_catalogs(cx);
+    }
+
+    fn activate_project(
+        &mut self,
+        path: PathBuf,
+        session: Option<PathBuf>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.projects.is_active(&path) {
+            if let Some(session) = session {
+                self.switch_session(session, cx);
+            } else {
+                self.toggle_project(path, cx);
+            }
+            return;
+        }
+        if !self.project_switch_enabled() {
+            self.project_feedback =
+                Some("Finish or stop the current project work before switching.".to_owned());
+            cx.notify();
+            return;
+        }
+        if !path.is_dir() {
+            self.project_feedback = Some("Project folder is unavailable.".to_owned());
+            cx.notify();
+            return;
+        }
+
+        self.cache_active_project_catalog();
+        if let Err(error) = self.projects.set_active(&path) {
+            self.project_feedback = Some(error.message().to_owned());
+            cx.notify();
+            return;
+        }
+        let preferred_session = session
+            .or_else(|| self.projects.active_project().last_session.clone())
+            .filter(|path| path.is_file());
+        self.project_feedback = None;
+        self.persist_projects(cx);
+        self.open_project_controller(path, preferred_session, window, cx);
+    }
+
+    fn remove_project(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        if self.projects.is_active(&path) && !self.project_switch_enabled() {
+            self.project_feedback =
+                Some("Finish or stop the current project work before removing it.".to_owned());
+            cx.notify();
+            return;
+        }
+        let was_active = self.projects.is_active(&path);
+        let next_available = self
+            .projects
+            .projects()
+            .iter()
+            .find(|project| project.path != path && project.path.is_dir())
+            .map(|project| project.path.clone());
+        if was_active && next_available.is_none() {
+            self.project_feedback =
+                Some("Add or restore another project folder before removing this one.".to_owned());
+            cx.notify();
+            return;
+        }
+        if was_active {
+            self.cache_active_project_catalog();
+        }
+        match self.projects.remove(&path) {
+            Ok(_) => {}
+            Err(error) => {
+                self.project_feedback = Some(error.message().to_owned());
+                cx.notify();
+                return;
+            }
+        }
+        self.project_catalogs.remove(&project_key(&path));
+        if let Some(next) = next_available
+            && was_active
+        {
+            let _ = self.projects.set_active(&next);
+            let preferred = self
+                .projects
+                .active_project()
+                .last_session
+                .clone()
+                .filter(|path| path.is_file());
+            self.open_project_controller(next, preferred, window, cx);
+        } else {
+            self.refresh_project_catalogs(cx);
+        }
+        self.project_feedback = Some("Project removed from the sidebar.".to_owned());
+        self.persist_projects(cx);
+        cx.notify();
+    }
+
     fn switch_session(&mut self, path: std::path::PathBuf, cx: &mut Context<Self>) {
         self.controller.update(cx, |controller, cx| {
             controller.switch_session(path, cx);
@@ -2269,6 +2686,7 @@ impl RootView {
         self.controller.update(cx, |controller, cx| {
             controller.refresh_sessions(cx);
         });
+        self.refresh_project_catalogs(cx);
     }
 
     fn on_sessions_scroll_wheel(
@@ -2645,6 +3063,15 @@ impl RootView {
     }
 
     fn sync_runtime(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.sync_runtime_state(false, window, cx);
+    }
+
+    fn sync_runtime_state(
+        &mut self,
+        force_epoch_reset: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         cx.defer_in(window, |view, _, cx| view.collect_runtime_notifications(cx));
         let (
             conversation,
@@ -2671,7 +3098,7 @@ impl RootView {
         {
             self.close_workspace_diff(window, cx);
         }
-        let epoch_changed = conversation.epoch != self.conversation.epoch;
+        let epoch_changed = force_epoch_reset || conversation.epoch != self.conversation.epoch;
         if epoch_changed {
             self.conversation_scroll_motion.cancel();
             self.conversation_follow.set(true);
@@ -2719,6 +3146,14 @@ impl RootView {
                 cx,
             )
         });
+        let active_project_path = self.projects.active_path().to_path_buf();
+        if let Some(session_file) = render_projections.catalog.current_session_file.clone()
+            && self
+                .projects
+                .set_last_session(&active_project_path, Some(session_file))
+        {
+            self.persist_projects(cx);
+        }
         let catalog = &render_projections.catalog;
         let bridge = &render_projections.bridge;
         let rename_available =

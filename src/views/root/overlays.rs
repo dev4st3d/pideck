@@ -138,9 +138,7 @@ pub(super) fn conversation_area(params: ConversationAreaParams) -> impl IntoElem
                 .overflow_hidden()
                 .child(
                     canvas(
-                        |bounds, window, _| {
-                            window.insert_hitbox(bounds, HitboxBehavior::Normal)
-                        },
+                        |bounds, window, _| window.insert_hitbox(bounds, HitboxBehavior::Normal),
                         move |_, hitbox, window, _| {
                             window.on_mouse_event(
                                 move |event: &ScrollWheelEvent, phase, window, cx| {

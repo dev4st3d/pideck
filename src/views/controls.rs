@@ -168,7 +168,10 @@ fn square_status_dot(
         .size(px(2.0))
         .bg(color)
         .with_animation(
-            ("square-status", animation_key * 4 + dot_index),
+            (
+                "square-status",
+                animation_key.wrapping_mul(4).wrapping_add(dot_index),
+            ),
             Animation::new(cycle).repeat(),
             move |dot, progress| {
                 let target = dot_index as f32 * 0.25;
@@ -837,55 +840,6 @@ pub fn interactive_list_row(
 
 fn row_shell() -> gpui::Div {
     div().border_b_1().border_color(theme::edge_soft())
-}
-
-pub fn session_row(
-    name: impl Into<SharedString>,
-    detail: impl Into<SharedString>,
-    active: bool,
-) -> impl IntoElement {
-    div()
-        .px(px(14.0))
-        .py(px(10.0))
-        .border_l_2()
-        .border_color(if active { theme::signal() } else { clear() })
-        .bg(if active { theme::panel_lift() } else { clear() })
-        .flex()
-        .flex_col()
-        .gap(px(2.0))
-        .child(
-            div()
-                .font_family(theme::sans())
-                .text_size(px(theme::T_UI))
-                .font_weight(if active {
-                    FontWeight::BOLD
-                } else {
-                    FontWeight::MEDIUM
-                })
-                .text_color(if active {
-                    theme::bone()
-                } else {
-                    theme::bone_dim()
-                })
-                .overflow_hidden()
-                .text_ellipsis()
-                .whitespace_nowrap()
-                .child(name.into()),
-        )
-        .child(
-            div()
-                .font_family(theme::mono())
-                .text_size(px(theme::T_TINY))
-                .text_color(if active {
-                    theme::signal()
-                } else {
-                    theme::ash()
-                })
-                .overflow_hidden()
-                .text_ellipsis()
-                .whitespace_nowrap()
-                .child(detail.into()),
-        )
 }
 
 pub fn divider_list() -> gpui::Div {
