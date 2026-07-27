@@ -1,4 +1,4 @@
-use gpui::{AnyElement, SharedString, svg};
+use gpui::{AnyElement, SharedString, deferred, svg};
 
 use super::shared::{action_id, runtime_operation_label, short_path};
 use super::*;
@@ -46,11 +46,13 @@ pub(super) fn titlebar(
     name_composer: &Entity<Composer>,
     rename_open: bool,
     rename_enabled: bool,
+    theme_menu_open: bool,
     cx: &mut Context<RootView>,
 ) -> impl IntoElement {
     let action = projection.action;
     let status = titlebar_status(projection, conversation, opening_thread);
     let status_color = status.color();
+    let active_theme = theme::active();
     div()
         .h(px(theme::TITLE_H))
         .px(px(theme::PAD_X))
@@ -188,22 +190,96 @@ pub(super) fn titlebar(
                 )
                 .child(
                     div()
-                        .id("theme-switcher")
-                        .px(px(5.0))
-                        .py(px(3.0))
-                        .rounded(px(2.0))
-                        .font_family(theme::main())
-                        .text_size(theme::text_size(theme::T_TINY))
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(theme::ash())
-                        .whitespace_nowrap()
+                        .relative()
                         .flex_shrink_0()
-                        .cursor_pointer()
-                        .hover(|switcher| switcher.bg(theme::panel()).text_color(theme::bone()))
-                        .active(|switcher| switcher.bg(theme::panel_lift()))
-                        .tab_index(0)
-                        .on_click(cx.listener(|view, _, window, cx| view.cycle_theme(window, cx)))
-                        .child(theme::active().label()),
+                        .child(
+                            div()
+                                .id("theme-switcher")
+                                .h(px(24.0))
+                                .px(px(7.0))
+                                .rounded(px(theme::RADIUS_SM))
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .gap(px(5.0))
+                                .bg(if theme_menu_open {
+                                    theme::panel_lift()
+                                } else {
+                                    theme::panel()
+                                })
+                                .border_1()
+                                .border_color(if theme_menu_open {
+                                    theme::edge_hard()
+                                } else {
+                                    theme::panel()
+                                })
+                                .font_family(theme::main())
+                                .text_size(theme::text_size(theme::T_TINY))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(if theme_menu_open {
+                                    theme::bone()
+                                } else {
+                                    theme::ash()
+                                })
+                                .whitespace_nowrap()
+                                .cursor_pointer()
+                                .hover(|switcher| {
+                                    switcher
+                                        .bg(theme::panel_lift())
+                                        .border_color(theme::edge())
+                                        .text_color(theme::bone())
+                                })
+                                .active(|switcher| switcher.bg(theme::panel_hover()))
+                                .tab_index(0)
+                                .on_click(cx.listener(|view, _, window, cx| {
+                                    view.toggle_theme_menu(window, cx)
+                                }))
+                                .child(
+                                    div()
+                                        .font_family(theme::mono())
+                                        .text_size(theme::text_size(10.0))
+                                        .text_color(
+                                            if active_theme.mode() == theme::ThemeMode::Light {
+                                                theme::data()
+                                            } else {
+                                                theme::smoke()
+                                            },
+                                        )
+                                        .child(match active_theme.mode() {
+                                            theme::ThemeMode::Dark => "D",
+                                            theme::ThemeMode::Light => "L",
+                                        }),
+                                )
+                                .child(active_theme.label())
+                                .child(
+                                    svg()
+                                        .path(if theme_menu_open {
+                                            "icons/chevron-up.svg"
+                                        } else {
+                                            "icons/chevron-down.svg"
+                                        })
+                                        .size(px(11.0))
+                                        .text_color(if theme_menu_open {
+                                            theme::data()
+                                        } else {
+                                            theme::smoke()
+                                        })
+                                        .flex_shrink_0(),
+                                ),
+                        )
+                        .when(theme_menu_open, |host| {
+                            host.child(deferred(
+                                div()
+                                    .id("theme-select-host")
+                                    .absolute()
+                                    .top_full()
+                                    .right_0()
+                                    .mt(px(6.0))
+                                    .w(px(196.0))
+                                    .occlude()
+                                    .child(theme_select_sheet(active_theme, cx)),
+                            ))
+                        }),
                 )
                 .when(action.is_some(), |row| row.child(controls::meta_sep()))
                 .when_some(action, |row, action| {
@@ -218,6 +294,137 @@ pub(super) fn titlebar(
                     ))
                 }),
         )
+}
+
+fn theme_select_sheet(active: theme::ThemeId, cx: &mut Context<RootView>) -> impl IntoElement {
+    use super::shared::popup_sheet;
+
+    popup_sheet()
+        .id("theme-select-sheet")
+        .child(
+            div()
+                .h(px(28.0))
+                .px(px(8.0))
+                .flex()
+                .flex_row()
+                .items_center()
+                .justify_between()
+                .gap(px(8.0))
+                .bg(theme::panel())
+                .border_b_1()
+                .border_color(theme::panel_hover())
+                .child(
+                    div()
+                        .font_family(theme::sans())
+                        .text_size(theme::text_size(theme::T_TINY))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(theme::ash())
+                        .child("Theme"),
+                )
+                .child(controls::chrome_action(
+                    "close-theme-select",
+                    "Close",
+                    true,
+                    Box::new(cx.listener(|view, _, window, cx| view.close_theme_menu(window, cx))),
+                )),
+        )
+        .child(theme_select_section(
+            theme::ThemeMode::Dark,
+            theme::ThemeId::for_mode(theme::ThemeMode::Dark),
+            active,
+            cx,
+        ))
+        .child(theme_select_section(
+            theme::ThemeMode::Light,
+            theme::ThemeId::for_mode(theme::ThemeMode::Light),
+            active,
+            cx,
+        ))
+}
+
+fn theme_select_section(
+    mode: theme::ThemeMode,
+    themes: &'static [theme::ThemeId],
+    active: theme::ThemeId,
+    cx: &mut Context<RootView>,
+) -> impl IntoElement {
+    div()
+        .flex()
+        .flex_col()
+        .child(
+            div()
+                .h(px(24.0))
+                .px(px(8.0))
+                .flex()
+                .flex_row()
+                .items_center()
+                .bg(theme::canvas())
+                .border_b_1()
+                .border_color(theme::panel_hover())
+                .child(
+                    div()
+                        .font_family(theme::mono())
+                        .text_size(theme::text_size(theme::T_TINY))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(theme::smoke())
+                        .child(mode.label()),
+                ),
+        )
+        .children(themes.iter().copied().map(|theme_id| {
+            let selected = theme_id == active;
+            div()
+                .id(SharedString::from(format!("theme-select-{theme_id:?}")))
+                .h(px(28.0))
+                .px(px(8.0))
+                .flex()
+                .flex_row()
+                .items_center()
+                .justify_between()
+                .gap(px(8.0))
+                .border_b_1()
+                .border_color(theme::panel_hover())
+                .bg(if selected {
+                    theme::panel_lift()
+                } else {
+                    theme::panel()
+                })
+                .text_color(if selected {
+                    theme::bone()
+                } else {
+                    theme::ash()
+                })
+                .when(!selected, |row| {
+                    row.tab_index(0)
+                        .cursor_pointer()
+                        .hover(|row| row.bg(theme::panel_lift()).text_color(theme::bone()))
+                        .active(|row| row.bg(theme::panel_hover()))
+                        .focus(|row| row.bg(theme::panel_lift()))
+                        .on_click(cx.listener(move |view, _, window, cx| {
+                            view.set_theme(theme_id, window, cx)
+                        }))
+                })
+                .child(
+                    div()
+                        .font_family(theme::main())
+                        .text_size(theme::text_size(theme::T_TINY))
+                        .font_weight(if selected {
+                            FontWeight::SEMIBOLD
+                        } else {
+                            FontWeight::MEDIUM
+                        })
+                        .child(theme_id.label()),
+                )
+                .when(selected, |row| {
+                    row.child(
+                        div()
+                            .w(px(5.0))
+                            .h(px(5.0))
+                            .rounded_full()
+                            .bg(theme::data())
+                            .flex_shrink_0(),
+                    )
+                })
+        }))
 }
 
 fn titlebar_status(

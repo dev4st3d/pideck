@@ -79,6 +79,7 @@ impl Render for RootView {
                 ) && self.conversation.pending_operation.is_none()
                     && catalog.current_session_file.is_some()
                     && !catalog.switching,
+                self.theme_menu_open,
                 cx,
             ))
             .child(

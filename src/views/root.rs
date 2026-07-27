@@ -13,7 +13,7 @@ use gpui::{
     HitboxBehavior, Image, ImageFormat, IntoElement, ListAlignment, ListOffset, ListState,
     MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit, PathBuilder,
     PathPromptOptions, Pixels, Render, ScrollHandle, ScrollWheelEvent, StyledImage, Subscription,
-    Task, Window, canvas, deferred, div, fill, img, list, point, prelude::*, px, size, svg,
+    Task, Window, canvas, div, fill, img, list, point, prelude::*, px, size, svg,
 };
 
 use crate::actions::{
@@ -299,6 +299,7 @@ pub struct RootView {
     controller: Entity<RuntimeController>,
     render_projections: RenderProjections,
     active_theme: theme::ThemeId,
+    theme_menu_open: bool,
     font_scale: theme::FontScale,
     composer: Entity<Composer>,
     compaction_composer: Entity<Composer>,
@@ -635,6 +636,7 @@ impl RootView {
             controller: controller.clone(),
             render_projections,
             active_theme,
+            theme_menu_open: false,
             font_scale,
             composer,
             compaction_composer,
@@ -781,8 +783,22 @@ impl RootView {
         view
     }
 
-    fn cycle_theme(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.active_theme = self.active_theme.next();
+    fn toggle_theme_menu(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        self.theme_menu_open = !self.theme_menu_open;
+        cx.notify();
+    }
+
+    fn close_theme_menu(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        if !self.theme_menu_open {
+            return;
+        }
+        self.theme_menu_open = false;
+        cx.notify();
+    }
+
+    fn set_theme(&mut self, theme_id: theme::ThemeId, window: &mut Window, cx: &mut Context<Self>) {
+        self.active_theme = theme_id;
+        self.theme_menu_open = false;
         theme::set_active(self.active_theme);
         window.refresh();
         cx.notify();
