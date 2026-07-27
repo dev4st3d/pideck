@@ -11,7 +11,7 @@ use gpui::{
 use crate::actions::RECOVERY_BUTTON_CONTEXT;
 use crate::theme;
 
-type ClickHandler = Box<dyn Fn(&ClickEvent, &mut Window, &mut gpui::App) + 'static>;
+pub(crate) type ClickHandler = Box<dyn Fn(&ClickEvent, &mut Window, &mut gpui::App) + 'static>;
 pub type HoverHandler = Rc<dyn Fn(&bool, &mut Window, &mut gpui::App) + 'static>;
 
 fn clear() -> gpui::Rgba {

@@ -13,7 +13,7 @@ use gpui::{
     HitboxBehavior, Image, ImageFormat, IntoElement, ListAlignment, ListOffset, ListState,
     MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit, PathBuilder,
     PathPromptOptions, Pixels, Render, ScrollHandle, ScrollWheelEvent, StyledImage, Subscription,
-    Task, Window, canvas, deferred, div, fill, img, list, point, prelude::*, px, size,
+    Task, Window, canvas, deferred, div, fill, img, list, point, prelude::*, px, size, svg,
 };
 
 use crate::actions::{
@@ -383,7 +383,6 @@ pub struct RootView {
     history_focus: FocusHandle,
     history_open: bool,
     session_rename_open: bool,
-    session_menu_open: bool,
     history_confirmation: Option<HistoryConfirmation>,
     summarize_navigation: bool,
     conversation: Arc<ConversationProjection>,
@@ -727,7 +726,6 @@ impl RootView {
             history_focus,
             history_open: false,
             session_rename_open: false,
-            session_menu_open: false,
             history_confirmation: None,
             summarize_navigation: false,
             conversation: Arc::new(conversation),
@@ -1708,7 +1706,6 @@ impl RootView {
             }
             NativeAction::NewSession => {
                 self.session_rename_open = false;
-                self.session_menu_open = false;
                 self.open_thread(self.projects.active_path().to_path_buf(), None, window, cx)
                     .then_some(())
                     .ok_or_else(|| "A new session could not be opened.".to_owned())
@@ -1718,7 +1715,6 @@ impl RootView {
                 Ok(())
             }
             NativeAction::Tree => {
-                self.session_menu_open = false;
                 self.history_open = !self.history_open;
                 self.history_confirmation = None;
                 if self.history_open {
@@ -1930,7 +1926,6 @@ impl RootView {
         {
             return;
         }
-        self.session_menu_open = false;
         if !self.session_rename_open {
             let current_name = self
                 .render_projections
@@ -1956,14 +1951,7 @@ impl RootView {
         }
     }
 
-    fn toggle_session_menu(&mut self, cx: &mut Context<Self>) {
-        self.session_rename_open = false;
-        self.session_menu_open = !self.session_menu_open;
-        cx.notify();
-    }
-
-    fn export_session_from_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.session_menu_open = false;
+    fn export_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let _ = self.execute_native_action(NativeAction::ExportHtml, "", window, cx);
         cx.notify();
     }
@@ -2690,7 +2678,6 @@ impl RootView {
         self.pencil_undo.clear();
         self.pencil_error = None;
         self.session_rename_open = false;
-        self.session_menu_open = false;
         self.history_open = false;
         self.history = HistoryBrowser::default();
         self.history_confirmation = None;
@@ -3662,9 +3649,6 @@ impl RootView {
             compact_available && catalog.current_session_file.is_some() && !catalog.switching;
         if !rename_available {
             self.session_rename_open = false;
-        }
-        if catalog.switching {
-            self.session_menu_open = false;
         }
         self.session_name_composer.update(cx, |composer, cx| {
             composer.set_availability(

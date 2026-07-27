@@ -387,7 +387,6 @@ pub(super) struct SessionsPanelParams<'a> {
     pub(super) project_switch_enabled: bool,
     pub(super) conversation: &'a ConversationProjection,
     pub(super) history_open: bool,
-    pub(super) menu_open: bool,
     pub(super) scroll: &'a ScrollHandle,
 }
 
@@ -405,7 +404,6 @@ pub(super) fn sessions_panel(
         project_switch_enabled,
         conversation,
         history_open,
-        menu_open,
         scroll,
     } = params;
     let wheel_root = cx.entity();
@@ -417,7 +415,11 @@ pub(super) fn sessions_panel(
     let new_thread_enabled = projects.active_path().is_dir();
     let current_path = catalog.current_session_file.as_ref();
     let pending_path = catalog.pending_session_file.as_ref();
-    let project_count = projects.projects().len().to_string();
+    let project_count = projects.projects().len();
+    let active_path = projects.active_path().to_path_buf();
+    let can_remove_active = project_count > 1 && project_switch_enabled;
+    let export_enabled = session_actions_enabled && catalog.current_session_file.is_some();
+    const SIDE_PAD: f32 = 12.0;
 
     div()
         .w(px(theme::SIDE_W))
@@ -432,30 +434,39 @@ pub(super) fn sessions_panel(
         .child(
             div()
                 .h(px(42.0))
-                .px(px(14.0))
+                .px(px(SIDE_PAD))
                 .flex()
                 .flex_row()
                 .items_center()
                 .justify_between()
-                .child(controls::section_label("Projects"))
+                .gap(px(8.0))
+                .border_b_1()
+                .border_color(theme::edge_soft())
+                .child(
+                    div()
+                        .min_w_0()
+                        .flex()
+                        .flex_row()
+                        .items_baseline()
+                        .gap(px(8.0))
+                        .child(controls::section_label("Workspace"))
+                        .child(
+                            div()
+                                .font_family(theme::mono())
+                                .text_size(theme::text_size(theme::T_TINY))
+                                .text_color(theme::smoke())
+                                .child(project_count.to_string()),
+                        ),
+                )
                 .child(
                     div()
                         .flex()
                         .flex_row()
                         .items_center()
-                        .gap(px(1.0))
-                        .child(
-                            div()
-                                .min_w(px(18.0))
-                                .font_family(theme::mono())
-                                .text_size(theme::text_size(theme::T_TINY))
-                                .text_color(theme::smoke())
-                                .text_align(gpui::TextAlign::Right)
-                                .child(project_count),
-                        )
-                        .child(controls::quiet_button(
+                        .child(controls::icon_button(
                             "add-project",
-                            "Add",
+                            "+",
+                            false,
                             !project_picker_pending,
                             Box::new(cx.listener(|view, _, _, cx| view.choose_projects(cx))),
                         ))
@@ -470,92 +481,40 @@ pub(super) fn sessions_panel(
         )
         .child(
             div()
-                .px(px(10.0))
+                .px(px(SIDE_PAD))
+                .pt(px(10.0))
                 .pb(px(10.0))
                 .flex()
                 .flex_col()
-                .gap(px(4.0))
+                .gap(px(6.0))
+                .border_b_1()
+                .border_color(theme::edge_soft())
+                .child(sidebar_new_thread_button(new_thread_enabled, cx))
                 .child(
                     div()
                         .flex()
                         .flex_row()
                         .items_center()
                         .gap(px(6.0))
-                        .child(controls::tone_button(
-                            "new-session",
-                            "New thread",
-                            new_thread_enabled,
-                            controls::ControlTone::Normal,
+                        .child(sidebar_secondary_button(
+                            "toggle-history-inline",
+                            "History",
+                            history_open,
+                            true,
                             Box::new(cx.listener(|view, _, window, cx| {
-                                let _ = view.execute_native_action(
-                                    NativeAction::NewSession,
-                                    "",
-                                    window,
-                                    cx,
-                                );
+                                let _ =
+                                    view.execute_native_action(NativeAction::Tree, "", window, cx);
                             })),
                         ))
-                        .child(
-                            div()
-                                .relative()
-                                .flex_1()
-                                .min_w_0()
-                                .child(controls::tone_button(
-                                    "session-tools",
-                                    "History / export",
-                                    true,
-                                    controls::ControlTone::Normal,
-                                    Box::new(
-                                        cx.listener(|view, _, _, cx| view.toggle_session_menu(cx)),
-                                    ),
-                                ))
-                                .when(menu_open, |host| {
-                                    host.child(deferred(
-                                        div()
-                                            .id("session-tools-popup")
-                                            .absolute()
-                                            .top(px(32.0))
-                                            .right_0()
-                                            .w(px(172.0))
-                                            .py(px(4.0))
-                                            .occlude()
-                                            .rounded(px(theme::RADIUS_SM))
-                                            .border_1()
-                                            .border_color(theme::edge_hard())
-                                            .bg(theme::panel_lift())
-                                            .child(controls::action_row(
-                                                "toggle-history",
-                                                if history_open {
-                                                    "Hide history"
-                                                } else {
-                                                    "Show history"
-                                                },
-                                                "Conversation tree",
-                                                true,
-                                                controls::ControlTone::Normal,
-                                                Box::new(cx.listener(|view, _, window, cx| {
-                                                    let _ = view.execute_native_action(
-                                                        NativeAction::Tree,
-                                                        "",
-                                                        window,
-                                                        cx,
-                                                    );
-                                                })),
-                                            ))
-                                            .child(controls::action_row(
-                                                "export-session",
-                                                "Export HTML",
-                                                "Save this session",
-                                                session_actions_enabled
-                                                    && catalog.current_session_file.is_some(),
-                                                controls::ControlTone::Normal,
-                                                Box::new(cx.listener(|view, _, window, cx| {
-                                                    view.export_session_from_menu(window, cx)
-                                                })),
-                                            )),
-                                    ))
-                                }),
-                        ),
+                        .child(sidebar_secondary_button(
+                            "export-session",
+                            "Export",
+                            false,
+                            export_enabled,
+                            Box::new(
+                                cx.listener(|view, _, window, cx| view.export_session(window, cx)),
+                            ),
+                        )),
                 ),
         )
         .when_some(
@@ -563,8 +522,8 @@ pub(super) fn sessions_panel(
             |panel, feedback| {
                 panel.child(
                     div()
-                        .mx(px(12.0))
-                        .mb(px(8.0))
+                        .mx(px(SIDE_PAD))
+                        .mt(px(8.0))
                         .px(px(9.0))
                         .py(px(7.0))
                         .rounded(px(theme::RADIUS_SM))
@@ -614,6 +573,8 @@ pub(super) fn sessions_panel(
                         .track_scroll(scroll)
                         .scrollbar_width(px(theme::SCROLLBAR))
                         .w_full()
+                        .pt(px(6.0))
+                        .pb(px(8.0))
                         .flex()
                         .flex_col()
                         .children(projects.projects().iter().map(|project| {
@@ -637,44 +598,166 @@ pub(super) fn sessions_panel(
         )
         .child(
             div()
-                .px(px(12.0))
-                .py(px(10.0))
+                .h(px(40.0))
+                .px(px(SIDE_PAD))
                 .border_t_1()
                 .border_color(theme::edge_soft())
                 .flex()
-                .flex_col()
-                .gap(px(6.0))
+                .flex_row()
+                .items_center()
+                .gap(px(8.0))
                 .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .justify_between()
-                        .gap(px(8.0))
-                        .child(controls::section_label("Active project"))
-                        .child(controls::quiet_button(
-                            "remove-active-project",
-                            "Remove",
-                            projects.projects().len() > 1 && project_switch_enabled,
-                            {
-                                let path = projects.active_path().to_path_buf();
-                                Box::new(cx.listener(move |view, _, window, cx| {
-                                    view.remove_project(path.clone(), window, cx)
-                                }))
-                            },
-                        )),
+                    svg()
+                        .path("icons/folder.svg")
+                        .size(px(12.0))
+                        .flex_shrink_0()
+                        .text_color(theme::data()),
                 )
                 .child(
                     div()
+                        .min_w_0()
+                        .flex_1()
                         .font_family(theme::mono())
                         .text_size(theme::text_size(theme::T_TINY))
-                        .line_height(gpui::relative(1.35))
                         .font_weight(FontWeight::MEDIUM)
                         .text_color(theme::data())
                         .overflow_hidden()
                         .text_ellipsis()
                         .whitespace_nowrap()
-                        .child(short_path(&projects.active_path().to_string_lossy())),
-                ),
+                        .child(short_path(&active_path.to_string_lossy())),
+                )
+                .child(controls::quiet_button(
+                    "remove-active-project",
+                    "Remove",
+                    can_remove_active,
+                    {
+                        let path = active_path;
+                        Box::new(cx.listener(move |view, _, window, cx| {
+                            view.remove_project(path.clone(), window, cx)
+                        }))
+                    },
+                )),
+        )
+}
+
+fn sidebar_new_thread_button(enabled: bool, cx: &mut Context<RootView>) -> impl IntoElement {
+    div()
+        .id("new-session")
+        .h(px(30.0))
+        .w_full()
+        .px(px(10.0))
+        .rounded(px(theme::RADIUS_SM))
+        .flex()
+        .flex_row()
+        .items_center()
+        .justify_center()
+        .gap(px(6.0))
+        .bg(if enabled {
+            theme::panel_lift()
+        } else {
+            gpui::rgba(0x0000_0000)
+        })
+        .border_1()
+        .border_color(if enabled {
+            theme::edge_hard()
+        } else {
+            theme::edge_soft()
+        })
+        .text_color(if enabled {
+            theme::bone()
+        } else {
+            theme::smoke()
+        })
+        .when(enabled, |button| {
+            button
+                .tab_index(0)
+                .cursor_pointer()
+                .hover(|button| button.bg(theme::panel_hover()).border_color(theme::edge()))
+                .active(|button| button.bg(theme::panel()))
+                .on_click(cx.listener(|view, _, window, cx| {
+                    let _ = view.execute_native_action(NativeAction::NewSession, "", window, cx);
+                }))
+        })
+        .child(
+            div()
+                .font_family(theme::main())
+                .text_size(theme::text_size(theme::T_UI_SM))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(if enabled {
+                    theme::signal()
+                } else {
+                    theme::smoke()
+                })
+                .child("+"),
+        )
+        .child(
+            div()
+                .font_family(theme::main())
+                .text_size(theme::text_size(theme::T_UI_SM))
+                .font_weight(FontWeight::SEMIBOLD)
+                .child("New thread"),
+        )
+}
+
+fn sidebar_secondary_button(
+    id: impl Into<SharedString>,
+    label: impl Into<SharedString>,
+    selected: bool,
+    enabled: bool,
+    on_click: controls::ClickHandler,
+) -> impl IntoElement {
+    div()
+        .id(id.into())
+        .h(px(28.0))
+        .flex_1()
+        .min_w_0()
+        .px(px(8.0))
+        .rounded(px(theme::RADIUS_SM))
+        .flex()
+        .items_center()
+        .justify_center()
+        .bg(if selected {
+            theme::panel_lift()
+        } else {
+            gpui::rgba(0x0000_0000)
+        })
+        .border_1()
+        .border_color(if selected {
+            theme::edge_hard()
+        } else {
+            theme::edge_soft()
+        })
+        .text_color(if !enabled {
+            theme::smoke()
+        } else if selected {
+            theme::bone()
+        } else {
+            theme::ash()
+        })
+        .when(enabled, |button| {
+            button
+                .tab_index(0)
+                .cursor_pointer()
+                .hover(|button| {
+                    if selected {
+                        button.bg(theme::panel_hover()).text_color(theme::bone())
+                    } else {
+                        button.bg(theme::panel()).text_color(theme::bone())
+                    }
+                })
+                .active(|button| button.bg(theme::panel_lift()))
+                .on_click(move |event, window, cx| on_click(event, window, cx))
+        })
+        .child(
+            div()
+                .font_family(theme::main())
+                .text_size(theme::text_size(theme::T_TINY))
+                .font_weight(if selected {
+                    FontWeight::BOLD
+                } else {
+                    FontWeight::SEMIBOLD
+                })
+                .child(label.into()),
         )
 }
 
@@ -768,23 +851,25 @@ fn project_group(params: ProjectGroupParams<'_>, cx: &mut Context<RootView>) -> 
         .w_full()
         .flex()
         .flex_col()
-        .mb(px(3.0))
+        .mb(px(2.0))
         .child(
             div()
                 .id(SharedString::from(format!(
                     "project-{}",
                     project_key(&path)
                 )))
-                .h(px(36.0))
-                .px(px(10.0))
+                .h(px(32.0))
+                .pl(px(8.0))
+                .pr(px(10.0))
                 .tab_index(0)
                 .cursor_pointer()
+                .relative()
                 .flex()
                 .flex_row()
                 .items_center()
-                .gap(px(7.0))
+                .gap(px(6.0))
                 .bg(if active {
-                    theme::panel_lift()
+                    theme::panel()
                 } else {
                     gpui::rgba(0x0000_0000)
                 })
@@ -818,14 +903,24 @@ fn project_group(params: ProjectGroupParams<'_>, cx: &mut Context<RootView>) -> 
                         _ => {}
                     }
                 })
+                .when(active, |row| {
+                    row.child(
+                        div()
+                            .absolute()
+                            .left_0()
+                            .top(px(8.0))
+                            .bottom(px(8.0))
+                            .w(px(2.0))
+                            .bg(theme::signal()),
+                    )
+                })
                 .child(
                     div()
                         .id(SharedString::from(format!(
                             "toggle-project-{}",
                             project_key(&path)
                         )))
-                        .ml(px(-4.0))
-                        .size(px(22.0))
+                        .size(px(18.0))
                         .flex_shrink_0()
                         .flex()
                         .items_center()
@@ -852,7 +947,7 @@ fn project_group(params: ProjectGroupParams<'_>, cx: &mut Context<RootView>) -> 
                 .child(
                     svg()
                         .path("icons/folder.svg")
-                        .size(px(14.0))
+                        .size(px(13.0))
                         .flex_shrink_0()
                         .text_color(if active { theme::data() } else { theme::ash() }),
                 )
@@ -866,7 +961,7 @@ fn project_group(params: ProjectGroupParams<'_>, cx: &mut Context<RootView>) -> 
                         .font_family(theme::sans())
                         .text_size(theme::text_size(theme::T_UI_SM))
                         .font_weight(if active {
-                            FontWeight::BOLD
+                            FontWeight::SEMIBOLD
                         } else {
                             FontWeight::MEDIUM
                         })
@@ -883,7 +978,7 @@ fn project_group(params: ProjectGroupParams<'_>, cx: &mut Context<RootView>) -> 
                         .flex()
                         .flex_row()
                         .items_center()
-                        .gap(px(7.0))
+                        .gap(px(6.0))
                         .when(
                             working_count > 0
                                 || (status == CatalogStatus::Loading && !sessions.is_empty()),
@@ -950,9 +1045,9 @@ fn project_group(params: ProjectGroupParams<'_>, cx: &mut Context<RootView>) -> 
                     let remove_path = project.path.clone();
                     group.child(
                         div()
-                            .pl(px(34.0))
-                            .pr(px(8.0))
-                            .pb(px(6.0))
+                            .pl(px(32.0))
+                            .pr(px(12.0))
+                            .py(px(6.0))
                             .flex()
                             .flex_col()
                             .gap(px(4.0))
@@ -1019,21 +1114,20 @@ fn project_thread_row(
     let key_session = session_path;
     let click_root = cx.entity();
     let key_root = click_root.clone();
-    let title = session
-        .name
-        .clone()
-        .or_else(|| session.first_user_summary.clone())
-        .unwrap_or_else(|| "Untitled thread".to_owned());
+    let title = sidebar_thread_title(
+        session.name.as_deref(),
+        session.first_user_summary.as_deref(),
+    );
     let activity_key = list_animation_key(&session.id);
-    let message_count = match session.counts.messages {
-        1 => "1 message".to_owned(),
-        count => format!("{count} messages"),
-    };
     let selected = selected || runtime_status.is_some_and(|status| status.active);
     let runtime_activity = runtime_status.map(|status| status.activity);
     let switching = switching || runtime_activity == Some(ThreadActivity::Opening);
-    let status = thread_row_status(runtime_activity, selected, switching, message_count);
-    let updated = compact_session_timestamp(&session.updated_at);
+    let trailing = thread_row_trailing(runtime_activity, selected, switching, &session.updated_at);
+    let show_activity = switching
+        || matches!(
+            runtime_activity,
+            Some(ThreadActivity::Working | ThreadActivity::Cancelling | ThreadActivity::Attention)
+        );
 
     div()
         .id(SharedString::from(format!(
@@ -1041,18 +1135,29 @@ fn project_thread_row(
             project_key(&click_project),
             session.id
         )))
-        .min_h(px(52.0))
-        .pl(px(34.0))
-        .pr(px(10.0))
-        .py(px(7.0))
+        .h(px(34.0))
+        .pl(px(32.0))
+        .pr(px(12.0))
+        .relative()
         .flex()
-        .flex_col()
-        .justify_center()
-        .gap(px(4.0))
+        .flex_row()
+        .items_center()
+        .gap(px(8.0))
         .bg(if selected {
             theme::panel_lift()
         } else {
             gpui::rgba(0x0000_0000)
+        })
+        .when(selected, |row| {
+            row.child(
+                div()
+                    .absolute()
+                    .left_0()
+                    .top(px(8.0))
+                    .bottom(px(8.0))
+                    .w(px(2.0))
+                    .bg(theme::signal()),
+            )
         })
         .when(enabled && !selected, |row| {
             row.tab_index(0)
@@ -1095,109 +1200,115 @@ fn project_thread_row(
         .child(
             div()
                 .min_w_0()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(8.0))
-                .child(
-                    div()
-                        .min_w_0()
-                        .flex_1()
-                        .overflow_hidden()
-                        .text_ellipsis()
-                        .whitespace_nowrap()
-                        .font_family(theme::sans())
-                        .text_size(theme::text_size(theme::T_UI_SM))
-                        .font_weight(if selected {
-                            FontWeight::BOLD
-                        } else {
-                            FontWeight::MEDIUM
-                        })
-                        .text_color(if selected {
-                            theme::bone()
-                        } else if enabled {
-                            theme::bone_dim()
-                        } else {
-                            theme::ash()
-                        })
-                        .child(title),
-                )
-                .when(
-                    switching
-                        || matches!(
-                            runtime_activity,
-                            Some(ThreadActivity::Working | ThreadActivity::Cancelling)
-                        ),
-                    |title| {
-                        title.child(controls::square_status_indicator(
-                            activity_key,
-                            true,
-                            Duration::from_millis(720),
-                            if runtime_activity == Some(ThreadActivity::Cancelling) {
-                                theme::data()
-                            } else {
-                                theme::working()
-                            },
-                        ))
-                    },
-                ),
+                .flex_1()
+                .overflow_hidden()
+                .text_ellipsis()
+                .whitespace_nowrap()
+                .font_family(theme::sans())
+                .text_size(theme::text_size(theme::T_UI_SM))
+                .font_weight(if selected {
+                    FontWeight::SEMIBOLD
+                } else {
+                    FontWeight::MEDIUM
+                })
+                .text_color(if selected {
+                    theme::bone()
+                } else if enabled {
+                    theme::bone_dim()
+                } else {
+                    theme::ash()
+                })
+                .child(title),
         )
+        .when(show_activity, |row| {
+            row.child(controls::square_status_indicator(
+                activity_key,
+                true,
+                Duration::from_millis(720),
+                match runtime_activity {
+                    Some(ThreadActivity::Cancelling) => theme::data(),
+                    Some(ThreadActivity::Attention) => theme::error(),
+                    _ => theme::working(),
+                },
+            ))
+        })
         .child(
             div()
-                .min_w_0()
-                .flex()
-                .flex_row()
-                .items_center()
-                .justify_between()
-                .gap(px(8.0))
+                .flex_shrink_0()
                 .font_family(theme::mono())
                 .text_size(theme::text_size(theme::T_TINY))
-                .text_color(
-                    if switching || runtime_activity == Some(ThreadActivity::Working) {
-                        theme::working()
-                    } else if runtime_activity == Some(ThreadActivity::Attention) {
-                        theme::error()
-                    } else if selected {
-                        theme::data()
-                    } else {
-                        theme::smoke()
-                    },
-                )
-                .child(div().whitespace_nowrap().child(status))
-                .child(
-                    div()
-                        .min_w_0()
-                        .overflow_hidden()
-                        .text_ellipsis()
-                        .whitespace_nowrap()
-                        .child(updated),
-                ),
+                .whitespace_nowrap()
+                .text_color(trailing.color)
+                .child(trailing.label),
         )
         .into_any_element()
 }
 
-fn thread_row_status(
+struct ThreadRowTrailing {
+    label: String,
+    color: gpui::Rgba,
+}
+
+fn thread_row_trailing(
     activity: Option<ThreadActivity>,
     selected: bool,
     switching: bool,
-    fallback: String,
-) -> String {
+    updated_at: &str,
+) -> ThreadRowTrailing {
     if switching {
-        return "Opening thread".to_owned();
-    }
-    if selected {
-        return if activity == Some(ThreadActivity::Working) {
-            "Working".to_owned()
-        } else {
-            "Current thread".to_owned()
+        return ThreadRowTrailing {
+            label: "Opening".to_owned(),
+            color: theme::working(),
         };
     }
     match activity {
-        Some(ThreadActivity::Working) => "Working in background".to_owned(),
-        Some(ThreadActivity::Cancelling) => "Cancelling in background".to_owned(),
-        Some(ThreadActivity::Attention) => "Needs attention".to_owned(),
-        Some(ThreadActivity::Idle | ThreadActivity::Opening) | None => fallback,
+        Some(ThreadActivity::Working) => ThreadRowTrailing {
+            label: if selected {
+                "Working".to_owned()
+            } else {
+                "Busy".to_owned()
+            },
+            color: theme::working(),
+        },
+        Some(ThreadActivity::Cancelling) => ThreadRowTrailing {
+            label: "Stop".to_owned(),
+            color: theme::data(),
+        },
+        Some(ThreadActivity::Attention) => ThreadRowTrailing {
+            label: "Alert".to_owned(),
+            color: theme::error(),
+        },
+        Some(ThreadActivity::Idle | ThreadActivity::Opening) | None => ThreadRowTrailing {
+            label: compact_session_day(updated_at),
+            color: if selected {
+                theme::ash()
+            } else {
+                theme::smoke()
+            },
+        },
     }
+}
+
+/// Prefer session name, else first-user summary. Collapse whitespace and drop a
+/// stored trailing ellipsis so the row's own truncation owns the "…".
+fn sidebar_thread_title(name: Option<&str>, first_user_summary: Option<&str>) -> String {
+    let raw = name.or(first_user_summary).unwrap_or("Untitled thread");
+    let collapsed = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+    let trimmed = strip_trailing_ellipsis(collapsed.trim());
+    if trimmed.is_empty() {
+        "Untitled thread".to_owned()
+    } else {
+        trimmed.to_owned()
+    }
+}
+
+fn strip_trailing_ellipsis(value: &str) -> &str {
+    let value = value.trim_end();
+    value
+        .strip_suffix('…')
+        .or_else(|| value.strip_suffix("..."))
+        .map(str::trim_end)
+        .unwrap_or(value)
 }
 
 fn sidebar_paths_match(left: &std::path::Path, right: &std::path::Path) -> bool {
@@ -1210,15 +1321,11 @@ fn list_animation_key(value: &str) -> usize {
     })
 }
 
-fn compact_session_timestamp(timestamp: &str) -> String {
+fn compact_session_day(timestamp: &str) -> String {
     let bytes = timestamp.as_bytes();
-    let iso_shape = bytes.len() >= 16
-        && bytes.get(4) == Some(&b'-')
-        && bytes.get(7) == Some(&b'-')
-        && matches!(bytes.get(10), Some(b'T' | b' '))
-        && bytes.get(13) == Some(&b':');
+    let iso_shape = bytes.len() >= 10 && bytes.get(4) == Some(&b'-') && bytes.get(7) == Some(&b'-');
     if !iso_shape {
-        return timestamp.to_owned();
+        return compact_session_timestamp(timestamp);
     }
 
     let Some(month_digits) = timestamp.get(5..7) else {
@@ -1239,21 +1346,42 @@ fn compact_session_timestamp(timestamp: &str) -> String {
         "12" => "Dec",
         _ => return timestamp.to_owned(),
     };
-    let (Some(day), Some(time)) = (timestamp.get(8..10), timestamp.get(11..16)) else {
+    let Some(day) = timestamp.get(8..10) else {
         return timestamp.to_owned();
     };
     let day = day.trim_start_matches('0');
     if day.is_empty() {
         return timestamp.to_owned();
     }
-    format!("{month} {day}, {time}")
+    format!("{month} {day}")
+}
+
+fn compact_session_timestamp(timestamp: &str) -> String {
+    let bytes = timestamp.as_bytes();
+    let iso_shape = bytes.len() >= 16
+        && bytes.get(4) == Some(&b'-')
+        && bytes.get(7) == Some(&b'-')
+        && matches!(bytes.get(10), Some(b'T' | b' '))
+        && bytes.get(13) == Some(&b':');
+    if !iso_shape {
+        return timestamp.to_owned();
+    }
+
+    let day = compact_session_day(timestamp);
+    let Some(time) = timestamp.get(11..16) else {
+        return day;
+    };
+    if day == timestamp {
+        return timestamp.to_owned();
+    }
+    format!("{day}, {time}")
 }
 
 fn project_tree_loading_note(animation_key: usize, text: &'static str) -> AnyElement {
     div()
-        .pl(px(34.0))
-        .pr(px(10.0))
-        .py(px(8.0))
+        .h(px(32.0))
+        .pl(px(32.0))
+        .pr(px(12.0))
         .flex()
         .flex_row()
         .items_center()
@@ -1273,12 +1401,13 @@ fn project_tree_loading_note(animation_key: usize, text: &'static str) -> AnyEle
 
 fn project_tree_note(text: impl Into<SharedString>) -> AnyElement {
     div()
-        .pl(px(34.0))
-        .pr(px(10.0))
-        .py(px(7.0))
+        .h(px(32.0))
+        .pl(px(32.0))
+        .pr(px(12.0))
+        .flex()
+        .items_center()
         .font_family(theme::sans())
         .text_size(theme::text_size(theme::T_TINY))
-        .line_height(gpui::relative(1.35))
         .text_color(theme::smoke())
         .child(text.into())
         .into_any_element()
@@ -1770,33 +1899,36 @@ mod tests {
 
     #[test]
     fn thread_rows_distinguish_foreground_and_background_work() {
+        let updated = "2026-07-26T14:08:51.000Z";
         assert_eq!(
-            thread_row_status(
-                Some(ThreadActivity::Working),
-                false,
-                false,
-                "4 messages".to_owned(),
-            ),
-            "Working in background"
+            thread_row_trailing(Some(ThreadActivity::Working), false, false, updated).label,
+            "Busy"
         );
         assert_eq!(
-            thread_row_status(
-                Some(ThreadActivity::Working),
-                true,
-                false,
-                "4 messages".to_owned(),
-            ),
+            thread_row_trailing(Some(ThreadActivity::Working), true, false, updated).label,
             "Working"
         );
         assert_eq!(
-            thread_row_status(
-                Some(ThreadActivity::Attention),
-                false,
-                false,
-                "4 messages".to_owned(),
-            ),
-            "Needs attention"
+            thread_row_trailing(Some(ThreadActivity::Attention), false, false, updated).label,
+            "Alert"
         );
+        assert_eq!(
+            thread_row_trailing(None, false, false, updated).label,
+            "Jul 26"
+        );
+    }
+
+    #[test]
+    fn sidebar_thread_title_is_single_line_without_stored_ellipsis() {
+        let title = sidebar_thread_title(None, Some("for the current diff.\nI think we should…"));
+        assert_eq!(title, "for the current diff. I think we should");
+        assert!(!title.ends_with('…'));
+        assert!(!title.ends_with("..."));
+        assert_eq!(sidebar_thread_title(Some("hey"), Some("ignored")), "hey");
+        assert_eq!(sidebar_thread_title(None, Some("...")), "Untitled thread");
+        assert_eq!(sidebar_thread_title(None, Some("v1.0")), "v1.0");
+        assert_eq!(strip_trailing_ellipsis("done..."), "done");
+        assert_eq!(strip_trailing_ellipsis("done…"), "done");
     }
 
     #[test]
@@ -1805,6 +1937,7 @@ mod tests {
             compact_session_timestamp("2026-07-26T14:08:51.000Z"),
             "Jul 26, 14:08"
         );
+        assert_eq!(compact_session_day("2026-07-26T14:08:51.000Z"), "Jul 26");
         assert_eq!(compact_session_timestamp("recently"), "recently");
     }
 

@@ -137,7 +137,7 @@ impl SubagentStatus {
             Self::Queued => "Queued",
             Self::Running => "Running",
             Self::Completed => "Done",
-            Self::Steered => "Wrapped up",
+            Self::Steered => "Steered",
             Self::Aborted => "Aborted",
             Self::Stopped => "Stopped",
             Self::Error => "Failed",

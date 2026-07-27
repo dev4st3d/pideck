@@ -98,7 +98,6 @@ impl Render for RootView {
                             project_switch_enabled,
                             conversation: &self.conversation,
                             history_open: self.history_open,
-                            menu_open: self.session_menu_open,
                             scroll: &self.sessions_scroll,
                         },
                         cx,

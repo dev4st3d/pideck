@@ -519,10 +519,14 @@ fn task_row(
 }
 
 fn subagent_list(agents: &[SubagentSnapshot], cx: &mut Context<RootView>) -> impl IntoElement {
+    let active = agents
+        .iter()
+        .filter(|agent| agent.status.is_active())
+        .count();
     div()
         .flex()
         .flex_col()
-        .gap(px(7.0))
+        .gap(px(9.0))
         .child(
             div()
                 .flex()
@@ -534,87 +538,169 @@ fn subagent_list(agents: &[SubagentSnapshot], cx: &mut Context<RootView>) -> imp
                         .font_family(theme::mono())
                         .text_size(theme::text_size(theme::T_TINY))
                         .text_color(theme::smoke())
-                        .child(agents.len().to_string()),
+                        .child(if agents.is_empty() {
+                            "0".into()
+                        } else {
+                            format!("{active}/{}", agents.len())
+                        }),
                 ),
         )
         .child(
-            controls::divider_list()
+            div()
+                .flex()
+                .flex_col()
+                .px(px(2.0))
                 .when(agents.is_empty(), |list| {
                     list.child(controls::empty_list_note("No subagents in this session."))
                 })
-                .children(agents.iter().enumerate().map(|(index, agent)| {
-                    let agent_id = agent.id.clone();
-                    let keyboard_agent_id = agent.id.clone();
+                .children(
+                    agents
+                        .iter()
+                        .enumerate()
+                        .map(|(index, agent)| subagent_row(index, agent, cx)),
+                ),
+        )
+}
+
+fn subagent_row(
+    index: usize,
+    agent: &SubagentSnapshot,
+    cx: &mut Context<RootView>,
+) -> gpui::AnyElement {
+    let agent_id = agent.id.clone();
+    let keyboard_agent_id = agent.id.clone();
+    let status_color = subagent_status_color(agent.status);
+    div()
+        .id(("subagent-row", index))
+        .tab_index(0)
+        .key_context(ORCHESTRATION_ROW_CONTEXT)
+        .cursor_pointer()
+        .rounded(px(theme::RADIUS_SM))
+        .px(px(10.0))
+        .py(px(10.0))
+        .flex()
+        .flex_col()
+        .gap(px(4.0))
+        .hover(|row| row.bg(theme::panel_hover()))
+        .focus(|row| row.bg(theme::panel_lift()))
+        .on_click(cx.listener(move |view, _, window, cx| {
+            view.open_subagent(agent_id.clone(), window, cx);
+        }))
+        .on_action(
+            cx.listener(move |view, _: &OrchestrationActivate, window, cx| {
+                view.open_subagent(keyboard_agent_id.clone(), window, cx);
+            }),
+        )
+        .child(
+            div()
+                .h(px(18.0))
+                .flex()
+                .items_center()
+                .justify_between()
+                .gap(px(8.0))
+                .child(
                     div()
-                        .id(("subagent-row", index))
-                        .tab_index(0)
-                        .key_context(ORCHESTRATION_ROW_CONTEXT)
-                        .cursor_pointer()
-                        .px(px(10.0))
-                        .py(px(9.0))
+                        .min_w_0()
+                        .flex_1()
                         .flex()
-                        .flex_col()
-                        .gap(px(3.0))
-                        .hover(|row| row.bg(theme::panel_hover()))
-                        .on_click(cx.listener(move |view, _, window, cx| {
-                            view.open_subagent(agent_id.clone(), window, cx);
-                        }))
-                        .on_action(cx.listener(
-                            move |view, _: &OrchestrationActivate, window, cx| {
-                                view.open_subagent(keyboard_agent_id.clone(), window, cx);
-                            },
-                        ))
+                        .items_center()
+                        .gap(px(7.0))
                         .child(
-                            div()
-                                .flex()
-                                .items_baseline()
-                                .justify_between()
-                                .gap(px(8.0))
-                                .child(
-                                    div()
-                                        .font_family(theme::sans())
-                                        .text_size(theme::text_size(theme::T_UI_SM))
-                                        .font_weight(FontWeight::BOLD)
-                                        .text_color(agent_type_color(&agent.agent_type))
-                                        .child(agent.agent_type.clone()),
-                                )
-                                .child(
-                                    div()
-                                        .font_family(theme::sans())
-                                        .text_size(theme::text_size(theme::T_TINY))
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .text_color(subagent_status_color(agent.status))
-                                        .child(agent.status.label()),
-                                ),
+                            svg()
+                                .path(subagent_icon_path(&agent.id))
+                                .size(px(13.0))
+                                .flex_shrink_0()
+                                .text_color(theme::ash()),
                         )
                         .child(
                             div()
+                                .min_w_0()
                                 .font_family(theme::sans())
                                 .text_size(theme::text_size(theme::T_UI_SM))
-                                .line_height(gpui::relative(1.4))
-                                .text_color(theme::bone_dim())
-                                .child(agent.description.clone()),
-                        )
-                        .child(
-                            div()
-                                .font_family(theme::mono())
-                                .text_size(theme::text_size(theme::T_TINY))
-                                .text_color(theme::smoke())
-                                .child(match agent.queue_position {
-                                    Some(position) => format!(
-                                        "{} · queue {} · limit {}",
-                                        agent.id, position, agent.max_concurrent
-                                    ),
-                                    None => format!(
-                                        "{} · {} tool use{}",
-                                        agent.id,
-                                        agent.tool_uses,
-                                        plural(agent.tool_uses)
-                                    ),
-                                }),
-                        )
-                })),
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(agent_type_color(&agent.agent_type))
+                                .overflow_hidden()
+                                .text_ellipsis()
+                                .whitespace_nowrap()
+                                .child(display_agent_type(&agent.agent_type)),
+                        ),
+                )
+                .child(subagent_status_widget(index, agent.status, status_color)),
         )
+        .child(
+            div()
+                .font_family(theme::sans())
+                .text_size(theme::text_size(theme::T_UI_SM))
+                .line_height(gpui::relative(1.4))
+                .text_color(theme::bone())
+                .child(agent.description.clone()),
+        )
+        .child(
+            div()
+                .font_family(theme::mono())
+                .text_size(theme::text_size(theme::T_TINY))
+                .text_color(theme::smoke())
+                .child(subagent_meta(agent)),
+        )
+        .into_any_element()
+}
+
+fn subagent_meta(agent: &SubagentSnapshot) -> String {
+    let mut parts = Vec::with_capacity(3);
+    match agent.queue_position {
+        Some(position) => {
+            parts.push(format!("queue {position}"));
+            parts.push(format!("limit {}", agent.max_concurrent));
+        }
+        None => parts.push(format!(
+            "{} tool{}",
+            agent.tool_uses,
+            plural(agent.tool_uses)
+        )),
+    }
+    if !agent.pending_steers.is_empty() {
+        let count = agent.pending_steers.len() as u64;
+        parts.push(format!("{count} steer{}", plural(count)));
+    }
+    parts.join(" · ")
+}
+
+fn subagent_status_widget(
+    index: usize,
+    status: SubagentStatus,
+    color: gpui::Rgba,
+) -> gpui::AnyElement {
+    let animated = status.is_active();
+    let cycle = match status {
+        SubagentStatus::Queued => Duration::from_millis(1_100),
+        SubagentStatus::Running => Duration::from_millis(640),
+        _ => Duration::from_millis(720),
+    };
+    // Offset past titlebar (0) and typical task-row keys.
+    controls::square_status_indicator(500 + index, animated, cycle, color)
+}
+
+fn display_agent_type(agent_type: &str) -> String {
+    let mut chars = agent_type.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        None => String::new(),
+    }
+}
+
+/// Stable pick among the agent glyph set. Hash of id only — no RNG, no type map.
+fn subagent_icon_path(agent_id: &str) -> &'static str {
+    const ICONS: [&str; 4] = [
+        "icons/agent-ring.svg",
+        "icons/agent-nodes.svg",
+        "icons/agent-diamond.svg",
+        "icons/agent-tiles.svg",
+    ];
+    let mut hash = 0u32;
+    for byte in agent_id.as_bytes() {
+        hash = hash.wrapping_mul(31).wrapping_add(u32::from(*byte));
+    }
+    ICONS[(hash as usize) % ICONS.len()]
 }
 
 fn goal_panel(

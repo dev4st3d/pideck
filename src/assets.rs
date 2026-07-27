@@ -7,6 +7,10 @@ pub struct Assets;
 impl AssetSource for Assets {
     fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
         let bytes = match path {
+            "icons/agent-diamond.svg" => &include_bytes!("../assets/icons/agent-diamond.svg")[..],
+            "icons/agent-nodes.svg" => &include_bytes!("../assets/icons/agent-nodes.svg")[..],
+            "icons/agent-ring.svg" => &include_bytes!("../assets/icons/agent-ring.svg")[..],
+            "icons/agent-tiles.svg" => &include_bytes!("../assets/icons/agent-tiles.svg")[..],
             "icons/chevron-down.svg" => &include_bytes!("../assets/icons/chevron-down.svg")[..],
             "icons/chevron-right.svg" => &include_bytes!("../assets/icons/chevron-right.svg")[..],
             "icons/chevron-up.svg" => &include_bytes!("../assets/icons/chevron-up.svg")[..],
@@ -23,6 +27,10 @@ impl AssetSource for Assets {
     fn list(&self, path: &str) -> Result<Vec<SharedString>> {
         Ok(match path {
             "icons" => vec![
+                "agent-diamond.svg".into(),
+                "agent-nodes.svg".into(),
+                "agent-ring.svg".into(),
+                "agent-tiles.svg".into(),
                 "chevron-down.svg".into(),
                 "chevron-right.svg".into(),
                 "chevron-up.svg".into(),
