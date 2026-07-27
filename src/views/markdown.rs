@@ -1,9 +1,6 @@
 use std::ops::Range;
 
 use pulldown_cmark::{Alignment, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
-use unicode_width::UnicodeWidthStr;
-
-const MAX_TABLE_COLUMN_WIDTH: usize = 40;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(super) struct MarkdownStyle {
@@ -16,7 +13,6 @@ pub(super) struct MarkdownStyle {
     pub link: bool,
     pub quote: bool,
     pub strikethrough: bool,
-    pub table: bool,
     pub task_marker: bool,
 }
 
@@ -26,10 +22,105 @@ pub(super) struct MarkdownSpan {
     pub style: MarkdownStyle,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(super) struct MarkdownDocument {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum TableAlign {
+    None,
+    Left,
+    Center,
+    Right,
+}
+
+impl From<Alignment> for TableAlign {
+    fn from(value: Alignment) -> Self {
+        match value {
+            Alignment::None => Self::None,
+            Alignment::Left => Self::Left,
+            Alignment::Center => Self::Center,
+            Alignment::Right => Self::Right,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct MarkdownTable {
+    pub alignments: Vec<TableAlign>,
+    pub headers: Vec<String>,
+    pub rows: Vec<Vec<String>>,
+}
+
+impl MarkdownTable {
+    pub fn column_count(&self) -> usize {
+        self.headers.len().max(
+            self.rows
+                .iter()
+                .map(|row| row.cells_len())
+                .max()
+                .unwrap_or(0),
+        )
+    }
+
+    pub fn cell<'a>(&'a self, row: &'a [String], column: usize) -> &'a str {
+        row.get(column).map(String::as_str).unwrap_or("")
+    }
+
+    pub fn to_plain_text(&self) -> String {
+        let columns = self.column_count();
+        if columns == 0 {
+            return String::new();
+        }
+
+        let mut lines = Vec::new();
+        if !self.headers.is_empty() {
+            lines.push(join_row(&self.headers, columns));
+        }
+        for row in &self.rows {
+            lines.push(join_row(row, columns));
+        }
+        lines.join("\n")
+    }
+}
+
+trait RowCells {
+    fn cells_len(&self) -> usize;
+}
+
+impl RowCells for Vec<String> {
+    fn cells_len(&self) -> usize {
+        self.len()
+    }
+}
+
+fn join_row(cells: &[String], columns: usize) -> String {
+    (0..columns)
+        .map(|index| cells.get(index).map(String::as_str).unwrap_or(""))
+        .collect::<Vec<_>>()
+        .join("\t")
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ProseBlock {
     pub text: String,
     pub spans: Vec<MarkdownSpan>,
+}
+
+impl Default for ProseBlock {
+    fn default() -> Self {
+        Self {
+            text: String::new(),
+            spans: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum MarkdownBlock {
+    Prose(ProseBlock),
+    Table(MarkdownTable),
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(super) struct MarkdownDocument {
+    pub blocks: Vec<MarkdownBlock>,
 }
 
 impl MarkdownDocument {
@@ -46,10 +137,42 @@ impl MarkdownDocument {
         }
         builder.finish()
     }
+
+    /// True when the document is a single prose block (supports drag selection).
+    pub fn is_selectable_prose(&self) -> bool {
+        matches!(self.blocks.as_slice(), [MarkdownBlock::Prose(_)])
+    }
+
+    pub fn sole_prose(&self) -> Option<&ProseBlock> {
+        match self.blocks.as_slice() {
+            [MarkdownBlock::Prose(prose)] => Some(prose),
+            _ => None,
+        }
+    }
+
+    pub fn plain_text(&self) -> String {
+        let mut parts = Vec::new();
+        for block in &self.blocks {
+            match block {
+                MarkdownBlock::Prose(prose) if !prose.text.is_empty() => {
+                    parts.push(prose.text.clone());
+                }
+                MarkdownBlock::Table(table) => {
+                    let text = table.to_plain_text();
+                    if !text.is_empty() {
+                        parts.push(text);
+                    }
+                }
+                MarkdownBlock::Prose(_) => {}
+            }
+        }
+        parts.join("\n\n")
+    }
 }
 
 struct DocumentBuilder {
-    document: MarkdownDocument,
+    blocks: Vec<MarkdownBlock>,
+    prose: ProseBlock,
     style: MarkdownStyle,
     quote_depth: usize,
     list_stack: Vec<ListState>,
@@ -60,7 +183,8 @@ struct DocumentBuilder {
 impl Default for DocumentBuilder {
     fn default() -> Self {
         Self {
-            document: MarkdownDocument::default(),
+            blocks: Vec::new(),
+            prose: ProseBlock::default(),
             style: MarkdownStyle::default(),
             quote_depth: 0,
             list_stack: Vec::new(),
@@ -95,7 +219,6 @@ impl DocumentBuilder {
 
         match event {
             Event::Start(Tag::Table(alignments)) => {
-                self.ensure_block_gap();
                 self.table = Some(TableState {
                     alignments,
                     rows: Vec::new(),
@@ -278,7 +401,6 @@ impl DocumentBuilder {
             Event::End(TagEnd::Table) => {
                 let table = self.table.take().expect("active Markdown table");
                 self.push_table(table);
-                self.ensure_block_gap();
             }
             _ => {}
         }
@@ -290,76 +412,49 @@ impl DocumentBuilder {
             return;
         }
 
-        let column_count = table
-            .rows
-            .iter()
-            .map(|row| row.cells.len())
-            .max()
-            .unwrap_or(0);
-        if column_count == 0 {
+        let mut headers = Vec::new();
+        let mut rows = Vec::new();
+        for row in table.rows {
+            if row.header && headers.is_empty() {
+                headers = row.cells;
+            } else {
+                rows.push(row.cells);
+            }
+        }
+
+        if headers.is_empty() && rows.is_empty() {
             return;
         }
 
-        let widths = (0..column_count)
-            .map(|column| {
-                table
-                    .rows
-                    .iter()
-                    .filter_map(|row| row.cells.get(column))
-                    .map(|cell| UnicodeWidthStr::width(cell.as_str()))
-                    .max()
-                    .unwrap_or(0)
-                    .min(MAX_TABLE_COLUMN_WIDTH)
-            })
-            .collect::<Vec<_>>();
+        self.flush_prose();
+        self.blocks.push(MarkdownBlock::Table(MarkdownTable {
+            alignments: table.alignments.into_iter().map(TableAlign::from).collect(),
+            headers,
+            rows,
+        }));
+        self.at_line_start = true;
+    }
 
-        let top = table_border('┌', '┬', '┐', &widths);
-        let middle = table_border('├', '┼', '┤', &widths);
-        let bottom = table_border('└', '┴', '┘', &widths);
-        let mut rendered = String::new();
-        let mut header_ranges = Vec::new();
-        rendered.push_str(&top);
-        rendered.push('\n');
-        for (index, row) in table.rows.iter().enumerate() {
-            let start = rendered.len();
-            rendered.push('│');
-            for (column, width) in widths.iter().copied().enumerate() {
-                let cell = row.cells.get(column).map(String::as_str).unwrap_or("");
-                let alignment = table
-                    .alignments
-                    .get(column)
-                    .copied()
-                    .unwrap_or(Alignment::None);
-                rendered.push('\u{a0}');
-                rendered.push_str(&aligned_cell(cell, width, alignment));
-                rendered.push('\u{a0}');
-                rendered.push('│');
-            }
-            if row.header {
-                header_ranges.push(start..rendered.len());
-            }
-            rendered.push('\n');
-            if row.header && index + 1 < table.rows.len() {
-                rendered.push_str(&middle);
-                rendered.push('\n');
-            }
+    fn flush_prose(&mut self) {
+        while self.prose.text.ends_with('\n') {
+            self.prose.text.pop();
         }
-        rendered.push_str(&bottom);
+        self.prose
+            .spans
+            .retain(|span| span.range.start < self.prose.text.len());
+        for span in &mut self.prose.spans {
+            span.range.end = span.range.end.min(self.prose.text.len());
+        }
 
-        let table_start = self.document.text.len();
-        let mut style = self.style;
-        style.table = true;
-        self.push(&rendered, style);
-        for range in header_ranges {
-            let start = table_start + range.start;
-            let end = table_start + range.end;
-            let mut header_style = style;
-            header_style.strong = true;
-            self.document.spans.push(MarkdownSpan {
-                range: start..end,
-                style: header_style,
-            });
+        if self.prose.text.is_empty() {
+            self.prose = ProseBlock::default();
+            self.at_line_start = true;
+            return;
         }
+
+        self.blocks
+            .push(MarkdownBlock::Prose(std::mem::take(&mut self.prose)));
+        self.at_line_start = true;
     }
 
     fn ensure_line_prefix(&mut self) {
@@ -403,28 +498,28 @@ impl DocumentBuilder {
     }
 
     fn ensure_line(&mut self) {
-        if !self.document.text.is_empty() && !self.at_line_start {
+        if !self.prose.text.is_empty() && !self.at_line_start {
             self.newline();
         }
         self.ensure_line_prefix();
     }
 
     fn ensure_block_gap(&mut self) {
-        while self.document.text.ends_with("\n\n\n") {
-            self.document.text.pop();
+        while self.prose.text.ends_with("\n\n\n") {
+            self.prose.text.pop();
         }
-        if !self.document.text.is_empty() {
-            if !self.document.text.ends_with('\n') {
+        if !self.prose.text.is_empty() {
+            if !self.prose.text.ends_with('\n') {
                 self.newline();
             }
-            if !self.document.text.ends_with("\n\n") {
+            if !self.prose.text.ends_with("\n\n") {
                 self.newline();
             }
         }
     }
 
     fn newline(&mut self) {
-        self.document.text.push('\n');
+        self.prose.text.push('\n');
         self.at_line_start = true;
     }
 
@@ -432,20 +527,20 @@ impl DocumentBuilder {
         if text.is_empty() {
             return;
         }
-        let start = self.document.text.len();
-        self.document.text.push_str(text);
-        let end = self.document.text.len();
+        let start = self.prose.text.len();
+        self.prose.text.push_str(text);
+        let end = self.prose.text.len();
         self.at_line_start = text.ends_with('\n');
 
         if style != MarkdownStyle::default() {
-            if let Some(last) = self.document.spans.last_mut()
+            if let Some(last) = self.prose.spans.last_mut()
                 && last.range.end == start
                 && last.style == style
             {
                 last.range.end = end;
                 return;
             }
-            self.document.spans.push(MarkdownSpan {
+            self.prose.spans.push(MarkdownSpan {
                 range: start..end,
                 style,
             });
@@ -453,16 +548,10 @@ impl DocumentBuilder {
     }
 
     fn finish(mut self) -> MarkdownDocument {
-        while self.document.text.ends_with('\n') {
-            self.document.text.pop();
+        self.flush_prose();
+        MarkdownDocument {
+            blocks: self.blocks,
         }
-        self.document
-            .spans
-            .retain(|span| span.range.start < self.document.text.len());
-        for span in &mut self.document.spans {
-            span.range.end = span.range.end.min(self.document.text.len());
-        }
-        self.document
     }
 }
 
@@ -481,95 +570,48 @@ fn heading_level(level: HeadingLevel) -> u8 {
     }
 }
 
-fn table_border(left: char, join: char, right: char, widths: &[usize]) -> String {
-    let mut border = String::new();
-    border.push(left);
-    for (index, width) in widths.iter().enumerate() {
-        border.push_str(&"─".repeat(width + 2));
-        border.push(if index + 1 == widths.len() {
-            right
-        } else {
-            join
-        });
-    }
-    border
-}
-
-fn aligned_cell(cell: &str, width: usize, alignment: Alignment) -> String {
-    let cell = truncate_to_width(cell, width);
-    let content_width = UnicodeWidthStr::width(cell.as_str());
-    let remaining = width.saturating_sub(content_width);
-    let (left, right) = match alignment {
-        Alignment::Center => (remaining / 2, remaining - remaining / 2),
-        Alignment::Right => (remaining, 0),
-        Alignment::None | Alignment::Left => (0, remaining),
-    };
-    format!(
-        "{}{}{}",
-        "\u{a0}".repeat(left),
-        cell.replace(' ', "\u{a0}"),
-        "\u{a0}".repeat(right)
-    )
-}
-
-fn truncate_to_width(value: &str, width: usize) -> String {
-    if UnicodeWidthStr::width(value) <= width {
-        return value.to_owned();
-    }
-    if width == 0 {
-        return String::new();
-    }
-
-    let target = width.saturating_sub(1);
-    let mut output = String::new();
-    for character in value.chars() {
-        let next_width = UnicodeWidthStr::width(output.as_str())
-            + unicode_width::UnicodeWidthChar::width(character).unwrap_or(0);
-        if next_width > target {
-            break;
-        }
-        output.push(character);
-    }
-    output.push('…');
-    output
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn sole_prose(document: &MarkdownDocument) -> &ProseBlock {
+        document.sole_prose().expect("single prose block")
+    }
 
     #[test]
     fn renders_core_markdown_as_styled_plain_text() {
         let document = MarkdownDocument::parse(
             "# Result\n\nUse **bold**, *care*, `code`, and [docs](https://example.com).\n\n- one\n- two",
         );
+        let prose = sole_prose(&document);
 
         assert_eq!(
-            document.text,
+            prose.text,
             "Result\n\nUse bold, care, code, and docs.\n\n• one\n• two"
         );
         assert!(
-            document.spans.iter().any(|span| {
-                &document.text[span.range.clone()] == "Result" && span.style.heading
-            })
-        );
-        assert!(
-            document
+            prose
                 .spans
                 .iter()
-                .any(|span| { &document.text[span.range.clone()] == "bold" && span.style.strong })
+                .any(|span| { &prose.text[span.range.clone()] == "Result" && span.style.heading })
         );
         assert!(
-            document
+            prose
                 .spans
                 .iter()
-                .any(|span| { &document.text[span.range.clone()] == "code" && span.style.code })
+                .any(|span| { &prose.text[span.range.clone()] == "bold" && span.style.strong })
         );
         assert!(
-            document
+            prose
                 .spans
                 .iter()
-                .any(|span| { &document.text[span.range.clone()] == "docs" && span.style.link })
+                .any(|span| { &prose.text[span.range.clone()] == "code" && span.style.code })
+        );
+        assert!(
+            prose
+                .spans
+                .iter()
+                .any(|span| { &prose.text[span.range.clone()] == "docs" && span.style.link })
         );
     }
 
@@ -578,13 +620,14 @@ mod tests {
         let document = MarkdownDocument::parse(
             "> Think carefully.\n\n1. First\n2. Second\n\n- [x] Done\n- [ ] Next",
         );
+        let prose = sole_prose(&document);
 
         assert_eq!(
-            document.text,
+            prose.text,
             "│ Think carefully.\n\n1. First\n2. Second\n\n• ☑ Done\n• ☐ Next"
         );
-        assert!(document.spans.iter().any(|span| span.style.quote));
-        assert!(document.spans.iter().any(|span| span.style.task_marker));
+        assert!(prose.spans.iter().any(|span| span.style.quote));
+        assert!(prose.spans.iter().any(|span| span.style.task_marker));
     }
 
     #[test]
@@ -592,60 +635,80 @@ mod tests {
         let document = MarkdownDocument::parse(
             "# Primary\n\n### Detail\n\nInline `code`.\n\n```rust\nfn main() {\n    println!(\"ok\");\n}\n```",
         );
+        let prose = sole_prose(&document);
 
-        assert!(document.spans.iter().any(|span| {
-            &document.text[span.range.clone()] == "Primary" && span.style.heading_level == 1
+        assert!(prose.spans.iter().any(|span| {
+            &prose.text[span.range.clone()] == "Primary" && span.style.heading_level == 1
         }));
-        assert!(document.spans.iter().any(|span| {
-            &document.text[span.range.clone()] == "Detail" && span.style.heading_level == 3
+        assert!(prose.spans.iter().any(|span| {
+            &prose.text[span.range.clone()] == "Detail" && span.style.heading_level == 3
         }));
-        assert!(document.spans.iter().any(|span| {
-            span.style.code_block && document.text[span.range.clone()].contains("println!")
+        assert!(prose.spans.iter().any(|span| {
+            span.style.code_block && prose.text[span.range.clone()].contains("println!")
         }));
-        assert!(document.spans.iter().any(|span| {
-            span.style.code
-                && !span.style.code_block
-                && &document.text[span.range.clone()] == "code"
+        assert!(prose.spans.iter().any(|span| {
+            span.style.code && !span.style.code_block && &prose.text[span.range.clone()] == "code"
         }));
     }
 
     #[test]
     fn hides_raw_html_but_keeps_inner_text() {
         let document = MarkdownDocument::parse("Before <kbd>Ctrl</kbd><br>After");
-        assert_eq!(document.text, "Before Ctrl\nAfter");
-        assert!(!document.text.contains("<kbd>"));
+        let prose = sole_prose(&document);
+        assert_eq!(prose.text, "Before Ctrl\nAfter");
+        assert!(!prose.text.contains("<kbd>"));
     }
 
     #[test]
     fn keeps_incomplete_streaming_markdown_readable() {
         let document = MarkdownDocument::parse("Working on **the answer");
-        assert!(document.text.contains("Working on"));
-        assert!(document.text.contains("the answer"));
+        let text = document.plain_text();
+        assert!(text.contains("Working on"));
+        assert!(text.contains("the answer"));
     }
 
     #[test]
-    fn renders_markdown_tables_as_aligned_grids() {
+    fn parses_markdown_tables_as_structured_blocks() {
         let document = MarkdownDocument::parse(
             "Before\n\n| Component | Installed | Latest | Status |\n|:--|--:|:-:|:--|\n| Pi coding agent | 0.80.10 | 0.81.1 | Update available |\n| pi-bar | 0.3.39 | 0.3.39 | Current |\n\nAfter",
         );
 
-        let expected = concat!(
-            "Before\n\n",
-            "┌─────────────────┬───────────┬────────┬──────────────────┐\n",
-            "│ Component       │ Installed │ Latest │ Status           │\n",
-            "├─────────────────┼───────────┼────────┼──────────────────┤\n",
-            "│ Pi coding agent │   0.80.10 │ 0.81.1 │ Update available │\n",
-            "│ pi-bar          │    0.3.39 │ 0.3.39 │ Current          │\n",
-            "└─────────────────┴───────────┴────────┴──────────────────┘\n\n",
-            "After",
-        );
-        assert_eq!(document.text.replace('\u{a0}', " "), expected);
-        assert!(document.spans.iter().any(|span| span.style.table));
+        assert_eq!(document.blocks.len(), 3);
+        match &document.blocks[0] {
+            MarkdownBlock::Prose(prose) => assert_eq!(prose.text, "Before"),
+            MarkdownBlock::Table(_) => panic!("expected leading prose"),
+        }
+        match &document.blocks[1] {
+            MarkdownBlock::Table(table) => {
+                assert_eq!(
+                    table.headers,
+                    vec!["Component", "Installed", "Latest", "Status"]
+                );
+                assert_eq!(table.rows.len(), 2);
+                assert_eq!(table.rows[0][0], "Pi coding agent");
+                assert_eq!(table.rows[0][1], "0.80.10");
+                assert_eq!(table.rows[1][3], "Current");
+                assert_eq!(
+                    table.alignments,
+                    vec![
+                        TableAlign::Left,
+                        TableAlign::Right,
+                        TableAlign::Center,
+                        TableAlign::Left
+                    ]
+                );
+            }
+            MarkdownBlock::Prose(_) => panic!("expected table block"),
+        }
+        match &document.blocks[2] {
+            MarkdownBlock::Prose(prose) => assert_eq!(prose.text, "After"),
+            MarkdownBlock::Table(_) => panic!("expected trailing prose"),
+        }
+
         assert!(
             document
-                .spans
-                .iter()
-                .any(|span| span.style.table && span.style.strong)
+                .plain_text()
+                .contains("Pi coding agent\t0.80.10\t0.81.1\tUpdate available")
         );
     }
 }
