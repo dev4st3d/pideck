@@ -1405,6 +1405,280 @@ pub(super) struct PastedImageOverlayParams<'a> {
     pub pencil_error: Option<&'a str>,
 }
 
+fn pencil_toolbar(
+    pencil_enabled: bool,
+    pencil_color: PencilColor,
+    pencil_size: u16,
+    can_undo: bool,
+    cx: &mut Context<RootView>,
+) -> impl IntoElement {
+    // Brush preview scales with size without dominating the bar.
+    let brush_dot = (4.0 + (pencil_size as f32 / 64.0) * 10.0).clamp(4.0, 14.0);
+
+    div()
+        .min_h(px(44.0))
+        .px(px(12.0))
+        .py(px(6.0))
+        .flex_shrink_0()
+        .flex()
+        .flex_wrap()
+        .items_center()
+        .gap(px(8.0))
+        .border_b_1()
+        .border_color(theme::edge_soft())
+        .bg(theme::floor())
+        // Pencil toggle — icon-only selected state.
+        .child(
+            div()
+                .id("pasted-image-pencil")
+                .tab_index(0)
+                .size(px(30.0))
+                .rounded(px(theme::RADIUS_SM))
+                .border_1()
+                .border_color(if pencil_enabled {
+                    theme::edge_hard()
+                } else {
+                    theme::edge_soft()
+                })
+                .bg(if pencil_enabled {
+                    theme::panel_lift()
+                } else {
+                    theme::canvas()
+                })
+                .flex()
+                .items_center()
+                .justify_center()
+                .cursor_pointer()
+                .hover(|button| button.bg(theme::panel_lift()).border_color(theme::edge()))
+                .on_key_down(cx.listener(|view, event: &gpui::KeyDownEvent, _, cx| {
+                    if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                        cx.stop_propagation();
+                        view.toggle_pencil(cx);
+                    }
+                }))
+                .on_click(cx.listener(|view, _, _, cx| view.toggle_pencil(cx)))
+                .child(svg().path("icons/pencil.svg").size(px(14.0)).text_color(
+                    if pencil_enabled {
+                        theme::data()
+                    } else {
+                        theme::ash()
+                    },
+                )),
+        )
+        .when(pencil_enabled, |toolbar| {
+            toolbar
+                .child(pencil_toolbar_sep())
+                // Color swatches — selection ring only, no redundant "Color: Red" copy.
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(4.0))
+                        .children(PencilColor::ALL.into_iter().map(|color| {
+                            let selected = color == pencil_color;
+                            div()
+                                .id(gpui::SharedString::from(format!(
+                                    "pencil-color-{}",
+                                    color.label().to_ascii_lowercase()
+                                )))
+                                .tab_index(0)
+                                .size(px(20.0))
+                                .rounded(px(999.0))
+                                .border_1()
+                                .border_color(if selected {
+                                    theme::bone()
+                                } else {
+                                    theme::edge_hard()
+                                })
+                                .bg(gpui::rgb(color.rgb()))
+                                .cursor_pointer()
+                                .hover(|swatch| swatch.border_color(theme::bone_dim()))
+                                .on_key_down(cx.listener(
+                                    move |view, event: &gpui::KeyDownEvent, _, cx| {
+                                        if matches!(event.keystroke.key.as_str(), "enter" | "space")
+                                        {
+                                            cx.stop_propagation();
+                                            view.set_pencil_color(color, cx);
+                                        }
+                                    },
+                                ))
+                                .on_click(cx.listener(move |view, _, _, cx| {
+                                    view.set_pencil_color(color, cx)
+                                }))
+                        })),
+                )
+                .child(pencil_toolbar_sep())
+                // Size stepper with live brush preview.
+                .child(
+                    div()
+                        .h(px(30.0))
+                        .px(px(4.0))
+                        .rounded(px(theme::RADIUS_SM))
+                        .border_1()
+                        .border_color(theme::edge_soft())
+                        .bg(theme::canvas())
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(2.0))
+                        .child(
+                            div()
+                                .id("pencil-size-decrease")
+                                .tab_index(0)
+                                .size(px(26.0))
+                                .rounded(px(theme::RADIUS_SM))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .text_color(theme::ash())
+                                .cursor_pointer()
+                                .hover(|button| {
+                                    button.bg(theme::panel_lift()).text_color(theme::bone())
+                                })
+                                .on_key_down(cx.listener(
+                                    |view, event: &gpui::KeyDownEvent, _, cx| {
+                                        if matches!(event.keystroke.key.as_str(), "enter" | "space")
+                                        {
+                                            cx.stop_propagation();
+                                            view.adjust_pencil_size(-1, cx);
+                                        }
+                                    },
+                                ))
+                                .on_click(
+                                    cx.listener(|view, _, _, cx| view.adjust_pencil_size(-1, cx)),
+                                )
+                                .child(
+                                    div()
+                                        .font_family(theme::main())
+                                        .text_size(theme::text_size(theme::T_UI_SM))
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .child("−"),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .w(px(52.0))
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .justify_center()
+                                .gap(px(6.0))
+                                .child(
+                                    div()
+                                        .size(px(brush_dot))
+                                        .rounded(px(999.0))
+                                        .bg(gpui::rgb(pencil_color.rgb()))
+                                        .flex_shrink_0(),
+                                )
+                                .child(
+                                    div()
+                                        .font_family(theme::mono())
+                                        .text_size(theme::text_size(theme::T_TINY))
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .text_color(theme::bone_dim())
+                                        .child(format!("{pencil_size}")),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .id("pencil-size-increase")
+                                .tab_index(0)
+                                .size(px(26.0))
+                                .rounded(px(theme::RADIUS_SM))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .text_color(theme::ash())
+                                .cursor_pointer()
+                                .hover(|button| {
+                                    button.bg(theme::panel_lift()).text_color(theme::bone())
+                                })
+                                .on_key_down(cx.listener(
+                                    |view, event: &gpui::KeyDownEvent, _, cx| {
+                                        if matches!(event.keystroke.key.as_str(), "enter" | "space")
+                                        {
+                                            cx.stop_propagation();
+                                            view.adjust_pencil_size(1, cx);
+                                        }
+                                    },
+                                ))
+                                .on_click(
+                                    cx.listener(|view, _, _, cx| view.adjust_pencil_size(1, cx)),
+                                )
+                                .child(
+                                    div()
+                                        .font_family(theme::main())
+                                        .text_size(theme::text_size(theme::T_UI_SM))
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .child("+"),
+                                ),
+                        ),
+                )
+                .child(pencil_toolbar_sep())
+                // Undo — icon button, dimmed when empty.
+                .child(
+                    div()
+                        .id("pencil-undo")
+                        .tab_index(if can_undo { 0 } else { -1 })
+                        .size(px(30.0))
+                        .rounded(px(theme::RADIUS_SM))
+                        .border_1()
+                        .border_color(theme::edge_soft())
+                        .bg(theme::canvas())
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_color(if can_undo {
+                            theme::bone_dim()
+                        } else {
+                            theme::smoke()
+                        })
+                        .cursor(if can_undo {
+                            gpui::CursorStyle::PointingHand
+                        } else {
+                            gpui::CursorStyle::Arrow
+                        })
+                        .opacity(if can_undo { 1.0 } else { 0.45 })
+                        .when(can_undo, |button| {
+                            button
+                                .hover(|button| {
+                                    button
+                                        .bg(theme::panel_lift())
+                                        .border_color(theme::edge())
+                                        .text_color(theme::bone())
+                                })
+                                .focus(|button| button.border_color(theme::focus()))
+                                .on_key_down(cx.listener(
+                                    |view, event: &gpui::KeyDownEvent, _, cx| {
+                                        if matches!(event.keystroke.key.as_str(), "enter" | "space")
+                                        {
+                                            cx.stop_propagation();
+                                            view.undo_pencil_stroke(cx);
+                                        }
+                                    },
+                                ))
+                                .on_click(cx.listener(|view, _, _, cx| view.undo_pencil_stroke(cx)))
+                        })
+                        .child(svg().path("icons/undo.svg").size(px(14.0)).text_color(
+                            if can_undo {
+                                theme::ash()
+                            } else {
+                                theme::smoke()
+                            },
+                        )),
+                )
+        })
+}
+
+fn pencil_toolbar_sep() -> impl IntoElement {
+    div()
+        .w(px(1.0))
+        .h(px(16.0))
+        .bg(theme::edge_soft())
+        .flex_shrink_0()
+}
+
 pub(super) fn pasted_image_overlay(
     params: PastedImageOverlayParams<'_>,
     cx: &mut Context<RootView>,
@@ -1476,257 +1750,22 @@ pub(super) fn pasted_image_overlay(
                                     format!("Image 1 · {format}")
                                 }),
                         )
-                        .child(
-                            div()
-                                .id("pasted-image-close")
-                                .tab_index(0)
-                                .cursor_pointer()
-                                .px(px(8.0))
-                                .py(px(5.0))
-                                .text_color(theme::bone_dim())
-                                .hover(|button| {
-                                    button.bg(theme::panel_lift()).text_color(theme::bone())
-                                })
-                                .focus(|button| button.text_color(theme::focus()))
-                                .on_key_down(cx.listener(
-                                    |view, event: &gpui::KeyDownEvent, window, cx| {
-                                        if matches!(event.keystroke.key.as_str(), "enter" | "space")
-                                        {
-                                            cx.stop_propagation();
-                                            view.close_pasted_image(window, cx);
-                                        }
-                                    },
-                                ))
-                                .on_click(cx.listener(|view, _, window, cx| {
-                                    view.close_pasted_image(window, cx)
-                                }))
-                                .child(
-                                    div()
-                                        .font_family(theme::main())
-                                        .text_size(theme::text_size(theme::T_UI_SM))
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .child("Close · Esc"),
-                                ),
-                        ),
+                        .child(controls::chrome_action(
+                            "pasted-image-close",
+                            "Close",
+                            true,
+                            Box::new(cx.listener(|view, _, window, cx| {
+                                view.close_pasted_image(window, cx)
+                            })),
+                        )),
                 )
-                .child(
-                    div()
-                        .min_h(px(46.0))
-                        .px(px(14.0))
-                        .py(px(7.0))
-                        .flex_shrink_0()
-                        .flex()
-                        .flex_wrap()
-                        .items_center()
-                        .gap(px(6.0))
-                        .child(
-                            div()
-                                .id("pasted-image-pencil")
-                                .tab_index(0)
-                                .h(px(32.0))
-                                .px(px(11.0))
-                                .rounded(px(theme::RADIUS_SM))
-                                .border_1()
-                                .border_color(if pencil_enabled {
-                                    theme::focus()
-                                } else {
-                                    theme::edge_soft()
-                                })
-                                .bg(if pencil_enabled {
-                                    theme::panel_hover()
-                                } else {
-                                    theme::canvas()
-                                })
-                                .font_family(theme::main())
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_size(theme::text_size(theme::T_UI_SM))
-                                .text_color(theme::bone())
-                                .cursor_pointer()
-                                .hover(|button| button.bg(theme::panel_lift()))
-                                .on_key_down(cx.listener(
-                                    |view, event: &gpui::KeyDownEvent, _, cx| {
-                                        if matches!(event.keystroke.key.as_str(), "enter" | "space")
-                                        {
-                                            cx.stop_propagation();
-                                            view.toggle_pencil(cx);
-                                        }
-                                    },
-                                ))
-                                .on_click(cx.listener(|view, _, _, cx| view.toggle_pencil(cx)))
-                                .child(if pencil_enabled {
-                                    "Pencil on"
-                                } else {
-                                    "Pencil"
-                                }),
-                        )
-                        .when(pencil_enabled, |toolbar| {
-                            toolbar
-                                .child(
-                                    div()
-                                        .font_family(theme::sans())
-                                        .text_size(theme::text_size(theme::T_TINY))
-                                        .text_color(theme::smoke())
-                                        .child(format!("Color: {}", pencil_color.label())),
-                                )
-                                .children(PencilColor::ALL.into_iter().map(|color| {
-                                    let selected = color == pencil_color;
-                                    div()
-                                        .id(gpui::SharedString::from(format!(
-                                            "pencil-color-{}",
-                                            color.label().to_ascii_lowercase()
-                                        )))
-                                        .tab_index(0)
-                                        .w(px(22.0))
-                                        .h(px(22.0))
-                                        .rounded(px(4.0))
-                                        .border_1()
-                                        .border_color(if selected {
-                                            theme::focus()
-                                        } else {
-                                            theme::edge_hard()
-                                        })
-                                        .bg(gpui::rgb(color.rgb()))
-                                        .cursor_pointer()
-                                        .on_key_down(cx.listener(
-                                            move |view, event: &gpui::KeyDownEvent, _, cx| {
-                                                if matches!(
-                                                    event.keystroke.key.as_str(),
-                                                    "enter" | "space"
-                                                ) {
-                                                    cx.stop_propagation();
-                                                    view.set_pencil_color(color, cx);
-                                                }
-                                            },
-                                        ))
-                                        .on_click(cx.listener(move |view, _, _, cx| {
-                                            view.set_pencil_color(color, cx)
-                                        }))
-                                }))
-                                .child(
-                                    div()
-                                        .font_family(theme::sans())
-                                        .text_size(theme::text_size(theme::T_TINY))
-                                        .text_color(theme::smoke())
-                                        .child("Pixels"),
-                                )
-                                .child(
-                                    div()
-                                        .id("pencil-size-decrease")
-                                        .tab_index(0)
-                                        .w(px(28.0))
-                                        .h(px(28.0))
-                                        .rounded(px(theme::RADIUS_SM))
-                                        .bg(theme::canvas())
-                                        .border_1()
-                                        .border_color(theme::edge_soft())
-                                        .flex()
-                                        .items_center()
-                                        .justify_center()
-                                        .cursor_pointer()
-                                        .hover(|button| button.bg(theme::panel_lift()))
-                                        .on_key_down(cx.listener(
-                                            |view, event: &gpui::KeyDownEvent, _, cx| {
-                                                if matches!(
-                                                    event.keystroke.key.as_str(),
-                                                    "enter" | "space"
-                                                ) {
-                                                    cx.stop_propagation();
-                                                    view.adjust_pencil_size(-1, cx);
-                                                }
-                                            },
-                                        ))
-                                        .on_click(cx.listener(|view, _, _, cx| {
-                                            view.adjust_pencil_size(-1, cx)
-                                        }))
-                                        .child("−"),
-                                )
-                                .child(
-                                    div()
-                                        .w(px(44.0))
-                                        .font_family(theme::mono())
-                                        .text_size(theme::text_size(theme::T_TINY))
-                                        .text_color(theme::bone_dim())
-                                        .text_align(gpui::TextAlign::Center)
-                                        .child(format!("{pencil_size} px")),
-                                )
-                                .child(
-                                    div()
-                                        .id("pencil-size-increase")
-                                        .tab_index(0)
-                                        .w(px(28.0))
-                                        .h(px(28.0))
-                                        .rounded(px(theme::RADIUS_SM))
-                                        .bg(theme::canvas())
-                                        .border_1()
-                                        .border_color(theme::edge_soft())
-                                        .flex()
-                                        .items_center()
-                                        .justify_center()
-                                        .cursor_pointer()
-                                        .hover(|button| button.bg(theme::panel_lift()))
-                                        .on_key_down(cx.listener(
-                                            |view, event: &gpui::KeyDownEvent, _, cx| {
-                                                if matches!(
-                                                    event.keystroke.key.as_str(),
-                                                    "enter" | "space"
-                                                ) {
-                                                    cx.stop_propagation();
-                                                    view.adjust_pencil_size(1, cx);
-                                                }
-                                            },
-                                        ))
-                                        .on_click(cx.listener(|view, _, _, cx| {
-                                            view.adjust_pencil_size(1, cx)
-                                        }))
-                                        .child("+"),
-                                )
-                                .child(
-                                    div()
-                                        .id("pencil-undo")
-                                        .tab_index(0)
-                                        .h(px(28.0))
-                                        .px(px(8.0))
-                                        .rounded(px(theme::RADIUS_SM))
-                                        .font_family(theme::main())
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .text_size(theme::text_size(theme::T_TINY))
-                                        .text_color(if can_undo {
-                                            theme::bone_dim()
-                                        } else {
-                                            theme::smoke()
-                                        })
-                                        .cursor(if can_undo {
-                                            gpui::CursorStyle::PointingHand
-                                        } else {
-                                            gpui::CursorStyle::Arrow
-                                        })
-                                        .when(can_undo, |button| {
-                                            button
-                                                .hover(|button| {
-                                                    button
-                                                        .bg(theme::panel_lift())
-                                                        .text_color(theme::bone())
-                                                })
-                                                .focus(|button| button.text_color(theme::focus()))
-                                                .on_key_down(cx.listener(
-                                                    |view, event: &gpui::KeyDownEvent, _, cx| {
-                                                        if matches!(
-                                                            event.keystroke.key.as_str(),
-                                                            "enter" | "space"
-                                                        ) {
-                                                            cx.stop_propagation();
-                                                            view.undo_pencil_stroke(cx);
-                                                        }
-                                                    },
-                                                ))
-                                                .on_click(cx.listener(|view, _, _, cx| {
-                                                    view.undo_pencil_stroke(cx)
-                                                }))
-                                        })
-                                        .child("Undo"),
-                                )
-                        }),
-                )
+                .child(pencil_toolbar(
+                    pencil_enabled,
+                    pencil_color,
+                    pencil_size,
+                    can_undo,
+                    cx,
+                ))
                 .child(
                     div()
                         .flex_1()
@@ -2106,6 +2145,8 @@ pub(super) fn hotkey_help_overlay(cx: &mut Context<RootView>) -> impl IntoElemen
     let shortcuts = [
         ("Command palette", "Ctrl+Shift+P"),
         ("Hotkey help", "Ctrl+/"),
+        ("Toggle workspace sidebar", "Ctrl+B"),
+        ("Toggle inspector", "Ctrl+I"),
         ("Increase font size", "Ctrl++"),
         ("Decrease font size", "Ctrl+-"),
         ("Send / steer", "Enter"),

@@ -1,4 +1,10 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="none">
-  <circle cx="8" cy="8" r="5.25" stroke="currentColor" stroke-width="1.25"/>
-  <rect x="6.25" y="6.25" width="3.5" height="3.5" stroke="currentColor" stroke-width="1.25"/>
+  <!-- Soft outer disc -->
+  <circle cx="8" cy="8" r="5.5" fill="currentColor" opacity="0.12"/>
+  <!-- Soft core -->
+  <rect x="5.9" y="5.9" width="4.2" height="4.2" rx="0.7" fill="currentColor" opacity="0.2"/>
+  <!-- Crisp ring -->
+  <circle cx="8" cy="8" r="5.5" stroke="currentColor" stroke-width="1.2"/>
+  <!-- Crisp core -->
+  <rect x="5.9" y="5.9" width="4.2" height="4.2" rx="0.7" stroke="currentColor" stroke-width="1.15"/>
 </svg>

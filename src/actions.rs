@@ -40,6 +40,8 @@ actions!(
         AbortRun,
         OpenCommandPalette,
         ShowHotkeys,
+        ToggleSidebar,
+        ToggleInspector,
         IncreaseFontSize,
         DecreaseFontSize,
         TranscriptCopy,

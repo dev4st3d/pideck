@@ -44,6 +44,8 @@ impl Render for RootView {
             .on_action(cx.listener(Self::on_focus_previous))
             .on_action(cx.listener(Self::on_open_command_palette))
             .on_action(cx.listener(Self::on_show_hotkeys))
+            .on_action(cx.listener(Self::on_toggle_sidebar))
+            .on_action(cx.listener(Self::on_toggle_inspector))
             .on_action(cx.listener(Self::on_increase_font_size))
             .on_action(cx.listener(Self::on_decrease_font_size))
             .on_action(cx.listener(Self::on_image_preview_previous))
@@ -80,6 +82,8 @@ impl Render for RootView {
                     && catalog.current_session_file.is_some()
                     && !catalog.switching,
                 self.theme_menu_open,
+                self.sidebar_open,
+                self.inspector_open,
                 cx,
             ))
             .child(
@@ -99,6 +103,8 @@ impl Render for RootView {
                             project_switch_enabled,
                             conversation: &self.conversation,
                             history_open: self.history_open,
+                            sidebar_open: self.sidebar_open,
+                            sidebar_motion_key: self.sidebar_motion_key,
                             scroll: &self.sessions_scroll,
                         },
                         cx,
@@ -193,6 +199,8 @@ impl Render for RootView {
                             usage_tooltip_hovered: self.usage_tooltip_hovered,
                             usage_tooltip_visible: self.usage_tooltip_visible,
                             usage_tooltip_epoch: self.usage_tooltip_epoch,
+                            inspector_open: self.inspector_open,
+                            inspector_motion_key: self.inspector_motion_key,
                         },
                         cx,
                     )),

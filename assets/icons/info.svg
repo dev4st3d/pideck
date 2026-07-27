@@ -1,5 +1,11 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" fill="none" color="#ffffff">
-  <circle cx="12" cy="12" r="8.25" stroke="#ffffff" stroke-width="1.5"/>
-  <circle cx="12" cy="8.25" r="1" fill="#ffffff"/>
-  <path d="M12 11.25V16" stroke="#ffffff" stroke-width="1.75" stroke-linecap="round"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="none">
+  <!-- Soft disc -->
+  <circle cx="8" cy="8" r="5.75" fill="currentColor" opacity="0.12"/>
+  <!-- Crisp ring -->
+  <circle cx="8" cy="8" r="5.75" stroke="currentColor" stroke-width="1.2"/>
+  <!-- Soft mark plate -->
+  <circle cx="8" cy="5.35" r="0.85" fill="currentColor" opacity="0.22"/>
+  <!-- i mark -->
+  <circle cx="8" cy="5.35" r="0.7" fill="currentColor"/>
+  <path d="M8 7.35v3.6" stroke="currentColor" stroke-width="1.35" stroke-linecap="round"/>
 </svg>

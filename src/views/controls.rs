@@ -289,6 +289,8 @@ pub fn icon_button(
         })
         .child(
             div()
+                .relative()
+                .top(px(-1.0))
                 .font_family(theme::sans())
                 .text_size(theme::text_size(16.0))
                 .line_height(gpui::relative(1.0))

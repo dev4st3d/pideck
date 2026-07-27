@@ -21,6 +21,7 @@ use crate::actions::{
     HistoryActivate, HistoryFirst, HistoryFold, HistoryLast, HistoryNext, HistoryPrevious,
     HistoryUnfold, ImagePreviewClose, ImagePreviewNext, ImagePreviewPrevious, IncreaseFontSize,
     ORCHESTRATION_ROW_CONTEXT, OpenCommandPalette, OrchestrationActivate, Retry, ShowHotkeys, Stop,
+    ToggleInspector, ToggleSidebar,
 };
 use crate::command_catalog::{
     CommandCatalog, CommandEntry, CommandTarget, InvocationResolution, NativeAction,
@@ -383,6 +384,14 @@ pub struct RootView {
     history: HistoryBrowser,
     history_focus: FocusHandle,
     history_open: bool,
+    /// Workspace project sidebar visibility (animated open/close).
+    sidebar_open: bool,
+    /// Bumps on each toggle so width animation only runs after user action.
+    sidebar_motion_key: u64,
+    /// Right-hand Inspector panel visibility (animated open/close).
+    inspector_open: bool,
+    /// Bumps on each toggle so width animation only runs after user action.
+    inspector_motion_key: u64,
     session_rename_open: bool,
     history_confirmation: Option<HistoryConfirmation>,
     summarize_navigation: bool,
@@ -727,6 +736,10 @@ impl RootView {
             history: HistoryBrowser::default(),
             history_focus,
             history_open: false,
+            sidebar_open: true,
+            sidebar_motion_key: 0,
+            inspector_open: true,
+            inspector_motion_key: 0,
             session_rename_open: false,
             history_confirmation: None,
             summarize_navigation: false,
@@ -786,6 +799,49 @@ impl RootView {
     fn toggle_theme_menu(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         self.theme_menu_open = !self.theme_menu_open;
         cx.notify();
+    }
+
+    fn toggle_sidebar(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        self.sidebar_open = !self.sidebar_open;
+        self.sidebar_motion_key = self.sidebar_motion_key.wrapping_add(1);
+        if !self.sidebar_open {
+            // History sits beside the workspace list; hide it when the rail closes.
+            self.history_open = false;
+            self.history_confirmation = None;
+        }
+        cx.notify();
+    }
+
+    fn on_toggle_sidebar(
+        &mut self,
+        _: &ToggleSidebar,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.toggle_sidebar(window, cx);
+    }
+
+    fn ensure_sidebar_open(&mut self) {
+        if self.sidebar_open {
+            return;
+        }
+        self.sidebar_open = true;
+        self.sidebar_motion_key = self.sidebar_motion_key.wrapping_add(1);
+    }
+
+    fn toggle_inspector(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        self.inspector_open = !self.inspector_open;
+        self.inspector_motion_key = self.inspector_motion_key.wrapping_add(1);
+        cx.notify();
+    }
+
+    fn on_toggle_inspector(
+        &mut self,
+        _: &ToggleInspector,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.toggle_inspector(window, cx);
     }
 
     fn close_theme_menu(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
@@ -1734,6 +1790,7 @@ impl RootView {
                 self.history_open = !self.history_open;
                 self.history_confirmation = None;
                 if self.history_open {
+                    self.ensure_sidebar_open();
                     self.sync_history_selection();
                     window.focus(&self.history_focus);
                 } else {
@@ -1743,6 +1800,7 @@ impl RootView {
                 Ok(())
             }
             NativeAction::Fork => {
+                self.ensure_sidebar_open();
                 self.history_open = true;
                 self.sync_history_selection();
                 self.history_confirmation = None;
@@ -1751,6 +1809,7 @@ impl RootView {
                 Ok(())
             }
             NativeAction::Clone => {
+                self.ensure_sidebar_open();
                 self.history_open = true;
                 self.sync_history_selection();
                 self.history_confirmation = Some(HistoryConfirmation::Clone);

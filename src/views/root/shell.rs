@@ -1,7 +1,12 @@
-use gpui::{AnyElement, SharedString, deferred, svg};
+use std::time::Duration;
+
+use gpui::{Animation, AnimationExt, AnyElement, SharedString, deferred, ease_out_quint, svg};
 
 use super::shared::{action_id, runtime_operation_label, short_path};
 use super::*;
+
+/// Subtle open/close duration; keep under 300ms per GPUI motion guidance.
+const SIDEBAR_MOTION_MS: u64 = 220;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TitlebarStatusTone {
@@ -47,6 +52,8 @@ pub(super) fn titlebar(
     rename_open: bool,
     rename_enabled: bool,
     theme_menu_open: bool,
+    sidebar_open: bool,
+    inspector_open: bool,
     cx: &mut Context<RootView>,
 ) -> impl IntoElement {
     let action = projection.action;
@@ -72,6 +79,7 @@ pub(super) fn titlebar(
                 .gap(px(12.0))
                 .min_w_0()
                 .flex_1()
+                .child(sidebar_toggle_button(sidebar_open, cx))
                 .child(
                     div()
                         .font_family(theme::main())
@@ -188,6 +196,7 @@ pub(super) fn titlebar(
                         .flex_shrink_0()
                         .child("|"),
                 )
+                .child(inspector_toggle_button(inspector_open, cx))
                 .child(
                     div()
                         .relative()
@@ -235,20 +244,20 @@ pub(super) fn titlebar(
                                     view.toggle_theme_menu(window, cx)
                                 }))
                                 .child(
-                                    div()
-                                        .font_family(theme::mono())
-                                        .text_size(theme::text_size(10.0))
+                                    svg()
+                                        .path(match active_theme.mode() {
+                                            theme::ThemeMode::Dark => "icons/moon.svg",
+                                            theme::ThemeMode::Light => "icons/sun.svg",
+                                        })
+                                        .size(px(13.0))
+                                        .flex_shrink_0()
                                         .text_color(
                                             if active_theme.mode() == theme::ThemeMode::Light {
                                                 theme::data()
                                             } else {
                                                 theme::smoke()
                                             },
-                                        )
-                                        .child(match active_theme.mode() {
-                                            theme::ThemeMode::Dark => "D",
-                                            theme::ThemeMode::Light => "L",
-                                        }),
+                                        ),
                                 )
                                 .child(active_theme.label())
                                 .child(
@@ -358,9 +367,20 @@ fn theme_select_section(
                 .flex()
                 .flex_row()
                 .items_center()
+                .gap(px(6.0))
                 .bg(theme::canvas())
                 .border_b_1()
                 .border_color(theme::panel_hover())
+                .child(
+                    svg()
+                        .path(match mode {
+                            theme::ThemeMode::Dark => "icons/moon.svg",
+                            theme::ThemeMode::Light => "icons/sun.svg",
+                        })
+                        .size(px(11.0))
+                        .flex_shrink_0()
+                        .text_color(theme::smoke()),
+                )
                 .child(
                     div()
                         .font_family(theme::mono())
@@ -594,6 +614,8 @@ pub(super) struct SessionsPanelParams<'a> {
     pub(super) project_switch_enabled: bool,
     pub(super) conversation: &'a ConversationProjection,
     pub(super) history_open: bool,
+    pub(super) sidebar_open: bool,
+    pub(super) sidebar_motion_key: u64,
     pub(super) scroll: &'a ScrollHandle,
 }
 
@@ -611,6 +633,8 @@ pub(super) fn sessions_panel(
         project_switch_enabled,
         conversation,
         history_open,
+        sidebar_open,
+        sidebar_motion_key,
         scroll,
     } = params;
     let wheel_root = cx.entity();
@@ -628,9 +652,13 @@ pub(super) fn sessions_panel(
     let export_enabled = session_actions_enabled && catalog.current_session_file.is_some();
     const SIDE_PAD: f32 = 12.0;
 
-    div()
-        .w(px(theme::SIDE_W))
-        .flex_shrink_0()
+    let expanded_w = theme::SIDE_W;
+    let target_w = if sidebar_open { expanded_w } else { 0.0 };
+
+    // Fixed-width body so collapse clips instead of reflowing labels mid-transition.
+    let body = div()
+        .id("sessions-panel-body")
+        .w(px(expanded_w))
         .h_full()
         .flex()
         .flex_col()
@@ -683,7 +711,8 @@ pub(super) fn sessions_panel(
                             false,
                             catalog.status != CatalogStatus::Loading,
                             Box::new(cx.listener(|view, _, _, cx| view.refresh_sessions(cx))),
-                        )),
+                        ))
+                        .child(sidebar_collapse_icon_button(cx)),
                 ),
         )
         .child(
@@ -844,6 +873,138 @@ pub(super) fn sessions_panel(
                         }))
                     },
                 )),
+        );
+
+    let shell = div()
+        .id("sessions-panel")
+        .h_full()
+        .flex_shrink_0()
+        .overflow_hidden()
+        .child(body);
+
+    if sidebar_motion_key == 0 {
+        shell.w(px(target_w)).into_any_element()
+    } else {
+        let open = sidebar_open;
+        shell
+            .with_animation(
+                ("sessions-sidebar", sidebar_motion_key),
+                Animation::new(Duration::from_millis(SIDEBAR_MOTION_MS))
+                    .with_easing(ease_out_quint()),
+                move |panel, delta| {
+                    let (from, to) = if open {
+                        (0.0, expanded_w)
+                    } else {
+                        (expanded_w, 0.0)
+                    };
+                    // Soft opacity with width so the rail doesn't hard-cut mid-slide.
+                    let fade = if open {
+                        0.55 + 0.45 * delta
+                    } else {
+                        1.0 - 0.45 * delta
+                    };
+                    panel.w(px(from + (to - from) * delta)).opacity(fade)
+                },
+            )
+            .into_any_element()
+    }
+}
+
+fn sidebar_toggle_button(open: bool, cx: &mut Context<RootView>) -> impl IntoElement {
+    div()
+        .id("toggle-sidebar")
+        .size(px(28.0))
+        .rounded(px(theme::RADIUS_SM))
+        .flex()
+        .items_center()
+        .justify_center()
+        .flex_shrink_0()
+        .bg(if open {
+            theme::panel_lift()
+        } else {
+            gpui::rgba(0x0000_0000)
+        })
+        .border_1()
+        .border_color(if open {
+            theme::edge_hard()
+        } else {
+            gpui::rgba(0x0000_0000)
+        })
+        .text_color(theme::bone_dim())
+        .tab_index(0)
+        .cursor_pointer()
+        .hover(|button| button.bg(theme::panel()).text_color(theme::bone()))
+        .active(|button| button.bg(theme::panel_lift()))
+        .on_click(cx.listener(|view, _, window, cx| view.toggle_sidebar(window, cx)))
+        .child(
+            svg()
+                .path("icons/sidebar.svg")
+                .size(px(14.0))
+                .text_color(if open {
+                    theme::data()
+                } else {
+                    theme::bone_dim()
+                }),
+        )
+}
+
+fn sidebar_collapse_icon_button(cx: &mut Context<RootView>) -> impl IntoElement {
+    div()
+        .id("collapse-sidebar")
+        .size(px(28.0))
+        .rounded(px(theme::RADIUS_SM))
+        .flex()
+        .items_center()
+        .justify_center()
+        .text_color(theme::bone_dim())
+        .tab_index(0)
+        .cursor_pointer()
+        .hover(|button| button.bg(theme::panel()).text_color(theme::bone()))
+        .active(|button| button.bg(theme::panel_lift()))
+        .on_click(cx.listener(|view, _, window, cx| view.toggle_sidebar(window, cx)))
+        .child(
+            svg()
+                .path("icons/chevron-left.svg")
+                .size(px(12.0))
+                .text_color(theme::ash()),
+        )
+}
+
+pub(super) fn inspector_toggle_button(open: bool, cx: &mut Context<RootView>) -> impl IntoElement {
+    div()
+        .id("toggle-inspector")
+        .size(px(28.0))
+        .rounded(px(theme::RADIUS_SM))
+        .flex()
+        .items_center()
+        .justify_center()
+        .flex_shrink_0()
+        .bg(if open {
+            theme::panel_lift()
+        } else {
+            gpui::rgba(0x0000_0000)
+        })
+        .border_1()
+        .border_color(if open {
+            theme::edge_hard()
+        } else {
+            gpui::rgba(0x0000_0000)
+        })
+        .text_color(theme::bone_dim())
+        .tab_index(0)
+        .cursor_pointer()
+        .hover(|button| button.bg(theme::panel()).text_color(theme::bone()))
+        .active(|button| button.bg(theme::panel_lift()))
+        .on_click(cx.listener(|view, _, window, cx| view.toggle_inspector(window, cx)))
+        .child(
+            svg()
+                .path("icons/inspector.svg")
+                .size(px(14.0))
+                .text_color(if open {
+                    theme::data()
+                } else {
+                    theme::bone_dim()
+                }),
         )
 }
 

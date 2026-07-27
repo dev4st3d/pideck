@@ -1,4 +1,9 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="none">
-  <path d="M3.25 3.25h5.5v5.5h-5.5z" stroke="currentColor" stroke-width="1.25" stroke-linejoin="round"/>
-  <path d="M7.25 7.25h5.5v5.5h-5.5z" stroke="currentColor" stroke-width="1.25" stroke-linejoin="round"/>
+  <!-- Soft back tile -->
+  <rect x="2.75" y="2.75" width="6.5" height="6.5" rx="1.2" fill="currentColor" opacity="0.12"/>
+  <!-- Soft front tile -->
+  <rect x="6.75" y="6.75" width="6.5" height="6.5" rx="1.2" fill="currentColor" opacity="0.2"/>
+  <!-- Crisp tiles -->
+  <rect x="2.75" y="2.75" width="6.5" height="6.5" rx="1.2" stroke="currentColor" stroke-width="1.2"/>
+  <rect x="6.75" y="6.75" width="6.5" height="6.5" rx="1.2" stroke="currentColor" stroke-width="1.2"/>
 </svg>

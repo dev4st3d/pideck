@@ -1,6 +1,14 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="none">
-  <circle cx="4" cy="4.5" r="1.5" stroke="currentColor" stroke-width="1.25"/>
-  <circle cx="12" cy="4.5" r="1.5" stroke="currentColor" stroke-width="1.25"/>
-  <circle cx="8" cy="11.5" r="1.5" stroke="currentColor" stroke-width="1.25"/>
-  <path d="M5.2 5.4 7 10.2M10.8 5.4 9 10.2" stroke="currentColor" stroke-width="1.25" stroke-linecap="round"/>
+  <!-- Soft links -->
+  <path d="M5.15 5.25 7.15 10.15M10.85 5.25 8.85 10.15" stroke="currentColor" stroke-width="1.15" stroke-linecap="round" opacity="0.35"/>
+  <!-- Soft node fills -->
+  <circle cx="4" cy="4.4" r="1.85" fill="currentColor" opacity="0.14"/>
+  <circle cx="12" cy="4.4" r="1.85" fill="currentColor" opacity="0.14"/>
+  <circle cx="8" cy="11.6" r="1.85" fill="currentColor" opacity="0.18"/>
+  <!-- Crisp links -->
+  <path d="M5.2 5.35 7.1 10.2M10.8 5.35 8.9 10.2" stroke="currentColor" stroke-width="1.15" stroke-linecap="round"/>
+  <!-- Crisp nodes -->
+  <circle cx="4" cy="4.4" r="1.55" stroke="currentColor" stroke-width="1.2"/>
+  <circle cx="12" cy="4.4" r="1.55" stroke="currentColor" stroke-width="1.2"/>
+  <circle cx="8" cy="11.6" r="1.55" stroke="currentColor" stroke-width="1.2"/>
 </svg>

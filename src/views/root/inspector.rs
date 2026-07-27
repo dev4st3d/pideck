@@ -1,7 +1,14 @@
+use std::time::Duration;
+
+use gpui::{Animation, AnimationExt, ease_out_quint};
+
 use super::shared::runtime_operation_label;
 use super::shared::{plural, short_path};
 use super::*;
 use crate::views::conversation::{TranscriptText, TranscriptTextCache};
+
+/// Matches the workspace sidebar motion; keep under 300ms per GPUI guidance.
+const INSPECTOR_MOTION_MS: u64 = 220;
 
 pub(super) struct InspectorParams<'a> {
     pub(super) projection: &'a ShellProjection,
@@ -13,6 +20,8 @@ pub(super) struct InspectorParams<'a> {
     pub(super) usage_tooltip_hovered: bool,
     pub(super) usage_tooltip_visible: bool,
     pub(super) usage_tooltip_epoch: u64,
+    pub(super) inspector_open: bool,
+    pub(super) inspector_motion_key: u64,
 }
 
 pub(super) fn inspector(
@@ -29,11 +38,18 @@ pub(super) fn inspector(
         usage_tooltip_hovered,
         usage_tooltip_visible,
         usage_tooltip_epoch,
+        inspector_open,
+        inspector_motion_key,
     } = params;
-    div()
-        .w(px(theme::INSPECT_W))
-        .flex_shrink_0()
+    let expanded_w = theme::INSPECT_W;
+    let target_w = if inspector_open { expanded_w } else { 0.0 };
+
+    // Fixed-width body so collapse clips instead of reflowing mid-transition.
+    let body = div()
+        .id("inspector-panel-body")
+        .w(px(expanded_w))
         .h_full()
+        .flex_shrink_0()
         .flex()
         .flex_col()
         .bg(theme::floor())
@@ -44,7 +60,10 @@ pub(super) fn inspector(
                 .px(px(16.0))
                 .h(px(theme::TITLE_H))
                 .flex()
+                .flex_row()
                 .items_center()
+                .justify_between()
+                .gap(px(8.0))
                 .border_b_1()
                 .border_color(theme::edge_soft())
                 .child(
@@ -54,7 +73,8 @@ pub(super) fn inspector(
                         .font_weight(FontWeight::BOLD)
                         .text_color(theme::bone_dim())
                         .child("Inspector"),
-                ),
+                )
+                .child(inspector_collapse_icon_button(cx)),
         )
         .child(
             div()
@@ -107,6 +127,66 @@ pub(super) fn inspector(
                                 .child(queue_panel(conversation)),
                         ),
                 ),
+        );
+
+    // Right-align body so width collapse clips from the left (slides off-screen right).
+    let shell = div()
+        .id("inspector-panel")
+        .h_full()
+        .flex_shrink_0()
+        .overflow_hidden()
+        .flex()
+        .flex_row()
+        .justify_end()
+        .child(body);
+
+    if inspector_motion_key == 0 {
+        shell.w(px(target_w)).into_any_element()
+    } else {
+        let open = inspector_open;
+        shell
+            .with_animation(
+                ("inspector-panel", inspector_motion_key),
+                Animation::new(Duration::from_millis(INSPECTOR_MOTION_MS))
+                    .with_easing(ease_out_quint()),
+                move |panel, delta| {
+                    let (from, to) = if open {
+                        (0.0, expanded_w)
+                    } else {
+                        (expanded_w, 0.0)
+                    };
+                    let fade = if open {
+                        0.55 + 0.45 * delta
+                    } else {
+                        1.0 - 0.45 * delta
+                    };
+                    panel.w(px(from + (to - from) * delta)).opacity(fade)
+                },
+            )
+            .into_any_element()
+    }
+}
+
+fn inspector_collapse_icon_button(cx: &mut Context<RootView>) -> impl IntoElement {
+    div()
+        .id("collapse-inspector")
+        .size(px(28.0))
+        .rounded(px(theme::RADIUS_SM))
+        .flex()
+        .items_center()
+        .justify_center()
+        .flex_shrink_0()
+        .text_color(theme::bone_dim())
+        .tab_index(0)
+        .cursor_pointer()
+        .hover(|button| button.bg(theme::panel()).text_color(theme::bone()))
+        .active(|button| button.bg(theme::panel_lift()))
+        .on_click(cx.listener(|view, _, window, cx| view.toggle_inspector(window, cx)))
+        .child(
+            svg()
+                .path("icons/chevron-right.svg")
+                .size(px(12.0))
+                .text_color(theme::ash()),
         )
 }
 

@@ -51,12 +51,9 @@ pub(super) fn composer_bar(
 
     div()
         .flex_shrink_0()
-        .bg(theme::floor())
-        .border_t_1()
-        .border_color(theme::edge_hard())
         .px(px(theme::STREAM_PAD_X))
-        .pt(px(6.0))
-        .pb(px(8.0))
+        .pt(px(8.0))
+        .pb(px(10.0))
         // Overlay host: popups are absolute and must not grow this bar's layout height.
         .relative()
         .child(
