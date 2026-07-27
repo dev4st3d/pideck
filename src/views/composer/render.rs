@@ -1,10 +1,23 @@
+use std::sync::Arc;
+use std::time::Duration;
+
 use gpui::{
-    AnyElement, Context, CursorStyle, FontWeight, IntoElement, MouseButton, div, prelude::*, px,
+    Animation, AnimationExt, AnyElement, Context, CursorStyle, FontWeight, Image, IntoElement,
+    MouseButton, ObjectFit, SharedString, div, ease_out_quint, img, prelude::*, px, rgba,
 };
 
 use super::element::ComposerTextElement;
 use super::{Composer, ComposerAvailability, ComposerChrome, ComposerEvent, ComposerFeedback};
 use crate::theme;
+
+/// On-screen size of each attached-image chip (square).
+const ATTACHMENT_CHIP: f32 = 56.0;
+/// Soft pop when an image is pasted into the composer.
+const ATTACHMENT_POP_MS: u64 = 220;
+/// Whole strip fade/lift when the first attachment appears.
+const ATTACHMENT_STRIP_MS: u64 = 180;
+/// Corner remove control diameter.
+const ATTACHMENT_REMOVE: f32 = 18.0;
 
 impl Composer {
     pub(super) fn render_view(&mut self, cx: &mut Context<Self>) -> AnyElement {
@@ -474,148 +487,208 @@ impl Composer {
     }
 
     fn render_attachments(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let rows = self
-            .images
-            .iter()
-            .enumerate()
-            .map(|(index, image)| {
-                let format = image
-                    .mime_type
-                    .strip_prefix("image/")
-                    .unwrap_or(&image.mime_type)
-                    .to_ascii_uppercase();
-                let bytes = super::decoded_image_len(&image.data);
+        let can_remove = !self.disabled;
+        let strip_key = self.strip_motion_key();
+        let id_prefix = self.id_prefix.clone();
+        let count = self.images.len();
+        let mut chips = Vec::with_capacity(count);
+        for index in 0..count {
+            let mime = self.images[index].mime_type.clone();
+            let format = mime
+                .strip_prefix("image/")
+                .unwrap_or(&mime)
+                .to_ascii_uppercase();
+            let thumb = self.thumbnail(index);
+            let attach_token = self.attach_token(index);
+
+            // Fixed layout slot so the pop scale does not shove neighboring chips.
+            chips.push(
                 div()
-                    .id(gpui::SharedString::from(format!(
-                        "{}-image-{index}",
-                        self.id_prefix
-                    )))
-                    .w_full()
-                    .min_h(px(28.0))
+                    .size(px(ATTACHMENT_CHIP))
+                    .flex_shrink_0()
                     .flex()
-                    .flex_row()
                     .items_center()
-                    .justify_between()
-                    .gap(px(12.0))
-                    .child(
-                        div()
-                            .min_w_0()
-                            .flex()
-                            .flex_row()
-                            .items_baseline()
-                            .gap(px(8.0))
-                            .child(
-                                div()
-                                    .font_family(theme::sans())
-                                    .text_size(theme::text_size(theme::T_UI_SM))
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(theme::bone_dim())
-                                    .child(format!("Image {}", index + 1)),
-                            )
-                            .child(
-                                div()
-                                    .font_family(theme::mono())
-                                    .text_size(theme::text_size(theme::T_TINY))
-                                    .text_color(theme::smoke())
-                                    .child(format!("{format} · {}", format_image_bytes(bytes))),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .gap(px(4.0))
-                            .child(
-                                div()
-                                    .id(gpui::SharedString::from(format!(
-                                        "{}-image-{index}-preview",
-                                        self.id_prefix
-                                    )))
-                                    .tab_index(0)
-                                    .cursor_pointer()
-                                    .px(px(6.0))
-                                    .py(px(3.0))
-                                    .text_color(theme::bone_dim())
-                                    .hover(|button| button.text_color(theme::bone()))
-                                    .focus(|button| button.text_color(theme::focus()))
-                                    .on_key_down(cx.listener(
-                                        move |view, event: &gpui::KeyDownEvent, _, cx| {
-                                            if matches!(
-                                                event.keystroke.key.as_str(),
-                                                "enter" | "space"
-                                            ) {
-                                                cx.stop_propagation();
-                                                view.preview_image(index, cx);
-                                            }
-                                        },
-                                    ))
-                                    .on_click(cx.listener(move |view, _, _, cx| {
-                                        view.preview_image(index, cx);
-                                    }))
-                                    .child(
-                                        div()
-                                            .font_family(theme::main())
-                                            .text_size(theme::text_size(theme::T_TINY))
-                                            .font_weight(FontWeight::SEMIBOLD)
-                                            .child("View"),
-                                    ),
-                            )
-                            .child(
-                                div()
-                                    .id(gpui::SharedString::from(format!(
-                                        "{}-image-{index}-remove",
-                                        self.id_prefix
-                                    )))
-                                    .tab_index(0)
-                                    .cursor_pointer()
-                                    .px(px(6.0))
-                                    .py(px(3.0))
-                                    .text_color(theme::ash())
-                                    .hover(|button| button.text_color(theme::error()))
-                                    .focus(|button| button.text_color(theme::focus()))
-                                    .on_key_down(cx.listener(
-                                        move |view, event: &gpui::KeyDownEvent, _, cx| {
-                                            if matches!(
-                                                event.keystroke.key.as_str(),
-                                                "enter" | "space"
-                                            ) {
-                                                cx.stop_propagation();
-                                                view.remove_image(index, cx);
-                                            }
-                                        },
-                                    ))
-                                    .on_click(cx.listener(move |view, _, _, cx| {
-                                        view.remove_image(index, cx);
-                                    }))
-                                    .child(
-                                        div()
-                                            .font_family(theme::main())
-                                            .text_size(theme::text_size(theme::T_TINY))
-                                            .font_weight(FontWeight::SEMIBOLD)
-                                            .child("Remove"),
-                                    ),
-                            ),
-                    )
-            })
-            .collect::<Vec<_>>();
+                    .justify_center()
+                    .child(self.render_attachment_chip(
+                        index,
+                        attach_token,
+                        format,
+                        thumb,
+                        can_remove,
+                        cx,
+                    ))
+                    .into_any_element(),
+            );
+        }
 
-        div()
+        let strip = div()
+            .id(SharedString::from(format!("{id_prefix}-attachments")))
             .w_full()
-            .px(px(10.0))
-            .py(px(5.0))
-            .bg(theme::canvas())
+            // Extra top/side padding so the corner × can sit slightly outside the chip.
+            .px(px(12.0))
+            .pt(px(12.0))
+            .pb(px(4.0))
             .flex()
-            .flex_col()
-            .children(rows)
-            .into_any_element()
-    }
-}
+            .flex_row()
+            .flex_wrap()
+            .items_start()
+            .gap(px(12.0))
+            .children(chips);
 
-fn format_image_bytes(bytes: usize) -> String {
-    if bytes >= 1024 * 1024 {
-        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
-    } else {
-        format!("{} KB", bytes.div_ceil(1024))
+        if strip_key == 0 {
+            strip.into_any_element()
+        } else {
+            let enter_id = SharedString::from(format!("{id_prefix}-attachments-enter"));
+            strip
+                .with_animation(
+                    (enter_id, strip_key as usize),
+                    Animation::new(Duration::from_millis(ATTACHMENT_STRIP_MS))
+                        .with_easing(ease_out_quint()),
+                    |strip, t| strip.opacity(0.4 + 0.6 * t).mt(px(5.0 * (1.0 - t))),
+                )
+                .into_any_element()
+        }
+    }
+
+    fn render_attachment_chip(
+        &mut self,
+        index: usize,
+        attach_token: u64,
+        format: String,
+        thumb: Option<Arc<Image>>,
+        can_remove: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let has_thumb = thumb.is_some();
+        let chip = div()
+            .id(SharedString::from(format!(
+                "{}-image-{index}",
+                self.id_prefix
+            )))
+            .relative()
+            .size(px(ATTACHMENT_CHIP))
+            .rounded(px(theme::RADIUS))
+            .border_1()
+            .border_color(rgba(0x0000_0000))
+            .tab_index(0)
+            .cursor_pointer()
+            .focus(|chip| chip.border_color(theme::focus()))
+            .on_key_down(cx.listener(move |view, event: &gpui::KeyDownEvent, _, cx| {
+                match event.keystroke.key.as_str() {
+                    "enter" | "space" => {
+                        cx.stop_propagation();
+                        view.preview_image(index, cx);
+                    }
+                    "backspace" | "delete" if can_remove => {
+                        cx.stop_propagation();
+                        view.remove_image(index, cx);
+                    }
+                    _ => {}
+                }
+            }))
+            .on_click(cx.listener(move |view, _, _, cx| {
+                view.preview_image(index, cx);
+            }))
+            .child(
+                div()
+                    .size_full()
+                    .rounded(px(theme::RADIUS))
+                    .border_1()
+                    .border_color(theme::edge_soft())
+                    .bg(theme::panel())
+                    .overflow_hidden()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .hover(|frame| frame.border_color(theme::edge_hard()))
+                    .when_some(thumb, |frame, source| {
+                        frame.child(img(source).size_full().object_fit(ObjectFit::Cover))
+                    })
+                    .when(!has_thumb, |frame| {
+                        frame.bg(theme::canvas()).child(
+                            div()
+                                .font_family(theme::mono())
+                                .text_size(theme::text_size(theme::T_TINY))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(theme::ash())
+                                .child(format),
+                        )
+                    }),
+            )
+            .when(can_remove, |chip| {
+                chip.child(
+                    div()
+                        .id(SharedString::from(format!(
+                            "{}-image-{index}-remove",
+                            self.id_prefix
+                        )))
+                        .absolute()
+                        .top(px(-5.0))
+                        .right(px(-5.0))
+                        .size(px(ATTACHMENT_REMOVE))
+                        .rounded(px(ATTACHMENT_REMOVE / 2.0))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        // Dark translucent disc stays readable on light and dark thumbs.
+                        .bg(rgba(0x1210_0ed9))
+                        .border_1()
+                        .border_color(rgba(0xffff_ff33))
+                        .text_color(rgba(0xffff_fff0))
+                        .tab_index(0)
+                        .cursor_pointer()
+                        .hover(|button| {
+                            button
+                                .bg(theme::error())
+                                .border_color(theme::error())
+                                .text_color(theme::bone())
+                        })
+                        .focus(|button| {
+                            button
+                                .border_color(theme::focus())
+                                .text_color(theme::focus())
+                        })
+                        .on_key_down(cx.listener(move |view, event: &gpui::KeyDownEvent, _, cx| {
+                            if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                                cx.stop_propagation();
+                                view.remove_image(index, cx);
+                            }
+                        }))
+                        .on_click(cx.listener(move |view, _, _, cx| {
+                            cx.stop_propagation();
+                            view.remove_image(index, cx);
+                        }))
+                        .child(
+                            div()
+                                .relative()
+                                .top(px(-0.5))
+                                .font_family(theme::sans())
+                                .text_size(theme::text_size(theme::T_TINY))
+                                .font_weight(FontWeight::BOLD)
+                                .line_height(gpui::relative(1.0))
+                                .child("×"),
+                        ),
+                )
+            });
+
+        if attach_token == 0 {
+            // Restored drafts stay settled (no pop).
+            chip.into_any_element()
+        } else {
+            // Soft pop on paste: fade, rise, and grow into the fixed slot.
+            let pop_id = SharedString::from(format!("{}-image-pop", self.id_prefix));
+            chip.with_animation(
+                (pop_id, attach_token as usize),
+                Animation::new(Duration::from_millis(ATTACHMENT_POP_MS))
+                    .with_easing(ease_out_quint()),
+                |chip, t| {
+                    let scale = 0.86 + 0.14 * t;
+                    let size = ATTACHMENT_CHIP * scale;
+                    let lift = 8.0 * (1.0 - t);
+                    chip.size(px(size)).opacity(0.18 + 0.82 * t).mt(px(lift))
+                },
+            )
+            .into_any_element()
+        }
     }
 }

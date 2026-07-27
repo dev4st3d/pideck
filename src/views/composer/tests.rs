@@ -232,6 +232,50 @@ fn composer_emits_preview_for_an_attached_image_only(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn composer_builds_square_thumbnails_for_decodable_images(cx: &mut TestAppContext) {
+    cx.update(|cx| cx.bind_keys(composer_key_bindings()));
+    let (harness, cx) = cx.add_window_view(ComposerHarness::new);
+    let composer = harness.read_with(cx, |harness, _| harness.composer.clone());
+
+    let source = image::RgbaImage::from_pixel(24, 12, image::Rgba([220, 40, 40, 255]));
+    let mut encoded = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgba8(source)
+        .write_to(&mut encoded, image::ImageFormat::Png)
+        .expect("encode test png");
+    let bytes = encoded.into_inner();
+    let image = gpui::Image::from_bytes(gpui::ImageFormat::Png, bytes);
+
+    cx.write_to_clipboard(ClipboardItem::new_image(&image));
+    cx.dispatch_action(ComposerPaste);
+
+    assert!(composer.read_with(cx, |composer, _| composer.thumbnail(0).is_some()));
+    assert!(composer.read_with(cx, |composer, _| composer.thumbnail(1).is_none()));
+    // Fresh paste should get a non-zero motion token for the pop-in animation.
+    assert_ne!(
+        composer.read_with(cx, |composer, _| composer.attach_token(0)),
+        0
+    );
+    assert_ne!(
+        composer.read_with(cx, |composer, _| composer.strip_motion_key()),
+        0
+    );
+
+    let restored = composer.read_with(cx, |composer, _| composer.images().to_vec());
+    composer.update(cx, |composer, cx| {
+        composer.restore_draft("", restored, cx);
+    });
+    // Restored drafts settle immediately (token 0 skips the pop).
+    assert_eq!(
+        composer.read_with(cx, |composer, _| composer.attach_token(0)),
+        0
+    );
+
+    composer.update(cx, |composer, cx| composer.remove_image(0, cx));
+    assert!(!composer.read_with(cx, |composer, _| composer.has_images()));
+    assert!(composer.read_with(cx, |composer, _| composer.thumbnail(0).is_none()));
+}
+
+#[gpui::test]
 fn composer_ime_uses_utf16_ranges_and_retains_disabled_draft(cx: &mut TestAppContext) {
     let (harness, cx) = cx.add_window_view(ComposerHarness::new);
     let composer = harness.read_with(cx, |harness, _| harness.composer.clone());

@@ -5,13 +5,15 @@ mod render;
 mod tests;
 
 use std::ops::Range;
+use std::sync::Arc;
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use gpui::{
     ClipboardEntry, ClipboardItem, Context, EntityInputHandler, EventEmitter, FocusHandle,
-    Focusable, IntoElement, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Render,
-    ScrollWheelEvent, SharedString, UTF16Selection, Window, px,
+    Focusable, Image, ImageFormat, IntoElement, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+    Pixels, Render, ScrollWheelEvent, SharedString, UTF16Selection, Window, px,
 };
+use image::GenericImageView;
 
 use self::buffer::TextBuffer;
 use self::element::EditorLayout;
@@ -26,6 +28,8 @@ use crate::state::runtime::{PromptImage, SubmissionKind};
 
 const MAX_IMAGE_ATTACHMENTS: usize = 4;
 const MAX_IMAGE_BYTES: usize = 5 * 1024 * 1024;
+/// Pixel edge length for cached square attachment thumbs (display is smaller).
+const ATTACHMENT_THUMB_PX: u32 = 96;
 
 fn decoded_image_len(data: &str) -> usize {
     let padding = data
@@ -38,6 +42,33 @@ fn decoded_image_len(data: &str) -> usize {
         .saturating_div(4)
         .saturating_mul(3)
         .saturating_sub(padding)
+}
+
+/// Center-crop to a square and re-encode a small PNG for chip previews.
+fn attachment_thumbnail(image: &PromptImage) -> Option<Arc<Image>> {
+    let bytes = STANDARD.decode(&image.data).ok()?;
+    if bytes.is_empty() {
+        return None;
+    }
+    let decoded = image::load_from_memory(&bytes).ok()?;
+    let (width, height) = decoded.dimensions();
+    if width == 0 || height == 0 {
+        return None;
+    }
+    let side = width.min(height);
+    let x = (width - side) / 2;
+    let y = (height - side) / 2;
+    let square = decoded.crop_imm(x, y, side, side).resize_exact(
+        ATTACHMENT_THUMB_PX,
+        ATTACHMENT_THUMB_PX,
+        image::imageops::FilterType::Triangle,
+    );
+    let mut encoded = std::io::Cursor::new(Vec::new());
+    square
+        .write_to(&mut encoded, image::ImageFormat::Png)
+        .ok()?;
+    let out = encoded.into_inner();
+    (!out.is_empty()).then(|| Arc::new(Image::from_bytes(ImageFormat::Png, out)))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -97,6 +128,13 @@ pub struct Composer {
     pub(super) focus_handle: FocusHandle,
     buffer: TextBuffer,
     images: Vec<PromptImage>,
+    /// Compressed square previews parallel to `images` (None when decode fails).
+    thumbnails: Vec<Option<Arc<Image>>>,
+    /// Stable ids for enter animations; bump only when a chip is newly attached.
+    attach_tokens: Vec<u64>,
+    attach_seq: u64,
+    /// Bumped when the attachment strip appears (0 → N) so the row can soft-enter.
+    strip_motion_key: u64,
     image_bytes: usize,
     placeholder: SharedString,
     masked: bool,
@@ -123,6 +161,10 @@ impl Composer {
             focus_handle: cx.focus_handle(),
             buffer: TextBuffer::default(),
             images: Vec::new(),
+            thumbnails: Vec::new(),
+            attach_tokens: Vec::new(),
+            attach_seq: 0,
+            strip_motion_key: 0,
             image_bytes: 0,
             placeholder: "Message Pi…  @ file  / command  ! shell".into(),
             masked: false,
@@ -221,6 +263,54 @@ impl Composer {
         &self.images
     }
 
+    pub(super) fn thumbnail(&self, index: usize) -> Option<Arc<Image>> {
+        self.thumbnails.get(index).and_then(|thumb| thumb.clone())
+    }
+
+    pub(super) fn attach_token(&self, index: usize) -> u64 {
+        self.attach_tokens.get(index).copied().unwrap_or(0)
+    }
+
+    pub(super) fn strip_motion_key(&self) -> u64 {
+        self.strip_motion_key
+    }
+
+    fn next_attach_token(&mut self) -> u64 {
+        self.attach_seq = self.attach_seq.wrapping_add(1).max(1);
+        self.attach_seq
+    }
+
+    fn note_strip_appeared(&mut self) {
+        if self.images.is_empty() {
+            self.strip_motion_key = self.strip_motion_key.wrapping_add(1).max(1);
+        }
+    }
+
+    fn set_thumbnail_slot(&mut self, index: usize, thumb: Option<Arc<Image>>) {
+        if let Some(slot) = self.thumbnails.get_mut(index) {
+            *slot = thumb;
+            return;
+        }
+        while self.thumbnails.len() < index {
+            self.thumbnails.push(None);
+        }
+        self.thumbnails.push(thumb);
+    }
+
+    fn ensure_attach_token_slot(&mut self, index: usize) {
+        while self.attach_tokens.len() <= index {
+            let token = self.next_attach_token();
+            self.attach_tokens.push(token);
+        }
+    }
+
+    fn push_attachment(&mut self, prompt: PromptImage) {
+        self.thumbnails.push(attachment_thumbnail(&prompt));
+        let token = self.next_attach_token();
+        self.attach_tokens.push(token);
+        self.images.push(prompt);
+    }
+
     pub fn replace_image(
         &mut self,
         index: usize,
@@ -240,7 +330,11 @@ impl Composer {
             return Err("The edited image would exceed the 5 MB attachment limit.");
         }
 
+        let thumb = attachment_thumbnail(&image);
         self.images[index] = image;
+        self.set_thumbnail_slot(index, thumb);
+        // Keep attach_token stable so pencil edits do not re-pop the chip.
+        self.ensure_attach_token_slot(index);
         self.image_bytes = next_total;
         cx.notify();
         Ok(())
@@ -264,6 +358,9 @@ impl Composer {
             .iter()
             .map(|image| decoded_image_len(&image.data))
             .sum();
+        self.thumbnails = images.iter().map(attachment_thumbnail).collect();
+        // Restored drafts should appear settled, not re-pop like a fresh paste.
+        self.attach_tokens = images.iter().map(|_| 0).collect();
         self.images = images;
         self.update_disabled();
         cx.notify();
@@ -344,6 +441,8 @@ impl Composer {
         self.update_disabled();
         if cleared {
             self.images.clear();
+            self.thumbnails.clear();
+            self.attach_tokens.clear();
             self.image_bytes = 0;
             self.after_edit(cx);
         } else {
@@ -540,8 +639,9 @@ impl Composer {
             self.feedback =
                 ComposerFeedback::Rejected("Attached images must total 5 MB or less.".to_owned());
         } else {
+            self.note_strip_appeared();
             self.image_bytes += image.bytes.len();
-            self.images.push(PromptImage {
+            self.push_attachment(PromptImage {
                 data: STANDARD.encode(&image.bytes),
                 mime_type: image.format.mime_type().to_owned(),
             });
@@ -560,6 +660,12 @@ impl Composer {
             return;
         }
         let image = self.images.remove(index);
+        if index < self.thumbnails.len() {
+            self.thumbnails.remove(index);
+        }
+        if index < self.attach_tokens.len() {
+            self.attach_tokens.remove(index);
+        }
         self.image_bytes = self
             .image_bytes
             .saturating_sub(decoded_image_len(&image.data));
