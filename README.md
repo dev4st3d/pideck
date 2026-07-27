@@ -9,7 +9,7 @@ Phases 9 through 16 complete run-control recovery UX, Pi's persisted session lif
 The visible shell now shows only live or explicitly Loading, Awaiting, Unknown, stale, stopped, and error values:
 
 - active session, lifecycle, and cost in the title bar;
-- a persistent, collapsible project sidebar with background thread catalogs, native folder picking, project switching/removal, and canonical active-workspace state;
+- a persistent, collapsible project sidebar with background thread catalogs, native folder picking, project switching/removal, canonical active-workspace state, and live per-thread foreground/background work status;
 - context, input/output tokens, cache usage, cost, model, and thinking in the inspector;
 - one applicable Connect, Retry, or Stop action with pointer and keyboard paths;
 - a native multiline composer with model and thinking pickers in the prompt chrome, grapheme-safe editing, IME, clipboard, selection, undo, wrapping, scrolling, and visible pending/accepted/rejected/uncertain delivery state;
@@ -42,7 +42,7 @@ Accepted idle input uses `prompt`. While Pi is running, the primary action uses 
 
 Discovered extension, prompt-template, and skill commands always invoke through Pi's `prompt` RPC. Prompt/skill commands use `streamingBehavior` while a run is active; extension commands execute immediately as Pi specifies. Exact dynamic-command arguments are preserved. Known TUI-only built-ins such as `/login`, `/logout`, `/resume`, `/share`, and `/theme` are rejected locally instead of becoming ordinary model prompts.
 
-Rendered Markdown links are styled but not yet clickable. There is no share or concurrent top-level session process UI. Resource Center management is deliberately read-mostly; package mutation remains unavailable. Main-session queue items are authoritative and read-only because stock Pi RPC has no remove/restore operation. Reversible trash stays unavailable until both catalog ownership and a platform trash provider are proven.
+Rendered Markdown links are styled but not yet clickable. There is no share UI. Saved threads can run in parallel: opening another thread reuses an idle same-project Pi runtime for the original fast switch when no local state must be preserved, or starts an independent supervised runtime when prior work must continue in the background; the sidebar exposes working, cancelling, opening, and attention states. Resource Center management is deliberately read-mostly; package mutation remains unavailable. Main-session queue items are authoritative and read-only because stock Pi RPC has no remove/restore operation. Reversible trash stays unavailable until both catalog ownership and a platform trash provider are proven.
 
 ## Prerequisite and launch
 
@@ -126,5 +126,7 @@ Typography uses installed system fonts. Open `/settings` and choose separate Mai
 - `src/views/controls.rs` - focus-visible recovery control and inspector rows
 
 The worker uses a controller attempt generation in addition to `ConnectionGeneration` and `SessionEpoch`. A retry starts a fresh process and generation; prior-attempt startup/results cannot overwrite it, and a late obsolete client is stopped immediately. Recovery hydrates state and never resends a prompt.
+
+`RootView` owns a bounded pool of thread runtimes rather than one eager runtime per project. Up to eight live thread runtimes may coexist; idle draft-free navigation reuses a same-project process for pre-pool switch latency, running and connecting threads remain supervised in the background, retained controllers keep their hydrated transcript/history/model state so revisits render immediately, the least-recently-used evictable runtime is retired only when the pool needs room, and unsent drafts remain attached to their thread. Each runtime/SDK bridge pair receives a unique orchestration endpoint so parallel threads in the same workspace cannot replace each other's adapter connection.
 
 Initial, recovery, and session-replacement hydration request `get_state` first, then messages, durable entries, session statistics, commands, available models, and fork candidates. Tree state is rebuilt from the flat durable entries instead of requesting Pi's recursively nested tree response, so long sessions cannot exceed the JSON decoder's recursion limit. Opening a saved session starts a fresh supervised connection directly on that file and retires the prior generation off the UI thread, preventing an in-process session handoff from leaving the shell disconnected. Fork, clone, import, and same-file navigation advance the session epoch before rebuilding every session-bound surface. Recovery resumes the persisted session and requests entries after the last durable cursor; an invalid cursor falls back to one full rebuild. Optional facet failures preserve prior valid values and do not make an otherwise ready connection unusable. Window/controller release requests shutdown without waiting on the GPUI event loop.

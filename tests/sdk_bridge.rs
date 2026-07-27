@@ -9,6 +9,7 @@ use std::time::Duration;
 use pi_gui::services::pi_process::discover_and_probe;
 use pi_gui::services::sdk_bridge::{
     BridgeCommand, BridgeErrorKind, ORCHESTRATION_PIPE_ENV, SdkBridgeClient, SdkBridgeConfig,
+    allocate_orchestration_endpoint,
 };
 
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(1);
@@ -45,9 +46,24 @@ fn temp_dir() -> PathBuf {
     path
 }
 
+#[test]
+fn orchestration_endpoints_are_stable_per_instance_and_unique_between_threads() {
+    let workspace = Path::new("synthetic-workspace");
+    let first = pi_gui::services::sdk_bridge::orchestration_endpoint(workspace, 41);
+    let same = pi_gui::services::sdk_bridge::orchestration_endpoint(workspace, 41);
+    let second = pi_gui::services::sdk_bridge::orchestration_endpoint(workspace, 42);
+
+    assert_eq!(first, same);
+    assert_ne!(first, second);
+}
+
 fn bridge_config(workspace: &Path) -> Option<SdkBridgeConfig> {
     let installation = discover_and_probe(None, Duration::from_secs(5)).ok()?;
-    SdkBridgeConfig::from_installation(&installation, workspace.to_path_buf())
+    SdkBridgeConfig::from_installation(
+        &installation,
+        workspace.to_path_buf(),
+        allocate_orchestration_endpoint(workspace),
+    )
 }
 
 fn write_branched_session(path: &Path, cwd: &Path) {
@@ -374,6 +390,7 @@ export function loadProjectContextFiles() {
         sdk_root,
         script: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("bridge/pi-bridge.mjs"),
         working_directory: root.to_path_buf(),
+        orchestration_endpoint: allocate_orchestration_endpoint(root),
     }
 }
 

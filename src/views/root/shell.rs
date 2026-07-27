@@ -381,6 +381,7 @@ pub(super) struct SessionsPanelParams<'a> {
     pub(super) catalog: &'a CatalogProjection,
     pub(super) projects: &'a ProjectRegistry,
     pub(super) project_catalogs: &'a HashMap<String, ProjectCatalogCache>,
+    pub(super) thread_statuses: &'a HashMap<String, ThreadRuntimeStatus>,
     pub(super) project_feedback: Option<&'a str>,
     pub(super) project_picker_pending: bool,
     pub(super) project_switch_enabled: bool,
@@ -398,6 +399,7 @@ pub(super) fn sessions_panel(
         catalog,
         projects,
         project_catalogs,
+        thread_statuses,
         project_feedback,
         project_picker_pending,
         project_switch_enabled,
@@ -412,6 +414,7 @@ pub(super) fn sessions_panel(
         RuntimeLifecycle::Ready | RuntimeLifecycle::Settled
     ) && conversation.pending_operation.is_none()
         && !catalog.switching;
+    let new_thread_enabled = projects.active_path().is_dir();
     let current_path = catalog.current_session_file.as_ref();
     let pending_path = catalog.pending_session_file.as_ref();
     let project_count = projects.projects().len().to_string();
@@ -481,7 +484,7 @@ pub(super) fn sessions_panel(
                         .child(controls::tone_button(
                             "new-session",
                             "New thread",
-                            session_actions_enabled,
+                            new_thread_enabled,
                             controls::ControlTone::Normal,
                             Box::new(cx.listener(|view, _, window, cx| {
                                 let _ = view.execute_native_action(
@@ -623,8 +626,8 @@ pub(super) fn sessions_panel(
                                         .get(&project_key(&project.path)),
                                     current_path,
                                     pending_path,
-                                    session_actions_enabled,
                                     project_switch_enabled,
+                                    thread_statuses,
                                     can_remove: projects.projects().len() > 1,
                                 },
                                 cx,
@@ -682,9 +685,9 @@ struct ProjectGroupParams<'a> {
     cached_catalog: Option<&'a ProjectCatalogCache>,
     current_path: Option<&'a PathBuf>,
     pending_path: Option<&'a PathBuf>,
-    session_actions_enabled: bool,
     project_switch_enabled: bool,
     can_remove: bool,
+    thread_statuses: &'a HashMap<String, ThreadRuntimeStatus>,
 }
 
 fn project_group(params: ProjectGroupParams<'_>, cx: &mut Context<RootView>) -> AnyElement {
@@ -695,9 +698,9 @@ fn project_group(params: ProjectGroupParams<'_>, cx: &mut Context<RootView>) -> 
         cached_catalog,
         current_path,
         pending_path,
-        session_actions_enabled,
         project_switch_enabled,
         can_remove,
+        thread_statuses,
     } = params;
     let cached_while_loading = cached_catalog.filter(|catalog| {
         active
@@ -748,7 +751,18 @@ fn project_group(params: ProjectGroupParams<'_>, cx: &mut Context<RootView>) -> 
     let right_root = click_root.clone();
     let toggle_root = click_root.clone();
     let expanded = project.expanded;
-    let activity_key = list_animation_key(&project_key(&path));
+    let project_runtime_key = project_key(&path);
+    let working_count = thread_statuses
+        .values()
+        .filter(|status| {
+            status.project == project_runtime_key
+                && matches!(
+                    status.activity,
+                    ThreadActivity::Opening | ThreadActivity::Working | ThreadActivity::Cancelling
+                )
+        })
+        .count();
+    let activity_key = list_animation_key(&project_runtime_key);
 
     div()
         .w_full()
@@ -871,7 +885,8 @@ fn project_group(params: ProjectGroupParams<'_>, cx: &mut Context<RootView>) -> 
                         .items_center()
                         .gap(px(7.0))
                         .when(
-                            status == CatalogStatus::Loading && !sessions.is_empty(),
+                            working_count > 0
+                                || (status == CatalogStatus::Loading && !sessions.is_empty()),
                             |meta| {
                                 meta.child(controls::square_status_indicator(
                                     activity_key,
@@ -914,20 +929,19 @@ fn project_group(params: ProjectGroupParams<'_>, cx: &mut Context<RootView>) -> 
                 })
                 .children(sessions.iter().map(|session| {
                     project_thread_row(
-                        project.path.clone(),
-                        session,
-                        active,
-                        active
-                            && pending_path
-                                .or(current_path)
-                                .is_some_and(|path| sidebar_paths_match(path, &session.path)),
-                        active
-                            && pending_path
-                                .is_some_and(|path| sidebar_paths_match(path, &session.path)),
-                        if active {
-                            session_actions_enabled
-                        } else {
-                            project_switch_enabled
+                        ProjectThreadRowParams {
+                            project_path: project.path.clone(),
+                            session,
+                            active_project: active,
+                            selected: active
+                                && pending_path
+                                    .or(current_path)
+                                    .is_some_and(|path| sidebar_paths_match(path, &session.path)),
+                            switching: active
+                                && pending_path
+                                    .is_some_and(|path| sidebar_paths_match(path, &session.path)),
+                            enabled: project_switch_enabled,
+                            runtime_status: thread_statuses.get(&project_key(&session.path)),
                         },
                         cx,
                     )
@@ -975,15 +989,29 @@ fn project_group(params: ProjectGroupParams<'_>, cx: &mut Context<RootView>) -> 
         .into_any_element()
 }
 
-fn project_thread_row(
+struct ProjectThreadRowParams<'a> {
     project_path: PathBuf,
-    session: &SessionSummary,
+    session: &'a SessionSummary,
     active_project: bool,
     selected: bool,
     switching: bool,
     enabled: bool,
+    runtime_status: Option<&'a ThreadRuntimeStatus>,
+}
+
+fn project_thread_row(
+    params: ProjectThreadRowParams<'_>,
     cx: &mut Context<RootView>,
 ) -> AnyElement {
+    let ProjectThreadRowParams {
+        project_path,
+        session,
+        active_project,
+        selected,
+        switching,
+        enabled,
+        runtime_status,
+    } = params;
     let session_path = session.path.clone();
     let click_project = project_path.clone();
     let click_session = session_path.clone();
@@ -1001,13 +1029,10 @@ fn project_thread_row(
         1 => "1 message".to_owned(),
         count => format!("{count} messages"),
     };
-    let status = if switching {
-        "Opening thread".to_owned()
-    } else if selected {
-        "Current thread".to_owned()
-    } else {
-        message_count
-    };
+    let selected = selected || runtime_status.is_some_and(|status| status.active);
+    let runtime_activity = runtime_status.map(|status| status.activity);
+    let switching = switching || runtime_activity == Some(ThreadActivity::Opening);
+    let status = thread_row_status(runtime_activity, selected, switching, message_count);
     let updated = compact_session_timestamp(&session.updated_at);
 
     div()
@@ -1038,7 +1063,7 @@ fn project_thread_row(
                 .on_click(move |_, window, cx| {
                     click_root.update(cx, |view, cx| {
                         if active_project {
-                            view.switch_session(click_session.clone(), cx);
+                            view.switch_session(click_session.clone(), window, cx);
                         } else {
                             view.activate_project(
                                 click_project.clone(),
@@ -1054,7 +1079,7 @@ fn project_thread_row(
                         cx.stop_propagation();
                         key_root.update(cx, |view, cx| {
                             if active_project {
-                                view.switch_session(key_session.clone(), cx);
+                                view.switch_session(key_session.clone(), window, cx);
                             } else {
                                 view.activate_project(
                                     key_project.clone(),
@@ -1097,14 +1122,25 @@ fn project_thread_row(
                         })
                         .child(title),
                 )
-                .when(switching, |title| {
-                    title.child(controls::square_status_indicator(
-                        activity_key,
-                        true,
-                        Duration::from_millis(720),
-                        theme::working(),
-                    ))
-                }),
+                .when(
+                    switching
+                        || matches!(
+                            runtime_activity,
+                            Some(ThreadActivity::Working | ThreadActivity::Cancelling)
+                        ),
+                    |title| {
+                        title.child(controls::square_status_indicator(
+                            activity_key,
+                            true,
+                            Duration::from_millis(720),
+                            if runtime_activity == Some(ThreadActivity::Cancelling) {
+                                theme::data()
+                            } else {
+                                theme::working()
+                            },
+                        ))
+                    },
+                ),
         )
         .child(
             div()
@@ -1116,13 +1152,17 @@ fn project_thread_row(
                 .gap(px(8.0))
                 .font_family(theme::mono())
                 .text_size(theme::text_size(theme::T_TINY))
-                .text_color(if switching {
-                    theme::working()
-                } else if selected {
-                    theme::data()
-                } else {
-                    theme::smoke()
-                })
+                .text_color(
+                    if switching || runtime_activity == Some(ThreadActivity::Working) {
+                        theme::working()
+                    } else if runtime_activity == Some(ThreadActivity::Attention) {
+                        theme::error()
+                    } else if selected {
+                        theme::data()
+                    } else {
+                        theme::smoke()
+                    },
+                )
                 .child(div().whitespace_nowrap().child(status))
                 .child(
                     div()
@@ -1134,6 +1174,30 @@ fn project_thread_row(
                 ),
         )
         .into_any_element()
+}
+
+fn thread_row_status(
+    activity: Option<ThreadActivity>,
+    selected: bool,
+    switching: bool,
+    fallback: String,
+) -> String {
+    if switching {
+        return "Opening thread".to_owned();
+    }
+    if selected {
+        return if activity == Some(ThreadActivity::Working) {
+            "Working".to_owned()
+        } else {
+            "Current thread".to_owned()
+        };
+    }
+    match activity {
+        Some(ThreadActivity::Working) => "Working in background".to_owned(),
+        Some(ThreadActivity::Cancelling) => "Cancelling in background".to_owned(),
+        Some(ThreadActivity::Attention) => "Needs attention".to_owned(),
+        Some(ThreadActivity::Idle | ThreadActivity::Opening) | None => fallback,
+    }
 }
 
 fn sidebar_paths_match(left: &std::path::Path, right: &std::path::Path) -> bool {
@@ -1701,6 +1765,37 @@ mod tests {
         assert_eq!(
             status,
             TitlebarStatus::new("Opening thread", TitlebarStatusTone::Working, true)
+        );
+    }
+
+    #[test]
+    fn thread_rows_distinguish_foreground_and_background_work() {
+        assert_eq!(
+            thread_row_status(
+                Some(ThreadActivity::Working),
+                false,
+                false,
+                "4 messages".to_owned(),
+            ),
+            "Working in background"
+        );
+        assert_eq!(
+            thread_row_status(
+                Some(ThreadActivity::Working),
+                true,
+                false,
+                "4 messages".to_owned(),
+            ),
+            "Working"
+        );
+        assert_eq!(
+            thread_row_status(
+                Some(ThreadActivity::Attention),
+                false,
+                false,
+                "4 messages".to_owned(),
+            ),
+            "Needs attention"
         );
     }
 

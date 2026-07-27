@@ -15,6 +15,7 @@ use crate::views::diff_summary::diff_overlay;
 impl Render for RootView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         theme::set_active(self.active_theme);
+        let thread_statuses = self.thread_statuses();
         let projection = &self.render_projections.shell;
         let catalog = &self.render_projections.catalog;
         let history = &self.render_projections.history;
@@ -91,6 +92,7 @@ impl Render for RootView {
                             catalog,
                             projects: &self.projects,
                             project_catalogs: &self.project_catalogs,
+                            thread_statuses: &thread_statuses,
                             project_feedback: self.project_feedback.as_deref(),
                             project_picker_pending: self.project_picker_pending,
                             project_switch_enabled,

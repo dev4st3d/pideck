@@ -23,12 +23,20 @@ const PROTOCOL_VERSION: u64 = 1;
 const MAX_RECORD_BYTES: usize = 1024 * 1024;
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 pub const ORCHESTRATION_PIPE_ENV: &str = "PI_GUI_ORCHESTRATION_PIPE";
+static NEXT_ORCHESTRATION_INSTANCE: AtomicU64 = AtomicU64::new(1);
 
 pub fn orchestration_adapter_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("bridge/orchestration-adapter.mjs")
 }
 
-pub fn orchestration_endpoint(working_directory: &std::path::Path) -> String {
+pub fn allocate_orchestration_endpoint(working_directory: &std::path::Path) -> String {
+    orchestration_endpoint(
+        working_directory,
+        NEXT_ORCHESTRATION_INSTANCE.fetch_add(1, Ordering::Relaxed),
+    )
+}
+
+pub fn orchestration_endpoint(working_directory: &std::path::Path, instance: u64) -> String {
     let normalized = working_directory.to_string_lossy();
     let mut hash = 0xcbf2_9ce4_8422_2325_u64;
     for byte in normalized.bytes() {
@@ -37,13 +45,13 @@ pub fn orchestration_endpoint(working_directory: &std::path::Path) -> String {
     }
     if cfg!(windows) {
         format!(
-            r"\\.\pipe\pi-gui-orchestration-{}-{hash:016x}",
+            r"\\.\pipe\pi-gui-orchestration-{}-{hash:016x}-{instance:016x}",
             std::process::id()
         )
     } else {
         std::env::temp_dir()
             .join(format!(
-                "pi-gui-orchestration-{}-{hash:016x}.sock",
+                "pi-gui-orchestration-{}-{hash:016x}-{instance:016x}.sock",
                 std::process::id()
             ))
             .to_string_lossy()
@@ -73,18 +81,21 @@ pub struct SdkBridgeConfig {
     pub sdk_root: PathBuf,
     pub script: PathBuf,
     pub working_directory: PathBuf,
+    pub orchestration_endpoint: String,
 }
 
 impl SdkBridgeConfig {
     pub fn from_installation(
         installation: &crate::services::pi_process::PiInstallation,
         working_directory: PathBuf,
+        orchestration_endpoint: String,
     ) -> Option<Self> {
         Some(Self {
             node: installation.executable.clone(),
             sdk_root: installation.sdk_package_root()?,
             script: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("bridge/pi-bridge.mjs"),
             working_directory,
+            orchestration_endpoint,
         })
     }
 }
@@ -375,10 +386,7 @@ impl SdkBridgeClient {
         let mut child = Command::new(&config.node)
             .arg(&config.script)
             .arg(&config.sdk_root)
-            .env(
-                ORCHESTRATION_PIPE_ENV,
-                orchestration_endpoint(&config.working_directory),
-            )
+            .env(ORCHESTRATION_PIPE_ENV, &config.orchestration_endpoint)
             .current_dir(&config.working_directory)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -734,10 +742,17 @@ pub struct SdkBridgeWorker {
 }
 
 impl SdkBridgeWorker {
-    pub fn spawn(working_directory: PathBuf) -> Self {
+    pub fn spawn(working_directory: PathBuf, orchestration_endpoint: String) -> Self {
         let (commands, command_receiver) = mpsc::channel();
         let (result_sender, results) = async_channel::unbounded();
-        thread::spawn(move || bridge_worker(working_directory, command_receiver, result_sender));
+        thread::spawn(move || {
+            bridge_worker(
+                working_directory,
+                orchestration_endpoint,
+                command_receiver,
+                result_sender,
+            )
+        });
         Self { commands, results }
     }
 
@@ -770,11 +785,12 @@ impl Drop for SdkBridgeWorker {
 
 fn bridge_worker(
     working_directory: PathBuf,
+    orchestration_endpoint: String,
     commands: mpsc::Receiver<BridgeWorkerCommand>,
     results: Sender<BridgeWorkerResult>,
 ) {
     let (internal_sender, internal_receiver) = mpsc::channel();
-    let mut client = start_discovered_bridge(&working_directory);
+    let mut client = start_discovered_bridge(&working_directory, &orchestration_endpoint);
     let mut event_receiver = client.as_ref().ok().map(SdkBridgeClient::events);
     let mut reconnect_delay = Duration::from_secs(1);
     let mut reconnect_due = client.is_err().then(|| Instant::now() + reconnect_delay);
@@ -797,7 +813,7 @@ fn bridge_worker(
             reconnect_due.get_or_insert_with(Instant::now);
         }
         if reconnect_due.is_some_and(|due| Instant::now() >= due) {
-            client = start_discovered_bridge(&working_directory);
+            client = start_discovered_bridge(&working_directory, &orchestration_endpoint);
             event_receiver = client.as_ref().ok().map(SdkBridgeClient::events);
             let _ = results.send_blocking(BridgeWorkerResult::Capabilities(
                 client
@@ -866,7 +882,7 @@ fn bridge_worker(
                 if let Ok(active) = &client {
                     active.stop();
                 }
-                client = start_discovered_bridge(&working_directory);
+                client = start_discovered_bridge(&working_directory, &orchestration_endpoint);
                 event_receiver = client.as_ref().ok().map(SdkBridgeClient::events);
                 reconnect_delay = Duration::from_secs(1);
                 reconnect_due = client.is_err().then(|| Instant::now() + reconnect_delay);
@@ -889,6 +905,7 @@ fn bridge_worker(
 
 fn start_discovered_bridge(
     working_directory: &std::path::Path,
+    orchestration_endpoint: &str,
 ) -> Result<SdkBridgeClient, BridgeError> {
     let installation =
         crate::services::pi_process::discover_and_probe(None, Duration::from_secs(5)).map_err(
@@ -899,13 +916,17 @@ fn start_discovered_bridge(
                 )
             },
         )?;
-    let config = SdkBridgeConfig::from_installation(&installation, working_directory.to_path_buf())
-        .ok_or_else(|| {
-            BridgeError::new(
-                BridgeErrorKind::Unavailable,
-                "This Pi installation does not expose the SDK bridge.",
-            )
-        })?;
+    let config = SdkBridgeConfig::from_installation(
+        &installation,
+        working_directory.to_path_buf(),
+        orchestration_endpoint.to_owned(),
+    )
+    .ok_or_else(|| {
+        BridgeError::new(
+            BridgeErrorKind::Unavailable,
+            "This Pi installation does not expose the SDK bridge.",
+        )
+    })?;
     SdkBridgeClient::start(config)
 }
 

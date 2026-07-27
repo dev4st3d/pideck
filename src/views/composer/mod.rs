@@ -258,6 +258,17 @@ impl Composer {
         }
     }
 
+    pub fn restore_draft(&mut self, text: &str, images: Vec<PromptImage>, cx: &mut Context<Self>) {
+        self.set_draft(text, cx);
+        self.image_bytes = images
+            .iter()
+            .map(|image| decoded_image_len(&image.data))
+            .sum();
+        self.images = images;
+        self.update_disabled();
+        cx.notify();
+    }
+
     pub fn set_placeholder(
         &mut self,
         placeholder: impl Into<SharedString>,

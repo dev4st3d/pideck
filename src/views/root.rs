@@ -29,7 +29,7 @@ use crate::controller::{
     AcceptedSubmission, AcceptedSubmissionKind, BridgeProjection, CatalogProjection, CatalogStatus,
     CommandCatalogProjection, ComposerRuntime, ConversationProjection, ExtensionUiProjection,
     HistoryProjection, ModelRuntimeProjection, OrchestrationProjection, ResourceCenterProjection,
-    RuntimeController, SubmissionPreference,
+    RuntimeController, SubmissionPreference, ThreadRuntimeProjection,
 };
 use crate::fonts::{self, FontCatalog, FontRole};
 use crate::model_runtime::{
@@ -74,10 +74,73 @@ mod shell;
 
 use overlays::{annotate_prompt_image, extension_dialog_key, single_line_title, wrapped_index};
 
+#[derive(Clone)]
 struct PendingDraft {
     request: crate::services::rpc::RequestId,
     text: String,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ThreadActivity {
+    Idle,
+    Opening,
+    Working,
+    Cancelling,
+    Attention,
+}
+
+#[derive(Debug, Clone)]
+struct ThreadRuntimeStatus {
+    project: String,
+    active: bool,
+    activity: ThreadActivity,
+}
+
+#[derive(Default)]
+struct ThreadUiState {
+    draft: String,
+    images: Vec<PromptImage>,
+    pending_draft: Option<PendingDraft>,
+    pending_bash: Option<crate::services::rpc::RequestId>,
+    pending_compaction_focus: Option<String>,
+    pending_session_name: Option<String>,
+}
+
+impl ThreadUiState {
+    fn can_evict(&self) -> bool {
+        self.draft.is_empty()
+            && self.images.is_empty()
+            && self.pending_draft.is_none()
+            && self.pending_bash.is_none()
+            && self.pending_compaction_focus.is_none()
+            && self.pending_session_name.is_none()
+    }
+}
+
+fn can_reuse_runtime_for_navigation(
+    projection: &ThreadRuntimeProjection,
+    ui: &ThreadUiState,
+) -> bool {
+    projection.status == crate::state::ControllerStatus::Active
+        && matches!(
+            projection.lifecycle,
+            RuntimeLifecycle::Ready | RuntimeLifecycle::Settled
+        )
+        && !projection.pending_operation
+        && ui.can_evict()
+}
+
+struct ThreadRuntimeSlot {
+    id: u64,
+    project_path: PathBuf,
+    requested_session: Option<PathBuf>,
+    controller: Entity<RuntimeController>,
+    projection: ThreadRuntimeProjection,
+    last_activated: u64,
+    ui: ThreadUiState,
+}
+
+const MAX_LIVE_THREAD_RUNTIMES: usize = 8;
 
 #[derive(Debug, Clone)]
 struct ProjectCatalogCache {
@@ -299,9 +362,12 @@ pub struct RootView {
     usage_tooltip_visible: bool,
     usage_tooltip_epoch: u64,
     projects: ProjectRegistry,
-    project_controllers: HashMap<String, Entity<RuntimeController>>,
+    runtime_slots: Vec<ThreadRuntimeSlot>,
+    runtime_observations: HashMap<u64, Subscription>,
+    active_runtime_id: u64,
+    next_runtime_id: u64,
+    runtime_clock: u64,
     project_catalogs: HashMap<String, ProjectCatalogCache>,
-    pending_project_session: Option<PathBuf>,
     project_feedback: Option<String>,
     project_picker_pending: bool,
     project_scan_generation: u64,
@@ -347,7 +413,6 @@ pub struct RootView {
     pending_compaction_focus: Option<String>,
     pending_session_name: Option<String>,
     focus_handle: FocusHandle,
-    _controller_observation: Subscription,
     _activity_disclosure_observation: Subscription,
     _composer_subscription: Subscription,
     _compaction_subscription: Subscription,
@@ -480,9 +545,11 @@ impl RootView {
         let transcript_cache = cx.new(|_| TranscriptTextCache::new(conversation.epoch));
         let activity_disclosures = cx.new(|_| ActivityDisclosureState::new(conversation.epoch));
         window.focus(&composer.read(cx).focus_handle(cx));
-        let controller_observation = cx.observe_in(&controller, window, |view, _, window, cx| {
-            view.sync_runtime(window, cx)
-        });
+        let initial_runtime_id = 1;
+        let controller_observation =
+            cx.observe_in(&controller, window, move |view, _, window, cx| {
+                view.on_thread_runtime_changed(initial_runtime_id, window, cx)
+            });
         let activity_disclosure_observation =
             cx.observe(&activity_disclosures, |_, _, cx| cx.notify());
         let composer_subscription =
@@ -561,10 +628,12 @@ impl RootView {
                 view.on_goal_edit_event(event, cx)
             });
         window.set_window_title("Pideck");
-        let mut project_controllers = HashMap::new();
-        project_controllers.insert(project_key(projects.active_path()), controller.clone());
+        let initial_project_path = projects.active_path().to_path_buf();
+        let initial_projection = controller.read(cx).thread_runtime_projection();
+        let mut runtime_observations = HashMap::new();
+        runtime_observations.insert(initial_runtime_id, controller_observation);
         let mut view = Self {
-            controller,
+            controller: controller.clone(),
             render_projections,
             active_theme,
             font_scale,
@@ -629,9 +698,20 @@ impl RootView {
             usage_tooltip_visible: false,
             usage_tooltip_epoch: 0,
             projects,
-            project_controllers,
+            runtime_slots: vec![ThreadRuntimeSlot {
+                id: initial_runtime_id,
+                project_path: initial_project_path,
+                requested_session: None,
+                controller: controller.clone(),
+                projection: initial_projection,
+                last_activated: 1,
+                ui: ThreadUiState::default(),
+            }],
+            runtime_observations,
+            active_runtime_id: initial_runtime_id,
+            next_runtime_id: initial_runtime_id + 1,
+            runtime_clock: 1,
             project_catalogs: HashMap::new(),
-            pending_project_session: None,
             project_feedback,
             project_picker_pending: false,
             project_scan_generation: 0,
@@ -677,7 +757,6 @@ impl RootView {
             pending_compaction_focus: None,
             pending_session_name: None,
             focus_handle,
-            _controller_observation: controller_observation,
             _activity_disclosure_observation: activity_disclosure_observation,
             _composer_subscription: composer_subscription,
             _compaction_subscription: compaction_subscription,
@@ -697,7 +776,6 @@ impl RootView {
             _subagent_subscription: subagent_subscription,
             _goal_edit_subscription: goal_edit_subscription,
         };
-        view.warm_project_controllers(cx);
         view.refresh_project_catalogs(cx);
         if projects_need_save {
             view.persist_projects(cx);
@@ -1631,10 +1709,9 @@ impl RootView {
             NativeAction::NewSession => {
                 self.session_rename_open = false;
                 self.session_menu_open = false;
-                self.controller
-                    .update(cx, |controller, cx| controller.new_session(cx))
+                self.open_thread(self.projects.active_path().to_path_buf(), None, window, cx)
                     .then_some(())
-                    .ok_or_else(|| "A new session cannot start in the current state.".to_owned())
+                    .ok_or_else(|| "A new session could not be opened.".to_owned())
             }
             NativeAction::Sessions => {
                 self.open_session_rename(window, cx);
@@ -2395,13 +2472,7 @@ impl RootView {
     }
 
     fn project_switch_enabled(&self) -> bool {
-        !matches!(
-            self.conversation.lifecycle,
-            RuntimeLifecycle::Loading | RuntimeLifecycle::Running | RuntimeLifecycle::Cancelling
-        ) && self.conversation.pending_operation.is_none()
-            && !self.render_projections.catalog.switching
-            && self.pending_draft.is_none()
-            && self.pending_bash.is_none()
+        true
     }
 
     fn persist_projects(&mut self, cx: &mut Context<Self>) {
@@ -2590,7 +2661,6 @@ impl RootView {
                                 if added == 1 { "" } else { "s" }
                             ));
                             view.persist_projects(cx);
-                            view.warm_project_controllers(cx);
                             view.refresh_project_catalogs(cx);
                         } else if duplicates > 0 {
                             view.project_feedback =
@@ -2641,7 +2711,6 @@ impl RootView {
         self.pending_bash = None;
         self.pending_compaction_focus = None;
         self.pending_session_name = None;
-        self.pending_project_session = None;
         self.sessions_scroll_motion.cancel();
         self.conversation_scroll_motion.cancel();
         self.conversation_follow.set(true);
@@ -2651,62 +2720,305 @@ impl RootView {
         window.focus(&self.focus_handle);
     }
 
-    fn warm_project_controllers(&mut self, cx: &mut Context<Self>) {
-        let projects = self
-            .projects
-            .projects()
-            .iter()
-            .filter(|project| project.path.is_dir())
-            .map(|project| {
-                (
-                    project.path.clone(),
-                    project
-                        .last_session
-                        .clone()
-                        .filter(|session| session.is_file()),
-                )
-            })
-            .collect::<Vec<_>>();
-        for (path, preferred_session) in projects {
-            let key = project_key(&path);
-            if self.project_controllers.contains_key(&key) {
-                continue;
-            }
-            let controller = cx.new(|cx| RuntimeController::for_workspace(path, cx));
-            controller.update(cx, |controller, cx| {
-                controller.connect_to_session(preferred_session, cx)
-            });
-            self.project_controllers.insert(key, controller);
+    fn save_active_thread_ui(&mut self, cx: &mut Context<Self>) {
+        let ui = ThreadUiState {
+            draft: self.composer.read(cx).draft().to_owned(),
+            images: self.composer.read(cx).images().to_vec(),
+            pending_draft: self.pending_draft.clone(),
+            pending_bash: self.pending_bash.clone(),
+            pending_compaction_focus: self.pending_compaction_focus.clone(),
+            pending_session_name: self.pending_session_name.clone(),
+        };
+        if let Some(slot) = self
+            .runtime_slots
+            .iter_mut()
+            .find(|slot| slot.id == self.active_runtime_id)
+        {
+            slot.ui = ui;
         }
     }
 
-    fn open_project_controller(
+    fn restore_active_thread_ui(&mut self, cx: &mut Context<Self>) {
+        let Some(slot) = self
+            .runtime_slots
+            .iter()
+            .find(|slot| slot.id == self.active_runtime_id)
+        else {
+            return;
+        };
+        self.pending_draft = slot.ui.pending_draft.clone();
+        self.pending_bash = slot.ui.pending_bash.clone();
+        self.pending_compaction_focus = slot.ui.pending_compaction_focus.clone();
+        self.pending_session_name = slot.ui.pending_session_name.clone();
+        let draft = slot.ui.draft.clone();
+        let images = slot.ui.images.clone();
+        self.composer.update(cx, |composer, cx| {
+            composer.restore_draft(&draft, images, cx)
+        });
+    }
+
+    fn thread_statuses(&self) -> HashMap<String, ThreadRuntimeStatus> {
+        self.runtime_slots
+            .iter()
+            .filter_map(|slot| {
+                let session = slot
+                    .projection
+                    .pending_session_file
+                    .as_ref()
+                    .or(slot.requested_session.as_ref())
+                    .or(slot.projection.session_file.as_ref())?;
+                let activity = if matches!(
+                    slot.projection.status,
+                    crate::state::ControllerStatus::Connecting
+                ) || slot.projection.lifecycle == RuntimeLifecycle::Loading
+                {
+                    ThreadActivity::Opening
+                } else if slot.projection.lifecycle == RuntimeLifecycle::Running {
+                    ThreadActivity::Working
+                } else if slot.projection.lifecycle == RuntimeLifecycle::Cancelling
+                    || slot.projection.status == crate::state::ControllerStatus::Stopping
+                {
+                    ThreadActivity::Cancelling
+                } else if slot.projection.has_error
+                    || matches!(
+                        slot.projection.status,
+                        crate::state::ControllerStatus::Failed
+                    )
+                {
+                    ThreadActivity::Attention
+                } else {
+                    ThreadActivity::Idle
+                };
+                Some((
+                    project_key(session),
+                    ThreadRuntimeStatus {
+                        project: project_key(&slot.project_path),
+                        active: slot.id == self.active_runtime_id,
+                        activity,
+                    },
+                ))
+            })
+            .collect()
+    }
+
+    fn on_thread_runtime_changed(
         &mut self,
-        path: PathBuf,
-        preferred_session: Option<PathBuf>,
+        runtime_id: u64,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let key = project_key(&path);
-        let controller = if let Some(controller) = self.project_controllers.get(&key) {
-            controller.clone()
-        } else {
-            let controller = cx.new(|cx| RuntimeController::for_workspace(path, cx));
-            controller.update(cx, |controller, cx| {
-                controller.connect_to_session(preferred_session.clone(), cx)
-            });
-            self.project_controllers.insert(key, controller.clone());
-            controller
+        let Some(index) = self
+            .runtime_slots
+            .iter()
+            .position(|slot| slot.id == runtime_id)
+        else {
+            return;
         };
-        let observation = cx.observe_in(&controller, window, |view, _, window, cx| {
-            view.sync_runtime(window, cx)
+        let projection = self.runtime_slots[index]
+            .controller
+            .read(cx)
+            .thread_runtime_projection();
+        if let Some(session) = projection.session_file.clone() {
+            self.runtime_slots[index].requested_session = Some(session);
+        }
+        self.runtime_slots[index].projection = projection;
+        if runtime_id == self.active_runtime_id {
+            self.sync_runtime_state(false, window, cx);
+        } else {
+            cx.notify();
+        }
+    }
+
+    fn create_thread_runtime(
+        &mut self,
+        project_path: PathBuf,
+        session: Option<PathBuf>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> u64 {
+        let controller = cx.new(|cx| RuntimeController::for_workspace(project_path.clone(), cx));
+        let runtime_id = self.next_runtime_id;
+        self.next_runtime_id = self.next_runtime_id.saturating_add(1);
+        let observation = cx.observe_in(&controller, window, move |view, _, window, cx| {
+            view.on_thread_runtime_changed(runtime_id, window, cx)
         });
+        let projection = controller.read(cx).thread_runtime_projection();
+        self.runtime_observations.insert(runtime_id, observation);
+        self.runtime_slots.push(ThreadRuntimeSlot {
+            id: runtime_id,
+            project_path,
+            requested_session: session.clone(),
+            controller: controller.clone(),
+            projection,
+            last_activated: 0,
+            ui: ThreadUiState::default(),
+        });
+        controller.update(cx, |controller, cx| {
+            controller.connect_to_session(session, cx)
+        });
+        runtime_id
+    }
+
+    fn activate_runtime(
+        &mut self,
+        runtime_id: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if runtime_id == self.active_runtime_id {
+            return false;
+        }
+        let Some(index) = self
+            .runtime_slots
+            .iter()
+            .position(|slot| slot.id == runtime_id)
+        else {
+            return false;
+        };
+        let project_path = self.runtime_slots[index].project_path.clone();
+        let controller = self.runtime_slots[index].controller.clone();
+
+        if !self.projects.is_active(&project_path) {
+            self.cache_active_project_catalog();
+            if let Err(error) = self.projects.set_active(&project_path) {
+                self.project_feedback = Some(error.message().to_owned());
+                return false;
+            }
+            self.persist_projects(cx);
+        }
+        self.save_active_thread_ui(cx);
+
+        self.runtime_clock = self.runtime_clock.saturating_add(1);
+        self.runtime_slots[index].last_activated = self.runtime_clock;
+        self.active_runtime_id = runtime_id;
         self.controller = controller;
-        self._controller_observation = observation;
         self.reset_for_project_switch(window, cx);
-        self.pending_project_session = preferred_session;
+        self.restore_active_thread_ui(cx);
         self.sync_runtime_state(true, window, cx);
         self.refresh_project_catalogs(cx);
+        true
+    }
+
+    fn open_thread(
+        &mut self,
+        project_path: PathBuf,
+        session: Option<PathBuf>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !project_path.is_dir() {
+            self.project_feedback = Some("Project folder is unavailable.".to_owned());
+            cx.notify();
+            return false;
+        }
+        let existing = session.as_ref().and_then(|session| {
+            let session_key = project_key(session);
+            self.runtime_slots
+                .iter()
+                .find(|slot| {
+                    project_key(&slot.project_path) == project_key(&project_path)
+                        && [
+                            slot.projection.session_file.as_ref(),
+                            slot.projection.pending_session_file.as_ref(),
+                            slot.requested_session.as_ref(),
+                        ]
+                        .into_iter()
+                        .flatten()
+                        .any(|path| project_key(path) == session_key)
+                })
+                .map(|slot| slot.id)
+        });
+        let runtime_id = if let Some(runtime_id) = existing {
+            runtime_id
+        } else if self.reuse_idle_runtime_for_thread(&project_path, session.clone(), window, cx) {
+            self.project_feedback = None;
+            return true;
+        } else {
+            if self.runtime_slots.len() >= MAX_LIVE_THREAD_RUNTIMES
+                && !self.evict_oldest_inactive_runtime(cx)
+            {
+                self.project_feedback = Some(format!(
+                    "The {MAX_LIVE_THREAD_RUNTIMES}-thread runtime limit is active. Let background work finish or clear an inactive draft first."
+                ));
+                cx.notify();
+                return false;
+            }
+            self.create_thread_runtime(project_path, session, window, cx)
+        };
+        self.project_feedback = None;
+        self.activate_runtime(runtime_id, window, cx)
+    }
+
+    fn reuse_idle_runtime_for_thread(
+        &mut self,
+        project_path: &std::path::Path,
+        session: Option<PathBuf>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        self.save_active_thread_ui(cx);
+        let project = project_key(project_path);
+        let Some(runtime_id) = self
+            .runtime_slots
+            .iter()
+            .filter(|slot| {
+                project_key(&slot.project_path) == project
+                    && can_reuse_runtime_for_navigation(&slot.projection, &slot.ui)
+            })
+            .min_by_key(|slot| (slot.id != self.active_runtime_id, slot.last_activated))
+            .map(|slot| slot.id)
+        else {
+            return false;
+        };
+        let Some(index) = self
+            .runtime_slots
+            .iter()
+            .position(|slot| slot.id == runtime_id)
+        else {
+            return false;
+        };
+        let controller = self.runtime_slots[index].controller.clone();
+        let accepted = controller.update(cx, |controller, cx| {
+            if let Some(path) = session.clone() {
+                controller.switch_session(path, cx)
+            } else {
+                controller.new_session(cx)
+            }
+        });
+        if !accepted {
+            return false;
+        }
+        self.runtime_slots[index].requested_session = session;
+        self.runtime_slots[index].ui = ThreadUiState::default();
+        runtime_id == self.active_runtime_id || self.activate_runtime(runtime_id, window, cx)
+    }
+
+    fn evict_oldest_inactive_runtime(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(runtime_id) = self
+            .runtime_slots
+            .iter()
+            .filter(|slot| {
+                slot.id != self.active_runtime_id
+                    && !slot.projection.keeps_background_process()
+                    && slot.ui.can_evict()
+            })
+            .min_by_key(|slot| slot.last_activated)
+            .map(|slot| slot.id)
+        else {
+            return false;
+        };
+        let Some(index) = self
+            .runtime_slots
+            .iter()
+            .position(|slot| slot.id == runtime_id)
+        else {
+            return false;
+        };
+        let slot = self.runtime_slots.remove(index);
+        slot.controller
+            .update(cx, |controller, _| controller.shutdown());
+        self.runtime_observations.remove(&runtime_id);
+        true
     }
 
     fn activate_project(
@@ -2716,44 +3028,32 @@ impl RootView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.projects.is_active(&path) {
-            if let Some(session) = session {
-                self.switch_session(session, cx);
-            } else {
-                self.toggle_project(path, cx);
-            }
+        if self.projects.is_active(&path) && session.is_none() {
+            self.toggle_project(path, cx);
             return;
         }
-        if !self.project_switch_enabled() {
-            self.project_feedback =
-                Some("Finish or stop the current project work before switching.".to_owned());
-            cx.notify();
-            return;
-        }
-        if !path.is_dir() {
-            self.project_feedback = Some("Project folder is unavailable.".to_owned());
-            cx.notify();
-            return;
-        }
-
-        self.cache_active_project_catalog();
-        if let Err(error) = self.projects.set_active(&path) {
-            self.project_feedback = Some(error.message().to_owned());
-            cx.notify();
-            return;
-        }
-        let preferred_session = session
-            .or_else(|| self.projects.active_project().last_session.clone())
-            .filter(|path| path.is_file());
-        self.project_feedback = None;
-        self.persist_projects(cx);
-        self.open_project_controller(path, preferred_session, window, cx);
+        let preferred_session = session.or_else(|| {
+            self.projects
+                .projects()
+                .iter()
+                .find(|project| project_key(&project.path) == project_key(&path))
+                .and_then(|project| project.last_session.clone())
+                .filter(|path| path.is_file())
+        });
+        let _ = self.open_thread(path, preferred_session, window, cx);
     }
 
     fn remove_project(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
-        if self.projects.is_active(&path) && !self.project_switch_enabled() {
-            self.project_feedback =
-                Some("Finish or stop the current project work before removing it.".to_owned());
+        self.save_active_thread_ui(cx);
+        let path_key = project_key(&path);
+        if self.runtime_slots.iter().any(|slot| {
+            project_key(&slot.project_path) == path_key
+                && (slot.projection.keeps_background_process() || !slot.ui.can_evict())
+        }) {
+            self.project_feedback = Some(
+                "Finish background work and clear saved drafts before removing this project."
+                    .to_owned(),
+            );
             cx.notify();
             return;
         }
@@ -2762,16 +3062,13 @@ impl RootView {
             .projects
             .projects()
             .iter()
-            .find(|project| project.path != path && project.path.is_dir())
+            .find(|project| project_key(&project.path) != path_key && project.path.is_dir())
             .map(|project| project.path.clone());
         if was_active && next_available.is_none() {
             self.project_feedback =
                 Some("Add or restore another project folder before removing this one.".to_owned());
             cx.notify();
             return;
-        }
-        if was_active {
-            self.cache_active_project_catalog();
         }
         match self.projects.remove(&path) {
             Ok(_) => {}
@@ -2781,21 +3078,36 @@ impl RootView {
                 return;
             }
         }
-        self.project_catalogs.remove(&project_key(&path));
-        if let Some(controller) = self.project_controllers.remove(&project_key(&path)) {
-            controller.update(cx, |controller, _| controller.shutdown());
+        self.project_catalogs.remove(&path_key);
+        let removed_ids = self
+            .runtime_slots
+            .iter()
+            .filter(|slot| project_key(&slot.project_path) == path_key)
+            .map(|slot| slot.id)
+            .collect::<Vec<_>>();
+        for runtime_id in removed_ids {
+            if let Some(index) = self
+                .runtime_slots
+                .iter()
+                .position(|slot| slot.id == runtime_id)
+            {
+                let slot = self.runtime_slots.remove(index);
+                slot.controller
+                    .update(cx, |controller, _| controller.shutdown());
+                self.runtime_observations.remove(&runtime_id);
+            }
         }
         if let Some(next) = next_available
             && was_active
         {
-            let _ = self.projects.set_active(&next);
             let preferred = self
                 .projects
-                .active_project()
-                .last_session
-                .clone()
+                .projects()
+                .iter()
+                .find(|project| project_key(&project.path) == project_key(&next))
+                .and_then(|project| project.last_session.clone())
                 .filter(|path| path.is_file());
-            self.open_project_controller(next, preferred, window, cx);
+            let _ = self.open_thread(next, preferred, window, cx);
         } else {
             self.refresh_project_catalogs(cx);
         }
@@ -2804,10 +3116,18 @@ impl RootView {
         cx.notify();
     }
 
-    fn switch_session(&mut self, path: std::path::PathBuf, cx: &mut Context<Self>) {
-        self.controller.update(cx, |controller, cx| {
-            controller.switch_session(path, cx);
-        });
+    fn switch_session(
+        &mut self,
+        path: std::path::PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let _ = self.open_thread(
+            self.projects.active_path().to_path_buf(),
+            Some(path),
+            window,
+            cx,
+        );
     }
 
     fn refresh_sessions(&mut self, cx: &mut Context<Self>) {
@@ -3235,40 +3555,6 @@ impl RootView {
         cx.notify();
     }
 
-    fn sync_runtime(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.sync_runtime_state(false, window, cx);
-    }
-
-    fn sync_pending_project_session(&mut self, cx: &mut Context<Self>) {
-        let Some(requested) = self.pending_project_session.clone() else {
-            return;
-        };
-        if self
-            .render_projections
-            .catalog
-            .current_session_file
-            .as_ref()
-            .is_some_and(|current| project_key(current) == project_key(&requested))
-        {
-            self.pending_project_session = None;
-            return;
-        }
-        if !matches!(
-            self.conversation.lifecycle,
-            RuntimeLifecycle::Ready | RuntimeLifecycle::Settled
-        ) || self.conversation.pending_operation.is_some()
-            || self.render_projections.catalog.switching
-        {
-            return;
-        }
-        let accepted = self.controller.update(cx, |controller, cx| {
-            controller.switch_session(requested, cx)
-        });
-        if accepted {
-            self.pending_project_session = None;
-        }
-    }
-
     fn sync_runtime_state(
         &mut self,
         force_epoch_reset: bool,
@@ -3310,10 +3596,19 @@ impl RootView {
                 window.focus(&self.composer.read(cx).focus_handle(cx));
             }
         }
-        self.transcript_cache
-            .update(cx, |cache, _| cache.prepare_epoch(conversation.epoch));
+        self.transcript_cache.update(cx, |cache, _| {
+            if force_epoch_reset {
+                cache.reset(conversation.epoch);
+            } else {
+                cache.prepare_epoch(conversation.epoch);
+            }
+        });
         self.activity_disclosures.update(cx, |disclosures, _| {
-            disclosures.prepare_epoch(conversation.epoch)
+            if force_epoch_reset {
+                disclosures.reset(conversation.epoch);
+            } else {
+                disclosures.prepare_epoch(conversation.epoch);
+            }
         });
         let requested_editor_text = self
             .controller
@@ -3490,7 +3785,6 @@ impl RootView {
             self.command_catalog_source = command_catalog_source;
         }
         self.render_projections = render_projections;
-        self.sync_pending_project_session(cx);
         if command_catalog_changed {
             self.refresh_command_palette_matches(cx);
             self.sync_slash_completion(cx);
@@ -3918,14 +4212,40 @@ mod tests {
     use std::sync::Arc;
 
     use super::{
-        ExtensionDialogKey,
+        ExtensionDialogKey, ThreadUiState, can_reuse_runtime_for_navigation,
         model_panels::{model_choices, model_provider_choices, thinking_choices},
         overlays::{extension_dialog_key, wrapped_index},
         shared::short_path,
     };
-    use crate::controller::{ModelRuntimeProjection, UsageProjection};
+    use crate::controller::{ModelRuntimeProjection, ThreadRuntimeProjection, UsageProjection};
     use crate::model_runtime::{CatalogPhase, ModelChangePolicy, ModelIdentity, ThinkingLevel};
-    use crate::state::runtime::{ModelSummary, RuntimeThinkingLevel};
+    use crate::state::ControllerStatus;
+    use crate::state::runtime::{ModelSummary, RuntimeLifecycle, RuntimeThinkingLevel};
+
+    #[test]
+    fn idle_empty_runtime_is_reused_but_live_or_stateful_threads_are_not() {
+        let mut projection = ThreadRuntimeProjection {
+            workspace: "workspace".to_owned(),
+            status: ControllerStatus::Active,
+            lifecycle: RuntimeLifecycle::Ready,
+            session_file: None,
+            session_name: None,
+            pending_session_file: None,
+            pending_operation: false,
+            has_error: false,
+        };
+        let mut ui = ThreadUiState::default();
+        assert!(can_reuse_runtime_for_navigation(&projection, &ui));
+
+        projection.lifecycle = RuntimeLifecycle::Running;
+        assert!(!can_reuse_runtime_for_navigation(&projection, &ui));
+        projection.lifecycle = RuntimeLifecycle::Ready;
+        projection.pending_operation = true;
+        assert!(!can_reuse_runtime_for_navigation(&projection, &ui));
+        projection.pending_operation = false;
+        ui.draft = "keep this thread".to_owned();
+        assert!(!can_reuse_runtime_for_navigation(&projection, &ui));
+    }
 
     #[test]
     fn short_path_preserves_short_values_and_truncates_deep_values() {

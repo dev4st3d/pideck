@@ -107,6 +107,16 @@ impl RpcRuntimeService {
     }
 
     pub fn default_profile(working_directory: impl Into<std::path::PathBuf>) -> Self {
+        let working_directory = working_directory.into();
+        let endpoint =
+            crate::services::sdk_bridge::allocate_orchestration_endpoint(&working_directory);
+        Self::default_profile_with_endpoint(working_directory, endpoint)
+    }
+
+    pub fn default_profile_with_endpoint(
+        working_directory: impl Into<std::path::PathBuf>,
+        orchestration_endpoint: String,
+    ) -> Self {
         let mut config = PiLaunchConfig::new(
             working_directory,
             ProjectTrust::Reject,
@@ -115,13 +125,24 @@ impl RpcRuntimeService {
         );
         config.disable_tools = false;
         config.offline = false;
-        attach_orchestration_adapter(&mut config);
+        attach_orchestration_adapter(&mut config, orchestration_endpoint);
         Self::new(config)
     }
 
     pub fn persisted_profile(
         working_directory: impl Into<std::path::PathBuf>,
         session_directory: impl Into<std::path::PathBuf>,
+    ) -> Self {
+        let working_directory = working_directory.into();
+        let endpoint =
+            crate::services::sdk_bridge::allocate_orchestration_endpoint(&working_directory);
+        Self::persisted_profile_with_endpoint(working_directory, session_directory, endpoint)
+    }
+
+    pub fn persisted_profile_with_endpoint(
+        working_directory: impl Into<std::path::PathBuf>,
+        session_directory: impl Into<std::path::PathBuf>,
+        orchestration_endpoint: String,
     ) -> Self {
         let mut config = PiLaunchConfig::new(
             working_directory,
@@ -131,19 +152,19 @@ impl RpcRuntimeService {
         );
         config.disable_tools = false;
         config.offline = false;
-        attach_orchestration_adapter(&mut config);
+        attach_orchestration_adapter(&mut config, orchestration_endpoint);
         Self::new(config)
     }
 }
 
-fn attach_orchestration_adapter(config: &mut PiLaunchConfig) {
+fn attach_orchestration_adapter(config: &mut PiLaunchConfig, orchestration_endpoint: String) {
     let adapter = crate::services::sdk_bridge::orchestration_adapter_path();
     if adapter.is_file() {
         config.resources.extensions.push(adapter);
     }
     config.environment_overrides.push((
         crate::services::sdk_bridge::ORCHESTRATION_PIPE_ENV.into(),
-        crate::services::sdk_bridge::orchestration_endpoint(&config.working_directory).into(),
+        orchestration_endpoint.into(),
     ));
 }
 

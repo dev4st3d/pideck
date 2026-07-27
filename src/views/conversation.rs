@@ -52,9 +52,13 @@ impl ActivityDisclosureState {
 
     pub(super) fn prepare_epoch(&mut self, epoch: SessionEpoch) {
         if self.epoch != epoch {
-            self.epoch = epoch;
-            self.expanded.clear();
+            self.reset(epoch);
         }
+    }
+
+    pub(super) fn reset(&mut self, epoch: SessionEpoch) {
+        self.epoch = epoch;
+        self.expanded.clear();
     }
 
     fn is_expanded(&self, key: &str) -> bool {
@@ -91,10 +95,14 @@ impl TranscriptTextCache {
 
     pub(super) fn prepare_epoch(&mut self, epoch: SessionEpoch) {
         if self.epoch != epoch {
-            self.epoch = epoch;
-            self.use_counter = 0;
-            self.entries.clear();
+            self.reset(epoch);
         }
+    }
+
+    pub(super) fn reset(&mut self, epoch: SessionEpoch) {
+        self.epoch = epoch;
+        self.use_counter = 0;
+        self.entries.clear();
     }
 
     pub(super) fn entity_for(
@@ -1703,11 +1711,7 @@ fn tool_detail_trigger(
         .hover(|trigger| trigger.bg(theme::panel_hover()))
         // Recess on press — a lighter active fill makes nested chips look bigger.
         .active(|trigger| trigger.bg(theme::canvas()))
-        .focus(|trigger| {
-            trigger
-                .bg(theme::panel())
-                .border_color(theme::edge_hard())
-        })
+        .focus(|trigger| trigger.bg(theme::panel()).border_color(theme::edge_hard()))
         .on_click(move |_, window, cx| {
             click_root.update(cx, |view, cx| {
                 view.open_activity_detail(click_detail.clone(), window, cx)
@@ -2168,6 +2172,10 @@ mod tests {
 
         state.prepare_epoch(second);
         assert!(!state.is_expanded("turn:user-1"));
+
+        state.expanded.insert("turn:user-2".to_owned());
+        state.reset(second);
+        assert!(!state.is_expanded("turn:user-2"));
     }
 
     #[test]

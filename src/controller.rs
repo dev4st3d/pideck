@@ -228,6 +228,34 @@ pub struct ComposerProjection {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ThreadRuntimeProjection {
+    pub workspace: String,
+    pub status: ControllerStatus,
+    pub lifecycle: RuntimeLifecycle,
+    pub session_file: Option<PathBuf>,
+    pub session_name: Option<String>,
+    pub pending_session_file: Option<PathBuf>,
+    pub pending_operation: bool,
+    pub has_error: bool,
+}
+
+impl ThreadRuntimeProjection {
+    pub fn keeps_background_process(&self) -> bool {
+        matches!(
+            self.status,
+            ControllerStatus::Connecting | ControllerStatus::Stopping
+        ) || (self.status == ControllerStatus::Active
+            && matches!(
+                self.lifecycle,
+                RuntimeLifecycle::Loading
+                    | RuntimeLifecycle::Running
+                    | RuntimeLifecycle::Cancelling
+            ))
+            || self.pending_operation
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommandCatalogProjection {
     pub status: FacetStatus,
     pub commands: Arc<Vec<RuntimeCommand>>,
@@ -1151,14 +1179,19 @@ impl RuntimeController {
     pub fn for_workspace(workspace: PathBuf, cx: &mut Context<Self>) -> Self {
         let catalog_config = SessionCatalogConfig::from_environment(workspace.clone());
         let session_root = catalog_config.resolve_root().path;
-        let service: Arc<dyn RuntimeService> = Arc::new(RpcRuntimeService::persisted_profile(
-            workspace.clone(),
-            session_root,
-        ));
-        Self::new(
+        let orchestration_endpoint =
+            crate::services::sdk_bridge::allocate_orchestration_endpoint(&workspace);
+        let service: Arc<dyn RuntimeService> =
+            Arc::new(RpcRuntimeService::persisted_profile_with_endpoint(
+                workspace.clone(),
+                session_root,
+                orchestration_endpoint.clone(),
+            ));
+        Self::new_with_endpoint(
             workspace.to_string_lossy().into_owned(),
             service,
             catalog_config,
+            orchestration_endpoint,
             cx,
         )
     }
@@ -1170,7 +1203,26 @@ impl RuntimeController {
         cx: &mut Context<Self>,
     ) -> Self {
         let workspace = workspace.into();
-        let bridge_worker = SdkBridgeWorker::spawn(PathBuf::from(&workspace));
+        let orchestration_endpoint =
+            crate::services::sdk_bridge::allocate_orchestration_endpoint(Path::new(&workspace));
+        Self::new_with_endpoint(
+            workspace,
+            service,
+            catalog_config,
+            orchestration_endpoint,
+            cx,
+        )
+    }
+
+    fn new_with_endpoint(
+        workspace: String,
+        service: Arc<dyn RuntimeService>,
+        catalog_config: SessionCatalogConfig,
+        orchestration_endpoint: String,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let bridge_worker =
+            SdkBridgeWorker::spawn(PathBuf::from(&workspace), orchestration_endpoint);
         let bridge_results = bridge_worker.results();
         let bridge_task = cx.spawn(async move |controller, cx| {
             while let Ok(result) = bridge_results.recv().await {
@@ -1244,6 +1296,27 @@ impl RuntimeController {
 
     pub fn composer_projection(&self) -> ComposerProjection {
         self.core.composer_projection()
+    }
+
+    pub fn thread_runtime_projection(&self) -> ThreadRuntimeProjection {
+        let session = self.core.runtime.session.data.as_ref();
+        ThreadRuntimeProjection {
+            workspace: self.core.workspace.clone(),
+            status: self.core.status(),
+            lifecycle: self.core.runtime.lifecycle,
+            session_file: session
+                .and_then(|session| session.file.as_deref())
+                .map(PathBuf::from),
+            session_name: session.and_then(|session| session.name.clone()),
+            pending_session_file: self.pending_session_file.clone(),
+            pending_operation: self.core.runtime.pending_operation.is_some(),
+            has_error: self.core.connection_error.is_some()
+                || self.core.status() == ControllerStatus::Failed
+                || matches!(
+                    self.core.runtime.lifecycle,
+                    RuntimeLifecycle::Disconnected | RuntimeLifecycle::Failed
+                ),
+        }
     }
 
     pub fn conversation_projection(&self) -> ConversationProjection {
@@ -2138,32 +2211,8 @@ impl RuntimeController {
             BridgeWorkerResult::Capabilities(Ok(hello)) => {
                 self.bridge_capabilities = Some(hello.capabilities);
                 self.bridge_unavailable = None;
-                if self
-                    .bridge_capabilities
-                    .as_ref()
-                    .is_some_and(|capabilities| capabilities.model_runtime)
-                {
-                    let operation = self.model_runtime.take_operation();
-                    if self
-                        .bridge_worker
-                        .execute(operation, BridgeCommand::GetModelRuntime)
-                    {
-                        self.model_snapshot_pending = Some(operation);
-                    }
-                }
-                if self
-                    .bridge_capabilities
-                    .as_ref()
-                    .is_some_and(|capabilities| capabilities.resource_inventory)
-                {
-                    let operation = self.resource_center.take_operation();
-                    if self
-                        .bridge_worker
-                        .execute(operation, BridgeCommand::GetResourceInventory)
-                    {
-                        self.resource_snapshot_pending = Some(operation);
-                    }
-                }
+                self.request_model_runtime_snapshot();
+                self.request_resource_inventory_snapshot();
                 self.request_orchestration_snapshot();
                 self.bridge_feedback =
                     Some(format!("Session bridge ready · SDK {}", hello.sdk_version));
@@ -2503,6 +2552,42 @@ impl RuntimeController {
             | BridgeCommand::SetPiSetting { .. }
             | BridgeCommand::GetOrchestrationSnapshot { .. }
             | BridgeCommand::OrchestrationAction { .. } => false,
+        }
+    }
+
+    fn request_model_runtime_snapshot(&mut self) {
+        if self.model_snapshot_pending.is_some()
+            || !self
+                .bridge_capabilities
+                .as_ref()
+                .is_some_and(|capabilities| capabilities.model_runtime)
+        {
+            return;
+        }
+        let operation = self.model_runtime.take_operation();
+        if self
+            .bridge_worker
+            .execute(operation, BridgeCommand::GetModelRuntime)
+        {
+            self.model_snapshot_pending = Some(operation);
+        }
+    }
+
+    fn request_resource_inventory_snapshot(&mut self) {
+        if self.resource_snapshot_pending.is_some()
+            || !self
+                .bridge_capabilities
+                .as_ref()
+                .is_some_and(|capabilities| capabilities.resource_inventory)
+        {
+            return;
+        }
+        let operation = self.resource_center.take_operation();
+        if self
+            .bridge_worker
+            .execute(operation, BridgeCommand::GetResourceInventory)
+        {
+            self.resource_snapshot_pending = Some(operation);
         }
     }
 
@@ -3308,6 +3393,27 @@ mod tests {
                 .accepted_user_inputs
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn background_process_policy_retains_only_live_or_pending_work() {
+        let mut projection = ThreadRuntimeProjection {
+            workspace: "workspace".to_owned(),
+            status: ControllerStatus::Active,
+            lifecycle: RuntimeLifecycle::Ready,
+            session_file: None,
+            session_name: None,
+            pending_session_file: None,
+            pending_operation: false,
+            has_error: false,
+        };
+        assert!(!projection.keeps_background_process());
+        projection.lifecycle = RuntimeLifecycle::Running;
+        assert!(projection.keeps_background_process());
+        projection.status = ControllerStatus::Failed;
+        assert!(!projection.keeps_background_process());
+        projection.pending_operation = true;
+        assert!(projection.keeps_background_process());
     }
 
     #[test]
