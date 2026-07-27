@@ -205,6 +205,15 @@ pub(super) fn composer_bar(
                                         )
                                     },
                                 )
+                                .child(controls::chrome_icon_toggle(
+                                    "prompt-enlarge-input",
+                                    "icons/expand.svg",
+                                    composer.read(cx).input_enlarged(),
+                                    true,
+                                    Box::new(cx.listener(|view, _, window, cx| {
+                                        view.toggle_composer_enlarged(window, cx);
+                                    })),
+                                ))
                                 .child(controls::chrome_icon_action(
                                     "prompt-model-settings",
                                     "icons/cog.svg",

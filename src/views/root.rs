@@ -2129,6 +2129,14 @@ impl RootView {
         }
     }
 
+    fn toggle_composer_enlarged(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.composer
+            .update(cx, |composer, cx| composer.toggle_input_enlarged(cx));
+        // Keep the draft field focused so enlarge is height-only, not a focus detour.
+        window.focus(&self.composer.read(cx).focus_handle(cx));
+        cx.notify();
+    }
+
     fn show_model_panel(&mut self, panel: ModelPanel, window: &mut Window, cx: &mut Context<Self>) {
         self.model_panel = Some(panel);
         match panel {

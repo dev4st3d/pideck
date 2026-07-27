@@ -6,12 +6,13 @@ mod tests;
 
 use std::ops::Range;
 use std::sync::Arc;
+use std::time::Duration;
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use gpui::{
     ClipboardEntry, ClipboardItem, Context, EntityInputHandler, EventEmitter, FocusHandle,
     Focusable, Image, ImageFormat, IntoElement, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    Pixels, Render, ScrollWheelEvent, SharedString, UTF16Selection, Window, px,
+    Pixels, Render, ScrollWheelEvent, SharedString, Subscription, UTF16Selection, Window, px,
 };
 use image::GenericImageView;
 
@@ -30,6 +31,8 @@ const MAX_IMAGE_ATTACHMENTS: usize = 4;
 const MAX_IMAGE_BYTES: usize = 5 * 1024 * 1024;
 /// Pixel edge length for cached square attachment thumbs (display is smaller).
 const ATTACHMENT_THUMB_PX: u32 = 96;
+/// Expand/collapse the multiline input between single-line and multi-line heights.
+pub(super) const INPUT_HEIGHT_MOTION_MS: u64 = 200;
 
 fn decoded_image_len(data: &str) -> usize {
     let padding = data
@@ -121,6 +124,14 @@ pub enum ComposerEvent {
     PreviewImage(usize),
 }
 
+/// In-flight height animation for the multiline input shell.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct InputHeightMotion {
+    pub(super) generation: u64,
+    pub(super) from: f32,
+    pub(super) to: f32,
+}
+
 pub struct Composer {
     id_prefix: SharedString,
     action_label: SharedString,
@@ -150,6 +161,14 @@ pub struct Composer {
     reveal_cursor: bool,
     last_layout: Option<EditorLayout>,
     command_completion_active: bool,
+    /// Multiline chrome only: multi-line (focused / inputting) vs single-line (idle).
+    input_expanded: bool,
+    /// User-pinned taller input; stays tall until toggled off (ignores blur collapse).
+    input_enlarged: bool,
+    input_height_motion: Option<InputHeightMotion>,
+    input_height_motion_seq: u64,
+    /// Keeps focus expand/collapse subscriptions alive for multiline chrome.
+    _input_focus_subscriptions: Option<(Subscription, Subscription)>,
 }
 
 impl Composer {
@@ -179,6 +198,12 @@ impl Composer {
             reveal_cursor: true,
             last_layout: None,
             command_completion_active: false,
+            // Multiline starts collapsed; focus tracking snaps/animates open when active.
+            input_expanded: false,
+            input_enlarged: false,
+            input_height_motion: None,
+            input_height_motion_seq: 0,
+            _input_focus_subscriptions: None,
         }
     }
 
@@ -273,6 +298,123 @@ impl Composer {
 
     pub(super) fn strip_motion_key(&self) -> u64 {
         self.strip_motion_key
+    }
+
+    pub fn input_enlarged(&self) -> bool {
+        self.input_enlarged
+    }
+
+    pub(super) fn input_height_motion(&self) -> Option<InputHeightMotion> {
+        self.input_height_motion
+    }
+
+    /// Settled shell height for the current expand/enlarge state.
+    pub(super) fn input_target_height(&self) -> f32 {
+        if self.chrome == ComposerChrome::Field {
+            return self.field_height();
+        }
+        let panel = self.chrome == ComposerChrome::Panel;
+        let padding_y = if panel { 8.0 } else { 6.0 };
+        let line_height = if panel { 21.0 } else { 20.0 };
+        let collapsed = line_height + padding_y * 2.0;
+        let normal = if panel { 64.0 } else { 52.0 };
+        // ~6 text rows: room for longer prompts without eating the whole stream.
+        let enlarged = if panel { 128.0 } else { 148.0 };
+        if self.input_enlarged {
+            enlarged
+        } else if self.input_expanded {
+            normal
+        } else {
+            collapsed
+        }
+    }
+
+    /// Pin or release the taller multiline input height.
+    pub fn toggle_input_enlarged(&mut self, cx: &mut Context<Self>) {
+        if self.chrome == ComposerChrome::Field {
+            return;
+        }
+        let from = self.input_target_height();
+        self.input_enlarged = !self.input_enlarged;
+        if self.input_enlarged {
+            // Leave enlarge mode into the multi-line shell, not a single line.
+            self.input_expanded = true;
+        }
+        let to = self.input_target_height();
+        self.begin_height_motion(from, to, cx);
+    }
+
+    /// Subscribe to focus so multiline chrome expands while inputting and collapses when idle.
+    /// First install snaps to the current focus without animating (avoids a launch pop).
+    pub(super) fn ensure_input_focus_tracking(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.chrome == ComposerChrome::Field || self._input_focus_subscriptions.is_some() {
+            return;
+        }
+
+        let handle = self.focus_handle.clone();
+        let on_focus = cx.on_focus(&handle, window, |this, _, cx| {
+            this.set_input_expanded(true, cx);
+        });
+        let on_blur = cx.on_blur(&handle, window, |this, _, cx| {
+            this.set_input_expanded(false, cx);
+        });
+        self._input_focus_subscriptions = Some((on_focus, on_blur));
+
+        // Snap to whatever is already focused (root focuses the desk composer on open).
+        self.input_expanded = self.focus_handle.is_focused(window);
+        self.input_height_motion = None;
+    }
+
+    fn set_input_expanded(&mut self, expanded: bool, cx: &mut Context<Self>) {
+        if self.chrome == ComposerChrome::Field || self.input_expanded == expanded {
+            return;
+        }
+        // Enlarged height is user-pinned; still track focus so leaving enlarge restores correctly.
+        if self.input_enlarged {
+            self.input_expanded = expanded;
+            cx.notify();
+            return;
+        }
+        let from = self.input_target_height();
+        self.input_expanded = expanded;
+        let to = self.input_target_height();
+        self.begin_height_motion(from, to, cx);
+    }
+
+    fn begin_height_motion(&mut self, from: f32, to: f32, cx: &mut Context<Self>) {
+        if (from - to).abs() < 0.5 {
+            self.input_height_motion = None;
+            cx.notify();
+            return;
+        }
+        self.input_height_motion_seq = self.input_height_motion_seq.wrapping_add(1).max(1);
+        let generation = self.input_height_motion_seq;
+        self.input_height_motion = Some(InputHeightMotion {
+            generation,
+            from,
+            to,
+        });
+
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(INPUT_HEIGHT_MOTION_MS))
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if this
+                    .input_height_motion
+                    .is_some_and(|motion| motion.generation == generation)
+                {
+                    this.input_height_motion = None;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+        cx.notify();
     }
 
     fn next_attach_token(&mut self) -> u64 {
@@ -1058,7 +1200,8 @@ impl EntityInputHandler for Composer {
 }
 
 impl Render for Composer {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.ensure_input_focus_tracking(window, cx);
         self.render_view(cx)
     }
 }

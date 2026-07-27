@@ -632,6 +632,32 @@ pub fn chrome_icon_action(
     enabled: bool,
     on_click: ClickHandler,
 ) -> impl IntoElement {
+    chrome_icon_button(id, icon_path, false, enabled, on_click)
+}
+
+/// Toolbar SVG toggle with a selected (pressed-in) appearance.
+pub fn chrome_icon_toggle(
+    id: impl Into<SharedString>,
+    icon_path: impl Into<SharedString>,
+    selected: bool,
+    enabled: bool,
+    on_click: ClickHandler,
+) -> impl IntoElement {
+    chrome_icon_button(id, icon_path, selected, enabled, on_click)
+}
+
+fn chrome_icon_button(
+    id: impl Into<SharedString>,
+    icon_path: impl Into<SharedString>,
+    selected: bool,
+    enabled: bool,
+    on_click: ClickHandler,
+) -> impl IntoElement {
+    let icon_color = if selected {
+        theme::bone_dim()
+    } else {
+        theme::smoke()
+    };
     div()
         .id(id.into())
         .size(px(20.0))
@@ -640,7 +666,8 @@ pub fn chrome_icon_action(
         .items_center()
         .justify_center()
         .flex_shrink_0()
-        .text_color(theme::smoke())
+        .bg(if selected { theme::canvas() } else { clear() })
+        .text_color(icon_color)
         .when(enabled, |button| {
             button
                 .tab_index(0)
@@ -653,7 +680,7 @@ pub fn chrome_icon_action(
             svg()
                 .path(icon_path.into())
                 .size(px(13.0))
-                .text_color(theme::smoke()),
+                .text_color(icon_color),
         )
 }
 

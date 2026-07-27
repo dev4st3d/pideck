@@ -7,7 +7,10 @@ use gpui::{
 };
 
 use super::element::ComposerTextElement;
-use super::{Composer, ComposerAvailability, ComposerChrome, ComposerEvent, ComposerFeedback};
+use super::{
+    Composer, ComposerAvailability, ComposerChrome, ComposerEvent, ComposerFeedback,
+    INPUT_HEIGHT_MOTION_MS,
+};
 use crate::theme;
 
 /// On-screen size of each attached-image chip (square).
@@ -213,18 +216,18 @@ impl Composer {
         let desk = self.chrome == ComposerChrome::Full;
         let status = self.status_text();
         let show_status = !status.is_empty() || !panel;
-        let input_height = if panel { 64.0 } else { 52.0 };
         let input_padding_x = if panel { 12.0 } else { 10.0 };
         let input_padding_y = if panel { 8.0 } else { 6.0 };
         let input_line_height = if panel { 21.0 } else { 20.0 };
+        // Idle: one row · focused: multi-line · user enlarge: taller pinned shell.
+        let height_motion = self.input_height_motion();
+        let settled_height = self.input_target_height();
         let action_height = if desk { 28.0 } else { 32.0 };
         let action_gap = if desk { 6.0 } else { 8.0 };
+        let id_prefix = self.id_prefix.clone();
 
         let mut input = div()
-            .id(gpui::SharedString::from(format!(
-                "{}-input",
-                self.id_prefix
-            )))
+            .id(gpui::SharedString::from(format!("{id_prefix}-input")))
             .track_focus(&self.focus_handle)
             .when(!self.disabled, |input| input.tab_index(0))
             .when(handles_composer_keys, |input| input.key_context("Composer"))
@@ -233,7 +236,7 @@ impl Composer {
             } else {
                 CursorStyle::IBeam
             })
-            .h(px(input_height))
+            .h(px(settled_height))
             .px(px(input_padding_x))
             .py(px(input_padding_y))
             .overflow_hidden()
@@ -260,8 +263,8 @@ impl Composer {
                     theme::panel()
                 });
         } else {
-            // Desk: preserve keyboard focus feedback with a subtle surface lift.
-            input = input.focus(|input| input.bg(theme::panel_lift()));
+            // Same surface when collapsed or focused so minimize is height-only.
+            input = input.bg(theme::panel_lift());
         }
 
         input = input
@@ -299,10 +302,29 @@ impl Composer {
             .on_scroll_wheel(cx.listener(Self::on_scroll_wheel))
             .child(ComposerTextElement { input: cx.entity() });
 
+        let input = if let Some(motion) = height_motion {
+            let from = motion.from;
+            let to = motion.to;
+            let anim_id = SharedString::from(format!("{id_prefix}-input-height"));
+            input
+                .with_animation(
+                    (anim_id, motion.generation as usize),
+                    Animation::new(Duration::from_millis(INPUT_HEIGHT_MOTION_MS))
+                        .with_easing(ease_out_quint()),
+                    move |input, delta| {
+                        let height = from + (to - from) * delta;
+                        input.h(px(height.max(1.0)))
+                    },
+                )
+                .into_any_element()
+        } else {
+            input.into_any_element()
+        };
+
         let attachments = (!self.images.is_empty()).then(|| self.render_attachments(cx));
 
         div()
-            .id(self.id_prefix.clone())
+            .id(id_prefix)
             .flex()
             .flex_col()
             .gap(px(if panel { 6.0 } else { 0.0 }))
