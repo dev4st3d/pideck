@@ -332,6 +332,116 @@ pub(super) fn command_suggestion_sheet(
         )
 }
 
+pub(super) fn file_suggestion_sheet(
+    entries: &[FileMatch],
+    selected: usize,
+    scroll: &ScrollHandle,
+    cx: &mut Context<RootView>,
+) -> impl IntoElement {
+    let rows = entries
+        .iter()
+        .enumerate()
+        .map(|(index, entry)| file_row(entry, index, index == selected, cx))
+        .collect::<Vec<_>>();
+    popup_sheet()
+        .max_w(px(560.0))
+        .max_h(px(220.0))
+        .child(
+            div()
+                .px(px(8.0))
+                .py(px(5.0))
+                .flex()
+                .flex_row()
+                .items_center()
+                .justify_between()
+                .border_b_1()
+                .border_color(theme::edge_soft())
+                .child(controls::section_label("Files"))
+                .child(
+                    div()
+                        .font_family(theme::mono())
+                        .text_size(theme::text_size(theme::T_TINY))
+                        .text_color(theme::smoke())
+                        .child("↑↓ · Enter · Esc"),
+                ),
+        )
+        .child(
+            div()
+                .id("file-completion-results")
+                .flex_1()
+                .min_h_0()
+                .overflow_y_scroll()
+                .track_scroll(scroll)
+                .scrollbar_width(px(theme::SCROLLBAR))
+                .children(rows),
+        )
+}
+
+fn file_row(
+    entry: &FileMatch,
+    index: usize,
+    selected: bool,
+    cx: &mut Context<RootView>,
+) -> gpui::AnyElement {
+    let path = entry.path.clone();
+    div()
+        .id(gpui::SharedString::from(format!("file-row-{index}-{path}")))
+        .px(px(8.0))
+        .py(px(4.0))
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(6.0))
+        .border_b_1()
+        .border_color(theme::edge_soft())
+        .when(selected, |row| row.bg(theme::panel_hover()))
+        .cursor_pointer()
+        .hover(|row| row.bg(theme::panel_hover()))
+        .on_click(cx.listener(move |view, _, window, cx| view.choose_file_match(index, window, cx)))
+        .child(
+            div()
+                .w(px(2.0))
+                .h(px(12.0))
+                .rounded(px(1.0))
+                .flex_shrink_0()
+                .bg(if selected {
+                    theme::signal()
+                } else {
+                    theme::edge_soft()
+                }),
+        )
+        .child(
+            div()
+                .w(px(10.0))
+                .flex_shrink_0()
+                .font_family(theme::mono())
+                .text_size(theme::text_size(theme::T_TINY))
+                .text_color(if entry.is_directory {
+                    theme::data()
+                } else {
+                    theme::smoke()
+                })
+                .child(if entry.is_directory { "/" } else { "·" }),
+        )
+        .child(
+            div()
+                .min_w_0()
+                .flex_1()
+                .font_family(theme::mono())
+                .text_size(theme::text_size(theme::T_TINY))
+                .text_color(if selected {
+                    theme::bone()
+                } else {
+                    theme::bone_dim()
+                })
+                .overflow_hidden()
+                .text_ellipsis()
+                .whitespace_nowrap()
+                .child(path),
+        )
+        .into_any_element()
+}
+
 fn command_row(
     entry: &CommandEntry,
     selected: bool,
@@ -2152,6 +2262,7 @@ pub(super) fn hotkey_help_overlay(cx: &mut Context<RootView>) -> impl IntoElemen
         ("Send / steer", "Enter"),
         ("Queue follow-up", "Alt+Enter"),
         ("Insert newline", "Shift+Enter"),
+        ("@ file / command menus", "↑ ↓ Enter Esc"),
         ("Abort run or Bash", "Esc"),
         ("Move focus", "Tab / Shift+Tab"),
         ("Copy transcript selection", "Ctrl+C"),

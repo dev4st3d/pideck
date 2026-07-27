@@ -32,6 +32,7 @@ use crate::controller::{
     HistoryProjection, ModelRuntimeProjection, OrchestrationProjection, ResourceCenterProjection,
     RuntimeController, SubmissionPreference, ThreadRuntimeProjection,
 };
+use crate::file_completion::{self, AtToken, FileMatch};
 use crate::fonts::{self, FontCatalog, FontRole};
 use crate::model_runtime::{
     AuthMethod, AuthPromptKind, AuthStage, CatalogPhase, ModelCatalogEntry, ModelChangePolicy,
@@ -341,6 +342,13 @@ pub struct RootView {
     command_palette_matches: Vec<CommandEntry>,
     slash_command_matches: Vec<CommandEntry>,
     slash_intercepts_enter: bool,
+    file_completion_matches: Vec<FileMatch>,
+    file_completion_token: Option<AtToken>,
+    file_completion_selection: usize,
+    file_completion_scroll: ScrollHandle,
+    file_completion_generation: u64,
+    file_completion_query: Option<String>,
+    dismissed_file_token: Option<String>,
     command_palette_scroll: ScrollHandle,
     slash_command_scroll: ScrollHandle,
     model_switcher_scroll: ScrollHandle,
@@ -597,7 +605,7 @@ impl RootView {
         let font_search_observation =
             cx.observe_in(&font_search_composer, window, |_, _, _, cx| cx.notify());
         let composer_observation = cx.observe_in(&composer, window, |view, _, _, cx| {
-            view.sync_slash_completion(cx)
+            view.sync_composer_completions(cx)
         });
         let command_search_observation =
             cx.observe_in(&command_search_composer, window, |view, _, _, cx| {
@@ -686,6 +694,13 @@ impl RootView {
             command_palette_matches,
             slash_command_matches: Vec::new(),
             slash_intercepts_enter: false,
+            file_completion_matches: Vec::new(),
+            file_completion_token: None,
+            file_completion_selection: 0,
+            file_completion_scroll: ScrollHandle::new(),
+            file_completion_generation: 0,
+            file_completion_query: None,
+            dismissed_file_token: None,
             command_palette_scroll: ScrollHandle::new(),
             slash_command_scroll: ScrollHandle::new(),
             model_switcher_scroll: ScrollHandle::new(),
@@ -1004,15 +1019,37 @@ impl RootView {
             ComposerEvent::AbortBash => {
                 let _ = self.execute_native_action(NativeAction::Abort, "", window, cx);
             }
-            ComposerEvent::CommandNext => self.move_command_selection(1, false, cx),
-            ComposerEvent::CommandPrevious => self.move_command_selection(-1, false, cx),
-            ComposerEvent::CommandAccept => self.accept_slash_completion(window, cx),
+            ComposerEvent::CommandNext => {
+                if self.file_completion_active() {
+                    self.move_file_completion_selection(1, cx);
+                } else {
+                    self.move_command_selection(1, false, cx);
+                }
+            }
+            ComposerEvent::CommandPrevious => {
+                if self.file_completion_active() {
+                    self.move_file_completion_selection(-1, cx);
+                } else {
+                    self.move_command_selection(-1, false, cx);
+                }
+            }
+            ComposerEvent::CommandAccept => {
+                if self.file_completion_active() {
+                    self.accept_file_completion(window, cx);
+                } else {
+                    self.accept_slash_completion(window, cx);
+                }
+            }
             ComposerEvent::CommandDismiss => {
-                self.dismissed_slash_draft = Some(self.composer.read(cx).draft().to_owned());
-                self.composer.update(cx, |composer, cx| {
-                    composer.set_command_completion_active(false, cx)
-                });
-                cx.notify();
+                if self.file_completion_active() {
+                    self.dismiss_file_completion(cx);
+                } else {
+                    self.dismissed_slash_draft = Some(self.composer.read(cx).draft().to_owned());
+                    self.composer.update(cx, |composer, cx| {
+                        composer.set_command_completion_active(false, cx)
+                    });
+                    cx.notify();
+                }
             }
             ComposerEvent::PreviewImage(index) => self.open_pasted_image(*index, window, cx),
         }
@@ -1201,6 +1238,22 @@ impl RootView {
         &self.command_catalog
     }
 
+    fn sync_composer_completions(&mut self, cx: &mut Context<Self>) {
+        self.sync_slash_completion(cx);
+        let composer = self.composer.read(cx);
+        let draft = composer.draft();
+        let slash_owns = !composer.has_images()
+            && self.slash_intercepts_enter
+            && self.dismissed_slash_draft.as_deref() != Some(draft);
+        drop(composer);
+        if slash_owns {
+            self.clear_file_completion();
+            self.apply_completion_keyboard_routing(cx);
+            return;
+        }
+        self.sync_file_completion(cx);
+    }
+
     fn sync_slash_completion(&mut self, cx: &mut Context<Self>) {
         let draft = self.composer.read(cx).draft().to_owned();
         if self.last_slash_draft != draft {
@@ -1229,20 +1282,182 @@ impl RootView {
         self.slash_command_matches = matches;
         self.slash_intercepts_enter = intercept_enter;
 
-        let active = !self.composer.read(cx).has_images()
+        let slash_active = !self.composer.read(cx).has_images()
             && self.dismissed_slash_draft.as_deref() != Some(draft.as_str())
             && self.slash_intercepts_enter;
-        if active {
+        if slash_active {
             self.command_selection = self
                 .command_selection
                 .min(self.slash_command_matches.len().saturating_sub(1));
-        } else {
+        } else if !self.slash_intercepts_enter {
             self.command_selection = 0;
         }
+        self.apply_completion_keyboard_routing(cx);
+    }
+
+    fn file_completion_active(&self) -> bool {
+        self.file_completion_token.is_some() && !self.file_completion_matches.is_empty()
+    }
+
+    fn slash_completion_active(&self, cx: &Context<Self>) -> bool {
+        let composer = self.composer.read(cx);
+        !composer.has_images()
+            && self.slash_intercepts_enter
+            && self.dismissed_slash_draft.as_deref() != Some(composer.draft())
+    }
+
+    fn apply_completion_keyboard_routing(&mut self, cx: &mut Context<Self>) {
+        let active = self.slash_completion_active(cx) || self.file_completion_active();
         self.composer.update(cx, |composer, cx| {
             composer.set_command_completion_active(active, cx)
         });
         cx.notify();
+    }
+
+    fn clear_file_completion(&mut self) {
+        self.file_completion_generation = self.file_completion_generation.wrapping_add(1);
+        self.file_completion_matches.clear();
+        self.file_completion_token = None;
+        self.file_completion_selection = 0;
+        self.file_completion_query = None;
+    }
+
+    fn sync_file_completion(&mut self, cx: &mut Context<Self>) {
+        if self.composer.read(cx).has_images() {
+            self.clear_file_completion();
+            self.apply_completion_keyboard_routing(cx);
+            return;
+        }
+
+        let (draft, cursor) = {
+            let composer = self.composer.read(cx);
+            (composer.draft().to_owned(), composer.cursor())
+        };
+        let Some(token) = file_completion::extract_at_token(&draft, cursor) else {
+            self.dismissed_file_token = None;
+            self.clear_file_completion();
+            self.apply_completion_keyboard_routing(cx);
+            return;
+        };
+
+        let token_key = format!("{}:{}", token.range.start, token.raw_query);
+        if self.dismissed_file_token.as_deref() == Some(token_key.as_str()) {
+            self.clear_file_completion();
+            self.apply_completion_keyboard_routing(cx);
+            return;
+        }
+        if self
+            .dismissed_file_token
+            .as_ref()
+            .is_some_and(|dismissed| dismissed != &token_key)
+        {
+            self.dismissed_file_token = None;
+        }
+
+        let query = token.raw_query.clone();
+        self.file_completion_token = Some(token);
+
+        // Same query: keep current results / in-flight search.
+        if self.file_completion_query.as_deref() == Some(query.as_str()) {
+            if !self.file_completion_matches.is_empty() {
+                self.file_completion_selection = self
+                    .file_completion_selection
+                    .min(self.file_completion_matches.len().saturating_sub(1));
+            }
+            self.apply_completion_keyboard_routing(cx);
+            return;
+        }
+
+        self.file_completion_selection = 0;
+        self.file_completion_scroll.scroll_to_item(0);
+        // Keep previous rows until the new search lands so the menu does not flash empty.
+        self.file_completion_query = Some(query.clone());
+        let generation = self.file_completion_generation.wrapping_add(1);
+        self.file_completion_generation = generation;
+
+        let workspace = PathBuf::from(&self.render_projections.shell.workspace);
+        // Debounce keystrokes; generation cancels superseded work.
+        cx.spawn(async move |view, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(45))
+                .await;
+            let still_current = view
+                .update(cx, |view, _| view.file_completion_generation == generation)
+                .unwrap_or(false);
+            if !still_current {
+                return;
+            }
+            let search_query = query.clone();
+            let matches = cx
+                .background_executor()
+                .spawn(async move { file_completion::search_files(&workspace, &search_query, 12) })
+                .await;
+            let _ = view.update(cx, |view, cx| {
+                if view.file_completion_generation != generation {
+                    return;
+                }
+                if view.file_completion_query.as_deref() != Some(query.as_str()) {
+                    return;
+                }
+                view.file_completion_matches = matches;
+                view.file_completion_selection = 0;
+                view.apply_completion_keyboard_routing(cx);
+            });
+        })
+        .detach();
+        self.apply_completion_keyboard_routing(cx);
+    }
+
+    fn move_file_completion_selection(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let count = self.file_completion_matches.len();
+        if count == 0 {
+            self.file_completion_selection = 0;
+            return;
+        }
+        self.file_completion_selection =
+            (self.file_completion_selection as isize + delta).rem_euclid(count as isize) as usize;
+        self.file_completion_scroll
+            .scroll_to_item(self.file_completion_selection);
+        cx.notify();
+    }
+
+    fn accept_file_completion(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(token) = self.file_completion_token.clone() else {
+            return;
+        };
+        let Some(item) = self
+            .file_completion_matches
+            .get(self.file_completion_selection)
+            .cloned()
+        else {
+            return;
+        };
+        let draft = self.composer.read(cx).draft().to_owned();
+        let (next, cursor) = file_completion::apply_file_match(&draft, &token, &item);
+        self.dismissed_file_token = None;
+        self.clear_file_completion();
+        self.composer.update(cx, |composer, cx| {
+            composer.set_draft_with_cursor(&next, cursor, cx);
+        });
+        // Directory accept re-opens listing for the extended `@path/`.
+        self.sync_composer_completions(cx);
+        window.focus(&self.composer.read(cx).focus_handle(cx));
+    }
+
+    fn dismiss_file_completion(&mut self, cx: &mut Context<Self>) {
+        if let Some(token) = self.file_completion_token.as_ref() {
+            self.dismissed_file_token = Some(format!("{}:{}", token.range.start, token.raw_query));
+        }
+        self.clear_file_completion();
+        self.apply_completion_keyboard_routing(cx);
+    }
+
+    fn choose_file_match(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if index >= self.file_completion_matches.len() {
+            return;
+        }
+        self.file_completion_selection = index;
+        self.accept_file_completion(window, cx);
     }
 
     fn refresh_command_palette_matches(&mut self, cx: &Context<Self>) {
@@ -3854,7 +4069,7 @@ impl RootView {
         self.render_projections = render_projections;
         if command_catalog_changed {
             self.refresh_command_palette_matches(cx);
-            self.sync_slash_completion(cx);
+            self.sync_composer_completions(cx);
         }
 
         if epoch_changed

@@ -3,6 +3,7 @@ pub mod app;
 pub mod assets;
 pub mod command_catalog;
 pub mod controller;
+pub mod file_completion;
 pub mod fonts;
 pub mod model_runtime;
 pub mod orchestration;

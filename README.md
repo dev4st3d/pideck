@@ -27,6 +27,7 @@ The visible shell now shows only live or explicitly Loading, Awaiting, Unknown, 
 - provider-owned API-key, browser, device-code, text, select, progress, cancel, and logout flows. Secret input is masked and redacted from Rust debug output; catalogs expose no credential values, resolved environment values, headers, base URLs, or raw provider errors;
 - honest separation between the active session model/thinking state (stock RPC) and Pi's persisted defaults/model cycle order (SDK settings), plus nullable current context, lifetime token/cache/reasoning totals, and estimated cost with zero pricing labeled as unpriced rather than free.
 - `/` autocomplete plus a `Ctrl+Shift+P` palette merging native actions with Pi-discovered extension, prompt-template, and skill commands. Results are grouped by kind, retain duplicate/suffixed names, and show installed scope/origin/source/path provenance;
+- compact `@` file autocomplete in the composer against the active workspace (directory drill-in, fuzzy search, quoted paths with spaces, keyboard navigation shared with `/`);
 - native model/session/tree/fork/clone/compact/export/copy/abort/settings/help actions that never round-trip through the model, with argument hints for native commands and a refresh command for retained stale catalogs.
 - native RPC notifications are shown as dismissible in-app notices, while installed TUI-only layout commands such as `/box`, `/rail`, and `/topbar` are omitted and guarded from model delivery.
 - stock `select`, `confirm`, `input`, and `editor` extension dialogs in a deterministic FIFO modal queue, with focus containment, Escape cancellation, answer-type validation, one response per request ID, and timeout/process/session tombstones that prevent late or duplicate answers;
@@ -80,6 +81,8 @@ If no model is available, open Settings > Providers, authenticate, refresh catal
 | Retry | `Ctrl+Alt+R` |
 | Stop | `Ctrl+Alt+S` |
 | Open command palette | `Ctrl+Shift+P` |
+| `@` file completion (in composer) | type `@` then `↑` `↓` `Enter` / `Esc` |
+| `/` command completion (in composer) | type `/` then `↑` `↓` `Enter` / `Esc` |
 | Show native hotkey help | `Ctrl+/` |
 | Increase font size | `Ctrl++` (or `Ctrl+=`) |
 | Decrease font size | `Ctrl+-` |

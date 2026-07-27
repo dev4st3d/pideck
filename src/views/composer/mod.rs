@@ -284,6 +284,11 @@ impl Composer {
         self.buffer.text()
     }
 
+    /// Byte offset of the active caret (grapheme-safe).
+    pub fn cursor(&self) -> usize {
+        self.buffer.cursor()
+    }
+
     pub fn images(&self) -> &[PromptImage] {
         &self.images
     }
@@ -494,6 +499,16 @@ impl Composer {
         }
     }
 
+    /// Replace the full draft and place the caret at `cursor` (clamped).
+    pub fn set_draft_with_cursor(&mut self, text: &str, cursor: usize, cx: &mut Context<Self>) {
+        let length = self.buffer.text().len();
+        self.buffer.set_selection(0..length, false);
+        let _ = self.buffer.replace_selection(text);
+        let cursor = cursor.min(self.buffer.text().len());
+        self.buffer.move_to(cursor);
+        self.after_edit(cx);
+    }
+
     pub fn restore_draft(&mut self, text: &str, images: Vec<PromptImage>, cx: &mut Context<Self>) {
         self.set_draft(text, cx);
         self.image_bytes = images
@@ -543,11 +558,17 @@ impl Composer {
         cx.notify();
     }
 
+    /// When true, arrows / Enter / Escape route to completion menu events instead
+    /// of caret motion or submit/abort. Shared by `/` command and `@` file menus.
     pub fn set_command_completion_active(&mut self, active: bool, cx: &mut Context<Self>) {
         if self.command_completion_active != active {
             self.command_completion_active = active;
             cx.notify();
         }
+    }
+
+    pub fn command_completion_active(&self) -> bool {
+        self.command_completion_active
     }
 
     pub fn clear_bash_accepted(

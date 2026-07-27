@@ -1,6 +1,9 @@
 use super::model_panels::{model_switcher_sheet, thinking_select_sheet};
-use super::overlays::{command_suggestion_sheet, extension_status_bar, extension_widgets};
+use super::overlays::{
+    command_suggestion_sheet, extension_status_bar, extension_widgets, file_suggestion_sheet,
+};
 use super::*;
+use crate::file_completion::FileMatch;
 
 pub(super) struct ComposerBarParams<'a> {
     pub(super) composer: &'a Entity<Composer>,
@@ -12,6 +15,9 @@ pub(super) struct ComposerBarParams<'a> {
     pub(super) slash_commands: &'a [CommandEntry],
     pub(super) command_selection: usize,
     pub(super) command_scroll: &'a ScrollHandle,
+    pub(super) file_matches: &'a [FileMatch],
+    pub(super) file_selection: usize,
+    pub(super) file_scroll: &'a ScrollHandle,
     pub(super) model_scroll: &'a ScrollHandle,
     pub(super) provider_scroll: &'a ScrollHandle,
     pub(super) thinking_scroll: &'a ScrollHandle,
@@ -33,6 +39,9 @@ pub(super) fn composer_bar(
         slash_commands,
         command_selection,
         command_scroll,
+        file_matches,
+        file_selection,
+        file_scroll,
         model_scroll,
         provider_scroll,
         thinking_scroll,
@@ -48,6 +57,9 @@ pub(super) fn composer_bar(
     let can_pick_thinking = catalog_ready || models.active_thinking.is_some();
     let slash_completion =
         (!slash_dismissed && !slash_commands.is_empty()).then_some(slash_commands);
+    // Slash menu wins when both could appear; file menu only when slash is idle.
+    let file_completion =
+        (slash_completion.is_none() && !file_matches.is_empty()).then_some(file_matches);
 
     div()
         .flex_shrink_0()
@@ -75,6 +87,25 @@ pub(super) fn composer_bar(
                                 completion,
                                 command_selection,
                                 command_scroll,
+                                cx,
+                            )),
+                    )
+                })
+                .when_some(file_completion, |host, matches| {
+                    host.child(
+                        div()
+                            .absolute()
+                            .left_0()
+                            .right_0()
+                            .bottom_full()
+                            .pb(px(10.0))
+                            .occlude()
+                            .flex()
+                            .justify_center()
+                            .child(file_suggestion_sheet(
+                                matches,
+                                file_selection,
+                                file_scroll,
                                 cx,
                             )),
                     )
