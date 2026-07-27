@@ -38,10 +38,25 @@ pub(super) use list::{ConversationDiffSummary, ConversationListModel};
 pub(super) use scroll::ConversationScrollMotion;
 
 const MAX_CACHED_TRANSCRIPT_BLOCKS: usize = 256;
+/// Open/close motion for the activity history disclosure.
+const DISCLOSURE_MOTION_MS: u64 = 210;
+/// Estimated row height used only while the disclosure is mid-animation.
+const DISCLOSURE_STEP_ESTIMATE_PX: f32 = 52.0;
+const DISCLOSURE_HISTORY_PAD_PX: f32 = 16.0;
+const DISCLOSURE_HISTORY_MAX_PX: f32 = 420.0;
+
+#[derive(Debug, Clone, Copy)]
+struct DisclosureMotion {
+    generation: u64,
+    /// `true` while opening, `false` while closing.
+    opening: bool,
+}
 
 pub(super) struct ActivityDisclosureState {
     epoch: SessionEpoch,
     expanded: HashSet<String>,
+    motions: HashMap<String, DisclosureMotion>,
+    next_generation: u64,
 }
 
 impl ActivityDisclosureState {
@@ -49,6 +64,8 @@ impl ActivityDisclosureState {
         Self {
             epoch,
             expanded: HashSet::new(),
+            motions: HashMap::new(),
+            next_generation: 0,
         }
     }
 
@@ -61,16 +78,58 @@ impl ActivityDisclosureState {
     pub(super) fn reset(&mut self, epoch: SessionEpoch) {
         self.epoch = epoch;
         self.expanded.clear();
+        self.motions.clear();
+        self.next_generation = 0;
     }
 
     fn is_expanded(&self, key: &str) -> bool {
         self.expanded.contains(key)
     }
 
+    /// Content stays mounted while collapsing so the exit animation can run.
+    fn shows_history(&self, key: &str) -> bool {
+        self.expanded.contains(key) || self.motions.get(key).is_some_and(|motion| !motion.opening)
+    }
+
+    fn motion(&self, key: &str) -> Option<DisclosureMotion> {
+        self.motions.get(key).copied()
+    }
+
     fn toggle(&mut self, key: &str, cx: &mut Context<Self>) {
-        if !self.expanded.remove(key) {
+        let opening = !self.expanded.contains(key);
+        if opening {
             self.expanded.insert(key.to_owned());
+        } else {
+            self.expanded.remove(key);
         }
+
+        self.next_generation = self.next_generation.wrapping_add(1);
+        let generation = self.next_generation;
+        self.motions.insert(
+            key.to_owned(),
+            DisclosureMotion {
+                generation,
+                opening,
+            },
+        );
+
+        let key = key.to_owned();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(DISCLOSURE_MOTION_MS))
+                .await;
+            let _ = this.update(cx, |state, cx| {
+                if state
+                    .motions
+                    .get(&key)
+                    .is_some_and(|motion| motion.generation == generation)
+                {
+                    state.motions.remove(&key);
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
         cx.notify();
     }
 }
@@ -816,6 +875,8 @@ fn turn_card(
         .bg(theme::floor())
         .border_1()
         .border_color(theme::edge_soft())
+        // Keep stacked turns visually continuous without a hard double edge.
+        .when(!position.is_last, |turn| turn.border_b_0())
         .child(user_prompt(position.index, user, render.texts))
         .when(!activity.is_empty(), |turn| {
             turn.child(activity_band(
@@ -837,6 +898,13 @@ fn optimistic_turn(
     texts: &HashMap<String, Entity<TranscriptText>>,
 ) -> impl IntoElement {
     let key = format!("optimistic:{}:text", input.request.as_str());
+    let mut body = Vec::new();
+    if !input.text.is_empty() {
+        body.push(prompt_selectable(&key, texts));
+    }
+    for image in &input.images {
+        body.push(compact_label(format!("Image · {}", image.mime_type)));
+    }
     div()
         .id(SharedString::from(format!(
             "optimistic-turn-{}",
@@ -847,27 +915,12 @@ fn optimistic_turn(
         .overflow_hidden()
         .border_1()
         .border_color(theme::user_message_edge())
-        .child(
-            div()
-                .relative()
-                .w_full()
-                .px(px(18.0))
-                .py(px(11.0))
-                .bg(theme::user_message())
-                .flex()
-                .flex_col()
-                .gap(px(6.0))
-                .child(prompt_info(index, optimistic_status(input.kind).to_owned()))
-                .when(!input.text.is_empty(), |turn| {
-                    turn.child(prompt_selectable(&key, texts))
-                })
-                .children(
-                    input
-                        .images
-                        .iter()
-                        .map(|image| compact_label(format!("Image · {}", image.mime_type))),
-                ),
-        )
+        .child(user_prompt_block(
+            index,
+            Some(optimistic_status(input.kind).to_owned()),
+            true,
+            body,
+        ))
 }
 
 fn user_prompt(
@@ -875,19 +928,10 @@ fn user_prompt(
     message: &RuntimeMessage,
     texts: &HashMap<String, Entity<TranscriptText>>,
 ) -> impl IntoElement {
-    div()
-        .relative()
-        .w_full()
-        .px(px(18.0))
-        .py(px(11.0))
-        .bg(theme::user_message())
-        .border_b_1()
-        .border_color(theme::user_message_edge())
-        .flex()
-        .flex_col()
-        .gap(px(6.0))
-        .child(prompt_info(index, format_timestamp(message.timestamp)))
-        .children(message.content.iter().filter_map(|block| match block {
+    let body = message
+        .content
+        .iter()
+        .filter_map(|block| match block {
             MessageBlock::Text { .. } => {
                 Some(prompt_selectable(&fragment_key(message, block), texts))
             }
@@ -895,54 +939,140 @@ fn user_prompt(
                 Some(compact_label(format!("Image · {mime_type}")))
             }
             _ => None,
-        }))
+        })
+        .collect::<Vec<_>>();
+    user_prompt_block(
+        index,
+        Some(format_timestamp(message.timestamp)),
+        false,
+        body,
+    )
 }
 
-fn prompt_info(index: usize, detail: String) -> impl IntoElement {
-    let tooltip = format!("Message {index:02} · You · {detail}");
+/// Compact editorial prompt: warm wash, tight type, one quiet mark of identity.
+fn user_prompt_block(
+    index: usize,
+    detail: Option<String>,
+    pending: bool,
+    body: Vec<AnyElement>,
+) -> impl IntoElement {
+    let mark = if pending {
+        theme::data()
+    } else {
+        theme::signal()
+    };
+
     div()
-        .id(("prompt-info", index))
-        .absolute()
-        .top(px(10.0))
-        .right(px(17.0))
-        .size(px(16.0))
-        .flex()
-        .items_center()
-        .justify_center()
-        .text_color(theme::smoke())
-        .hover(|info| info.text_color(theme::bone_dim()))
-        .tooltip(move |_, cx| {
-            cx.new(|_| PromptInfoTooltip {
-                text: tooltip.clone(),
-            })
-            .into()
+        .relative()
+        .w_full()
+        .bg(theme::user_message())
+        .when(!pending, |block| {
+            block.border_b_1().border_color(theme::edge_soft())
         })
+        // Inset warm hairline — sits on the content rhythm, not the outer edge.
         .child(
-            svg()
-                .path("icons/info.svg")
-                .size(px(13.0))
-                .text_color(theme::smoke()),
+            div()
+                .absolute()
+                .top(px(0.0))
+                .left(px(18.0))
+                .right(px(18.0))
+                .h(px(1.0))
+                .bg(theme::user_message_edge()),
+        )
+        .child(
+            div()
+                .w_full()
+                .px(px(18.0))
+                .pt(px(10.0))
+                .pb(px(11.0))
+                .flex()
+                .flex_col()
+                .gap(px(6.0))
+                .child(user_prompt_header(index, detail, pending, mark))
+                .when(!body.is_empty(), |block| {
+                    block.child(div().w_full().flex().flex_col().gap(px(5.0)).children(body))
+                }),
         )
 }
 
-struct PromptInfoTooltip {
-    text: String,
+fn user_prompt_header(
+    index: usize,
+    detail: Option<String>,
+    pending: bool,
+    mark: gpui::Rgba,
+) -> impl IntoElement {
+    div()
+        .w_full()
+        .flex()
+        .flex_row()
+        .items_center()
+        .justify_between()
+        .gap(px(12.0))
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(8.0))
+                .child(
+                    // Short gem — identity without a full rail.
+                    div()
+                        .w(px(2.0))
+                        .h(px(10.0))
+                        .rounded_full()
+                        .bg(mark)
+                        .flex_shrink_0(),
+                )
+                .child(
+                    div()
+                        .font_family(theme::sans())
+                        .text_size(theme::text_size(theme::T_UI_SM))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(if pending {
+                            theme::bone_dim()
+                        } else {
+                            theme::ash()
+                        })
+                        .child("You"),
+                ),
+        )
+        .child(user_prompt_meta(index, detail, pending))
 }
 
-impl Render for PromptInfoTooltip {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .px(px(8.0))
-            .py(px(6.0))
-            .rounded(px(theme::RADIUS_SM))
-            .bg(theme::panel_lift())
-            .border_1()
-            .border_color(theme::edge_hard())
-            .font_family(theme::mono())
-            .text_size(theme::text_size(theme::T_TINY))
-            .text_color(theme::bone_dim())
-            .child(self.text.clone())
-    }
+fn user_prompt_meta(index: usize, detail: Option<String>, pending: bool) -> impl IntoElement {
+    div()
+        .max_w(px(300.0))
+        .flex_shrink_0()
+        .flex()
+        .flex_row()
+        .items_baseline()
+        .justify_end()
+        .gap(px(6.0))
+        .font_family(theme::mono())
+        .text_size(theme::text_size(theme::T_TINY))
+        .text_color(theme::smoke())
+        .child(
+            div()
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(theme::ash())
+                .child(format!("{index:02}")),
+        )
+        .when_some(detail, |row, detail| {
+            row.child(div().text_color(theme::edge_hard()).child("·"))
+                .child(
+                    div()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .whitespace_nowrap()
+                        .text_color(if pending {
+                            theme::data()
+                        } else {
+                            theme::smoke()
+                        })
+                        .child(detail),
+                )
+        })
 }
 
 /// One spine step inside a turn's activity band.
@@ -1520,7 +1650,10 @@ fn activity_band(
     }
 
     let expanded = render.disclosures.read(cx).is_expanded(disclosure_key);
-    let animate_latest = !expanded
+    let show_history = render.disclosures.read(cx).shows_history(disclosure_key);
+    let motion = render.disclosures.read(cx).motion(disclosure_key);
+
+    let animate_latest = !show_history
         && matches!(
             latest_step,
             ActivityStep::Tool { presentation, .. }
@@ -1539,13 +1672,26 @@ fn activity_band(
                     "activity-latest-tool:{disclosure_key}:{}",
                     steps.len()
                 )),
-                Animation::new(Duration::from_millis(170)).with_easing(ease_out_quint()),
-                |row, delta| row.ml(px(8.0 * (1.0 - delta))).opacity(0.72 + 0.28 * delta),
+                Animation::new(Duration::from_millis(180)).with_easing(ease_out_quint()),
+                |row, delta| row.ml(px(6.0 * (1.0 - delta))).opacity(0.68 + 0.32 * delta),
             )
             .into_any_element()
     } else {
         latest
     };
+
+    let history_panel = if show_history && !history.is_empty() {
+        Some(activity_history_panel(
+            disclosure_key,
+            history.len(),
+            expanded,
+            motion,
+            children,
+        ))
+    } else {
+        None
+    };
+
     div()
         .w_full()
         .bg(theme::floor())
@@ -1559,27 +1705,74 @@ fn activity_band(
                 render.disclosures,
             ))
         })
-        .when(expanded && !history.is_empty(), |band| {
-            band.child(
-                div()
-                    .w_full()
-                    .px(px(18.0))
-                    .pt(px(9.0))
-                    .pb(px(2.0))
-                    .flex()
-                    .flex_col()
-                    .children(children),
-            )
-        })
+        .children(history_panel)
         .child(
             div()
                 .w_full()
                 .px(px(18.0))
-                .pt(px(6.0))
-                .pb(if has_reply { px(6.0) } else { px(11.0) })
+                .pt(px(7.0))
+                .pb(if has_reply { px(7.0) } else { px(12.0) })
                 .child(latest),
         )
         .into_any_element()
+}
+
+fn activity_history_panel(
+    disclosure_key: &str,
+    history_count: usize,
+    expanded: bool,
+    motion: Option<DisclosureMotion>,
+    children: Vec<AnyElement>,
+) -> AnyElement {
+    let body = div()
+        .w_full()
+        .px(px(18.0))
+        .pt(px(8.0))
+        .pb(px(4.0))
+        .flex()
+        .flex_col()
+        .children(children);
+
+    let Some(motion) = motion else {
+        // Settled open — full natural height, no clip.
+        return body.into_any_element();
+    };
+
+    let opening = motion.opening && expanded;
+    // Closing starts from a roomier clip so multi-line steps do not snap-crop.
+    let span_h = if opening {
+        disclosure_history_estimate(history_count)
+    } else {
+        (disclosure_history_estimate(history_count) * 1.55).min(DISCLOSURE_HISTORY_MAX_PX + 96.0)
+    };
+    div()
+        .w_full()
+        .overflow_hidden()
+        .child(body)
+        .with_animation(
+            SharedString::from(format!(
+                "activity-history:{disclosure_key}:{}",
+                motion.generation
+            )),
+            Animation::new(Duration::from_millis(DISCLOSURE_MOTION_MS))
+                .with_easing(ease_out_quint()),
+            move |panel, delta| {
+                let t = if opening { delta } else { 1.0 - delta };
+                let fade = 0.18 + 0.82 * t;
+                let height = (span_h * t).max(0.5);
+                panel
+                    .max_h(px(height))
+                    .opacity(fade)
+                    .mt(px(-3.0 * (1.0 - t)))
+            },
+        )
+        .into_any_element()
+}
+
+fn disclosure_history_estimate(history_count: usize) -> f32 {
+    let steps = history_count.max(1) as f32;
+    (steps * DISCLOSURE_STEP_ESTIMATE_PX + DISCLOSURE_HISTORY_PAD_PX)
+        .clamp(36.0, DISCLOSURE_HISTORY_MAX_PX)
 }
 
 fn activity_disclosure(
@@ -1592,6 +1785,12 @@ fn activity_disclosure(
     let click_state = disclosures.clone();
     let keyboard_key = key.to_owned();
     let keyboard_state = disclosures.clone();
+    let label = if history_count == 1 {
+        "Earlier step".to_owned()
+    } else {
+        "Earlier steps".to_owned()
+    };
+    let count_label = format!("{history_count:02}");
 
     div()
         .w_full()
@@ -1604,18 +1803,24 @@ fn activity_disclosure(
                 .tab_index(0)
                 .cursor_pointer()
                 .w_full()
-                .min_h(px(34.0))
-                .px(px(18.0))
-                .py(px(6.0))
+                .min_h(px(32.0))
+                .px(px(15.0))
+                .py(px(5.0))
+                .rounded(px(theme::RADIUS_SM))
+                .border_1()
+                .border_color(gpui::rgba(0x0000_0000))
                 .text_color(theme::ash())
                 .flex()
                 .flex_row()
                 .items_center()
-                .justify_between()
-                .gap(px(12.0))
+                .gap(px(10.0))
                 .hover(|row| row.bg(theme::panel()).text_color(theme::bone_dim()))
                 .active(|row| row.bg(theme::panel_lift()))
-                .focus(|row| row.bg(theme::panel()).text_color(theme::focus()))
+                .focus(|row| {
+                    row.bg(theme::panel())
+                        .text_color(theme::focus())
+                        .border_color(theme::edge_hard())
+                })
                 .on_click(move |_, _, cx| {
                     click_state.update(cx, |state, cx| state.toggle(&click_key, cx));
                 })
@@ -1627,37 +1832,62 @@ fn activity_disclosure(
                 })
                 .child(
                     div()
-                        .w(px(14.0))
-                        .h(px(14.0))
+                        .size(px(18.0))
                         .flex_shrink_0()
+                        .rounded(px(theme::RADIUS_SM))
                         .flex()
                         .items_center()
                         .justify_center()
-                        .font_family(theme::mono())
+                        .bg(theme::floor())
+                        .border_1()
+                        .border_color(theme::edge_soft())
+                        .child(
+                            svg()
+                                .path(if expanded {
+                                    "icons/chevron-down.svg"
+                                } else {
+                                    "icons/chevron-right.svg"
+                                })
+                                .size(px(10.0))
+                                .text_color(theme::smoke()),
+                        ),
+                )
+                .child(
+                    div()
+                        .min_w_0()
+                        .flex_1()
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .whitespace_nowrap()
+                        .font_family(theme::sans())
                         .text_size(theme::text_size(theme::T_UI_SM))
-                        .font_weight(FontWeight::BOLD)
-                        .child(if expanded { "−" } else { "+" }),
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(theme::ash())
+                        .child(label),
                 )
                 .child(
                     div()
                         .flex_shrink_0()
+                        .px(px(6.0))
+                        .py(px(2.0))
+                        .rounded_full()
+                        .bg(theme::floor())
+                        .border_1()
+                        .border_color(theme::edge_soft())
                         .font_family(theme::mono())
                         .text_size(theme::text_size(theme::T_TINY))
                         .font_weight(FontWeight::MEDIUM)
                         .text_color(theme::smoke())
-                        .child(format!(
-                            "{history_count:02} step{}",
-                            if history_count == 1 { "" } else { "s" }
-                        )),
+                        .child(count_label),
                 ),
         )
         .child(
-            div().w_full().px(px(18.0)).child(
+            div().w_full().px(px(16.0)).child(
                 div()
                     .w_full()
                     .h(px(1.0))
                     .rounded_full()
-                    .bg(theme::edge_hard()),
+                    .bg(theme::edge_soft()),
             ),
         )
 }
@@ -1974,7 +2204,7 @@ fn step_shell(is_last: bool, marker: gpui::Rgba, body: impl IntoElement) -> impl
     div()
         .flex()
         .flex_row()
-        .gap(px(9.0))
+        .gap(px(10.0))
         .child(
             div()
                 .w(px(10.0))
@@ -1984,9 +2214,9 @@ fn step_shell(is_last: bool, marker: gpui::Rgba, body: impl IntoElement) -> impl
                 .items_center()
                 .child(
                     div()
-                        .mt(px(5.0))
-                        .w(px(4.0))
-                        .h(px(4.0))
+                        .mt(px(6.0))
+                        .w(px(5.0))
+                        .h(px(5.0))
                         .rounded_full()
                         .bg(marker)
                         .flex_shrink_0(),
@@ -1996,9 +2226,10 @@ fn step_shell(is_last: bool, marker: gpui::Rgba, body: impl IntoElement) -> impl
                         div()
                             .flex_1()
                             .w(px(1.0))
-                            .min_h(px(6.0))
-                            .mt(px(2.0))
-                            .bg(theme::edge()),
+                            .min_h(px(8.0))
+                            .mt(px(3.0))
+                            .rounded_full()
+                            .bg(theme::edge_soft()),
                     )
                 }),
         )
@@ -2006,7 +2237,7 @@ fn step_shell(is_last: bool, marker: gpui::Rgba, body: impl IntoElement) -> impl
             div()
                 .flex_1()
                 .min_w_0()
-                .pb(if is_last { px(4.0) } else { px(8.0) })
+                .pb(if is_last { px(4.0) } else { px(9.0) })
                 .child(body),
         )
 }
@@ -2020,14 +2251,14 @@ fn assistant_reply(
         .id(SharedString::from(format!("message-{}", message.key.0)))
         .w_full()
         .px(px(18.0))
-        .pt(px(14.0))
-        .pb(px(16.0))
+        .pt(px(13.0))
+        .pb(px(15.0))
         .bg(theme::canvas())
         .border_t_1()
         .border_color(theme::edge_soft())
         .flex()
         .flex_col()
-        .gap(px(10.0))
+        .gap(px(9.0))
         .child(
             div()
                 .flex()
@@ -2187,19 +2418,15 @@ fn selectable(
 }
 
 fn prompt_selectable(key: &str, texts: &HashMap<String, Entity<TranscriptText>>) -> AnyElement {
-    div()
-        .w_full()
-        .pr(px(22.0))
-        .child(selectable_with_leading(
-            key,
-            texts,
-            theme::sans(),
-            theme::T_BODY_SM,
-            theme::bone(),
-            FontWeight::MEDIUM,
-            1.48,
-        ))
-        .into_any_element()
+    selectable_with_leading(
+        key,
+        texts,
+        theme::sans(),
+        theme::T_BODY_SM,
+        theme::bone(),
+        FontWeight::NORMAL,
+        1.48,
+    )
 }
 
 fn activity_selectable(key: &str, texts: &HashMap<String, Entity<TranscriptText>>) -> AnyElement {
@@ -2364,9 +2591,9 @@ fn empty_state(projection: &ConversationProjection) -> impl IntoElement {
 
 fn optimistic_status(kind: SubmissionKind) -> &'static str {
     match kind {
-        SubmissionKind::Prompt => "Accepted · awaiting transcript",
-        SubmissionKind::Steer => "Steering accepted · awaiting delivery",
-        SubmissionKind::FollowUp => "Follow-up queued · awaiting delivery",
+        SubmissionKind::Prompt => "Awaiting transcript",
+        SubmissionKind::Steer => "Steering…",
+        SubmissionKind::FollowUp => "Queued…",
     }
 }
 
@@ -2414,10 +2641,19 @@ mod tests {
 
         state.prepare_epoch(second);
         assert!(!state.is_expanded("turn:user-1"));
+        assert!(state.motions.is_empty());
 
         state.expanded.insert("turn:user-2".to_owned());
         state.reset(second);
         assert!(!state.is_expanded("turn:user-2"));
+        assert!(!state.shows_history("turn:user-2"));
+    }
+
+    #[test]
+    fn disclosure_history_estimate_stays_bounded() {
+        assert!(disclosure_history_estimate(1) >= 36.0);
+        assert!(disclosure_history_estimate(100) <= DISCLOSURE_HISTORY_MAX_PX);
+        assert!(disclosure_history_estimate(3) > disclosure_history_estimate(1));
     }
 
     #[test]

@@ -226,22 +226,22 @@ impl ConversationListModel {
 }
 
 fn header(turn_count: usize) -> impl IntoElement {
-    stream_gutter().pb(px(16.0)).child(
+    stream_gutter().pb(px(14.0)).child(
         div()
             .w_full()
             .flex()
             .flex_row()
             .items_baseline()
             .justify_between()
-            .pb(px(10.0))
+            .pb(px(9.0))
             .border_b_1()
             .border_color(theme::edge_soft())
             .child(
                 div()
                     .font_family(theme::sans())
                     .text_size(theme::text_size(theme::T_UI_SM))
-                    .font_weight(FontWeight::BOLD)
-                    .text_color(theme::ash())
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(theme::bone_dim())
                     .child("Conversation"),
             )
             .child(
@@ -259,7 +259,7 @@ fn header(turn_count: usize) -> impl IntoElement {
 
 fn row(content: AnyElement) -> AnyElement {
     stream_gutter()
-        .pb(px(16.0))
+        .pb(px(14.0))
         .child(content)
         .into_any_element()
 }
@@ -291,7 +291,7 @@ fn trailing(
     stream_gutter()
         .flex()
         .flex_col()
-        .gap(px(16.0))
+        .gap(px(14.0))
         .children(
             projection
                 .accepted_user_inputs
@@ -307,7 +307,7 @@ fn trailing(
         .when_some(diff_summary.snapshot.clone(), |tail, snapshot| {
             tail.child(
                 div()
-                    .pt(px(14.0))
+                    .pt(px(12.0))
                     .child(crate::views::diff_summary::summary_card(
                         &snapshot,
                         diff_summary.files_expanded,
@@ -324,7 +324,7 @@ fn trailing(
         .child(
             div()
                 .id(SharedString::from("conversation-bottom-padding"))
-                .h(px(16.0)),
+                .h(px(14.0)),
         )
 }
 
