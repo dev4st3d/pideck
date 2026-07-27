@@ -264,6 +264,8 @@ enum ExtensionDialogKey {
     ContainFocus,
     Move(isize),
     AcceptSelection,
+    /// 1-based option shortcut (`1`–`9`) for select dialogs.
+    SelectIndex(usize),
 }
 
 /// Which queue-delivery control the inspector is editing right now.
@@ -503,8 +505,12 @@ impl RootView {
         let auth_secret_composer = cx.new(|cx| {
             Composer::secret_field("provider-auth-secret", "Credential...", "Continue", cx)
         });
-        let extension_input_composer = cx
-            .new(|cx| Composer::field("extension-dialog-input", "Enter a value...", "Submit", cx));
+        // Empty submit is valid: ask_user_question multi-select treats "" as no
+        // selection (same as TUI Next with nothing toggled).
+        let extension_input_composer = cx.new(|cx| {
+            Composer::field("extension-dialog-input", "Enter a value...", "Submit", cx)
+                .allowing_empty_submit()
+        });
         let extension_editor_composer =
             cx.new(|cx| Composer::scoped("extension-dialog-editor", "Edit text...", "Submit", cx));
         let subagent_composer = cx.new(|cx| {
@@ -1830,22 +1836,31 @@ impl RootView {
     }
 
     fn accept_extension_dialog_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.accept_extension_dialog_at(self.extension_dialog_selection, window, cx);
+    }
+
+    fn accept_extension_dialog_at(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let answer = match self
             .extension_ui
             .active_dialog
             .as_ref()
             .map(|dialog| &dialog.request)
         {
-            Some(DialogRequest::Select { options, .. }) => options
-                .get(self.extension_dialog_selection)
-                .cloned()
-                .map(DialogAnswer::Value),
-            Some(DialogRequest::Confirm { .. }) => Some(DialogAnswer::Confirmed(
-                self.extension_dialog_selection == 1,
-            )),
+            Some(DialogRequest::Select { options, .. }) => {
+                options.get(index).cloned().map(DialogAnswer::Value)
+            }
+            Some(DialogRequest::Confirm { .. }) if index < 2 => {
+                Some(DialogAnswer::Confirmed(index == 1))
+            }
             _ => None,
         };
         if let Some(answer) = answer {
+            self.extension_dialog_selection = index;
             self.answer_extension_dialog(answer, window, cx);
         }
     }
@@ -1877,6 +1892,10 @@ impl RootView {
             Some(ExtensionDialogKey::AcceptSelection) => {
                 cx.stop_propagation();
                 self.accept_extension_dialog_selection(window, cx);
+            }
+            Some(ExtensionDialogKey::SelectIndex(index)) => {
+                cx.stop_propagation();
+                self.accept_extension_dialog_at(index, window, cx);
             }
             None => {}
         }
@@ -4669,5 +4688,17 @@ mod tests {
             Some(ExtensionDialogKey::AcceptSelection)
         );
         assert_eq!(extension_dialog_key(Some("input"), "enter"), None);
+        // Digit shortcuts only apply to select so multi-select free-text input can type numbers.
+        assert_eq!(
+            extension_dialog_key(Some("select"), "1"),
+            Some(ExtensionDialogKey::SelectIndex(0))
+        );
+        assert_eq!(
+            extension_dialog_key(Some("select"), "9"),
+            Some(ExtensionDialogKey::SelectIndex(8))
+        );
+        assert_eq!(extension_dialog_key(Some("select"), "0"), None);
+        assert_eq!(extension_dialog_key(Some("input"), "1"), None);
+        assert_eq!(extension_dialog_key(Some("confirm"), "2"), None);
     }
 }

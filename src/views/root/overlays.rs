@@ -91,6 +91,63 @@ mod conversation_scrollbar_tests {
     }
 }
 
+#[cfg(test)]
+mod extension_dialog_layout_tests {
+    use super::*;
+
+    #[test]
+    fn split_dialog_title_keeps_question_and_scrolls_detail() {
+        let (headline, detail) = split_dialog_title(
+            "[UI] Which layout?\n\n--- 1. Compact preview ---\n```rs\nfn main() {}\n```\n\nType numbers",
+        );
+        assert_eq!(headline, "[UI] Which layout?");
+        assert!(detail.as_deref().is_some_and(|body| {
+            body.contains("Compact preview") && body.contains("Type numbers")
+        }));
+    }
+
+    #[test]
+    fn split_dialog_title_handles_single_line_and_empty() {
+        assert_eq!(
+            split_dialog_title("Pick one?"),
+            ("Pick one?".to_owned(), None)
+        );
+        assert_eq!(split_dialog_title("   "), (String::new(), None));
+        let (headline, detail) = split_dialog_title("Line one\nline two");
+        assert_eq!(headline, "Line one");
+        assert_eq!(detail.as_deref(), Some("line two"));
+    }
+
+    #[test]
+    fn split_select_option_separates_label_and_description() {
+        assert_eq!(
+            split_select_option("1. Compact — Fewer chrome rows"),
+            (
+                "1. Compact".to_owned(),
+                Some("Fewer chrome rows".to_owned())
+            )
+        );
+        assert_eq!(
+            split_select_option("2. Type something."),
+            ("2. Type something.".to_owned(), None)
+        );
+        assert_eq!(
+            split_select_option("3. Nested - with hyphen still splits"),
+            (
+                "3. Nested".to_owned(),
+                Some("with hyphen still splits".to_owned())
+            )
+        );
+    }
+
+    #[test]
+    fn keyboard_hint_mentions_digit_range_for_select() {
+        assert!(extension_dialog_keyboard_hint("select", 4).contains("1–4"));
+        assert!(extension_dialog_keyboard_hint("select", 12).contains("1–9"));
+        assert!(!extension_dialog_keyboard_hint("input", 0).contains("shortcut"));
+    }
+}
+
 pub(super) struct ConversationAreaParams {
     pub(super) projection: Arc<ConversationProjection>,
     pub(super) list: Arc<ConversationListModel>,
@@ -985,7 +1042,17 @@ pub(super) fn extension_dialog_overlay(
             .as_secs_f32();
         format!("Auto-closes in {:.1}s", seconds.max(0.0))
     });
+    let (headline, detail) = split_dialog_title(dialog.title());
     let request = dialog.request.clone();
+    let kind = dialog.kind();
+    let keyboard_hint = extension_dialog_keyboard_hint(
+        kind,
+        match &request {
+            DialogRequest::Select { options, .. } => options.len(),
+            DialogRequest::Confirm { .. } => 2,
+            _ => 0,
+        },
+    );
     let body = match &request {
         DialogRequest::Select { options, .. } => div()
             .flex()
@@ -1001,6 +1068,7 @@ pub(super) fn extension_dialog_overlay(
             })
             .children(options.iter().enumerate().map(|(index, option)| {
                 let option_answer = option.clone();
+                let (label, description) = split_select_option(option);
                 div()
                     .id(("extension-dialog-option", index))
                     .px(px(12.0))
@@ -1028,10 +1096,28 @@ pub(super) fn extension_dialog_overlay(
                     }))
                     .child(
                         div()
-                            .font_family(theme::sans())
-                            .text_size(theme::text_size(theme::T_UI))
-                            .text_color(theme::bone())
-                            .child(option.clone()),
+                            .flex()
+                            .flex_col()
+                            .gap(px(3.0))
+                            .min_w_0()
+                            .child(
+                                div()
+                                    .font_family(theme::sans())
+                                    .text_size(theme::text_size(theme::T_UI))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(theme::bone())
+                                    .child(label),
+                            )
+                            .when_some(description, |row, description| {
+                                row.child(
+                                    div()
+                                        .font_family(theme::sans())
+                                        .text_size(theme::text_size(theme::T_UI_SM))
+                                        .line_height(theme::text_size(18.0))
+                                        .text_color(theme::bone_dim())
+                                        .child(description),
+                                )
+                            }),
                     )
             }))
             .into_any_element(),
@@ -1071,7 +1157,19 @@ pub(super) fn extension_dialog_overlay(
                     )),
             )
             .into_any_element(),
-        DialogRequest::Input { .. } => input.clone().into_any_element(),
+        DialogRequest::Input { .. } => div()
+            .flex()
+            .flex_col()
+            .gap(px(8.0))
+            .child(input.clone())
+            .child(
+                div()
+                    .font_family(theme::mono())
+                    .text_size(theme::text_size(theme::T_TINY))
+                    .text_color(theme::smoke())
+                    .child("Enter submits · Esc cancels · empty is allowed"),
+            )
+            .into_any_element(),
         DialogRequest::Editor { .. } => editor.clone().into_any_element(),
     };
 
@@ -1094,8 +1192,8 @@ pub(super) fn extension_dialog_overlay(
             div()
                 .id("extension-dialog-card")
                 .w_full()
-                .max_w(px(620.0))
-                .max_h(px(620.0))
+                .max_w(px(720.0))
+                .max_h(px(720.0))
                 .overflow_y_scroll()
                 .p(px(18.0))
                 .rounded(px(theme::RADIUS))
@@ -1115,6 +1213,7 @@ pub(super) fn extension_dialog_overlay(
                         .child(
                             div()
                                 .min_w_0()
+                                .flex_1()
                                 .flex()
                                 .flex_col()
                                 .gap(px(4.0))
@@ -1123,18 +1222,16 @@ pub(super) fn extension_dialog_overlay(
                                         .font_family(theme::mono())
                                         .text_size(theme::text_size(theme::T_TINY))
                                         .text_color(theme::focus())
-                                        .child(format!(
-                                            "Extension {} · untrusted UI",
-                                            dialog.kind()
-                                        )),
+                                        .child(format!("Extension {kind} · untrusted UI")),
                                 )
                                 .child(
                                     div()
                                         .font_family(theme::sans())
                                         .text_size(theme::text_size(theme::T_TITLE))
                                         .font_weight(FontWeight::BOLD)
+                                        .line_height(theme::text_size(26.0))
                                         .text_color(theme::bone())
-                                        .child(dialog.title().to_owned()),
+                                        .child(headline),
                                 ),
                         )
                         .child(controls::chrome_action(
@@ -1156,6 +1253,27 @@ pub(super) fn extension_dialog_overlay(
                             "This content comes from an extension. It is not a secure permission prompt and has no verified provenance.",
                         ),
                 )
+                .when_some(detail, |card, detail| {
+                    card.child(
+                        div()
+                            .id("extension-dialog-detail")
+                            .w_full()
+                            .max_h(px(220.0))
+                            .overflow_y_scroll()
+                            .scrollbar_width(px(theme::SCROLLBAR))
+                            .px(px(12.0))
+                            .py(px(10.0))
+                            .rounded(px(theme::RADIUS_SM))
+                            .bg(theme::canvas())
+                            .border_1()
+                            .border_color(theme::edge_soft())
+                            .font_family(theme::mono())
+                            .text_size(theme::text_size(theme::T_UI_SM))
+                            .line_height(theme::text_size(18.0))
+                            .text_color(theme::bone_dim())
+                            .child(detail),
+                    )
+                })
                 .child(body)
                 .child(
                     div()
@@ -1170,9 +1288,9 @@ pub(super) fn extension_dialog_overlay(
                                 .text_size(theme::text_size(theme::T_TINY))
                                 .text_color(theme::smoke())
                                 .child(match queued_dialogs {
-                                    0 => "No queued extension dialogs".to_owned(),
+                                    0 => keyboard_hint,
                                     count => format!(
-                                        "{count} queued extension dialog{}",
+                                        "{keyboard_hint} · {count} queued dialog{}",
                                         plural(count as u64)
                                     ),
                                 }),
@@ -1242,6 +1360,72 @@ pub(super) fn single_line_title(value: &str) -> String {
         .collect()
 }
 
+/// Split an extension dialog title into a short headline and optional detail body.
+///
+/// `ask_user_question`'s RPC walker folds previews, option lists, and instructions into
+/// the stock `select`/`input` title with `\n\n` separators. Keep the first block as the
+/// title and scroll the remainder so long multi-select prompts stay usable.
+pub(super) fn split_dialog_title(title: &str) -> (String, Option<String>) {
+    let trimmed = title.trim();
+    if trimmed.is_empty() {
+        return (String::new(), None);
+    }
+    let (head, rest) = match trimmed.split_once("\n\n") {
+        Some((head, rest)) => (head.trim(), rest.trim()),
+        None => {
+            // Single newlines still appear in free-form titles; first line is the headline.
+            match trimmed.split_once('\n') {
+                Some((head, rest)) if !rest.trim().is_empty() => (head.trim(), rest.trim()),
+                _ => (trimmed, ""),
+            }
+        }
+    };
+    let headline = if head.is_empty() {
+        single_line_title(trimmed)
+    } else {
+        head.to_owned()
+    };
+    let detail = (!rest.is_empty()).then(|| rest.to_owned());
+    (headline, detail)
+}
+
+/// Split `N. Label — description` option lines for readable select rows.
+///
+/// The full original string remains the answer value; this only affects display.
+pub(super) fn split_select_option(option: &str) -> (String, Option<String>) {
+    let trimmed = option.trim();
+    if trimmed.is_empty() {
+        return (String::new(), None);
+    }
+    for separator in [" — ", " – ", " - "] {
+        if let Some((label, description)) = trimmed.split_once(separator) {
+            let label = label.trim();
+            let description = description.trim();
+            if !label.is_empty() && !description.is_empty() {
+                return (label.to_owned(), Some(description.to_owned()));
+            }
+        }
+    }
+    (trimmed.to_owned(), None)
+}
+
+fn extension_dialog_keyboard_hint(kind: &str, option_count: usize) -> String {
+    match kind {
+        "select" if option_count > 0 => {
+            let max_digit = option_count.min(9);
+            if max_digit == 1 {
+                "↑↓ move · Enter choose · 1 shortcut · Esc cancel".to_owned()
+            } else {
+                format!("↑↓ move · Enter choose · 1–{max_digit} shortcut · Esc cancel")
+            }
+        }
+        "confirm" => "←→ choose · Enter confirm · Esc cancel".to_owned(),
+        "input" => "Enter submit · Esc cancel".to_owned(),
+        "editor" => "Enter submit · Esc cancel".to_owned(),
+        _ => "Esc cancel".to_owned(),
+    }
+}
+
 pub(super) fn extension_dialog_key(kind: Option<&str>, key: &str) -> Option<ExtensionDialogKey> {
     match key {
         "escape" => Some(ExtensionDialogKey::Cancel),
@@ -1254,6 +1438,15 @@ pub(super) fn extension_dialog_key(kind: Option<&str>, key: &str) -> Option<Exte
         }
         "enter" | "space" if matches!(kind, Some("select" | "confirm")) => {
             Some(ExtensionDialogKey::AcceptSelection)
+        }
+        digit
+            if matches!(kind, Some("select"))
+                && digit.len() == 1
+                && digit.as_bytes()[0].is_ascii_digit()
+                && digit != "0" =>
+        {
+            let index = (digit.as_bytes()[0] - b'1') as usize;
+            Some(ExtensionDialogKey::SelectIndex(index))
         }
         _ => None,
     }
