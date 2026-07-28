@@ -339,12 +339,13 @@ impl Composer {
         if self.chrome == ComposerChrome::Field {
             return;
         }
-        let from = self.input_target_height();
+        // Prefer the last settled height if a blur-driven collapse is already mid-flight.
+        let from = self.height_motion_origin();
         self.input_enlarged = !self.input_enlarged;
-        if self.input_enlarged {
-            // Leave enlarge mode into the multi-line shell, not a single line.
-            self.input_expanded = true;
-        }
+        // Enlarge control is height-only: root re-focuses the field after the click.
+        // Always land on the multi-line shell so blur-before-click cannot target collapsed
+        // height and cancel the motion into a snap.
+        self.input_expanded = true;
         let to = self.input_target_height();
         self.begin_height_motion(from, to, cx);
     }
@@ -384,10 +385,20 @@ impl Composer {
             cx.notify();
             return;
         }
-        let from = self.input_target_height();
+        let from = self.height_motion_origin();
         self.input_expanded = expanded;
         let to = self.input_target_height();
         self.begin_height_motion(from, to, cx);
+    }
+
+    /// Height to start a new motion from.
+    /// If a blur-driven collapse is mid-flight, keep the pre-collapse height so a
+    /// following enlarge toggle does not start from the trough and zap the shell.
+    fn height_motion_origin(&self) -> f32 {
+        match self.input_height_motion {
+            Some(motion) if motion.to < motion.from => motion.from,
+            _ => self.input_target_height(),
+        }
     }
 
     fn begin_height_motion(&mut self, from: f32, to: f32, cx: &mut Context<Self>) {

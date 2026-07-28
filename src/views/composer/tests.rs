@@ -384,3 +384,58 @@ fn composer_mouse_selection_scroll_and_delivery_feedback_preserve_drafts(cx: &mu
         ""
     );
 }
+
+#[gpui::test]
+fn minimize_enlarged_input_animates_to_normal_not_collapsed(cx: &mut TestAppContext) {
+    let (harness, cx) = cx.add_window_view(ComposerHarness::new);
+    let composer = harness.read_with(cx, |harness, _| harness.composer.clone());
+
+    // Focused multi-line shell, then pin enlarge.
+    composer.update(cx, |composer, cx| {
+        composer.set_input_expanded(true, cx);
+        composer.toggle_input_enlarged(cx);
+    });
+    let enlarged_h = composer.read_with(cx, |composer, _| composer.input_target_height());
+    assert!(composer.read_with(cx, |composer, _| composer.input_enlarged()));
+    assert!((enlarged_h - 148.0).abs() < 0.5);
+
+    // Clicking the chrome control blurs the field before the toggle runs.
+    composer.update(cx, |composer, cx| {
+        composer.set_input_expanded(false, cx);
+        composer.toggle_input_enlarged(cx);
+    });
+
+    let (enlarged, target, motion) = composer.read_with(cx, |composer, _| {
+        (
+            composer.input_enlarged(),
+            composer.input_target_height(),
+            composer.input_height_motion(),
+        )
+    });
+    assert!(!enlarged);
+    // Must settle on multi-line (52), not idle single-line (~32).
+    assert!(
+        (target - 52.0).abs() < 0.5,
+        "minimize target should be normal multi-line, got {target}"
+    );
+    let motion = motion.expect("minimize should animate height");
+    assert!(
+        (motion.from - 148.0).abs() < 0.5,
+        "minimize from={:?}",
+        motion.from
+    );
+    assert!(
+        (motion.to - 52.0).abs() < 0.5,
+        "minimize to={:?}",
+        motion.to
+    );
+
+    // Root re-focuses the field after toggle; that must not replace the motion.
+    composer.update(cx, |composer, cx| {
+        composer.set_input_expanded(true, cx);
+    });
+    let motion_after_focus = composer.read_with(cx, |composer, _| composer.input_height_motion());
+    let motion_after_focus = motion_after_focus.expect("re-focus should keep minimize motion");
+    assert_eq!(motion_after_focus.generation, motion.generation);
+    assert!((motion_after_focus.to - 52.0).abs() < 0.5);
+}
