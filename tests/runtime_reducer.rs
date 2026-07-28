@@ -1732,6 +1732,7 @@ fn prompt_delivery_tracks_acceptance_rejection_and_unknown_outcome() {
             request: accepted.clone(),
             text: "Accepted".to_owned(),
             images: Vec::new(),
+            files: Vec::new(),
             kind: SubmissionKind::Prompt,
         }),
     );
@@ -1748,6 +1749,7 @@ fn prompt_delivery_tracks_acceptance_rejection_and_unknown_outcome() {
             request: accepted.clone(),
             text: "Accepted".to_owned(),
             images: Vec::new(),
+            files: Vec::new(),
             kind: SubmissionKind::Prompt,
         },
         Ok(NormalizedResponse::Accepted),
@@ -1771,6 +1773,7 @@ fn prompt_delivery_tracks_acceptance_rejection_and_unknown_outcome() {
             request: rejected.clone(),
             text: "Rejected".to_owned(),
             images: Vec::new(),
+            files: Vec::new(),
             kind: SubmissionKind::Prompt,
         }),
     );
@@ -1780,6 +1783,7 @@ fn prompt_delivery_tracks_acceptance_rejection_and_unknown_outcome() {
             request: rejected.clone(),
             text: "Rejected".to_owned(),
             images: Vec::new(),
+            files: Vec::new(),
             kind: SubmissionKind::Prompt,
         },
         Err(failure(RequestFailureKind::Rejected, "Prompt rejected")),
@@ -1801,6 +1805,7 @@ fn prompt_acceptance_respects_event_before_response_ordering() {
             request: request.clone(),
             text: "Fast".to_owned(),
             images: Vec::new(),
+            files: Vec::new(),
             kind: SubmissionKind::Prompt,
         }),
     );
@@ -1815,6 +1820,7 @@ fn prompt_acceptance_respects_event_before_response_ordering() {
             request,
             text: "Fast".to_owned(),
             images: Vec::new(),
+            files: Vec::new(),
             kind: SubmissionKind::Prompt,
         },
         Ok(NormalizedResponse::Accepted),
@@ -1837,6 +1843,7 @@ fn accepted_user_input_is_optimistic_only_until_authoritative_message_arrives() 
         request: request.clone(),
         text: "Show this once".to_owned(),
         images: Vec::new(),
+        files: Vec::new(),
         kind: SubmissionKind::Prompt,
     };
     apply(
@@ -1845,6 +1852,7 @@ fn accepted_user_input_is_optimistic_only_until_authoritative_message_arrives() 
             request: request.clone(),
             text: "Show this once".to_owned(),
             images: Vec::new(),
+            files: Vec::new(),
             kind: SubmissionKind::Prompt,
         }),
     );
@@ -1883,6 +1891,7 @@ fn authoritative_user_event_before_acceptance_never_creates_a_duplicate() {
             request: request.clone(),
             text: "Fast authoritative input".to_owned(),
             images: Vec::new(),
+            files: Vec::new(),
             kind: SubmissionKind::Prompt,
         }),
     );
@@ -1900,6 +1909,7 @@ fn authoritative_user_event_before_acceptance_never_creates_a_duplicate() {
             request,
             text: "Fast authoritative input".to_owned(),
             images: Vec::new(),
+            files: Vec::new(),
             kind: SubmissionKind::Prompt,
         },
         Ok(NormalizedResponse::Accepted),
@@ -2236,6 +2246,7 @@ fn reconnect_hydration_reconciles_accepted_input_against_authoritative_history()
             request: request.clone(),
             text: "Persisted while reconnecting".to_owned(),
             images: Vec::new(),
+            files: Vec::new(),
             kind: SubmissionKind::Prompt,
         }),
     );
@@ -2245,6 +2256,7 @@ fn reconnect_hydration_reconciles_accepted_input_against_authoritative_history()
             request,
             text: "Persisted while reconnecting".to_owned(),
             images: Vec::new(),
+            files: Vec::new(),
             kind: SubmissionKind::Prompt,
         },
         Ok(NormalizedResponse::Accepted),
@@ -2488,6 +2500,7 @@ fn uncertain_prompt_is_never_resent_on_reconnect() {
             request: request.clone(),
             text: "Synthetic prompt".to_owned(),
             images: Vec::new(),
+            files: Vec::new(),
             kind: SubmissionKind::Prompt,
         }),
     );
@@ -2583,6 +2596,7 @@ fn service_adapter_maps_effects_errors_and_safe_extension_records() {
             request: request.clone(),
             text: "Synthetic prompt".to_owned(),
             images: Vec::new(),
+            files: Vec::new(),
             kind: SubmissionKind::Prompt,
         }),
     );
@@ -2663,6 +2677,7 @@ fn empty_and_rapid_duplicate_submissions_never_emit_side_effects() {
             request: empty.clone(),
             text: " \n ".to_owned(),
             images: Vec::new(),
+            files: Vec::new(),
             kind: SubmissionKind::Prompt,
         }),
     );
@@ -2680,6 +2695,7 @@ fn empty_and_rapid_duplicate_submissions_never_emit_side_effects() {
                 request: first.clone(),
                 text: "Run once".to_owned(),
                 images: Vec::new(),
+                files: Vec::new(),
                 kind: SubmissionKind::Prompt,
             }),
         )
@@ -2694,6 +2710,7 @@ fn empty_and_rapid_duplicate_submissions_never_emit_side_effects() {
                 request: duplicate,
                 text: "Run twice".to_owned(),
                 images: Vec::new(),
+                files: Vec::new(),
                 kind: SubmissionKind::Prompt,
             }),
         )
@@ -2719,6 +2736,7 @@ fn steer_and_follow_up_use_distinct_rpc_commands_and_disconnect_safely() {
             request: steer.clone(),
             text: "Change course".to_owned(),
             images: Vec::new(),
+            files: Vec::new(),
             kind: SubmissionKind::Steer,
         }),
     );
@@ -2732,6 +2750,7 @@ fn steer_and_follow_up_use_distinct_rpc_commands_and_disconnect_safely() {
             request: steer,
             text: "Change course".to_owned(),
             images: Vec::new(),
+            files: Vec::new(),
             kind: SubmissionKind::Steer,
         },
         Ok(NormalizedResponse::Accepted),
@@ -2744,6 +2763,7 @@ fn steer_and_follow_up_use_distinct_rpc_commands_and_disconnect_safely() {
             request: follow_up.clone(),
             text: "Then summarize".to_owned(),
             images: Vec::new(),
+            files: Vec::new(),
             kind: SubmissionKind::FollowUp,
         }),
     );
@@ -2939,6 +2959,7 @@ fn crash_after_acceptance_preserves_last_durable_transcript_read_only() {
         request: request.clone(),
         text: "May not be durable yet".to_owned(),
         images: Vec::new(),
+        files: Vec::new(),
         kind: SubmissionKind::Prompt,
     };
     apply(
@@ -2947,6 +2968,7 @@ fn crash_after_acceptance_preserves_last_durable_transcript_read_only() {
             request: request.clone(),
             text: "May not be durable yet".to_owned(),
             images: Vec::new(),
+            files: Vec::new(),
             kind: SubmissionKind::Prompt,
         }),
     );

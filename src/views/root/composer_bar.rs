@@ -7,6 +7,7 @@ use crate::file_completion::FileMatch;
 
 pub(super) struct ComposerBarParams<'a> {
     pub(super) composer: &'a Entity<Composer>,
+    pub(super) attachment_picker_pending: bool,
     pub(super) models: &'a ModelRuntimeProjection,
     pub(super) projection: &'a ShellProjection,
     pub(super) panel: Option<ModelPanel>,
@@ -31,6 +32,7 @@ pub(super) fn composer_bar(
 ) -> impl IntoElement {
     let ComposerBarParams {
         composer,
+        attachment_picker_pending,
         models,
         projection,
         panel,
@@ -55,6 +57,7 @@ pub(super) fn composer_bar(
     let catalog_ready = models.catalog.is_some();
     let can_pick_model = catalog_ready || !models.stock_models.is_empty();
     let can_pick_thinking = catalog_ready || models.active_thinking.is_some();
+    let can_attach = !attachment_picker_pending && composer.read(cx).can_add_attachments();
     let slash_completion =
         (!slash_dismissed && !slash_commands.is_empty()).then_some(slash_commands);
     // Slash menu wins when both could appear; file menu only when slash is idle.
@@ -147,6 +150,13 @@ pub(super) fn composer_bar(
                         .border_color(theme::edge_hard())
                         .bg(theme::panel())
                         .overflow_hidden()
+                        .can_drop(move |value, _, _| can_attach && value.is::<ExternalPaths>())
+                        .drag_over::<ExternalPaths>(|style, _, _, _| {
+                            style.border_color(theme::focus()).bg(theme::panel_lift())
+                        })
+                        .on_drop(cx.listener(|view, paths: &ExternalPaths, _, cx| {
+                            view.attach_dropped_paths(paths.paths(), cx);
+                        }))
                         .child(
                             div()
                                 .px(px(8.0))
@@ -236,6 +246,14 @@ pub(super) fn composer_bar(
                                         )
                                     },
                                 )
+                                .child(controls::chrome_icon_action(
+                                    "prompt-attach-files",
+                                    "icons/paperclip.svg",
+                                    can_attach,
+                                    Box::new(cx.listener(|view, _, _, cx| {
+                                        view.choose_attachments(cx);
+                                    })),
+                                ))
                                 .child(controls::chrome_icon_toggle(
                                     "prompt-enlarge-input",
                                     "icons/expand.svg",

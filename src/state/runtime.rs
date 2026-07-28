@@ -4,6 +4,7 @@ use std::time::Instant;
 
 use serde_json::Value;
 
+use crate::attachments::{PromptFile, PromptFileMetadata};
 use crate::services::rpc::{
     ConnectionGeneration, EntryId, RequestId, SessionEpoch, SessionId, ToolCallId,
 };
@@ -258,6 +259,10 @@ pub enum MessageBlock {
         mime_type: String,
         data: Option<String>,
     },
+    File {
+        key: BlockKey,
+        metadata: PromptFileMetadata,
+    },
     ToolCall {
         key: BlockKey,
         id: ToolCallId,
@@ -304,6 +309,7 @@ impl MessageBlock {
             Self::Text { key, .. }
             | Self::Thinking { key, .. }
             | Self::Image { key, .. }
+            | Self::File { key, .. }
             | Self::ToolCall { key, .. }
             | Self::ToolResult { key, .. }
             | Self::Bash { key, .. }
@@ -559,6 +565,8 @@ pub enum CompactionKind {
 pub struct PromptImage {
     pub data: String,
     pub mime_type: String,
+    pub file_name: Option<String>,
+    pub source_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -573,6 +581,7 @@ pub struct OptimisticUserInput {
     pub request: RequestId,
     pub text: String,
     pub images: Vec<PromptImage>,
+    pub files: Vec<PromptFile>,
     pub kind: SubmissionKind,
     pub display_optimistically: bool,
     pub accepted: bool,
@@ -888,6 +897,7 @@ pub enum RuntimeIntent {
         request: RequestId,
         text: String,
         images: Vec<PromptImage>,
+        files: Vec<PromptFile>,
         kind: SubmissionKind,
     },
     InvokeCommand {
@@ -966,6 +976,7 @@ pub enum RuntimeRequest {
         request: RequestId,
         text: String,
         images: Vec<PromptImage>,
+        files: Vec<PromptFile>,
         kind: SubmissionKind,
     },
     InvokeCommand {

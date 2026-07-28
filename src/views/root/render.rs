@@ -51,6 +51,7 @@ impl Render for RootView {
             .on_action(cx.listener(Self::on_retry))
             .on_action(cx.listener(Self::on_stop))
             .on_action(cx.listener(Self::on_abort_run))
+            .on_action(cx.listener(Self::on_attach_files))
             .on_action(cx.listener(Self::on_activate_recovery))
             .on_action(cx.listener(Self::on_focus_next))
             .on_action(cx.listener(Self::on_focus_previous))
@@ -184,6 +185,7 @@ impl Render for RootView {
                             .child(composer_bar(
                                 ComposerBarParams {
                                     composer: &self.composer,
+                                    attachment_picker_pending: self.attachment_picker_pending,
                                     models,
                                     projection,
                                     panel: self.model_panel,

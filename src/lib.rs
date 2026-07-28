@@ -1,6 +1,7 @@
 pub mod actions;
 pub mod app;
 pub mod assets;
+pub mod attachments;
 pub mod command_catalog;
 pub mod controller;
 pub mod file_completion;

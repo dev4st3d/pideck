@@ -63,6 +63,7 @@ fn composer_actions_route_send_newline_follow_up_and_abort(cx: &mut TestAppConte
         &[ComposerEvent::Accept {
             text: "hello\nworld".to_owned(),
             images: Vec::new(),
+            files: Vec::new(),
         }]
     );
 
@@ -87,10 +88,12 @@ fn composer_actions_route_send_newline_follow_up_and_abort(cx: &mut TestAppConte
             ComposerEvent::Accept {
                 text: "hello\nworld".to_owned(),
                 images: Vec::new(),
+                files: Vec::new(),
             },
             ComposerEvent::FollowUp {
                 text: "hello\nworld".to_owned(),
                 images: Vec::new(),
+                files: Vec::new(),
             },
             ComposerEvent::Abort,
         ]
@@ -200,12 +203,65 @@ fn composer_pastes_clipboard_images_and_submits_them_without_text(cx: &mut TestA
         vec![ComposerEvent::Accept {
             text: String::new(),
             images: attached,
+            files: Vec::new(),
         }]
     );
     assert!(composer.update(cx, |composer, cx| {
         composer.clear_accepted("", SubmissionKind::Prompt, cx)
     }));
     assert!(!composer.read_with(cx, |composer, _| composer.has_images()));
+}
+
+#[gpui::test]
+fn composer_submits_and_restores_text_file_attachments(cx: &mut TestAppContext) {
+    use crate::attachments::{FileDelivery, PromptFileMetadata};
+
+    cx.update(|cx| cx.bind_keys(composer_key_bindings()));
+    let (harness, cx) = cx.add_window_view(ComposerHarness::new);
+    let composer = harness.read_with(cx, |harness, _| harness.composer.clone());
+    let file = PromptFile {
+        metadata: PromptFileMetadata {
+            name: "notes.md".to_owned(),
+            path: "C:/work/notes.md".to_owned(),
+            size: 7,
+            delivery: FileDelivery::Snapshot,
+        },
+        content: Some(Arc::from("# Notes")),
+    };
+    composer.update(cx, |composer, cx| {
+        composer.add_loaded_attachments(
+            LoadedAttachmentBatch {
+                attachments: vec![LoadedAttachment::File(file.clone())],
+                issues: Vec::new(),
+            },
+            cx,
+        )
+    });
+
+    assert!(composer.read_with(cx, |composer, _| composer.has_attachments()));
+    assert_eq!(
+        composer.read_with(cx, |composer, _| composer.files().to_vec()),
+        vec![file.clone()]
+    );
+    cx.simulate_keystrokes("enter");
+    assert_eq!(
+        harness.read_with(cx, |harness, _| harness.events.borrow().clone()),
+        vec![ComposerEvent::Accept {
+            text: String::new(),
+            images: Vec::new(),
+            files: vec![file.clone()],
+        }]
+    );
+
+    composer.update(cx, |composer, cx| {
+        composer.restore_draft("", Vec::new(), vec![file], cx);
+    });
+    assert_eq!(
+        composer.read_with(cx, |composer, _| composer.file_attach_token(0)),
+        0
+    );
+    composer.update(cx, |composer, cx| composer.remove_file(0, cx));
+    assert!(!composer.read_with(cx, |composer, _| composer.has_attachments()));
 }
 
 #[gpui::test]
@@ -262,7 +318,7 @@ fn composer_builds_square_thumbnails_for_decodable_images(cx: &mut TestAppContex
 
     let restored = composer.read_with(cx, |composer, _| composer.images().to_vec());
     composer.update(cx, |composer, cx| {
-        composer.restore_draft("", restored, cx);
+        composer.restore_draft("", restored, Vec::new(), cx);
     });
     // Restored drafts settle immediately (token 0 skips the pop).
     assert_eq!(

@@ -13,6 +13,7 @@ The visible shell now shows only live or explicitly Loading, Awaiting, Unknown, 
 - context, input/output tokens, cache usage, cost, model, and thinking in the inspector;
 - one applicable Connect, Retry, or Stop action with pointer and keyboard paths;
 - a native multiline composer with model and thinking pickers in the prompt chrome, grapheme-safe editing, IME, clipboard, selection, undo, wrapping, scrolling, and visible pending/accepted/rejected/uncertain delivery state;
+- native multi-file picker and drag/drop attachments: images keep Pi's RPC image transport, small UTF-8 text/code files are snapshotted into bounded named prompt blocks, larger readable files remain explicit live path references, and unsupported binaries are rejected without blocking the UI;
 - the authoritative current transcript with Markdown-rendered user input, assistant output, and thinking; visible custom messages; branch/compaction summaries; generic running/success/error/cancelled tool and Bash cards; lifecycle notices; and in-place accumulated partial updates;
 - expandable sanitized tool arguments, bounded text/diff previews, image results, opaque detail fallback, copy controls, elapsed time, truncation metadata, and explicit full-output Reveal/Open folder actions;
 - a read-only Git workspace change summary after completed responses, with per-file counts, untracked and binary awareness, expandable file rows, and a bounded file-oriented diff viewer with a scrollable folder tree, navigation, readable hunks, and compact line numbers;
@@ -82,6 +83,7 @@ If no model is available, open Settings > Providers, authenticate, refresh catal
 | Retry | `Ctrl+Alt+R` |
 | Stop | `Ctrl+Alt+S` |
 | Open command palette | `Ctrl+Shift+P` |
+| Attach files | `Ctrl+O` or drag onto the composer |
 | Toggle workspace terminal | Ctrl + backtick |
 | `@` file completion (in composer) | type `@` then `↑` `↓` `Enter` / `Esc` |
 | `/` command completion (in composer) | type `/` then `↑` `↓` `Enter` / `Esc` |

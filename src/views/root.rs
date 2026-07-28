@@ -9,20 +9,21 @@ use std::time::{Duration, Instant};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use gpui::{
-    Bounds, ClipboardItem, Context, CursorStyle, DispatchPhase, Entity, FocusHandle, Focusable,
-    FontWeight, HitboxBehavior, Image, ImageFormat, IntoElement, ListAlignment, ListOffset,
-    ListState, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit, PathBuilder,
-    PathPromptOptions, Pixels, Render, ScrollHandle, ScrollWheelEvent, StyledImage, Subscription,
-    Task, Window, canvas, div, fill, img, list, point, prelude::*, px, size, svg,
+    Bounds, ClipboardItem, Context, CursorStyle, DispatchPhase, Entity, ExternalPaths, FocusHandle,
+    Focusable, FontWeight, HitboxBehavior, Image, ImageFormat, IntoElement, ListAlignment,
+    ListOffset, ListState, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit,
+    PathBuilder, PathPromptOptions, Pixels, Render, ScrollHandle, ScrollWheelEvent, StyledImage,
+    Subscription, Task, Window, canvas, div, fill, img, list, point, prelude::*, px, size, svg,
 };
 
 use crate::actions::{
-    AbortRun, ActivateRecovery, Connect, DecreaseFontSize, FocusNext, FocusPrevious,
+    AbortRun, ActivateRecovery, AttachFiles, Connect, DecreaseFontSize, FocusNext, FocusPrevious,
     HistoryActivate, HistoryFirst, HistoryFold, HistoryLast, HistoryNext, HistoryPrevious,
     HistoryUnfold, ImagePreviewClose, ImagePreviewNext, ImagePreviewPrevious, IncreaseFontSize,
     ORCHESTRATION_ROW_CONTEXT, OpenCommandPalette, OrchestrationActivate, Retry, ShowHotkeys, Stop,
     ToggleInspector, ToggleSidebar, ToggleTerminal,
 };
+use crate::attachments::{self, PromptFile};
 use crate::command_catalog::{
     CommandCatalog, CommandEntry, CommandTarget, InvocationResolution, NativeAction,
 };
@@ -104,6 +105,7 @@ struct ThreadRuntimeStatus {
 struct ThreadUiState {
     draft: String,
     images: Vec<PromptImage>,
+    files: Vec<PromptFile>,
     pending_draft: Option<PendingDraft>,
     pending_bash: Option<crate::services::rpc::RequestId>,
     pending_compaction_focus: Option<String>,
@@ -114,6 +116,7 @@ impl ThreadUiState {
     fn can_evict(&self) -> bool {
         self.draft.is_empty()
             && self.images.is_empty()
+            && self.files.is_empty()
             && self.pending_draft.is_none()
             && self.pending_bash.is_none()
             && self.pending_compaction_focus.is_none()
@@ -384,6 +387,8 @@ pub struct RootView {
     project_catalogs: HashMap<String, ProjectCatalogCache>,
     project_feedback: Option<String>,
     project_picker_pending: bool,
+    attachment_picker_pending: bool,
+    attachment_task: Option<Task<()>>,
     project_scan_generation: u64,
     project_scan_task: Option<Task<()>>,
     project_save_generation: u64,
@@ -751,6 +756,8 @@ impl RootView {
             project_catalogs: HashMap::new(),
             project_feedback,
             project_picker_pending: false,
+            attachment_picker_pending: false,
+            attachment_task: None,
             project_scan_generation: 0,
             project_scan_task: None,
             project_save_generation: 0,
@@ -1060,6 +1067,10 @@ impl RootView {
         self.connect(cx);
     }
 
+    fn on_attach_files(&mut self, _: &AttachFiles, _: &mut Window, cx: &mut Context<Self>) {
+        self.choose_attachments(cx);
+    }
+
     fn on_retry(&mut self, _: &Retry, _: &mut Window, cx: &mut Context<Self>) {
         self.connect(cx);
     }
@@ -1090,21 +1101,31 @@ impl RootView {
         cx: &mut Context<Self>,
     ) {
         match event {
-            ComposerEvent::Accept { text, images } => {
+            ComposerEvent::Accept {
+                text,
+                images,
+                files,
+            } => {
                 self.pasted_image_preview = None;
                 self.execute_composer_text(
                     text.clone(),
                     images.clone(),
+                    files.clone(),
                     SubmissionPreference::Default,
                     window,
                     cx,
                 )
             }
-            ComposerEvent::FollowUp { text, images } => {
+            ComposerEvent::FollowUp {
+                text,
+                images,
+                files,
+            } => {
                 self.pasted_image_preview = None;
                 self.execute_composer_text(
                     text.clone(),
                     images.clone(),
+                    files.clone(),
                     SubmissionPreference::FollowUp,
                     window,
                     cx,
@@ -1346,7 +1367,7 @@ impl RootView {
         let slash_owns = {
             let composer = self.composer.read(cx);
             let draft = composer.draft();
-            !composer.has_images()
+            !composer.has_attachments()
                 && self.slash_intercepts_enter
                 && self.dismissed_slash_draft.as_deref() != Some(draft)
         };
@@ -1386,7 +1407,7 @@ impl RootView {
         self.slash_command_matches = matches;
         self.slash_intercepts_enter = intercept_enter;
 
-        let slash_active = !self.composer.read(cx).has_images()
+        let slash_active = !self.composer.read(cx).has_attachments()
             && self.dismissed_slash_draft.as_deref() != Some(draft.as_str())
             && self.slash_intercepts_enter;
         if slash_active {
@@ -1405,7 +1426,7 @@ impl RootView {
 
     fn slash_completion_active(&self, cx: &Context<Self>) -> bool {
         let composer = self.composer.read(cx);
-        !composer.has_images()
+        !composer.has_attachments()
             && self.slash_intercepts_enter
             && self.dismissed_slash_draft.as_deref() != Some(composer.draft())
     }
@@ -1427,7 +1448,7 @@ impl RootView {
     }
 
     fn sync_file_completion(&mut self, cx: &mut Context<Self>) {
-        if self.composer.read(cx).has_images() {
+        if self.composer.read(cx).has_attachments() {
             self.clear_file_completion();
             self.apply_completion_keyboard_routing(cx);
             return;
@@ -1631,12 +1652,13 @@ impl RootView {
         &mut self,
         text: String,
         images: Vec<PromptImage>,
+        files: Vec<PromptFile>,
         preference: SubmissionPreference,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !images.is_empty() {
-            self.submit(text, images, preference, cx);
+        if !images.is_empty() || !files.is_empty() {
+            self.submit(text, images, files, preference, cx);
             return;
         }
         let resolution = match self.command_catalog().resolve(&text) {
@@ -1655,7 +1677,7 @@ impl RootView {
                 window,
                 cx,
             ),
-            Ok(None) => self.submit(text, images, preference, cx),
+            Ok(None) => self.submit(text, images, files, preference, cx),
         }
     }
 
@@ -1727,6 +1749,7 @@ impl RootView {
         &mut self,
         text: String,
         images: Vec<PromptImage>,
+        files: Vec<PromptFile>,
         preference: SubmissionPreference,
         cx: &mut Context<Self>,
     ) {
@@ -1743,7 +1766,13 @@ impl RootView {
         }
 
         let result = self.controller.update(cx, |controller, cx| {
-            controller.submit_with_images(text.clone(), images.clone(), preference, cx)
+            controller.submit_with_attachments(
+                text.clone(),
+                images.clone(),
+                files.clone(),
+                preference,
+                cx,
+            )
         });
         match result {
             Ok(AcceptedSubmission {
@@ -3010,6 +3039,100 @@ impl RootView {
         cx.notify();
     }
 
+    fn choose_attachments(&mut self, cx: &mut Context<Self>) {
+        if self.attachment_picker_pending || !self.composer.read(cx).can_add_attachments() {
+            return;
+        }
+        self.attachment_picker_pending = true;
+        self.composer
+            .update(cx, |composer, cx| composer.set_attachment_loading(true, cx));
+        let receiver = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: true,
+            prompt: Some("Attach files".into()),
+        });
+        self.attachment_task = Some(cx.spawn(async move |view, cx| {
+            let selection = receiver.await;
+            let paths = match selection {
+                Ok(Ok(Some(paths))) if !paths.is_empty() => paths,
+                Ok(Ok(Some(_))) | Ok(Ok(None)) => {
+                    let _ = view.update(cx, |view, cx| {
+                        view.attachment_picker_pending = false;
+                        view.attachment_task = None;
+                        view.composer.update(cx, |composer, cx| {
+                            composer.set_attachment_loading(false, cx)
+                        });
+                    });
+                    return;
+                }
+                Ok(Err(_)) | Err(_) => {
+                    let _ = view.update(cx, |view, cx| {
+                        view.attachment_picker_pending = false;
+                        view.attachment_task = None;
+                        view.composer.update(cx, |composer, cx| {
+                            composer.set_feedback(
+                                ComposerFeedback::Rejected(
+                                    "The file picker could not be opened.".to_owned(),
+                                ),
+                                cx,
+                            )
+                        });
+                    });
+                    return;
+                }
+            };
+            let Some(limits) = view
+                .update(cx, |view, cx| {
+                    view.composer.read(cx).attachment_load_limits()
+                })
+                .ok()
+            else {
+                return;
+            };
+            let batch = cx
+                .background_executor()
+                .spawn(async move { attachments::load_attachments(paths, limits) })
+                .await;
+            let _ = view.update(cx, |view, cx| {
+                view.attachment_picker_pending = false;
+                view.attachment_task = None;
+                view.composer.update(cx, |composer, cx| {
+                    composer.add_loaded_attachments(batch, cx)
+                });
+            });
+        }));
+        cx.notify();
+    }
+
+    fn attach_dropped_paths(&mut self, paths: &[PathBuf], cx: &mut Context<Self>) {
+        if paths.is_empty()
+            || self.attachment_picker_pending
+            || !self.composer.read(cx).can_add_attachments()
+        {
+            return;
+        }
+        self.attachment_picker_pending = true;
+        self.composer
+            .update(cx, |composer, cx| composer.set_attachment_loading(true, cx));
+        let paths = paths.to_vec();
+        let limits = self.composer.read(cx).attachment_load_limits();
+        self.attachment_task = Some(cx.spawn(async move |view, cx| {
+            let batch = cx
+                .background_executor()
+                .spawn(async move { attachments::load_attachments(paths, limits) })
+                .await;
+            let _ = view.update(cx, |view, cx| {
+                view.attachment_picker_pending = false;
+                view.attachment_task = None;
+                view.composer.update(cx, |composer, cx| {
+                    composer.add_loaded_attachments(batch, cx)
+                });
+            });
+        }));
+        cx.notify();
+    }
+
     fn choose_projects(&mut self, cx: &mut Context<Self>) {
         if self.project_picker_pending {
             return;
@@ -3064,6 +3187,8 @@ impl RootView {
     }
 
     fn reset_for_project_switch(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.attachment_task.take();
+        self.attachment_picker_pending = false;
         self.model_panel = None;
         self.command_palette_open = false;
         self.hotkey_help_open = false;
@@ -3106,6 +3231,7 @@ impl RootView {
         let ui = ThreadUiState {
             draft: self.composer.read(cx).draft().to_owned(),
             images: self.composer.read(cx).images().to_vec(),
+            files: self.composer.read(cx).files().to_vec(),
             pending_draft: self.pending_draft.clone(),
             pending_bash: self.pending_bash.clone(),
             pending_compaction_focus: self.pending_compaction_focus.clone(),
@@ -3134,8 +3260,9 @@ impl RootView {
         self.pending_session_name = slot.ui.pending_session_name.clone();
         let draft = slot.ui.draft.clone();
         let images = slot.ui.images.clone();
+        let files = slot.ui.files.clone();
         self.composer.update(cx, |composer, cx| {
-            composer.restore_draft(&draft, images, cx)
+            composer.restore_draft(&draft, images, files, cx)
         });
     }
 

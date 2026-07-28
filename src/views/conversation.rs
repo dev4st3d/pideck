@@ -16,6 +16,7 @@ use gpui::{
 };
 
 use crate::actions::{TranscriptCopy, TranscriptSelectAll};
+use crate::attachments::{FileDelivery, PromptFileMetadata, format_bytes};
 use crate::controller::{AcceptedUserInput, ConversationProjection};
 use crate::services::rpc::{SessionEpoch, ToolCallId};
 use crate::state::runtime::{
@@ -830,6 +831,7 @@ fn transcript_block_text(block: &MessageBlock) -> Option<&str> {
         MessageBlock::Thinking { text, redacted, .. } if !redacted => Some(text),
         MessageBlock::Thinking { .. }
         | MessageBlock::Image { .. }
+        | MessageBlock::File { .. }
         | MessageBlock::ToolCall { .. }
         | MessageBlock::ToolResult { .. }
         | MessageBlock::Bash { .. }
@@ -902,8 +904,19 @@ fn optimistic_turn(
     if !input.text.is_empty() {
         body.push(prompt_selectable(&key, texts));
     }
+    let mut chips = Vec::new();
     for image in &input.images {
-        body.push(compact_label(format!("Image · {}", image.mime_type)));
+        let label = image.file_name.as_deref().map_or_else(
+            || format!("Image · {}", image.mime_type),
+            |name| format!("Image · {name}"),
+        );
+        chips.push(attachment_chip("icons/image.svg", label));
+    }
+    for file in &input.files {
+        chips.push(file_attachment_chip(&file.metadata));
+    }
+    if !chips.is_empty() {
+        body.push(attachment_chip_row(chips));
     }
     let meta_rows = vec![
         ("Turn".to_owned(), format!("{index:02}")),
@@ -935,19 +948,28 @@ fn user_prompt(
     message: &RuntimeMessage,
     texts: &HashMap<String, Entity<TranscriptText>>,
 ) -> impl IntoElement {
-    let body = message
-        .content
-        .iter()
-        .filter_map(|block| match block {
+    let mut body = Vec::new();
+    let mut chips = Vec::new();
+    for block in &message.content {
+        match block {
             MessageBlock::Text { .. } => {
-                Some(prompt_selectable(&fragment_key(message, block), texts))
+                body.push(prompt_selectable(&fragment_key(message, block), texts));
             }
             MessageBlock::Image { mime_type, .. } => {
-                Some(compact_label(format!("Image · {mime_type}")))
+                chips.push(attachment_chip(
+                    "icons/image.svg",
+                    format!("Image · {mime_type}"),
+                ));
             }
-            _ => None,
-        })
-        .collect::<Vec<_>>();
+            MessageBlock::File { metadata, .. } => {
+                chips.push(file_attachment_chip(metadata));
+            }
+            _ => {}
+        }
+    }
+    if !chips.is_empty() {
+        body.push(attachment_chip_row(chips));
+    }
     let meta_rows = vec![
         ("Turn".to_owned(), format!("{index:02}")),
         ("Timestamp".to_owned(), format_timestamp(message.timestamp)),
@@ -1248,6 +1270,7 @@ fn push_message_activity<'a>(
             MessageBlock::Image { mime_type, .. } => activity.push(ActivityStep::Image {
                 mime_type: mime_type.as_str(),
             }),
+            MessageBlock::File { .. } => {}
             MessageBlock::ToolCall {
                 id,
                 name,
@@ -2464,6 +2487,76 @@ fn selectable_with_leading(
         .into_any_element()
 }
 
+fn file_message_label(metadata: &PromptFileMetadata) -> String {
+    format!(
+        "File · {} · {} · {}",
+        sanitize_untrusted_text(&metadata.name),
+        metadata.delivery.label(),
+        format_bytes(metadata.size)
+    )
+}
+
+fn file_attachment_chip(metadata: &PromptFileMetadata) -> AnyElement {
+    let (icon, kind) = match metadata.delivery {
+        FileDelivery::Snapshot => ("icons/file.svg", "Snapshot"),
+        FileDelivery::PathReference => ("icons/link.svg", "Path ref"),
+    };
+    let label = format!(
+        "{} · {} · {}",
+        sanitize_untrusted_text(&metadata.name),
+        kind,
+        format_bytes(metadata.size)
+    );
+    attachment_chip(icon, label)
+}
+
+fn attachment_chip_row(chips: Vec<AnyElement>) -> AnyElement {
+    div()
+        .w_full()
+        .flex()
+        .flex_row()
+        .flex_wrap()
+        .items_start()
+        .gap(px(6.0))
+        .children(chips)
+        .into_any_element()
+}
+
+fn attachment_chip(icon: &'static str, label: String) -> AnyElement {
+    div()
+        .max_w(px(280.0))
+        .h(px(26.0))
+        .px(px(8.0))
+        .rounded(px(theme::RADIUS_SM))
+        .border_1()
+        .border_color(theme::edge_soft())
+        .bg(theme::panel())
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(7.0))
+        .child(
+            svg()
+                .path(icon)
+                .size(px(13.0))
+                .text_color(theme::ash())
+                .flex_shrink_0(),
+        )
+        .child(
+            div()
+                .min_w_0()
+                .font_family(theme::mono())
+                .text_size(theme::text_size(theme::T_TINY))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(theme::smoke())
+                .overflow_hidden()
+                .text_ellipsis()
+                .whitespace_nowrap()
+                .child(label),
+        )
+        .into_any_element()
+}
+
 fn compact_label(text: String) -> AnyElement {
     div()
         .font_family(theme::mono())
@@ -2482,6 +2575,9 @@ fn message_prompt_text(message: &RuntimeMessage) -> String {
             MessageBlock::Text { text, .. } => Some(sanitize_untrusted_text(text)),
             MessageBlock::Image { mime_type, .. } => {
                 Some(format!("[Image: {}]", sanitize_untrusted_text(mime_type)))
+            }
+            MessageBlock::File { metadata, .. } => {
+                Some(format!("[{}]", file_message_label(metadata)))
             }
             _ => None,
         })

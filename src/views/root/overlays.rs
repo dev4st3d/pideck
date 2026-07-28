@@ -1621,6 +1621,8 @@ pub(super) fn annotate_prompt_image(
     Ok(PromptImage {
         data: STANDARD.encode(encoded.into_inner()),
         mime_type: mime_type.to_owned(),
+        file_name: image.file_name.clone(),
+        source_path: image.source_path.clone(),
     })
 }
 
@@ -1653,6 +1655,8 @@ mod pasted_image_tests {
         let prompt = PromptImage {
             data: STANDARD.encode(encoded.into_inner()),
             mime_type: "image/png".to_owned(),
+            file_name: None,
+            source_path: None,
         };
         let stroke = PencilStroke {
             image_index: 0,
@@ -2557,6 +2561,7 @@ pub(super) fn hotkey_help_overlay(cx: &mut Context<RootView>) -> impl IntoElemen
         ("Send / steer", "Enter"),
         ("Queue follow-up", "Alt+Enter"),
         ("Insert newline", "Shift+Enter"),
+        ("Attach files", "Ctrl+O"),
         ("@ file / command menus", "↑ ↓ Enter Esc"),
         ("Abort run or Bash", "Esc"),
         ("Move focus", "Tab / Shift+Tab"),

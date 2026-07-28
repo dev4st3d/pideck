@@ -12,6 +12,7 @@ use super::runtime::{
     RuntimeState, SafeError, SessionMutation, StampedInput, SubmissionKind, ToolExecution,
     ToolStatus, UnknownRecord, push_bounded,
 };
+use crate::attachments::PromptFile;
 use crate::services::rpc::{EntryId, RequestId};
 
 const MAX_LIVE_BASH_OUTPUT_BYTES: usize = 256 * 1024;
@@ -134,14 +135,23 @@ fn reduce_intent(
             request,
             text,
             images,
+            files,
             kind,
-        } => submit(state, request, text, images, kind, None),
+        } => submit(state, request, text, images, files, kind, None),
         RuntimeIntent::InvokeCommand {
             request,
             text,
             kind,
             source,
-        } => submit(state, request, text, Vec::new(), kind, Some(source)),
+        } => submit(
+            state,
+            request,
+            text,
+            Vec::new(),
+            Vec::new(),
+            kind,
+            Some(source),
+        ),
         RuntimeIntent::RefreshCommands => {
             state.commands.loading();
             vec![effect(state, RuntimeRequest::GetCommands)]
@@ -350,14 +360,15 @@ fn submit(
     request: RequestId,
     text: String,
     images: Vec<PromptImage>,
+    files: Vec<PromptFile>,
     kind: SubmissionKind,
     dynamic_source: Option<CommandSource>,
 ) -> Vec<RuntimeEffect> {
     if matches!(state.prompt_delivery, PromptDelivery::Pending { .. }) {
         return Vec::new();
     }
-    let rejection = if text.trim().is_empty() && images.is_empty() {
-        Some("Write a prompt or attach an image first.".to_owned())
+    let rejection = if text.trim().is_empty() && images.is_empty() && files.is_empty() {
+        Some("Write a prompt or attach a file first.".to_owned())
     } else if !submission_allowed(state.lifecycle, kind) {
         Some(match kind {
             SubmissionKind::Prompt => "Pi is not idle yet.".to_owned(),
@@ -382,6 +393,7 @@ fn submit(
         request: request.clone(),
         text: text.clone(),
         images: images.clone(),
+        files: files.clone(),
         kind,
         display_optimistically: dynamic_source.is_none(),
         accepted: false,
@@ -405,6 +417,7 @@ fn submit(
             request,
             text,
             images,
+            files,
             kind,
         },
     };
@@ -1846,6 +1859,7 @@ fn message_text(message: &RuntimeMessage) -> String {
             MessageBlock::Text { text, .. } => Some(text.as_str()),
             MessageBlock::Thinking { .. }
             | MessageBlock::Image { .. }
+            | MessageBlock::File { .. }
             | MessageBlock::ToolCall { .. }
             | MessageBlock::ToolResult { .. }
             | MessageBlock::Bash { .. }

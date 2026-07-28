@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use gpui::{
     Animation, AnimationExt, AnyElement, Context, CursorStyle, FontWeight, Image, IntoElement,
-    MouseButton, ObjectFit, SharedString, div, ease_out_quint, img, prelude::*, px, rgba,
+    MouseButton, ObjectFit, SharedString, div, ease_out_quint, img, prelude::*, px, rgba, svg,
 };
 
 use super::element::ComposerTextElement;
@@ -11,16 +11,18 @@ use super::{
     Composer, ComposerAvailability, ComposerChrome, ComposerEvent, ComposerFeedback,
     INPUT_HEIGHT_MOTION_MS,
 };
+use crate::attachments::{FileDelivery, format_bytes};
 use crate::theme;
 
 /// On-screen size of each attached-image chip (square).
 const ATTACHMENT_CHIP: f32 = 56.0;
+const FILE_ATTACHMENT_WIDTH: f32 = 196.0;
 /// Soft pop when an image is pasted into the composer.
 const ATTACHMENT_POP_MS: u64 = 220;
 /// Whole strip fade/lift when the first attachment appears.
 const ATTACHMENT_STRIP_MS: u64 = 180;
 /// Corner remove control diameter.
-const ATTACHMENT_REMOVE: f32 = 18.0;
+const ATTACHMENT_REMOVE: f32 = 22.0;
 
 impl Composer {
     pub(super) fn render_view(&mut self, cx: &mut Context<Self>) -> AnyElement {
@@ -36,7 +38,7 @@ impl Composer {
         let can_submit = !self.disabled
             && (self.allow_empty_submit
                 || !self.buffer.text().trim().is_empty()
-                || !self.images.is_empty());
+                || self.has_attachments());
         let handles_composer_keys = self.availability != ComposerAvailability::Unavailable;
         let field_height = self.field_height();
         let field_padding_y = ((field_height - 22.0) / 2.0).max(0.0);
@@ -44,7 +46,9 @@ impl Composer {
         let show_status = !status.is_empty();
         let status_color = match self.feedback {
             ComposerFeedback::Rejected(_) | ComposerFeedback::Uncertain => theme::error(),
-            ComposerFeedback::Pending(_) | ComposerFeedback::BashRunning { .. } => theme::data(),
+            ComposerFeedback::Pending(_)
+            | ComposerFeedback::BashRunning { .. }
+            | ComposerFeedback::LoadingAttachments => theme::data(),
             ComposerFeedback::Accepted(_) | ComposerFeedback::BashCompleted => theme::live(),
             ComposerFeedback::Ready => theme::ash(),
         };
@@ -195,7 +199,7 @@ impl Composer {
         let can_submit = !self.disabled
             && (self.allow_empty_submit
                 || !self.buffer.text().trim().is_empty()
-                || !self.images.is_empty());
+                || self.has_attachments());
         let handles_composer_keys = self.availability != ComposerAvailability::Unavailable;
         let running = self.availability == ComposerAvailability::Running;
         let bash_running = self.availability == ComposerAvailability::BashRunning;
@@ -206,7 +210,9 @@ impl Composer {
         };
         let status_color = match self.feedback {
             ComposerFeedback::Rejected(_) | ComposerFeedback::Uncertain => theme::error(),
-            ComposerFeedback::Pending(_) | ComposerFeedback::BashRunning { .. } => theme::data(),
+            ComposerFeedback::Pending(_)
+            | ComposerFeedback::BashRunning { .. }
+            | ComposerFeedback::LoadingAttachments => theme::data(),
             ComposerFeedback::Accepted(_) | ComposerFeedback::BashCompleted => theme::live(),
             ComposerFeedback::Ready => theme::ash(),
         };
@@ -321,7 +327,7 @@ impl Composer {
             input.into_any_element()
         };
 
-        let attachments = (!self.images.is_empty()).then(|| self.render_attachments(cx));
+        let attachments = self.has_attachments().then(|| self.render_attachments(cx));
 
         div()
             .id(id_prefix)
@@ -512,9 +518,8 @@ impl Composer {
         let can_remove = !self.disabled;
         let strip_key = self.strip_motion_key();
         let id_prefix = self.id_prefix.clone();
-        let count = self.images.len();
-        let mut chips = Vec::with_capacity(count);
-        for index in 0..count {
+        let mut chips = Vec::with_capacity(self.attachment_count());
+        for index in 0..self.images.len() {
             let mime = self.images[index].mime_type.clone();
             let format = mime
                 .strip_prefix("image/")
@@ -542,11 +547,21 @@ impl Composer {
                     .into_any_element(),
             );
         }
+        for index in 0..self.files.len() {
+            chips.push(
+                div()
+                    .w(px(FILE_ATTACHMENT_WIDTH))
+                    .h(px(ATTACHMENT_CHIP))
+                    .flex_shrink_0()
+                    .child(self.render_file_attachment_chip(index, can_remove, cx))
+                    .into_any_element(),
+            );
+        }
 
         let strip = div()
             .id(SharedString::from(format!("{id_prefix}-attachments")))
             .w_full()
-            // Extra top/side padding so the corner × can sit slightly outside the chip.
+            // Extra top/side padding keeps image remove controls clear of the clipped panel edge.
             .px(px(12.0))
             .pt(px(12.0))
             .pb(px(4.0))
@@ -566,9 +581,181 @@ impl Composer {
                     (enter_id, strip_key as usize),
                     Animation::new(Duration::from_millis(ATTACHMENT_STRIP_MS))
                         .with_easing(ease_out_quint()),
-                    |strip, t| strip.opacity(0.4 + 0.6 * t).mt(px(5.0 * (1.0 - t))),
+                    |strip, t| strip.mt(px(5.0 * (1.0 - t))),
                 )
                 .into_any_element()
+        }
+    }
+
+    fn render_file_attachment_chip(
+        &mut self,
+        index: usize,
+        can_remove: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let Some(file) = self.files.get(index) else {
+            return div().into_any_element();
+        };
+        let name = file.metadata.name.clone();
+        let delivery = file.metadata.delivery;
+        let size_label = format_bytes(file.metadata.size);
+        let (kind_icon, kind_label, kind_color) = match delivery {
+            FileDelivery::Snapshot => ("icons/file.svg", "Snapshot", theme::ash()),
+            FileDelivery::PathReference => ("icons/link.svg", "Path ref", theme::data()),
+        };
+        let attach_token = self.file_attach_token(index);
+        let chip = div()
+            .id(SharedString::from(format!(
+                "{}-file-{index}",
+                self.id_prefix
+            )))
+            .w(px(FILE_ATTACHMENT_WIDTH))
+            .h(px(ATTACHMENT_CHIP))
+            .pl(px(8.0))
+            .pr(px(6.0))
+            .rounded(px(theme::RADIUS))
+            .border_1()
+            .border_color(theme::edge_soft())
+            .bg(theme::panel())
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(8.0))
+            .hover(|chip| {
+                chip.border_color(theme::edge_hard())
+                    .bg(theme::panel_lift())
+            })
+            .when(can_remove, |chip| {
+                chip.tab_index(0)
+                    .cursor_pointer()
+                    .focus(|chip| chip.border_color(theme::focus()))
+                    .on_key_down(cx.listener(move |view, event: &gpui::KeyDownEvent, _, cx| {
+                        if matches!(event.keystroke.key.as_str(), "backspace" | "delete") {
+                            cx.stop_propagation();
+                            view.remove_file(index, cx);
+                        }
+                    }))
+            })
+            .child(
+                div()
+                    .size(px(32.0))
+                    .rounded(px(theme::RADIUS_SM))
+                    .flex_shrink_0()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .bg(theme::canvas())
+                    .border_1()
+                    .border_color(theme::edge_soft())
+                    .child(
+                        svg()
+                            .path(kind_icon)
+                            .size(px(16.0))
+                            .text_color(kind_color)
+                            .flex_shrink_0(),
+                    ),
+            )
+            .child(
+                div()
+                    .min_w_0()
+                    .flex_1()
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.0))
+                    .child(
+                        div()
+                            .font_family(theme::sans())
+                            .text_size(theme::text_size(theme::T_UI_SM))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(theme::bone_dim())
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .whitespace_nowrap()
+                            .child(name),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(5.0))
+                            .min_w_0()
+                            .child(
+                                div()
+                                    .px(px(5.0))
+                                    .py(px(1.0))
+                                    .rounded(px(theme::RADIUS_SM))
+                                    .bg(theme::canvas())
+                                    .font_family(theme::main())
+                                    .text_size(theme::text_size(theme::T_TINY))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(kind_color)
+                                    .child(kind_label),
+                            )
+                            .child(
+                                div()
+                                    .font_family(theme::mono())
+                                    .text_size(theme::text_size(theme::T_TINY))
+                                    .text_color(theme::smoke())
+                                    .overflow_hidden()
+                                    .text_ellipsis()
+                                    .whitespace_nowrap()
+                                    .child(size_label),
+                            ),
+                    ),
+            )
+            .when(can_remove, |chip| {
+                chip.child(
+                    div()
+                        .id(SharedString::from(format!(
+                            "{}-file-{index}-remove",
+                            self.id_prefix
+                        )))
+                        .size(px(22.0))
+                        .rounded_full()
+                        .flex_shrink_0()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .tab_index(0)
+                        .cursor_pointer()
+                        .hover(|button| button.bg(theme::canvas()))
+                        .focus(|button| {
+                            button
+                                .bg(theme::canvas())
+                                .border_1()
+                                .border_color(theme::focus())
+                        })
+                        .on_key_down(cx.listener(move |view, event: &gpui::KeyDownEvent, _, cx| {
+                            if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                                cx.stop_propagation();
+                                view.remove_file(index, cx);
+                            }
+                        }))
+                        .on_click(cx.listener(move |view, _, _, cx| {
+                            cx.stop_propagation();
+                            view.remove_file(index, cx);
+                        }))
+                        .child(
+                            svg()
+                                .path("icons/close.svg")
+                                .size(px(12.0))
+                                .text_color(theme::ash()),
+                        ),
+                )
+            });
+
+        if attach_token == 0 {
+            chip.into_any_element()
+        } else {
+            let pop_id = SharedString::from(format!("{}-file-pop", self.id_prefix));
+            chip.with_animation(
+                (pop_id, attach_token as usize),
+                Animation::new(Duration::from_millis(ATTACHMENT_POP_MS))
+                    .with_easing(ease_out_quint()),
+                |chip, t| chip.mt(px(6.0 * (1.0 - t))),
+            )
+            .into_any_element()
         }
     }
 
@@ -629,11 +816,25 @@ impl Composer {
                     .when(!has_thumb, |frame| {
                         frame.bg(theme::canvas()).child(
                             div()
-                                .font_family(theme::mono())
-                                .text_size(theme::text_size(theme::T_TINY))
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(theme::ash())
-                                .child(format),
+                                .flex()
+                                .flex_col()
+                                .items_center()
+                                .justify_center()
+                                .gap(px(3.0))
+                                .child(
+                                    svg()
+                                        .path("icons/image.svg")
+                                        .size(px(18.0))
+                                        .text_color(theme::ash()),
+                                )
+                                .child(
+                                    div()
+                                        .font_family(theme::mono())
+                                        .text_size(theme::text_size(theme::T_TINY))
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(theme::smoke())
+                                        .child(format),
+                                ),
                         )
                     }),
             )
@@ -645,8 +846,8 @@ impl Composer {
                             self.id_prefix
                         )))
                         .absolute()
-                        .top(px(-5.0))
-                        .right(px(-5.0))
+                        .top(px(-6.0))
+                        .right(px(-6.0))
                         .size(px(ATTACHMENT_REMOVE))
                         .rounded(px(ATTACHMENT_REMOVE / 2.0))
                         .flex()
@@ -681,14 +882,10 @@ impl Composer {
                             view.remove_image(index, cx);
                         }))
                         .child(
-                            div()
-                                .relative()
-                                .top(px(-0.5))
-                                .font_family(theme::sans())
-                                .text_size(theme::text_size(theme::T_TINY))
-                                .font_weight(FontWeight::BOLD)
-                                .line_height(gpui::relative(1.0))
-                                .child("×"),
+                            svg()
+                                .path("icons/close.svg")
+                                .size(px(12.0))
+                                .text_color(rgba(0xffff_fff0)),
                         ),
                 )
             });
@@ -697,7 +894,7 @@ impl Composer {
             // Restored drafts stay settled (no pop).
             chip.into_any_element()
         } else {
-            // Soft pop on paste: fade, rise, and grow into the fixed slot.
+            // Soft pop on paste: rise and grow into the fixed slot without hiding content.
             let pop_id = SharedString::from(format!("{}-image-pop", self.id_prefix));
             chip.with_animation(
                 (pop_id, attach_token as usize),
@@ -707,7 +904,7 @@ impl Composer {
                     let scale = 0.86 + 0.14 * t;
                     let size = ATTACHMENT_CHIP * scale;
                     let lift = 8.0 * (1.0 - t);
-                    chip.size(px(size)).opacity(0.18 + 0.82 * t).mt(px(lift))
+                    chip.size(px(size)).mt(px(lift))
                 },
             )
             .into_any_element()

@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 
 use gpui::{Context, Task};
 
+use crate::attachments::PromptFile;
 use crate::model_runtime::{
     AuthFlow, AuthMethod, AuthPrompt, CatalogPhase, ModelCatalogSnapshot, ModelChangePolicy,
     ModelIdentity, ModelRuntimeState, ThinkingLevel, model_change_policy,
@@ -266,6 +267,7 @@ pub struct AcceptedUserInput {
     pub request: RequestId,
     pub text: String,
     pub images: Vec<PromptImage>,
+    pub files: Vec<PromptFile>,
     pub kind: SubmissionKind,
 }
 
@@ -423,7 +425,7 @@ pub enum SubmissionRejection {
 impl SubmissionRejection {
     pub fn message(self) -> &'static str {
         match self {
-            Self::Empty => "Write a prompt or attach an image first.",
+            Self::Empty => "Write a prompt or attach a file first.",
             Self::EmptyBash => "Write a Bash command after ! or !!.",
             Self::Pending => "The previous acceptance is still pending.",
             Self::BashRunning => "A Bash command is already running.",
@@ -669,6 +671,7 @@ impl ControllerCore {
                     request: input.request.clone(),
                     text: input.text.clone(),
                     images: input.images.clone(),
+                    files: input.files.clone(),
                     kind: input.kind,
                 })
                 .collect(),
@@ -750,7 +753,23 @@ impl ControllerCore {
         ),
         SubmissionRejection,
     > {
-        if text.trim().is_empty() && images.is_empty() {
+        self.submit_with_attachments(text, images, Vec::new(), preference)
+    }
+
+    pub fn submit_with_attachments(
+        &mut self,
+        text: String,
+        images: Vec<PromptImage>,
+        files: Vec<PromptFile>,
+        preference: SubmissionPreference,
+    ) -> Result<
+        (
+            AcceptedSubmission,
+            Vec<crate::state::runtime::RuntimeEffect>,
+        ),
+        SubmissionRejection,
+    > {
+        if text.trim().is_empty() && images.is_empty() && files.is_empty() {
             return Err(SubmissionRejection::Empty);
         }
         if !images.is_empty()
@@ -765,6 +784,7 @@ impl ControllerCore {
             return Err(SubmissionRejection::ImagesUnsupported);
         }
         if images.is_empty()
+            && files.is_empty()
             && let Some(parsed) = parse_bash_submission(&text)
         {
             let (command, exclude_from_context) = parsed?;
@@ -830,6 +850,7 @@ impl ControllerCore {
                     request: request.clone(),
                     text,
                     images,
+                    files,
                     kind,
                 }),
             },
@@ -1718,7 +1739,20 @@ impl RuntimeController {
         preference: SubmissionPreference,
         cx: &mut Context<Self>,
     ) -> Result<AcceptedSubmission, SubmissionRejection> {
-        let (submission, effects) = self.core.submit_with_images(text, images, preference)?;
+        self.submit_with_attachments(text, images, Vec::new(), preference, cx)
+    }
+
+    pub fn submit_with_attachments(
+        &mut self,
+        text: String,
+        images: Vec<PromptImage>,
+        files: Vec<PromptFile>,
+        preference: SubmissionPreference,
+        cx: &mut Context<Self>,
+    ) -> Result<AcceptedSubmission, SubmissionRejection> {
+        let (submission, effects) = self
+            .core
+            .submit_with_attachments(text, images, files, preference)?;
         self.send_effects(effects);
         cx.notify();
         Ok(submission)
@@ -3158,6 +3192,8 @@ mod tests {
         let image = PromptImage {
             data: "iVBORw0KGgo=".to_owned(),
             mime_type: "image/png".to_owned(),
+            file_name: None,
+            source_path: None,
         };
         let mut core = ready_core();
         assert_eq!(
@@ -3195,6 +3231,46 @@ mod tests {
         assert_eq!(images.len(), 1);
         assert_eq!(images[0].data, image.data);
         assert_eq!(images[0].mime_type, image.mime_type);
+    }
+
+    #[test]
+    fn controller_expands_text_attachments_only_at_the_rpc_boundary() {
+        use std::sync::Arc;
+
+        use crate::attachments::{FileDelivery, PromptFile, PromptFileMetadata};
+        use crate::services::rpc::{Command, RpcDispatch, dispatch_for_effect};
+
+        let file = PromptFile {
+            metadata: PromptFileMetadata {
+                name: "notes.md".to_owned(),
+                path: "C:/work/notes.md".to_owned(),
+                size: 7,
+                delivery: FileDelivery::Snapshot,
+            },
+            content: Some(Arc::from("# Notes")),
+        };
+        let mut core = ready_core();
+        let (_, effects) = core
+            .submit_with_attachments(
+                "Review this".to_owned(),
+                Vec::new(),
+                vec![file.clone()],
+                SubmissionPreference::Default,
+            )
+            .expect("file prompt");
+
+        assert_eq!(core.runtime.optimistic_user_inputs[0].text, "Review this");
+        assert_eq!(core.runtime.optimistic_user_inputs[0].files, vec![file]);
+        let RpcDispatch::Command(Command::Prompt {
+            message,
+            images: None,
+            ..
+        }) = dispatch_for_effect(&effects[0])
+        else {
+            panic!("expected prompt with expanded file");
+        };
+        assert!(message.contains("# Notes"));
+        assert!(message.ends_with("Review this"));
     }
 
     #[test]

@@ -25,10 +25,11 @@ use crate::actions::{
     ComposerSelectLineEnd, ComposerSelectLineStart, ComposerSelectRight, ComposerSelectUp,
     ComposerUndo, ComposerUp, InsertNewline, QueueFollowUp,
 };
+use crate::attachments::{
+    AttachmentLoadLimits, LoadedAttachment, LoadedAttachmentBatch, MAX_ATTACHMENTS,
+    MAX_IMAGE_ATTACHMENTS, MAX_IMAGE_BYTES, MAX_TOTAL_TEXT_SNAPSHOT_BYTES, PromptFile,
+};
 use crate::state::runtime::{PromptImage, SubmissionKind};
-
-const MAX_IMAGE_ATTACHMENTS: usize = 4;
-const MAX_IMAGE_BYTES: usize = 5 * 1024 * 1024;
 /// Pixel edge length for cached square attachment thumbs (display is smaller).
 const ATTACHMENT_THUMB_PX: u32 = 96;
 /// Expand/collapse the multiline input between single-line and multi-line heights.
@@ -101,6 +102,7 @@ pub enum ComposerFeedback {
     Accepted(SubmissionKind),
     BashRunning { exclude_from_context: bool },
     BashCompleted,
+    LoadingAttachments,
     Rejected(String),
     Uncertain,
 }
@@ -110,10 +112,12 @@ pub enum ComposerEvent {
     Accept {
         text: String,
         images: Vec<PromptImage>,
+        files: Vec<PromptFile>,
     },
     FollowUp {
         text: String,
         images: Vec<PromptImage>,
+        files: Vec<PromptFile>,
     },
     Abort,
     AbortBash,
@@ -139,10 +143,12 @@ pub struct Composer {
     pub(super) focus_handle: FocusHandle,
     buffer: TextBuffer,
     images: Vec<PromptImage>,
+    files: Vec<PromptFile>,
     /// Compressed square previews parallel to `images` (None when decode fails).
     thumbnails: Vec<Option<Arc<Image>>>,
     /// Stable ids for enter animations; bump only when a chip is newly attached.
     attach_tokens: Vec<u64>,
+    file_attach_tokens: Vec<u64>,
     attach_seq: u64,
     /// Bumped when the attachment strip appears (0 → N) so the row can soft-enter.
     strip_motion_key: u64,
@@ -180,8 +186,10 @@ impl Composer {
             focus_handle: cx.focus_handle(),
             buffer: TextBuffer::default(),
             images: Vec::new(),
+            files: Vec::new(),
             thumbnails: Vec::new(),
             attach_tokens: Vec::new(),
+            file_attach_tokens: Vec::new(),
             attach_seq: 0,
             strip_motion_key: 0,
             image_bytes: 0,
@@ -293,12 +301,51 @@ impl Composer {
         &self.images
     }
 
+    pub fn files(&self) -> &[PromptFile] {
+        &self.files
+    }
+
+    pub fn attachment_count(&self) -> usize {
+        self.images.len().saturating_add(self.files.len())
+    }
+
+    pub fn can_add_attachments(&self) -> bool {
+        self.chrome == ComposerChrome::Full
+            && !self.disabled
+            && self.attachment_count() < MAX_ATTACHMENTS
+    }
+
+    pub fn attachment_load_limits(&self) -> AttachmentLoadLimits {
+        let existing_sources = self
+            .images
+            .iter()
+            .filter_map(|image| image.source_path.clone())
+            .chain(self.files.iter().map(|file| file.metadata.path.clone()))
+            .collect();
+        let snapshot_bytes = self
+            .files
+            .iter()
+            .map(PromptFile::snapshot_bytes)
+            .sum::<usize>();
+        AttachmentLoadLimits {
+            remaining_attachments: MAX_ATTACHMENTS.saturating_sub(self.attachment_count()),
+            remaining_images: MAX_IMAGE_ATTACHMENTS.saturating_sub(self.images.len()),
+            remaining_image_bytes: MAX_IMAGE_BYTES.saturating_sub(self.image_bytes),
+            remaining_snapshot_bytes: MAX_TOTAL_TEXT_SNAPSHOT_BYTES.saturating_sub(snapshot_bytes),
+            existing_sources,
+        }
+    }
+
     pub(super) fn thumbnail(&self, index: usize) -> Option<Arc<Image>> {
         self.thumbnails.get(index).and_then(|thumb| thumb.clone())
     }
 
     pub(super) fn attach_token(&self, index: usize) -> u64 {
         self.attach_tokens.get(index).copied().unwrap_or(0)
+    }
+
+    pub(super) fn file_attach_token(&self, index: usize) -> u64 {
+        self.file_attach_tokens.get(index).copied().unwrap_or(0)
     }
 
     pub(super) fn strip_motion_key(&self) -> u64 {
@@ -439,7 +486,7 @@ impl Composer {
     }
 
     fn note_strip_appeared(&mut self) {
-        if self.images.is_empty() {
+        if !self.has_attachments() {
             self.strip_motion_key = self.strip_motion_key.wrapping_add(1).max(1);
         }
     }
@@ -462,11 +509,17 @@ impl Composer {
         }
     }
 
-    fn push_attachment(&mut self, prompt: PromptImage) {
+    fn push_image_attachment(&mut self, prompt: PromptImage) {
         self.thumbnails.push(attachment_thumbnail(&prompt));
         let token = self.next_attach_token();
         self.attach_tokens.push(token);
         self.images.push(prompt);
+    }
+
+    fn push_file_attachment(&mut self, file: PromptFile) {
+        let token = self.next_attach_token();
+        self.file_attach_tokens.push(token);
+        self.files.push(file);
     }
 
     pub fn replace_image(
@@ -502,6 +555,68 @@ impl Composer {
         !self.images.is_empty()
     }
 
+    pub fn has_attachments(&self) -> bool {
+        !self.images.is_empty() || !self.files.is_empty()
+    }
+
+    pub fn set_attachment_loading(&mut self, loading: bool, cx: &mut Context<Self>) {
+        self.feedback = if loading {
+            ComposerFeedback::LoadingAttachments
+        } else {
+            ComposerFeedback::Ready
+        };
+        self.update_disabled();
+        cx.notify();
+    }
+
+    pub fn add_loaded_attachments(&mut self, batch: LoadedAttachmentBatch, cx: &mut Context<Self>) {
+        let added = batch.attachments.len();
+        for attachment in batch.attachments {
+            self.note_strip_appeared();
+            match attachment {
+                LoadedAttachment::Image {
+                    data,
+                    mime_type,
+                    file_name,
+                    source_path,
+                    bytes,
+                } => {
+                    self.image_bytes = self.image_bytes.saturating_add(bytes);
+                    self.push_image_attachment(PromptImage {
+                        data,
+                        mime_type,
+                        file_name: Some(file_name),
+                        source_path: Some(source_path),
+                    });
+                }
+                LoadedAttachment::File(file) => self.push_file_attachment(file),
+            }
+        }
+
+        self.feedback = if let Some(issue) = batch.issues.first() {
+            let prefix = if added == 0 {
+                String::new()
+            } else {
+                format!("Added {added} file{}. ", if added == 1 { "" } else { "s" })
+            };
+            let extra = batch.issues.len().saturating_sub(1);
+            ComposerFeedback::Rejected(format!(
+                "{prefix}{}: {}{}",
+                issue.name,
+                issue.message,
+                if extra == 0 {
+                    String::new()
+                } else {
+                    format!(" ({extra} more skipped)")
+                }
+            ))
+        } else {
+            ComposerFeedback::Ready
+        };
+        self.update_disabled();
+        cx.notify();
+    }
+
     pub fn set_draft(&mut self, text: &str, cx: &mut Context<Self>) {
         let length = self.buffer.text().len();
         self.buffer.set_selection(0..length, false);
@@ -520,16 +635,24 @@ impl Composer {
         self.after_edit(cx);
     }
 
-    pub fn restore_draft(&mut self, text: &str, images: Vec<PromptImage>, cx: &mut Context<Self>) {
+    pub fn restore_draft(
+        &mut self,
+        text: &str,
+        images: Vec<PromptImage>,
+        files: Vec<PromptFile>,
+        cx: &mut Context<Self>,
+    ) {
         self.set_draft(text, cx);
         self.image_bytes = images
             .iter()
             .map(|image| decoded_image_len(&image.data))
             .sum();
         self.thumbnails = images.iter().map(attachment_thumbnail).collect();
-        // Restored drafts should appear settled, not re-pop like a fresh paste.
+        // Restored drafts should appear settled, not re-pop like a fresh selection.
         self.attach_tokens = images.iter().map(|_| 0).collect();
+        self.file_attach_tokens = files.iter().map(|_| 0).collect();
         self.images = images;
+        self.files = files;
         self.update_disabled();
         cx.notify();
     }
@@ -609,14 +732,16 @@ impl Composer {
     ) -> bool {
         let draft_matches = self.buffer.text() == expected_draft;
         let text_cleared = self.buffer.clear_if_matches(expected_draft);
-        let images_cleared = draft_matches && !self.images.is_empty();
-        let cleared = text_cleared || images_cleared;
+        let attachments_cleared = draft_matches && self.has_attachments();
+        let cleared = text_cleared || attachments_cleared;
         self.feedback = ComposerFeedback::Accepted(kind);
         self.update_disabled();
         if cleared {
             self.images.clear();
+            self.files.clear();
             self.thumbnails.clear();
             self.attach_tokens.clear();
+            self.file_attach_tokens.clear();
             self.image_bytes = 0;
             self.after_edit(cx);
         } else {
@@ -634,7 +759,9 @@ impl Composer {
                 | ComposerAvailability::BashCancelling
         ) || matches!(
             self.feedback,
-            ComposerFeedback::Pending(_) | ComposerFeedback::BashRunning { .. }
+            ComposerFeedback::Pending(_)
+                | ComposerFeedback::BashRunning { .. }
+                | ComposerFeedback::LoadingAttachments
         );
     }
 
@@ -805,6 +932,10 @@ impl Composer {
             self.feedback = ComposerFeedback::Rejected(
                 "The clipboard image is empty and could not be attached.".to_owned(),
             );
+        } else if self.attachment_count() >= MAX_ATTACHMENTS {
+            self.feedback = ComposerFeedback::Rejected(format!(
+                "You can attach up to {MAX_ATTACHMENTS} files."
+            ));
         } else if self.images.len() >= MAX_IMAGE_ATTACHMENTS {
             self.feedback = ComposerFeedback::Rejected(format!(
                 "You can attach up to {MAX_IMAGE_ATTACHMENTS} images."
@@ -815,9 +946,11 @@ impl Composer {
         } else {
             self.note_strip_appeared();
             self.image_bytes += image.bytes.len();
-            self.push_attachment(PromptImage {
+            self.push_image_attachment(PromptImage {
                 data: STANDARD.encode(&image.bytes),
                 mime_type: image.format.mime_type().to_owned(),
+                file_name: None,
+                source_path: None,
             });
         }
         cx.notify();
@@ -843,6 +976,17 @@ impl Composer {
         self.image_bytes = self
             .image_bytes
             .saturating_sub(decoded_image_len(&image.data));
+        cx.notify();
+    }
+
+    fn remove_file(&mut self, index: usize, cx: &mut Context<Self>) {
+        if self.disabled || index >= self.files.len() {
+            return;
+        }
+        self.files.remove(index);
+        if index < self.file_attach_tokens.len() {
+            self.file_attach_tokens.remove(index);
+        }
         cx.notify();
     }
 
@@ -900,7 +1044,7 @@ impl Composer {
     }
 
     fn emit_accept(&mut self, follow_up: bool, cx: &mut Context<Self>) {
-        if self.command_completion_active && self.images.is_empty() {
+        if self.command_completion_active && !self.has_attachments() {
             cx.emit(ComposerEvent::CommandAccept);
             return;
         }
@@ -913,10 +1057,10 @@ impl Composer {
         }
         if !self.allow_empty_submit
             && self.buffer.text().trim().is_empty()
-            && self.images.is_empty()
+            && !self.has_attachments()
         {
             self.feedback = ComposerFeedback::Rejected(match self.chrome {
-                ComposerChrome::Full => "Write a prompt or attach an image first.".to_owned(),
+                ComposerChrome::Full => "Write a prompt or attach a file first.".to_owned(),
                 ComposerChrome::Panel | ComposerChrome::Field => "Enter a value first.".to_owned(),
             });
             cx.notify();
@@ -924,6 +1068,7 @@ impl Composer {
         }
         let text = self.buffer.text().to_owned();
         let images = self.images.clone();
+        let files = self.files.clone();
         if follow_up {
             if self.availability != ComposerAvailability::Running {
                 self.feedback = ComposerFeedback::Rejected(
@@ -932,9 +1077,17 @@ impl Composer {
                 cx.notify();
                 return;
             }
-            cx.emit(ComposerEvent::FollowUp { text, images });
+            cx.emit(ComposerEvent::FollowUp {
+                text,
+                images,
+                files,
+            });
         } else {
-            cx.emit(ComposerEvent::Accept { text, images });
+            cx.emit(ComposerEvent::Accept {
+                text,
+                images,
+                files,
+            });
         }
     }
 
@@ -1080,6 +1233,7 @@ impl Composer {
                 exclude_from_context: false,
             } => "Bash is running.".to_owned(),
             ComposerFeedback::BashCompleted => "Bash finished.".to_owned(),
+            ComposerFeedback::LoadingAttachments => "Adding files…".to_owned(),
             ComposerFeedback::Rejected(summary) => summary.clone(),
             ComposerFeedback::Uncertain => {
                 "Delivery is uncertain. The draft was kept; reconnect before retrying.".to_owned()
@@ -1109,9 +1263,11 @@ impl Composer {
     fn hint_text(&self) -> &'static str {
         match self.availability {
             ComposerAvailability::Running => {
-                "Enter steer · Alt+Enter follow up · Shift+Enter newline · Ctrl+V image · Esc abort"
+                "Enter steer · Alt+Enter follow up · Shift+Enter newline · Ctrl+O files · Esc abort"
             }
-            ComposerAvailability::Idle => "Enter send · Shift+Enter newline · Ctrl+V image",
+            ComposerAvailability::Idle => {
+                "Enter send · Shift+Enter newline · Ctrl+O files · Ctrl+V image"
+            }
             ComposerAvailability::BashRunning => "Esc aborts Bash only",
             ComposerAvailability::BashCancelling => "Waiting for Bash to stop",
             ComposerAvailability::Unavailable | ComposerAvailability::Cancelling => {

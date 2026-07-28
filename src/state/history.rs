@@ -379,6 +379,7 @@ fn entry_copy(entry: &RuntimeEntry) -> (String, String, String) {
                     MessageBlock::Bash {
                         command, output, ..
                     } => Some(if output.is_empty() { command } else { output }),
+                    MessageBlock::File { metadata, .. } => Some(metadata.name.as_str()),
                     MessageBlock::Image { .. }
                     | MessageBlock::ToolCall { .. }
                     | MessageBlock::ToolResult { .. }

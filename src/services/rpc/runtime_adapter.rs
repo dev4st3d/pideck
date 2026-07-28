@@ -11,6 +11,7 @@ use super::{
     SessionEpoch, SessionTreeNode, SlashCommand, SlashCommandSource, StopReason, StreamingBehavior,
     TaggedIncomingRecord, ThinkingLevel, UserContent, UserContentBlock,
 };
+use crate::attachments::{expand_prompt, parse_expanded_prompt};
 use crate::state::runtime::{
     AssistantMetadata, BlockKey, CommandProvenance, CommandSource, CompactionKind, DialogAnswer,
     DialogRequest, DirectBashResult, EffectKind, EntryKind, ErrorKind, ExtensionFailure,
@@ -125,23 +126,22 @@ fn command_for_request(request: &RuntimeRequest) -> Command {
         RuntimeRequest::GetTree { .. } => Command::GetTree,
         RuntimeRequest::GetForkMessages => Command::GetForkMessages,
         RuntimeRequest::Submit {
-            text, images, kind, ..
+            text,
+            images,
+            files,
+            kind,
+            ..
         } => {
             let images = image_content(images);
+            let message = expand_prompt(text, files);
             match kind {
                 SubmissionKind::Prompt => Command::Prompt {
-                    message: text.clone(),
+                    message,
                     images,
                     streaming_behavior: None,
                 },
-                SubmissionKind::Steer => Command::Steer {
-                    message: text.clone(),
-                    images,
-                },
-                SubmissionKind::FollowUp => Command::FollowUp {
-                    message: text.clone(),
-                    images,
-                },
+                SubmissionKind::Steer => Command::Steer { message, images },
+                SubmissionKind::FollowUp => Command::FollowUp { message, images },
             }
         }
         RuntimeRequest::InvokeCommand {
@@ -891,26 +891,50 @@ fn assistant_block(index: usize, block: AssistantContentBlock) -> MessageBlock {
 }
 
 fn user_content(content: UserContent) -> Vec<MessageBlock> {
+    let mut output = Vec::new();
     match content {
-        UserContent::Text(text) => vec![MessageBlock::Text {
-            key: block_key("text", 0, None),
+        UserContent::Text(text) => push_user_text(&mut output, text),
+        UserContent::Blocks(blocks) => {
+            for block in blocks {
+                match block {
+                    UserContentBlock::Text { text, .. } => push_user_text(&mut output, text),
+                    UserContentBlock::Image { data, mime_type } => {
+                        let index = output.len();
+                        output.push(MessageBlock::Image {
+                            key: block_key("image", index, Some(&mime_type)),
+                            mime_type,
+                            data: Some(data),
+                        });
+                    }
+                }
+            }
+        }
+    }
+    output
+}
+
+fn push_user_text(output: &mut Vec<MessageBlock>, text: String) {
+    if let Some((visible_text, files)) = parse_expanded_prompt(&text) {
+        for metadata in files {
+            let index = output.len();
+            output.push(MessageBlock::File {
+                key: block_key("file", index, Some(&metadata.path)),
+                metadata,
+            });
+        }
+        if !visible_text.is_empty() {
+            let index = output.len();
+            output.push(MessageBlock::Text {
+                key: block_key("text", index, None),
+                text: visible_text,
+            });
+        }
+    } else {
+        let index = output.len();
+        output.push(MessageBlock::Text {
+            key: block_key("text", index, None),
             text,
-        }],
-        UserContent::Blocks(blocks) => blocks
-            .into_iter()
-            .enumerate()
-            .map(|(index, block)| match block {
-                UserContentBlock::Text { text, .. } => MessageBlock::Text {
-                    key: block_key("text", index, None),
-                    text,
-                },
-                UserContentBlock::Image { data, mime_type } => MessageBlock::Image {
-                    key: block_key("image", index, Some(&mime_type)),
-                    mime_type,
-                    data: Some(data),
-                },
-            })
-            .collect(),
+        });
     }
 }
 
@@ -1288,6 +1312,36 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn authoritative_file_prompt_hides_snapshot_body_but_keeps_metadata() {
+        use std::sync::Arc;
+
+        use crate::attachments::{FileDelivery, PromptFile, PromptFileMetadata, expand_prompt};
+
+        let file = PromptFile {
+            metadata: PromptFileMetadata {
+                name: "main.rs".to_owned(),
+                path: "C:/work/main.rs".to_owned(),
+                size: 12,
+                delivery: FileDelivery::Snapshot,
+            },
+            content: Some(Arc::from("secret body")),
+        };
+        let blocks = user_content(UserContent::Text(expand_prompt("Fix it", &[file])));
+
+        assert!(matches!(
+            &blocks[0],
+            MessageBlock::File { metadata, .. } if metadata.name == "main.rs"
+        ));
+        assert!(matches!(
+            &blocks[1],
+            MessageBlock::Text { text, .. } if text == "Fix it"
+        ));
+        assert!(blocks.iter().all(|block| {
+            !matches!(block, MessageBlock::Text { text, .. } if text.contains("secret body"))
+        }));
+    }
 
     #[test]
     fn stock_openai_model_uses_default_and_explicit_thinking_efforts() {
