@@ -116,15 +116,7 @@ pub(super) fn titlebar(
                                 .whitespace_nowrap()
                                 .child(projection.session.label()),
                         )
-                        .child(controls::icon_button(
-                            "rename-session",
-                            "✎",
-                            rename_open,
-                            rename_enabled,
-                            Box::new(cx.listener(|view, _, window, cx| {
-                                view.toggle_session_rename(window, cx)
-                            })),
-                        ))
+                        .child(session_rename_button(rename_open, rename_enabled, cx))
                         .when(rename_open, |title| {
                             title.child(deferred(
                                 div()
@@ -908,6 +900,56 @@ pub(super) fn sessions_panel(
             )
             .into_any_element()
     }
+}
+
+fn session_rename_button(
+    open: bool,
+    enabled: bool,
+    cx: &mut Context<RootView>,
+) -> impl IntoElement {
+    let icon_color = if !enabled {
+        theme::smoke()
+    } else if open {
+        theme::data()
+    } else {
+        theme::bone_dim()
+    };
+    div()
+        .id("rename-session")
+        .size(px(28.0))
+        .rounded(px(theme::RADIUS_SM))
+        .flex()
+        .items_center()
+        .justify_center()
+        .flex_shrink_0()
+        .bg(if open {
+            theme::panel_lift()
+        } else {
+            gpui::rgba(0x0000_0000)
+        })
+        .border_1()
+        .border_color(if open {
+            theme::edge_hard()
+        } else {
+            gpui::rgba(0x0000_0000)
+        })
+        .text_color(icon_color)
+        .when(enabled, |button| {
+            button
+                .tab_index(0)
+                .cursor_pointer()
+                .hover(|button| button.bg(theme::panel()).text_color(theme::bone()))
+                .active(|button| button.bg(theme::panel_lift()))
+                .on_click(cx.listener(|view, _, window, cx| {
+                    view.toggle_session_rename(window, cx)
+                }))
+        })
+        .child(
+            svg()
+                .path("icons/pencil.svg")
+                .size(px(14.0))
+                .text_color(icon_color),
+        )
 }
 
 fn sidebar_toggle_button(open: bool, cx: &mut Context<RootView>) -> impl IntoElement {
