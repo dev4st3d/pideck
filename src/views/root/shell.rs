@@ -940,9 +940,7 @@ fn session_rename_button(
                 .cursor_pointer()
                 .hover(|button| button.bg(theme::panel()).text_color(theme::bone()))
                 .active(|button| button.bg(theme::panel_lift()))
-                .on_click(cx.listener(|view, _, window, cx| {
-                    view.toggle_session_rename(window, cx)
-                }))
+                .on_click(cx.listener(|view, _, window, cx| view.toggle_session_rename(window, cx)))
         })
         .child(
             svg()

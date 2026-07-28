@@ -411,8 +411,8 @@ const PIDECK_DARK: Palette = Palette {
     panel: 0x1a1714ff,
     panel_lift: 0x221e1aff,
     panel_hover: 0x2a241fff,
-    user_message: 0x201a16ff,
-    user_message_edge: 0xc75a3838,
+    user_message: 0x2c241eff,
+    user_message_edge: 0xc75a3866,
     edge: 0xebe4d618,
     edge_hard: 0xebe4d62c,
     edge_soft: 0xebe4d612,
@@ -442,8 +442,8 @@ const CURSOR_DARK: Palette = Palette {
     panel: 0x121212ff,        // opaque panel; prevents content bleed-through
     panel_lift: 0x1b1b1bff,   // opaque active / selected surface
     panel_hover: 0x171717ff,  // opaque hover surface
-    user_message: 0x171a1dff, // subtle cool lift from agent work
-    user_message_edge: 0x5a718842,
+    user_message: 0x242c34ff, // cool lift — clear step above agent canvas
+    user_message_edge: 0x5a718866,
     edge: 0xe4e4e413,        // border
     edge_hard: 0xe4e4e426,   // border.focused
     edge_soft: 0xe4e4e413,   // border.variant
@@ -472,8 +472,8 @@ const MOSS_FOUNDRY: Palette = Palette {
     panel: 0x141c18ff,
     panel_lift: 0x1e2a24ff,
     panel_hover: 0x28362eff,
-    user_message: 0x18241eff,
-    user_message_edge: 0xd49a4a55,
+    user_message: 0x2a3830ff,
+    user_message_edge: 0xd49a4a66,
     edge: 0xd8ecda30,
     edge_hard: 0xd8ecda4a,
     edge_soft: 0xd8ecda1c,
@@ -501,8 +501,8 @@ const INK_HARBOR: Palette = Palette {
     panel: 0x121a24ff,
     panel_lift: 0x1c2734ff,
     panel_hover: 0x263242ff,
-    user_message: 0x14202cff,
-    user_message_edge: 0x3ecfb655,
+    user_message: 0x283848ff,
+    user_message_edge: 0x3ecfb666,
     edge: 0xd0e4f430,
     edge_hard: 0xd0e4f44a,
     edge_soft: 0xd0e4f41c,
@@ -530,8 +530,8 @@ const VOLT_WORKSHOP: Palette = Palette {
     panel: 0x17171aff,
     panel_lift: 0x222228ff,
     panel_hover: 0x2c2c34ff,
-    user_message: 0x1a1a20ff,
-    user_message_edge: 0xffc04055,
+    user_message: 0x2c2c36ff,
+    user_message_edge: 0xffc04066,
     edge: 0xe8e8f030,
     edge_hard: 0xe8e8f04a,
     edge_soft: 0xe8e8f01c,
@@ -559,8 +559,8 @@ const PLUM_ARCHIVE: Palette = Palette {
     panel: 0x1c1622ff,
     panel_lift: 0x28202eff,
     panel_hover: 0x342a3cff,
-    user_message: 0x221a28ff,
-    user_message_edge: 0xe8a87855,
+    user_message: 0x342a3cff,
+    user_message_edge: 0xe8a87866,
     edge: 0xf0e0f030,
     edge_hard: 0xf0e0f04a,
     edge_soft: 0xf0e0f01c,
@@ -588,7 +588,7 @@ const PARCHMENT_DESK: Palette = Palette {
     panel: 0xe8dfd0ff,
     panel_lift: 0xddd2c0ff,
     panel_hover: 0xd0c4b0ff,
-    user_message: 0xefe6d8ff,
+    user_message: 0xe4d9c8ff,
     user_message_edge: 0xb84a28aa,
     edge: 0x2a201830,
     edge_hard: 0x2a20184a,
@@ -617,7 +617,7 @@ const MIST_ORCHARD: Palette = Palette {
     panel: 0xdce8e0ff,
     panel_lift: 0xced8cfff,
     panel_hover: 0xbed0c0ff,
-    user_message: 0xe4eee6ff,
+    user_message: 0xd8e4dcff,
     user_message_edge: 0x1e7a3eaa,
     edge: 0x14201830,
     edge_hard: 0x1420184a,
@@ -646,7 +646,7 @@ const CORAL_LEDGER: Palette = Palette {
     panel: 0xecdfdaff,
     panel_lift: 0xe0d0caff,
     panel_hover: 0xd2c0b8ff,
-    user_message: 0xf4e8e4ff,
+    user_message: 0xead8d2ff,
     user_message_edge: 0xc83a3aaa,
     edge: 0x28181030,
     edge_hard: 0x2818104a,
@@ -675,7 +675,7 @@ const CHALK_BLUEPRINT: Palette = Palette {
     panel: 0xe0e6f0ff,
     panel_lift: 0xd0d8e6ff,
     panel_hover: 0xc0cadcff,
-    user_message: 0xe8edf6ff,
+    user_message: 0xdce4f0ff,
     user_message_edge: 0x1860c0aa,
     edge: 0x10182830,
     edge_hard: 0x1018284a,
@@ -704,7 +704,7 @@ const HONEY_COMB: Palette = Palette {
     panel: 0xeee4d4ff,
     panel_lift: 0xe2d6c2ff,
     panel_hover: 0xd4c6aeff,
-    user_message: 0xf4eadcff,
+    user_message: 0xeadec8ff,
     user_message_edge: 0xc07a10aa,
     edge: 0x20180830,
     edge_hard: 0x2018084a,
@@ -734,8 +734,8 @@ const SALT_FLAT: Palette = Palette {
     panel: 0x14171aff,
     panel_lift: 0x1e2226ff,
     panel_hover: 0x282e34ff,
-    user_message: 0x181c20ff,
-    user_message_edge: 0x3ad4e055,
+    user_message: 0x2a3238ff,
+    user_message_edge: 0x3ad4e066,
     edge: 0xf0f4f838,
     edge_hard: 0xf0f4f858,
     edge_soft: 0xf0f4f820,
@@ -764,8 +764,8 @@ const SAFFRON_LOOM: Palette = Palette {
     panel: 0x1c1812ff,
     panel_lift: 0x282218ff,
     panel_hover: 0x342e20ff,
-    user_message: 0x221c14ff,
-    user_message_edge: 0xf0b02055,
+    user_message: 0x342c1cff,
+    user_message_edge: 0xf0b02066,
     edge: 0xf8ecd038,
     edge_hard: 0xf8ecd058,
     edge_soft: 0xf8ecd020,
@@ -794,8 +794,8 @@ const JUNIPER_COIL: Palette = Palette {
     panel: 0x161a22ff,
     panel_lift: 0x202630ff,
     panel_hover: 0x2a3240ff,
-    user_message: 0x1a1e28ff,
-    user_message_edge: 0xb878e055,
+    user_message: 0x2c3444ff,
+    user_message_edge: 0xb878e066,
     edge: 0xe0e4f038,
     edge_hard: 0xe0e4f058,
     edge_soft: 0xe0e4f020,
@@ -824,7 +824,7 @@ const PORCELAIN_LAB: Palette = Palette {
     panel: 0xe4e8eeff,
     panel_lift: 0xd6dce6ff,
     panel_hover: 0xc6cedcff,
-    user_message: 0xeceff4ff,
+    user_message: 0xe0e4ecff,
     user_message_edge: 0xc02080aa,
     edge: 0x10141c34,
     edge_hard: 0x10141c52,
@@ -854,7 +854,7 @@ const CITRUS_GROVE: Palette = Palette {
     panel: 0xece6d4ff,
     panel_lift: 0xe0d8c2ff,
     panel_hover: 0xd2c8aeff,
-    user_message: 0xf4eedeff,
+    user_message: 0xe8e0c8ff,
     user_message_edge: 0x3a8c18aa,
     edge: 0x1c201034,
     edge_hard: 0x1c201052,
@@ -884,7 +884,7 @@ const LETTERPRESS: Palette = Palette {
     panel: 0xe4e4deff,
     panel_lift: 0xd6d6ceff,
     panel_hover: 0xc6c6bcff,
-    user_message: 0xeeeee8ff,
+    user_message: 0xe0e0d8ff,
     user_message_edge: 0xc01828aa,
     edge: 0x10101034,
     edge_hard: 0x10101052,
@@ -914,8 +914,8 @@ const SMOKE_LIBRARY: Palette = Palette {
     panel: 0x1c1a17ff,
     panel_lift: 0x26231fff,
     panel_hover: 0x302c27ff,
-    user_message: 0x201c18ff,
-    user_message_edge: 0xb8887044,
+    user_message: 0x322e28ff,
+    user_message_edge: 0xb8887066,
     edge: 0xe8e0d428,
     edge_hard: 0xe8e0d442,
     edge_soft: 0xe8e0d418,
@@ -944,8 +944,8 @@ const PEWTER_HALL: Palette = Palette {
     panel: 0x1a1c1fff,
     panel_lift: 0x24272bff,
     panel_hover: 0x2e3237ff,
-    user_message: 0x1e2125ff,
-    user_message_edge: 0x7a8ea044,
+    user_message: 0x303438ff,
+    user_message_edge: 0x7a8ea066,
     edge: 0xdce2e828,
     edge_hard: 0xdce2e842,
     edge_soft: 0xdce2e818,
@@ -974,8 +974,8 @@ const OLIVE_STUDY: Palette = Palette {
     panel: 0x1a1c16ff,
     panel_lift: 0x242720ff,
     panel_hover: 0x2e3228ff,
-    user_message: 0x1e221aff,
-    user_message_edge: 0xa8986844,
+    user_message: 0x303428ff,
+    user_message_edge: 0xa8986866,
     edge: 0xe0e4d428,
     edge_hard: 0xe0e4d442,
     edge_soft: 0xe0e4d418,
@@ -1004,8 +1004,8 @@ const LINEN_GALLERY: Palette = Palette {
     panel: 0xe8e4ddff,
     panel_lift: 0xddd8cfff,
     panel_hover: 0xd0cac0ff,
-    user_message: 0xf0ece6ff,
-    user_message_edge: 0x8a7a6844,
+    user_message: 0xe4ded4ff,
+    user_message_edge: 0x8a7a6888,
     edge: 0x2a262230,
     edge_hard: 0x2a262248,
     edge_soft: 0x2a26221c,
@@ -1034,8 +1034,8 @@ const RICE_PAPER: Palette = Palette {
     panel: 0xe6e4deff,
     panel_lift: 0xdad8d0ff,
     panel_hover: 0xcccac0ff,
-    user_message: 0xeeece8ff,
-    user_message_edge: 0x3a4a7044,
+    user_message: 0xe2e0d8ff,
+    user_message_edge: 0x3a4a7088,
     edge: 0x1c1c2030,
     edge_hard: 0x1c1c2048,
     edge_soft: 0x1c1c201c,
@@ -1064,8 +1064,8 @@ const BONE_CHINA: Palette = Palette {
     panel: 0xebe6e0ff,
     panel_lift: 0xe0d9d1ff,
     panel_hover: 0xd4ccc2ff,
-    user_message: 0xf2ede8ff,
-    user_message_edge: 0xa0806044,
+    user_message: 0xe6e0d8ff,
+    user_message_edge: 0xa0806088,
     edge: 0x28241e30,
     edge_hard: 0x28241e48,
     edge_soft: 0x28241e1c,
@@ -1295,7 +1295,7 @@ mod tests {
     fn pideck_dark_preserves_the_original_palette() {
         assert_eq!(PIDECK_DARK.canvas, 0x0b0a09ff);
         assert_eq!(PIDECK_DARK.floor, 0x12100eff);
-        assert_eq!(PIDECK_DARK.user_message, 0x201a16ff);
+        assert_eq!(PIDECK_DARK.user_message, 0x2c241eff);
         assert_eq!(PIDECK_DARK.bone, 0xefe7d8ff);
         assert_eq!(PIDECK_DARK.signal, 0xc75a38ff);
     }
@@ -1307,7 +1307,7 @@ mod tests {
         assert_eq!(CURSOR_DARK.panel, 0x121212ff);
         assert_eq!(CURSOR_DARK.panel_lift, 0x1b1b1bff);
         assert_eq!(CURSOR_DARK.panel_hover, 0x171717ff);
-        assert_eq!(CURSOR_DARK.user_message, 0x171a1dff);
+        assert_eq!(CURSOR_DARK.user_message, 0x242c34ff);
         assert_eq!(CURSOR_DARK.edge, 0xe4e4e413);
         assert_eq!(CURSOR_DARK.bone, 0xe4e4e4eb);
         assert_eq!(CURSOR_DARK.signal, 0x5a7188ff);
@@ -1363,6 +1363,48 @@ mod tests {
                     assert!(
                         lift_l <= panel_l,
                         "{theme:?} light panel_lift is not at least as dark as panel"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn user_message_separates_from_floor_and_canvas() {
+        // User prompts must read as a distinct band from the turn floor and the
+        // recessed agent reply (canvas): lighter on dark themes, darker on light.
+        for theme in ThemeId::ALL {
+            let palette = theme.palette();
+            let user_l = relative_luminance(palette.user_message);
+            let floor_l = relative_luminance(palette.floor);
+            let canvas_l = relative_luminance(palette.canvas);
+            match theme.mode() {
+                ThemeMode::Dark => {
+                    assert!(
+                        user_l > floor_l,
+                        "{theme:?} dark user_message is not lighter than floor"
+                    );
+                    assert!(
+                        user_l > canvas_l,
+                        "{theme:?} dark user_message is not lighter than canvas"
+                    );
+                    assert!(
+                        (user_l - floor_l) >= 0.008,
+                        "{theme:?} dark user/floor contrast {user_l:.4}/{floor_l:.4} is too subtle"
+                    );
+                }
+                ThemeMode::Light => {
+                    assert!(
+                        user_l < floor_l,
+                        "{theme:?} light user_message is not darker than floor"
+                    );
+                    assert!(
+                        user_l < canvas_l,
+                        "{theme:?} light user_message is not darker than canvas"
+                    );
+                    assert!(
+                        (floor_l - user_l) >= 0.02,
+                        "{theme:?} light user/floor contrast {user_l:.4}/{floor_l:.4} is too subtle"
                     );
                 }
             }

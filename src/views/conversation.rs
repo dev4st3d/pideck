@@ -905,6 +905,13 @@ fn optimistic_turn(
     for image in &input.images {
         body.push(compact_label(format!("Image · {}", image.mime_type)));
     }
+    let meta_rows = vec![
+        ("Turn".to_owned(), format!("{index:02}")),
+        (
+            "Status".to_owned(),
+            optimistic_status(input.kind).to_owned(),
+        ),
+    ];
     div()
         .id(SharedString::from(format!(
             "optimistic-turn-{}",
@@ -916,8 +923,8 @@ fn optimistic_turn(
         .border_1()
         .border_color(theme::user_message_edge())
         .child(user_prompt_block(
-            index,
-            Some(optimistic_status(input.kind).to_owned()),
+            SharedString::from(format!("optimistic-meta-{}", input.request.as_str())),
+            meta_rows,
             true,
             body,
         ))
@@ -941,18 +948,22 @@ fn user_prompt(
             _ => None,
         })
         .collect::<Vec<_>>();
+    let meta_rows = vec![
+        ("Turn".to_owned(), format!("{index:02}")),
+        ("Timestamp".to_owned(), format_timestamp(message.timestamp)),
+    ];
     user_prompt_block(
-        index,
-        Some(format_timestamp(message.timestamp)),
+        SharedString::from(format!("user-meta-{}", message.key.0)),
+        meta_rows,
         false,
         body,
     )
 }
 
-/// Compact editorial prompt: warm wash, tight type, one quiet mark of identity.
+/// Compact editorial prompt: elevated wash, tight type, one quiet mark of identity.
 fn user_prompt_block(
-    index: usize,
-    detail: Option<String>,
+    meta_id: SharedString,
+    meta_rows: Vec<(String, String)>,
     pending: bool,
     body: Vec<AnyElement>,
 ) -> impl IntoElement {
@@ -961,13 +972,17 @@ fn user_prompt_block(
     } else {
         theme::signal()
     };
+    let pending_label = meta_rows
+        .iter()
+        .find(|(key, _)| key == "Status")
+        .map(|(_, value)| value.clone());
 
     div()
         .relative()
         .w_full()
         .bg(theme::user_message())
         .when(!pending, |block| {
-            block.border_b_1().border_color(theme::edge_soft())
+            block.border_b_1().border_color(theme::user_message_edge())
         })
         // Inset warm hairline — sits on the content rhythm, not the outer edge.
         .child(
@@ -988,7 +1003,13 @@ fn user_prompt_block(
                 .flex()
                 .flex_col()
                 .gap(px(6.0))
-                .child(user_prompt_header(index, detail, pending, mark))
+                .child(user_prompt_header(
+                    meta_id,
+                    meta_rows,
+                    pending_label,
+                    pending,
+                    mark,
+                ))
                 .when(!body.is_empty(), |block| {
                     block.child(div().w_full().flex().flex_col().gap(px(5.0)).children(body))
                 }),
@@ -996,8 +1017,9 @@ fn user_prompt_block(
 }
 
 fn user_prompt_header(
-    index: usize,
-    detail: Option<String>,
+    meta_id: SharedString,
+    meta_rows: Vec<(String, String)>,
+    pending_label: Option<String>,
     pending: bool,
     mark: gpui::Rgba,
 ) -> impl IntoElement {
@@ -1018,7 +1040,7 @@ fn user_prompt_header(
                     // Short gem — identity without a full rail.
                     div()
                         .w(px(2.0))
-                        .h(px(10.0))
+                        .h(px(12.0))
                         .rounded_full()
                         .bg(mark)
                         .flex_shrink_0(),
@@ -1031,48 +1053,30 @@ fn user_prompt_header(
                         .text_color(if pending {
                             theme::bone_dim()
                         } else {
-                            theme::ash()
+                            theme::bone()
                         })
                         .child("You"),
                 ),
         )
-        .child(user_prompt_meta(index, detail, pending))
-}
-
-fn user_prompt_meta(index: usize, detail: Option<String>, pending: bool) -> impl IntoElement {
-    div()
-        .max_w(px(300.0))
-        .flex_shrink_0()
-        .flex()
-        .flex_row()
-        .items_baseline()
-        .justify_end()
-        .gap(px(6.0))
-        .font_family(theme::mono())
-        .text_size(theme::text_size(theme::T_TINY))
-        .text_color(theme::smoke())
         .child(
             div()
-                .font_weight(FontWeight::MEDIUM)
-                .text_color(theme::ash())
-                .child(format!("{index:02}")),
+                .flex_shrink_0()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(8.0))
+                .when_some(pending_label, |row, label| {
+                    row.child(
+                        div()
+                            .font_family(theme::mono())
+                            .text_size(theme::text_size(theme::T_TINY))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(theme::data())
+                            .child(label),
+                    )
+                })
+                .child(message_meta_info(meta_id, meta_rows)),
         )
-        .when_some(detail, |row, detail| {
-            row.child(div().text_color(theme::edge_hard()).child("·"))
-                .child(
-                    div()
-                        .min_w_0()
-                        .overflow_hidden()
-                        .text_ellipsis()
-                        .whitespace_nowrap()
-                        .text_color(if pending {
-                            theme::data()
-                        } else {
-                            theme::smoke()
-                        })
-                        .child(detail),
-                )
-        })
 }
 
 /// One spine step inside a turn's activity band.
@@ -2246,7 +2250,6 @@ fn assistant_reply(
     message: &RuntimeMessage,
     texts: &HashMap<String, Entity<TranscriptText>>,
 ) -> impl IntoElement {
-    let metadata = assistant_metadata(message);
     div()
         .id(SharedString::from(format!("message-{}", message.key.0)))
         .w_full()
@@ -2263,27 +2266,24 @@ fn assistant_reply(
             div()
                 .flex()
                 .flex_row()
-                .items_baseline()
-                .justify_between()
-                .gap(px(12.0))
+                .items_center()
+                .gap(px(8.0))
+                .child(
+                    // Quiet cool gem — pairs with the warm user mark.
+                    div()
+                        .w(px(2.0))
+                        .h(px(12.0))
+                        .rounded_full()
+                        .bg(theme::working())
+                        .flex_shrink_0(),
+                )
                 .child(
                     div()
                         .font_family(theme::sans())
                         .text_size(theme::text_size(theme::T_UI_SM))
                         .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(theme::ash())
+                        .text_color(theme::bone())
                         .child("Pi"),
-                )
-                .child(
-                    div()
-                        .max_w(px(420.0))
-                        .overflow_hidden()
-                        .text_ellipsis()
-                        .whitespace_nowrap()
-                        .font_family(theme::mono())
-                        .text_size(theme::text_size(theme::T_TINY))
-                        .text_color(theme::smoke())
-                        .child(metadata),
                 ),
         )
         .children(message.content.iter().filter_map(|block| match block {
@@ -2497,28 +2497,81 @@ fn fragment_key(message: &RuntimeMessage, block: &MessageBlock) -> String {
     format!("{}:{}", message.key.0, block.key().0)
 }
 
-fn assistant_metadata(message: &RuntimeMessage) -> String {
-    let time = format_timestamp(message.timestamp);
-    let Some(metadata) = message.assistant.as_ref() else {
-        return time;
-    };
-    let model = metadata
-        .response_model
-        .as_deref()
-        .filter(|model| !model.is_empty())
-        .unwrap_or(&metadata.model);
-    let usage = &metadata.usage;
-    let state = if message.terminal {
-        format!(
-            "{} in · {} out · {}",
-            format_count(usage.input),
-            format_count(usage.output),
-            format_cost(usage.total_cost)
+/// Compact (i) control that parks user turn/time meta in a hover popup.
+fn message_meta_info(id: SharedString, rows: Vec<(String, String)>) -> impl IntoElement {
+    let tooltip_rows = rows.clone();
+    div()
+        .id(id)
+        .size(px(20.0))
+        .flex_shrink_0()
+        .rounded_full()
+        .flex()
+        .items_center()
+        .justify_center()
+        .cursor(CursorStyle::PointingHand)
+        .hover(|icon| icon.bg(theme::panel_hover()))
+        .tooltip(move |_, cx| {
+            cx.new(|_| MessageMetaTooltip {
+                rows: tooltip_rows.clone(),
+            })
+            .into()
+        })
+        // GPUI SVGs resolve `currentColor` from the svg element's own text_color,
+        // not from a parent container — omit it and the glyph is invisible.
+        .child(
+            svg()
+                .path("icons/info.svg")
+                .size(px(15.0))
+                .text_color(theme::ash()),
         )
-    } else {
-        "streaming".to_owned()
-    };
-    format!("{}/{} · {state} · {time}", metadata.provider, model)
+}
+
+struct MessageMetaTooltip {
+    rows: Vec<(String, String)>,
+}
+
+impl Render for MessageMetaTooltip {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .min_w(px(200.0))
+            .max_w(px(320.0))
+            .p(px(10.0))
+            .rounded(px(theme::RADIUS))
+            .bg(theme::panel_lift())
+            .border_1()
+            .border_color(theme::edge_hard())
+            .flex()
+            .flex_col()
+            .gap(px(6.0))
+            .children(self.rows.iter().map(|(label, value)| {
+                div()
+                    .w_full()
+                    .flex()
+                    .flex_row()
+                    .items_start()
+                    .justify_between()
+                    .gap(px(14.0))
+                    .child(
+                        div()
+                            .flex_shrink_0()
+                            .font_family(theme::sans())
+                            .text_size(theme::text_size(theme::T_TINY))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(theme::ash())
+                            .child(label.clone()),
+                    )
+                    .child(
+                        div()
+                            .min_w_0()
+                            .text_right()
+                            .font_family(theme::mono())
+                            .text_size(theme::text_size(theme::T_TINY))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(theme::bone())
+                            .child(value.clone()),
+                    )
+            }))
+    }
 }
 
 fn stop_label(message: &RuntimeMessage) -> Option<String> {

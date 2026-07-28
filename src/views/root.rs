@@ -1246,12 +1246,13 @@ impl RootView {
 
     fn sync_composer_completions(&mut self, cx: &mut Context<Self>) {
         self.sync_slash_completion(cx);
-        let composer = self.composer.read(cx);
-        let draft = composer.draft();
-        let slash_owns = !composer.has_images()
-            && self.slash_intercepts_enter
-            && self.dismissed_slash_draft.as_deref() != Some(draft);
-        drop(composer);
+        let slash_owns = {
+            let composer = self.composer.read(cx);
+            let draft = composer.draft();
+            !composer.has_images()
+                && self.slash_intercepts_enter
+                && self.dismissed_slash_draft.as_deref() != Some(draft)
+        };
         if slash_owns {
             self.clear_file_completion();
             self.apply_completion_keyboard_routing(cx);
