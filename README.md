@@ -66,7 +66,7 @@ The launch folder is added to the persistent project sidebar. The app reopens th
 - a persisted session directory resolved with Pi precedence (`PI_CODING_AGENT_SESSION_DIR`, configured `sessionDir`, then the encoded default under the agent directory);
 - installed extensions, skills, and prompt templates discovered for the command catalog under rejected project trust;
 - TUI chrome extensions replaced by native UI (`activity-rail`, `box-editor`, `quiet-topbar`, `compact-resources`, `pi-bar`) omitted from the GUI Pi process only — they stay installed for the TUI and are never deleted;
-- themes and context files disabled because the native shell does not consume them;
+- themes disabled because the native shell owns appearance; context files (`AGENTS.md` / `CLAUDE.md`) load the same way as stock Pi;
 - built-in Pi tools enabled so generic tool cards can observe their execution;
 - offline mode disabled so Pi can resolve existing Pi-managed credentials and models.
 

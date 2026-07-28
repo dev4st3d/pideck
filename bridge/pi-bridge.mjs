@@ -798,6 +798,8 @@ async function buildResourceSnapshot(signal, operation = "inventory") {
   }
 
   try {
+    // Paths only — never surface file contents. Pi loads AGENTS.md / CLAUDE.md into the
+    // agent session independently of project-extension trust (same as stock Pi).
     for (const context of sdk.loadProjectContextFiles({ cwd, agentDir })) {
       const global = pathContains(agentDir, context.path);
       const sourceInfo = {
@@ -809,13 +811,9 @@ async function buildResourceSnapshot(signal, operation = "inventory") {
       items.push(
         itemFromSource("context", basename(context.path), sourceInfo, {
           path: context.path,
-          state: "disabled",
-          trust: global ? "trusted" : "rejected",
-          diagnostics: [
-            global
-              ? "Context is inventoried but disabled because the native shell does not consume it."
-              : "Project trust is rejected; context was inventoried but not loaded.",
-          ],
+          state: "loaded",
+          trust: global ? "trusted" : "not_applicable",
+          diagnostics: [],
         }),
       );
     }

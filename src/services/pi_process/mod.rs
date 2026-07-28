@@ -100,9 +100,11 @@ impl ResourcePolicy {
             skills: Vec::new(),
             discover_prompt_templates: true,
             prompt_templates: Vec::new(),
+            // Themes stay off: the native shell owns appearance.
             discover_themes: false,
             themes: Vec::new(),
-            discover_context_files: false,
+            // Context files (AGENTS.md / CLAUDE.md) load the same way as stock Pi.
+            discover_context_files: true,
         }
     }
 }
@@ -1012,7 +1014,7 @@ mod tests {
     }
 
     #[test]
-    fn command_source_profile_discovers_commands_but_keeps_unrelated_resources_disabled() {
+    fn command_source_profile_discovers_commands_and_context_but_keeps_themes_disabled() {
         let installation = PiInstallation {
             executable: PathBuf::from("pi"),
             launcher_arguments: Vec::new(),
@@ -1040,7 +1042,7 @@ mod tests {
         assert!(!arguments.contains(&"--no-skills".to_owned()));
         assert!(!arguments.contains(&"--no-prompt-templates".to_owned()));
         assert!(arguments.contains(&"--no-themes".to_owned()));
-        assert!(arguments.contains(&"--no-context-files".to_owned()));
+        assert!(!arguments.contains(&"--no-context-files".to_owned()));
         assert!(arguments.contains(&"--no-approve".to_owned()));
     }
 
