@@ -117,8 +117,9 @@ impl RpcRuntimeService {
         working_directory: impl Into<std::path::PathBuf>,
         orchestration_endpoint: String,
     ) -> Self {
+        let working_directory = working_directory.into();
         let mut config = PiLaunchConfig::new(
-            working_directory,
+            working_directory.clone(),
             ProjectTrust::Reject,
             SessionLaunch::Ephemeral,
             ResourcePolicy::command_sources(),
@@ -126,6 +127,7 @@ impl RpcRuntimeService {
         config.disable_tools = false;
         config.offline = false;
         attach_orchestration_adapter(&mut config, orchestration_endpoint);
+        apply_native_shell_extension_policy(&mut config, &working_directory);
         Self::new(config)
     }
 
@@ -144,8 +146,9 @@ impl RpcRuntimeService {
         session_directory: impl Into<std::path::PathBuf>,
         orchestration_endpoint: String,
     ) -> Self {
+        let working_directory = working_directory.into();
         let mut config = PiLaunchConfig::new(
-            working_directory,
+            working_directory.clone(),
             ProjectTrust::Reject,
             SessionLaunch::NewInDirectory(session_directory.into()),
             ResourcePolicy::command_sources(),
@@ -153,6 +156,7 @@ impl RpcRuntimeService {
         config.disable_tools = false;
         config.offline = false;
         attach_orchestration_adapter(&mut config, orchestration_endpoint);
+        apply_native_shell_extension_policy(&mut config, &working_directory);
         Self::new(config)
     }
 }
@@ -166,6 +170,15 @@ fn attach_orchestration_adapter(config: &mut PiLaunchConfig, orchestration_endpo
         crate::services::sdk_bridge::ORCHESTRATION_PIPE_ENV.into(),
         orchestration_endpoint.into(),
     ));
+}
+
+/// Omit TUI-chrome extensions that native GPUI replaces, without changing installed Pi files.
+fn apply_native_shell_extension_policy(
+    config: &mut PiLaunchConfig,
+    working_directory: &std::path::Path,
+) {
+    let agent_dir = super::pi_process::resolve_agent_dir(working_directory);
+    super::pi_process::apply_gui_extension_policy(&mut config.resources, &agent_dir);
 }
 
 impl RuntimeService for RpcRuntimeService {

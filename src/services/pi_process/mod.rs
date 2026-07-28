@@ -6,6 +6,7 @@
 
 mod diagnostics;
 mod discovery;
+mod gui_extensions;
 mod platform;
 
 use std::ffi::{OsStr, OsString};
@@ -22,6 +23,7 @@ pub use discovery::{
     DiscoveryError, ExecutableSource, PiCapabilities, PiInstallation, SUPPORTED_PI_VERSION,
     discover_and_probe,
 };
+pub use gui_extensions::{apply_gui_extension_policy, resolve_agent_dir};
 pub use platform::ExitStatus;
 
 use diagnostics::{StderrRing, drain_stderr};

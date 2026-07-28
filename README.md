@@ -21,7 +21,7 @@ The visible shell now shows only live or explicitly Loading, Awaiting, Unknown, 
 - complete steering/follow-up queue visibility and delivery modes, scoped abort controls, retry countdown/attempt/final-error state, manual compaction with optional focus instructions, and auto-compaction/auto-retry controls;
 - real workspace-filtered v1-v3 JSONL thread catalogs for every saved project, with loading, empty, inaccessible, corrupt, refreshing/stale, and active-switch states;
 - atomic new/switch/rename/export operations that retain the old transcript read-only until Pi confirms a replacement and never replay an uncertain prompt.
-- a searchable, foldable, filterable session tree with the authoritative active leaf, keyboard navigation, entry details, stock fork-before-message and clone-path actions, and explicit same-file/new-file confirmations;
+- a compact History tools panel focused on the active tip, with stock fork-before-tip and clone-path actions, labels, and explicit same-file/new-file confirmations;
 - a negotiated Pi SDK 0.82.0 stdio JSONL bridge for same-file navigation, optional branch summaries, labels, active-path JSONL export, and safe import into a new session file. Unsupported bridge actions stay hidden.
 - cached-first provider and model catalogs with background refresh, stale/per-provider failures, a searchable model switcher and thinking chips attached to the prompt box, and Providers/Models/Thinking/Usage settings;
 - provider-owned API-key, browser, device-code, text, select, progress, cancel, and logout flows. Secret input is masked and redacted from Rust debug output; catalogs expose no credential values, resolved environment values, headers, base URLs, or raw provider errors;
@@ -65,6 +65,7 @@ The launch folder is added to the persistent project sidebar. The app reopens th
 - `ProjectTrust::Reject` (`--no-approve`);
 - a persisted session directory resolved with Pi precedence (`PI_CODING_AGENT_SESSION_DIR`, configured `sessionDir`, then the encoded default under the agent directory);
 - installed extensions, skills, and prompt templates discovered for the command catalog under rejected project trust;
+- TUI chrome extensions replaced by native UI (`activity-rail`, `box-editor`, `quiet-topbar`, `compact-resources`, `pi-bar`) omitted from the GUI Pi process only — they stay installed for the TUI and are never deleted;
 - themes and context files disabled because the native shell does not consume them;
 - built-in Pi tools enabled so generic tool cards can observe their execution;
 - offline mode disabled so Pi can resolve existing Pi-managed credentials and models.

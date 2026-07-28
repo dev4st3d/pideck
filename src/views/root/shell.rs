@@ -1880,7 +1880,6 @@ pub(super) struct HistoryPanelParams<'a> {
     pub(super) bridge: &'a BridgeProjection,
     pub(super) browser: &'a HistoryBrowser,
     pub(super) focus: &'a FocusHandle,
-    pub(super) search: &'a Entity<Composer>,
     pub(super) label: &'a Entity<Composer>,
     pub(super) import_path: &'a Entity<Composer>,
     pub(super) confirmation: Option<&'a HistoryConfirmation>,
@@ -1896,13 +1895,11 @@ pub(super) fn history_panel(
         bridge,
         browser,
         focus,
-        search,
         label,
         import_path,
         confirmation,
         summarize,
     } = params;
-    let rows = browser.rows(&projection.tree, projection.leaf_id.as_ref());
     let details = browser.details(&projection.tree, projection.leaf_id.as_ref());
     let selected = browser.selected().cloned();
     let selected_is_forkable = selected.as_ref().is_some_and(|selected| {
@@ -1922,7 +1919,14 @@ pub(super) fn history_panel(
     let export_available = capabilities.is_some_and(|capabilities| capabilities.jsonl_export);
     let import_available = capabilities.is_some_and(|capabilities| capabilities.jsonl_import);
     let summary_available = capabilities.is_some_and(|capabilities| capabilities.branch_summary);
-    let filter = browser.filter();
+    let tip_status = match projection.status {
+        crate::state::runtime::FacetStatus::Loading => Some("Loading session tip…"),
+        crate::state::runtime::FacetStatus::Failed(_) => Some("Session tip unavailable."),
+        crate::state::runtime::FacetStatus::Ready if details.is_none() => {
+            Some("No active session tip.")
+        }
+        crate::state::runtime::FacetStatus::Ready => None,
+    };
 
     div()
         .id("history-tree")
@@ -1942,380 +1946,291 @@ pub(super) fn history_panel(
             div()
                 .px(px(12.0))
                 .pt(px(12.0))
-                .pb(px(8.0))
-                .flex()
-                .items_baseline()
-                .justify_between()
-                .child(controls::section_label("History"))
-                .child(
-                    div()
-                        .font_family(theme::mono())
-                        .text_size(theme::text_size(theme::T_TINY))
-                        .text_color(theme::smoke())
-                        .child(format!("{}", rows.len())),
-                ),
-        )
-        .child(div().px(px(10.0)).pb(px(6.0)).child(search.clone()))
-        .child(
-            div()
-                .px(px(10.0))
-                .pb(px(8.0))
-                .flex()
-                .flex_row()
-                .flex_wrap()
-                .gap(px(4.0))
-                .child(controls::chip_button(
-                    "history-all",
-                    "All",
-                    filter == HistoryFilter::All,
-                    true,
-                    Box::new(cx.listener(|view, _, _, cx| {
-                        view.set_history_filter(HistoryFilter::All, cx)
-                    })),
-                ))
-                .child(controls::chip_button(
-                    "history-messages",
-                    "Messages",
-                    filter == HistoryFilter::Messages,
-                    true,
-                    Box::new(cx.listener(|view, _, _, cx| {
-                        view.set_history_filter(HistoryFilter::Messages, cx)
-                    })),
-                ))
-                .child(controls::chip_button(
-                    "history-summaries",
-                    "Summaries",
-                    filter == HistoryFilter::Summaries,
-                    true,
-                    Box::new(cx.listener(|view, _, _, cx| {
-                        view.set_history_filter(HistoryFilter::Summaries, cx)
-                    })),
-                ))
-                .child(controls::chip_button(
-                    "history-labels",
-                    "Labels",
-                    filter == HistoryFilter::Labels,
-                    true,
-                    Box::new(cx.listener(|view, _, _, cx| {
-                        view.set_history_filter(HistoryFilter::Labels, cx)
-                    })),
-                )),
+                .pb(px(10.0))
+                .border_b_1()
+                .border_color(theme::edge_soft())
+                .child(controls::section_label("History")),
         )
         .child(
             div()
-                .id("history-scroll")
+                .id("history-tools-scroll")
                 .flex_1()
                 .min_h_0()
                 .overflow_y_scroll()
                 .scrollbar_width(px(theme::SCROLLBAR))
-                .when(rows.is_empty(), |list| {
-                    list.child(controls::empty_list_note(match projection.status {
-                        crate::state::runtime::FacetStatus::Loading => "Loading history…",
-                        crate::state::runtime::FacetStatus::Failed(_) => "History unavailable.",
-                        crate::state::runtime::FacetStatus::Ready => "No matching entries.",
-                    }))
+                .px(px(10.0))
+                .py(px(10.0))
+                .flex()
+                .flex_col()
+                .gap(px(12.0))
+                .when_some(tip_status, |panel, status| {
+                    panel.child(controls::panel_note(status, controls::ControlTone::Normal))
                 })
-                .children(rows.into_iter().map(|row| {
-                    let entry = row.id.clone();
-                    let selected = browser.selected() == Some(&row.id);
-                    let marker = if row.active_leaf {
-                        "●"
-                    } else if row.active_path {
-                        "│"
-                    } else if row.has_children && row.folded {
-                        "▸"
-                    } else if row.has_children {
-                        "▾"
-                    } else {
-                        "·"
-                    };
-                    let label_copy = row
+                .when_some(details, |panel, details| {
+                    let body = details.body.chars().take(120).collect::<String>();
+                    let meta = format!(
+                        "{} · {} child{}",
+                        details.kind,
+                        details.child_count,
+                        if details.child_count == 1 { "" } else { "ren" },
+                    );
+                    let label_suffix = details
                         .label
                         .as_deref()
+                        .filter(|label| !label.is_empty())
                         .map(|label| format!(" · {label}"))
                         .unwrap_or_default();
-                    controls::interactive_list_row(
-                        gpui::SharedString::from(format!("history-{}", row.id)),
-                        true,
-                        Box::new(cx.listener(move |view, _, window, cx| {
-                            view.select_history(entry.clone(), window, cx)
-                        })),
+                    panel.child(
                         div()
-                            .w_full()
-                            .pl(px(6.0 + row.depth as f32 * 10.0))
-                            .py(px(5.0))
+                            .px(px(10.0))
+                            .py(px(10.0))
+                            .rounded(px(theme::RADIUS_SM))
+                            .bg(theme::panel())
+                            .border_1()
+                            .border_color(theme::edge_soft())
                             .flex()
-                            .gap(px(6.0))
-                            .when(selected, |row| row.bg(theme::panel()))
+                            .flex_col()
+                            .gap(px(4.0))
                             .child(
                                 div()
-                                    .w(px(10.0))
-                                    .font_family(theme::mono())
+                                    .font_family(theme::sans())
                                     .text_size(theme::text_size(theme::T_TINY))
-                                    .text_color(if row.active_path {
-                                        theme::signal_hot()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(theme::ash())
+                                    .child(if details.active_leaf {
+                                        "Active tip"
                                     } else {
-                                        theme::smoke()
-                                    })
-                                    .child(marker),
+                                        "Selected entry"
+                                    }),
                             )
                             .child(
                                 div()
-                                    .min_w_0()
-                                    .flex_1()
-                                    .child(
-                                        div()
-                                            .text_size(theme::text_size(theme::T_TINY))
-                                            .font_weight(FontWeight::BOLD)
-                                            .text_color(if row.contextual {
-                                                theme::smoke()
-                                            } else {
-                                                theme::bone()
-                                            })
-                                            .child(format!("{}{}", row.title, label_copy)),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_size(theme::text_size(theme::T_TINY))
-                                            .text_color(theme::bone_dim())
-                                            .overflow_hidden()
-                                            .text_ellipsis()
-                                            .whitespace_nowrap()
-                                            .child(row.detail),
-                                    ),
+                                    .font_family(theme::sans())
+                                    .text_size(theme::text_size(theme::T_UI_SM))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(theme::bone())
+                                    .child(format!("{}{}", details.title, label_suffix)),
+                            )
+                            .child(
+                                div()
+                                    .font_family(theme::mono())
+                                    .text_size(theme::text_size(theme::T_TINY))
+                                    .text_color(theme::smoke())
+                                    .child(meta),
+                            )
+                            .when(!body.is_empty(), |block| {
+                                block.child(
+                                    div()
+                                        .mt(px(2.0))
+                                        .text_size(theme::text_size(theme::T_TINY))
+                                        .line_height(gpui::relative(1.4))
+                                        .text_color(theme::bone_dim())
+                                        .overflow_hidden()
+                                        .child(body),
+                                )
+                            })
+                            .child(
+                                div()
+                                    .mt(px(2.0))
+                                    .font_family(theme::mono())
+                                    .text_size(theme::text_size(theme::T_TINY))
+                                    .text_color(theme::smoke())
+                                    .child("↑↓ step · Enter navigate"),
                             ),
                     )
-                })),
-        )
-        .when_some(details, |panel, details| {
-            let body = details.body.chars().take(160).collect::<String>();
-            panel.child(
-                div()
-                    .px(px(12.0))
-                    .py(px(10.0))
-                    .border_t_1()
-                    .border_color(theme::edge_soft())
-                    .flex()
-                    .flex_col()
-                    .gap(px(4.0))
-                    .child(
-                        div()
-                            .font_family(theme::mono())
-                            .text_size(theme::text_size(theme::T_TINY))
-                            .text_color(theme::data())
-                            .child(format!(
-                                "{} · {} child{} · {}",
-                                details.kind,
-                                details.child_count,
-                                if details.child_count == 1 { "" } else { "ren" },
-                                details.timestamp
-                            )),
-                    )
-                    .when(!body.is_empty(), |block| {
-                        block.child(
-                            div()
-                                .text_size(theme::text_size(theme::T_TINY))
-                                .line_height(gpui::relative(1.4))
-                                .text_color(theme::bone_dim())
-                                .child(body),
-                        )
-                    }),
-            )
-        })
-        .child(
-            div()
-                .px(px(10.0))
-                .py(px(8.0))
-                .border_t_1()
-                .border_color(theme::edge_soft())
-                .flex()
-                .flex_col()
-                .gap(px(6.0))
+                })
                 .child(
                     div()
                         .flex()
-                        .flex_row()
-                        .flex_wrap()
-                        .gap(px(4.0))
-                        .child(controls::quiet_button(
-                            "history-fork",
-                            "Fork",
-                            ready && selected_is_forkable,
-                            Box::new(cx.listener(|view, _, _, cx| view.request_fork(cx))),
-                        ))
-                        .child(controls::quiet_button(
-                            "history-clone",
-                            "Clone",
-                            ready && projection.leaf_id.is_some(),
-                            Box::new(cx.listener(|view, _, _, cx| view.request_clone(cx))),
-                        ))
-                        .when(navigation_available, |actions| {
-                            actions.child(controls::quiet_button(
-                                "history-navigate",
-                                "Navigate",
-                                ready
-                                    && selected.is_some()
-                                    && selected.as_ref() != projection.leaf_id.as_ref(),
-                                Box::new(cx.listener(|view, _, _, cx| view.request_navigation(cx))),
-                            ))
-                        })
-                        .when(export_available, |actions| {
-                            actions.child(controls::quiet_button(
-                                "history-export-jsonl",
-                                "Export",
-                                ready,
-                                Box::new(cx.listener(|view, _, _, cx| view.export_jsonl(cx))),
-                            ))
-                        })
-                        .when(bridge.pending.is_some(), |actions| {
-                            actions.child(controls::quiet_button(
-                                "history-cancel-bridge",
-                                "Cancel",
-                                true,
-                                Box::new(cx.listener(|view, _, _, cx| view.cancel_bridge(cx))),
-                            ))
-                        }),
-                )
-                .when(navigation_available && summary_available, |block| {
-                    block.child(controls::chip_button(
-                        "history-summary",
-                        "Branch summary",
-                        summarize,
-                        ready,
-                        Box::new(cx.listener(|view, _, _, cx| view.toggle_navigation_summary(cx))),
-                    ))
-                }),
-        )
-        .when(labels_available && selected.is_some(), |panel| {
-            panel.child(
-                div()
-                    .px(px(10.0))
-                    .pb(px(8.0))
-                    .flex()
-                    .flex_col()
-                    .gap(px(4.0))
-                    .child(controls::section_label("Label"))
-                    .child(
-                        div()
-                            .flex()
-                            .flex_row()
-                            .items_start()
-                            .gap(px(6.0))
-                            .child(div().flex_1().min_w_0().child(label.clone()))
-                            .child(controls::quiet_button(
-                                "history-clear-label",
-                                "Clear",
-                                ready,
-                                Box::new(
-                                    cx.listener(|view, _, _, cx| view.clear_selected_label(cx)),
-                                ),
-                            )),
-                    ),
-            )
-        })
-        .when(import_available, |panel| {
-            panel.child(
-                div()
-                    .px(px(10.0))
-                    .pb(px(8.0))
-                    .flex()
-                    .flex_col()
-                    .gap(px(4.0))
-                    .child(controls::section_label("Import JSONL"))
-                    .child(import_path.clone()),
-            )
-        })
-        .when_some(confirmation.cloned(), |panel, confirmation| {
-            let (title, copy) = match confirmation {
-                HistoryConfirmation::Navigate(_) => (
-                    "Navigate here?",
-                    "Same file keeps every branch. Only the active leaf changes.",
-                ),
-                HistoryConfirmation::Fork(_) => (
-                    "Fork before message?",
-                    "Creates a new session file. Message text returns to the composer.",
-                ),
-                HistoryConfirmation::Clone => (
-                    "Clone current path?",
-                    "New file gets this path. Abandoned branches stay in the original.",
-                ),
-            };
-            panel.child(
-                div()
-                    .mx(px(10.0))
-                    .mb(px(8.0))
-                    .px(px(10.0))
-                    .py(px(10.0))
-                    .rounded(px(theme::RADIUS_SM))
-                    .bg(theme::data_wash())
-                    .border_1()
-                    .border_color(theme::data())
-                    .flex()
-                    .flex_col()
-                    .gap(px(8.0))
-                    .child(
-                        div()
-                            .font_family(theme::sans())
-                            .text_size(theme::text_size(theme::T_UI_SM))
-                            .font_weight(FontWeight::BOLD)
-                            .text_color(theme::bone())
-                            .child(title),
-                    )
-                    .child(
-                        div()
-                            .text_size(theme::text_size(theme::T_TINY))
-                            .line_height(gpui::relative(1.4))
-                            .text_color(theme::bone_dim())
-                            .child(copy),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .flex_row()
-                            .gap(px(4.0))
-                            .child(controls::quiet_button(
-                                "history-confirm",
-                                "Confirm",
+                        .flex_col()
+                        .gap(px(6.0))
+                        .child(controls::section_label("Session tools"))
+                        .child(
+                            div()
+                                .flex()
+                                .flex_row()
+                                .flex_wrap()
+                                .gap(px(6.0))
+                                .child(controls::quiet_button(
+                                    "history-fork",
+                                    "Fork",
+                                    ready && selected_is_forkable,
+                                    Box::new(cx.listener(|view, _, _, cx| view.request_fork(cx))),
+                                ))
+                                .child(controls::quiet_button(
+                                    "history-clone",
+                                    "Clone",
+                                    ready && projection.leaf_id.is_some(),
+                                    Box::new(cx.listener(|view, _, _, cx| view.request_clone(cx))),
+                                ))
+                                .when(navigation_available, |actions| {
+                                    actions.child(controls::quiet_button(
+                                        "history-navigate",
+                                        "Navigate",
+                                        ready
+                                            && selected.is_some()
+                                            && selected.as_ref() != projection.leaf_id.as_ref(),
+                                        Box::new(cx.listener(|view, _, _, cx| {
+                                            view.request_navigation(cx)
+                                        })),
+                                    ))
+                                })
+                                .when(export_available, |actions| {
+                                    actions.child(controls::quiet_button(
+                                        "history-export-jsonl",
+                                        "Export",
+                                        ready,
+                                        Box::new(
+                                            cx.listener(|view, _, _, cx| view.export_jsonl(cx)),
+                                        ),
+                                    ))
+                                })
+                                .when(bridge.pending.is_some(), |actions| {
+                                    actions.child(controls::quiet_button(
+                                        "history-cancel-bridge",
+                                        "Cancel",
+                                        true,
+                                        Box::new(
+                                            cx.listener(|view, _, _, cx| view.cancel_bridge(cx)),
+                                        ),
+                                    ))
+                                }),
+                        )
+                        .when(navigation_available && summary_available, |block| {
+                            block.child(controls::chip_button(
+                                "history-summary",
+                                "Branch summary",
+                                summarize,
                                 ready,
                                 Box::new(
                                     cx.listener(|view, _, _, cx| {
-                                        view.confirm_history_operation(cx)
+                                        view.toggle_navigation_summary(cx)
                                     }),
                                 ),
                             ))
+                        }),
+                )
+                .when(labels_available && selected.is_some(), |panel| {
+                    panel.child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(6.0))
+                            .child(controls::section_label("Label tip"))
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_row()
+                                    .items_start()
+                                    .gap(px(6.0))
+                                    .child(div().flex_1().min_w_0().child(label.clone()))
+                                    .child(controls::quiet_button(
+                                        "history-clear-label",
+                                        "Clear",
+                                        ready,
+                                        Box::new(cx.listener(|view, _, _, cx| {
+                                            view.clear_selected_label(cx)
+                                        })),
+                                    )),
+                            ),
+                    )
+                })
+                .when(import_available, |panel| {
+                    panel.child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(6.0))
+                            .child(controls::section_label("Import JSONL"))
+                            .child(import_path.clone()),
+                    )
+                })
+                .when_some(confirmation.cloned(), |panel, confirmation| {
+                    let (title, copy) = match confirmation {
+                        HistoryConfirmation::Navigate(_) => (
+                            "Navigate here?",
+                            "Same file keeps every branch. Only the active leaf changes.",
+                        ),
+                        HistoryConfirmation::Fork(_) => (
+                            "Fork before tip?",
+                            "Creates a new session file. Message text returns to the composer.",
+                        ),
+                        HistoryConfirmation::Clone => (
+                            "Clone current path?",
+                            "New file gets this path. Abandoned branches stay in the original.",
+                        ),
+                    };
+                    panel.child(
+                        div()
+                            .px(px(10.0))
+                            .py(px(10.0))
+                            .rounded(px(theme::RADIUS_SM))
+                            .bg(theme::data_wash())
+                            .border_1()
+                            .border_color(theme::data())
+                            .flex()
+                            .flex_col()
+                            .gap(px(8.0))
+                            .child(
+                                div()
+                                    .font_family(theme::sans())
+                                    .text_size(theme::text_size(theme::T_UI_SM))
+                                    .font_weight(FontWeight::BOLD)
+                                    .text_color(theme::bone())
+                                    .child(title),
+                            )
+                            .child(
+                                div()
+                                    .text_size(theme::text_size(theme::T_TINY))
+                                    .line_height(gpui::relative(1.4))
+                                    .text_color(theme::bone_dim())
+                                    .child(copy),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_row()
+                                    .gap(px(4.0))
+                                    .child(controls::quiet_button(
+                                        "history-confirm",
+                                        "Confirm",
+                                        ready,
+                                        Box::new(cx.listener(|view, _, _, cx| {
+                                            view.confirm_history_operation(cx)
+                                        })),
+                                    ))
+                                    .child(controls::quiet_button(
+                                        "history-confirm-cancel",
+                                        "Cancel",
+                                        true,
+                                        Box::new(cx.listener(|view, _, _, cx| {
+                                            view.cancel_history_confirmation(cx)
+                                        })),
+                                    )),
+                            ),
+                    )
+                })
+                .when_some(bridge.unavailable.clone(), |panel, unavailable| {
+                    panel.child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(6.0))
+                            .child(controls::panel_note(
+                                unavailable,
+                                controls::ControlTone::Normal,
+                            ))
                             .child(controls::quiet_button(
-                                "history-confirm-cancel",
-                                "Cancel",
-                                true,
-                                Box::new(cx.listener(|view, _, _, cx| {
-                                    view.cancel_history_confirmation(cx)
-                                })),
+                                "history-restart-bridge",
+                                "Restart bridge",
+                                bridge.pending.is_none(),
+                                Box::new(cx.listener(|view, _, _, cx| view.restart_bridge(cx))),
                             )),
-                    ),
-            )
-        })
+                    )
+                }),
+        )
         .when_some(bridge.feedback.clone(), |panel, feedback| {
             panel.child(controls::panel_footer_status(feedback))
-        })
-        .when_some(bridge.unavailable.clone(), |panel, unavailable| {
-            panel.child(
-                div()
-                    .px(px(10.0))
-                    .pb(px(10.0))
-                    .flex()
-                    .flex_col()
-                    .gap(px(6.0))
-                    .child(controls::panel_note(
-                        unavailable,
-                        controls::ControlTone::Normal,
-                    ))
-                    .child(controls::quiet_button(
-                        "history-restart-bridge",
-                        "Restart bridge",
-                        bridge.pending.is_none(),
-                        Box::new(cx.listener(|view, _, _, cx| view.restart_bridge(cx))),
-                    )),
-            )
         })
 }
 

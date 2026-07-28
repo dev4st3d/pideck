@@ -512,37 +512,40 @@ fn command_row(
         .as_deref()
         .map(|hint| format!(" {hint}"))
         .unwrap_or_default();
+    let disabled_reason = entry.disabled_reason.clone();
     div()
         .id(gpui::SharedString::from(format!(
             "command-row-{}",
             entry.id
         )))
+        .mx(px(6.0))
         .px(px(10.0))
-        .py(px(7.0))
+        .py(px(8.0))
+        .rounded(px(theme::RADIUS_SM))
         .flex()
         .flex_row()
         .items_center()
-        .gap(px(10.0))
-        .border_b_1()
-        .border_color(theme::edge_soft())
-        .when(selected, |row| row.bg(theme::panel_hover()))
-        .when(entry.enabled, |row| {
+        .gap(px(12.0))
+        .border_l_2()
+        .border_color(if selected {
+            theme::signal()
+        } else {
+            gpui::rgba(0x0000_0000)
+        })
+        .bg(if selected {
+            theme::panel_lift()
+        } else {
+            gpui::rgba(0x0000_0000)
+        })
+        .when(entry.enabled && !selected, |row| {
             row.cursor_pointer()
                 .hover(|row| row.bg(theme::panel_hover()))
         })
-        .when(!entry.enabled, |row| row.opacity(0.55))
+        .when(entry.enabled && selected, |row| row.cursor_pointer())
+        .when(!entry.enabled, |row| row.opacity(0.5))
         .on_click(cx.listener(move |view, _, window, cx| {
             view.choose_command_entry(click_entry.clone(), window, cx)
         }))
-        .child(
-            div()
-                .w(px(76.0))
-                .flex_shrink_0()
-                .font_family(theme::mono())
-                .text_size(theme::text_size(theme::T_TINY))
-                .text_color(theme::data())
-                .child(entry.group.label()),
-        )
         .child(
             div()
                 .min_w_0()
@@ -553,8 +556,20 @@ fn command_row(
                 .child(
                     div()
                         .font_family(theme::mono())
-                        .text_size(theme::text_size(theme::T_BODY))
-                        .text_color(theme::bone())
+                        .text_size(theme::text_size(theme::T_BODY_SM))
+                        .font_weight(if selected {
+                            FontWeight::SEMIBOLD
+                        } else {
+                            FontWeight::NORMAL
+                        })
+                        .text_color(if selected {
+                            theme::bone()
+                        } else {
+                            theme::bone_dim()
+                        })
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .whitespace_nowrap()
                         .child(format!("/{}{}", entry.name, hint)),
                 )
                 .child(
@@ -565,12 +580,13 @@ fn command_row(
                         .overflow_hidden()
                         .text_ellipsis()
                         .whitespace_nowrap()
-                        .child(entry.description.clone()),
+                        .child(disabled_reason.unwrap_or_else(|| entry.description.clone())),
                 ),
         )
         .child(
             div()
-                .max_w(px(260.0))
+                .max_w(px(200.0))
+                .flex_shrink_0()
                 .font_family(theme::mono())
                 .text_size(theme::text_size(theme::T_TINY))
                 .text_color(theme::ash())
@@ -2354,20 +2370,22 @@ pub(super) fn command_palette_overlay(
     scroll: &ScrollHandle,
     cx: &mut Context<RootView>,
 ) -> impl IntoElement {
+    let visible = matches.iter().take(60).count();
     let mut rows = Vec::new();
     let mut previous_group = None;
     for (index, entry) in matches.iter().take(60).enumerate() {
         if previous_group != Some(entry.group) {
+            let first_group = previous_group.is_none();
             previous_group = Some(entry.group);
             rows.push(
                 div()
-                    .px(px(10.0))
-                    .pt(px(10.0))
-                    .pb(px(5.0))
-                    .font_family(theme::sans())
+                    .px(px(14.0))
+                    .pt(if first_group { px(8.0) } else { px(12.0) })
+                    .pb(px(4.0))
+                    .font_family(theme::mono())
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_size(theme::text_size(theme::T_TINY))
-                    .text_color(theme::data())
+                    .text_color(theme::ash())
                     .child(entry.group.label())
                     .into_any_element(),
             );
@@ -2375,42 +2393,72 @@ pub(super) fn command_palette_overlay(
         rows.push(command_row(entry, index == selected, cx).into_any_element());
     }
 
+    let result_label = if matches.is_empty() {
+        "No matches".to_owned()
+    } else if matches.len() > visible {
+        format!("{visible}+ commands")
+    } else if matches.len() == 1 {
+        "1 command".to_owned()
+    } else {
+        format!("{} commands", matches.len())
+    };
+
     div()
         .absolute()
         .top_0()
+        .right_0()
         .bottom_0()
         .left_0()
-        .right_0()
         .occlude()
-        .bg(theme::canvas())
-        .pt(px(76.0))
+        .bg(gpui::rgba(0x0b0a_09cc))
+        .flex()
         .items_center()
+        .justify_center()
+        .p(px(24.0))
         .child(
             div()
-                .w(px(760.0))
-                .h_full()
-                .max_h(px(620.0))
+                .id("command-palette-card")
+                .w_full()
+                .max_w(px(600.0))
                 .flex()
                 .flex_col()
-                .rounded(px(theme::RADIUS_SM))
+                .rounded(px(theme::RADIUS))
                 .border_1()
                 .border_color(theme::edge_hard())
                 .bg(theme::panel())
                 .overflow_hidden()
                 .child(
                     div()
-                        .px(px(12.0))
-                        .py(px(10.0))
+                        .px(px(14.0))
+                        .pt(px(12.0))
+                        .pb(px(8.0))
                         .flex()
                         .flex_row()
                         .items_center()
                         .justify_between()
+                        .gap(px(12.0))
                         .child(
                             div()
-                                .font_family(theme::sans())
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_size(theme::text_size(theme::T_BODY))
-                                .child("Command palette"),
+                                .min_w_0()
+                                .flex_1()
+                                .flex()
+                                .flex_col()
+                                .gap(px(2.0))
+                                .child(
+                                    div()
+                                        .font_family(theme::sans())
+                                        .font_weight(FontWeight::BOLD)
+                                        .text_size(theme::text_size(theme::T_BODY))
+                                        .text_color(theme::bone())
+                                        .child("Command palette"),
+                                )
+                                .child(
+                                    div()
+                                        .font_family(theme::sans())
+                                        .text_size(theme::text_size(theme::T_TINY))
+                                        .text_color(theme::smoke())
+                                        .child("Native actions, extensions, prompts, and skills"),
+                                ),
                         )
                         .child(controls::chrome_action(
                             "close-command-palette",
@@ -2421,12 +2469,20 @@ pub(super) fn command_palette_overlay(
                             })),
                         )),
                 )
-                .child(search.clone())
+                .child(
+                    div()
+                        .px(px(12.0))
+                        .pb(px(10.0))
+                        .border_b_1()
+                        .border_color(theme::edge_soft())
+                        .child(search.clone()),
+                )
                 .child(
                     div()
                         .id("command-palette-results")
-                        .flex_1()
-                        .min_h_0()
+                        .w_full()
+                        .max_h(px(340.0))
+                        .py(px(6.0))
                         .overflow_y_scroll()
                         .track_scroll(scroll)
                         .scrollbar_width(px(theme::SCROLLBAR))
@@ -2434,12 +2490,57 @@ pub(super) fn command_palette_overlay(
                         .when(matches.is_empty(), |list| {
                             list.child(
                                 div()
-                                    .p(px(18.0))
-                                    .text_size(theme::text_size(theme::T_BODY))
-                                    .text_color(theme::smoke())
-                                    .child("No matching commands."),
+                                    .flex()
+                                    .flex_col()
+                                    .items_center()
+                                    .justify_center()
+                                    .gap(px(6.0))
+                                    .px(px(24.0))
+                                    .py(px(40.0))
+                                    .child(
+                                        div()
+                                            .font_family(theme::sans())
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .text_size(theme::text_size(theme::T_BODY_SM))
+                                            .text_color(theme::bone_dim())
+                                            .child("No matching commands"),
+                                    )
+                                    .child(
+                                        div()
+                                            .font_family(theme::sans())
+                                            .text_size(theme::text_size(theme::T_TINY))
+                                            .text_color(theme::smoke())
+                                            .child("Try a different name, group, or keyword."),
+                                    ),
                             )
                         }),
+                )
+                .child(
+                    div()
+                        .px(px(14.0))
+                        .py(px(8.0))
+                        .border_t_1()
+                        .border_color(theme::edge_soft())
+                        .bg(theme::floor())
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .justify_between()
+                        .gap(px(12.0))
+                        .child(
+                            div()
+                                .font_family(theme::mono())
+                                .text_size(theme::text_size(theme::T_TINY))
+                                .text_color(theme::ash())
+                                .child(result_label),
+                        )
+                        .child(
+                            div()
+                                .font_family(theme::mono())
+                                .text_size(theme::text_size(theme::T_TINY))
+                                .text_color(theme::smoke())
+                                .child("↑↓ navigate · Enter run · Esc close"),
+                        ),
                 ),
         )
 }
@@ -2460,7 +2561,7 @@ pub(super) fn hotkey_help_overlay(cx: &mut Context<RootView>) -> impl IntoElemen
         ("Abort run or Bash", "Esc"),
         ("Move focus", "Tab / Shift+Tab"),
         ("Copy transcript selection", "Ctrl+C"),
-        ("History navigation", "↑ ↓ ← → Home End"),
+        ("History tip step", "↑ ↓ ← → Home End"),
     ];
     div()
         .absolute()

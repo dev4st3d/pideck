@@ -848,29 +848,6 @@ pub fn action_row(
         )
 }
 
-pub fn interactive_list_row(
-    id: SharedString,
-    enabled: bool,
-    on_click: ClickHandler,
-    child: impl IntoElement,
-) -> impl IntoElement {
-    row_shell()
-        .id(id)
-        .when(enabled, |row| {
-            row.tab_index(0)
-                .cursor_pointer()
-                .hover(|row| row.bg(theme::panel_hover()))
-                .active(|row| row.bg(theme::panel()))
-                .focus(|row| row.bg(theme::panel_lift()))
-                .on_click(move |event, window, cx| on_click(event, window, cx))
-        })
-        .child(child)
-}
-
-fn row_shell() -> gpui::Div {
-    div().border_b_1().border_color(theme::edge_soft())
-}
-
 pub fn divider_list() -> gpui::Div {
     div()
         .flex()

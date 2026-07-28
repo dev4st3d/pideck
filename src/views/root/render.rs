@@ -132,7 +132,6 @@ impl Render for RootView {
                                 bridge,
                                 browser: &self.history,
                                 focus: &self.history_focus,
-                                search: &self.history_search_composer,
                                 label: &self.history_label_composer,
                                 import_path: &self.import_path_composer,
                                 confirmation: self.history_confirmation.as_ref(),

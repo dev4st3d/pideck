@@ -51,7 +51,7 @@ use crate::services::projects::{
 };
 use crate::services::session_catalog::{SessionCatalogConfig, SessionSummary, scan_sessions};
 use crate::services::terminal::TerminalSize;
-use crate::state::history::{HistoryBrowser, HistoryFilter};
+use crate::state::history::HistoryBrowser;
 use crate::state::runtime::{
     BashStatus, CompactionState, DialogAnswer, DialogRequest, MessageBlock, MessageRole,
     ModelSummary, NotificationKind, PromptDelivery, PromptImage, QueueContents, QueueDeliveryMode,
@@ -311,7 +311,6 @@ pub struct RootView {
     terminal: Entity<TerminalView>,
     compaction_composer: Entity<Composer>,
     session_name_composer: Entity<Composer>,
-    history_search_composer: Entity<Composer>,
     history_label_composer: Entity<Composer>,
     import_path_composer: Entity<Composer>,
     model_search_composer: Entity<Composer>,
@@ -446,7 +445,6 @@ pub struct RootView {
     _terminal_subscription: Subscription,
     _compaction_subscription: Subscription,
     _session_name_subscription: Subscription,
-    _history_search_observation: Subscription,
     _history_label_subscription: Subscription,
     _import_path_subscription: Subscription,
     _model_search_observation: Subscription,
@@ -491,10 +489,8 @@ impl RootView {
         });
         let session_name_composer =
             cx.new(|cx| Composer::field("session-name", "Rename session…", "Rename", cx));
-        let history_search_composer =
-            cx.new(|cx| Composer::field("history-search", "Search history…", "", cx));
         let history_label_composer =
-            cx.new(|cx| Composer::field("history-label", "Label selected entry…", "Set", cx));
+            cx.new(|cx| Composer::field("history-label", "Label active tip…", "Set", cx));
         let import_path_composer =
             cx.new(|cx| Composer::field("import-jsonl", "JSONL path to import…", "Import", cx));
         let model_search_composer = cx.new(|cx| {
@@ -605,12 +601,6 @@ impl RootView {
             window,
             |view, _, event, window, cx| view.on_session_name_event(event, window, cx),
         );
-        let history_search_observation =
-            cx.observe_in(&history_search_composer, window, |view, _, _, cx| {
-                let query = view.history_search_composer.read(cx).draft().to_owned();
-                view.history.set_query(query);
-                cx.notify();
-            });
         let history_label_subscription =
             cx.subscribe_in(&history_label_composer, window, |view, _, event, _, cx| {
                 view.on_history_label_event(event, cx)
@@ -681,7 +671,6 @@ impl RootView {
             terminal,
             compaction_composer,
             session_name_composer,
-            history_search_composer,
             history_label_composer,
             import_path_composer,
             model_search_composer,
@@ -816,7 +805,6 @@ impl RootView {
             _terminal_subscription: terminal_subscription,
             _compaction_subscription: compaction_subscription,
             _session_name_subscription: session_name_subscription,
-            _history_search_observation: history_search_observation,
             _history_label_subscription: history_label_subscription,
             _import_path_subscription: import_path_subscription,
             _model_search_observation: model_search_observation,
@@ -2725,26 +2713,6 @@ impl RootView {
         let tree = Arc::clone(&self.render_projections.history.tree);
         let leaf_id = self.render_projections.history.leaf_id.clone();
         self.history.synchronize(&tree, leaf_id.as_ref());
-    }
-
-    fn select_history(
-        &mut self,
-        entry: crate::services::rpc::EntryId,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let tree = Arc::clone(&self.render_projections.history.tree);
-        if self.history.select(entry, &tree) {
-            window.focus(&self.history_focus);
-            self.history_confirmation = None;
-            cx.notify();
-        }
-    }
-
-    fn set_history_filter(&mut self, filter: HistoryFilter, cx: &mut Context<Self>) {
-        self.history.set_filter(filter);
-        self.history_confirmation = None;
-        cx.notify();
     }
 
     fn on_history_next(&mut self, _: &HistoryNext, _: &mut Window, cx: &mut Context<Self>) {

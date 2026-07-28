@@ -306,6 +306,7 @@ fn fuzzy_subsequence_score(haystack: &str, needle: &str) -> Option<i32> {
 fn unsupported_tui_builtin(name: &str) -> bool {
     const BUILTINS: &[&str] = &[
         "box",
+        "bar",
         "clear",
         "editor",
         "help",
@@ -357,6 +358,12 @@ fn replaced_by_native_gui(command: &RuntimeCommand) -> bool {
         "box" => matches_source("box-editor.ts"),
         "rail" => matches_source("activity-rail.ts"),
         "topbar" => matches_source("quiet-topbar.ts"),
+        "bar" => {
+            matches_source("status-footer.ts")
+                || path.contains("/pi-bar/")
+                || source.contains("/pi-bar/")
+                || source.contains("pi-bar")
+        }
         _ => false,
     }
 }
@@ -636,6 +643,11 @@ mod tests {
                     "C:/Users/test/.pi/agent/extensions/quiet-topbar.ts",
                 ),
                 dynamic(
+                    "bar",
+                    CommandSource::Extension,
+                    "C:/Users/test/.pi/agent/npm/node_modules/pi-bar/extensions/status-footer.ts",
+                ),
+                dynamic(
                     "binance",
                     CommandSource::Extension,
                     "C:/Users/test/.pi/agent/extensions/binance/index.ts",
@@ -650,6 +662,7 @@ mod tests {
 
         assert!(!catalog.entries.iter().any(|entry| entry.name == "rail"));
         assert!(!catalog.entries.iter().any(|entry| entry.name == "topbar"));
+        assert!(!catalog.entries.iter().any(|entry| entry.name == "bar"));
         assert_eq!(
             catalog
                 .entries
