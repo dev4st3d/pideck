@@ -41,6 +41,7 @@ actions!(
         OpenCommandPalette,
         ShowHotkeys,
         ToggleSidebar,
+        ToggleTerminal,
         ToggleInspector,
         IncreaseFontSize,
         DecreaseFontSize,

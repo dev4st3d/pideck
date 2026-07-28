@@ -81,6 +81,7 @@ If no model is available, open Settings > Providers, authenticate, refresh catal
 | Retry | `Ctrl+Alt+R` |
 | Stop | `Ctrl+Alt+S` |
 | Open command palette | `Ctrl+Shift+P` |
+| Toggle workspace terminal | Ctrl + backtick |
 | `@` file completion (in composer) | type `@` then `↑` `↓` `Enter` / `Esc` |
 | `/` command completion (in composer) | type `/` then `↑` `↓` `Enter` / `Esc` |
 | Show native hotkey help | `Ctrl+/` |
@@ -112,6 +113,7 @@ Typography uses installed system fonts. Open `/settings` and choose separate Mai
 - `src/services/runtime_worker.rs` - injectable GPUI-independent service boundary and responsive worker coordinator
 - `src/services/session_catalog.rs` - strict streaming v1-v3 JSONL metadata scanner, directory precedence, canonical workspace filtering, corruption reporting, and stale-scan worker
 - `src/services/git_diff.rs` - bounded read-only Git and untracked-file inspection for post-response workspace change snapshots
+- `src/services/terminal.rs` and `src/views/terminal.rs` - lazy, bounded real-PTY transport with an adjustable multi-instance terminal tab panel
 - `src/model_runtime.rs` - secret-free provider/model catalog, cached refresh, auth prompt state machine, sparse thinking, pricing-tier, and streaming-change policy
 - `src/services/sdk_bridge.rs`, `bridge/pi-bridge.mjs`, and `bridge/protocol.schema.json` - negotiated, versioned, cancellable stdio JSONL SDK sidecar for the Phase 11 session gaps, Phase 12 ModelRuntime/settings/auth gaps, Phase 15 resource inventory/reload plane, and Phase 16 orchestration adapter transport
 - `src/orchestration.rs`, `bridge/orchestration-adapter.mjs`, and `bridge/orchestration-core.mjs` - typed task/subagent/goal snapshots, stale/session guards, Pi event-bus actions, task DAG checks, schedule restoration, and bounded live subagent transcripts

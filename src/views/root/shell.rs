@@ -44,18 +44,32 @@ impl TitlebarStatus {
     }
 }
 
-pub(super) fn titlebar(
-    projection: &ShellProjection,
-    conversation: &ConversationProjection,
-    opening_thread: bool,
-    name_composer: &Entity<Composer>,
-    rename_open: bool,
-    rename_enabled: bool,
-    theme_menu_open: bool,
-    sidebar_open: bool,
-    inspector_open: bool,
-    cx: &mut Context<RootView>,
-) -> impl IntoElement {
+pub(super) struct TitlebarParams<'a> {
+    pub(super) projection: &'a ShellProjection,
+    pub(super) conversation: &'a ConversationProjection,
+    pub(super) opening_thread: bool,
+    pub(super) name_composer: &'a Entity<Composer>,
+    pub(super) rename_open: bool,
+    pub(super) rename_enabled: bool,
+    pub(super) theme_menu_open: bool,
+    pub(super) sidebar_open: bool,
+    pub(super) terminal_open: bool,
+    pub(super) inspector_open: bool,
+}
+
+pub(super) fn titlebar(params: TitlebarParams<'_>, cx: &mut Context<RootView>) -> impl IntoElement {
+    let TitlebarParams {
+        projection,
+        conversation,
+        opening_thread,
+        name_composer,
+        rename_open,
+        rename_enabled,
+        theme_menu_open,
+        sidebar_open,
+        terminal_open,
+        inspector_open,
+    } = params;
     let action = projection.action;
     let status = titlebar_status(projection, conversation, opening_thread);
     let status_color = status.color();
@@ -188,6 +202,7 @@ pub(super) fn titlebar(
                         .flex_shrink_0()
                         .child("|"),
                 )
+                .child(terminal_toggle_button(terminal_open, cx))
                 .child(inspector_toggle_button(inspector_open, cx))
                 .child(
                     div()
@@ -979,6 +994,45 @@ fn sidebar_toggle_button(open: bool, cx: &mut Context<RootView>) -> impl IntoEle
         .child(
             svg()
                 .path("icons/sidebar.svg")
+                .size(px(14.0))
+                .text_color(if open {
+                    theme::data()
+                } else {
+                    theme::bone_dim()
+                }),
+        )
+}
+
+fn terminal_toggle_button(open: bool, cx: &mut Context<RootView>) -> impl IntoElement {
+    div()
+        .id("toggle-terminal")
+        .size(px(28.0))
+        .rounded(px(theme::RADIUS_SM))
+        .flex()
+        .items_center()
+        .justify_center()
+        .flex_shrink_0()
+        .bg(if open {
+            theme::panel_lift()
+        } else {
+            gpui::rgba(0x0000_0000)
+        })
+        .border_1()
+        .border_color(if open {
+            theme::edge_hard()
+        } else {
+            gpui::rgba(0x0000_0000)
+        })
+        .text_color(theme::bone_dim())
+        .tab_index(0)
+        .cursor_pointer()
+        .hover(|button| button.bg(theme::panel()).text_color(theme::bone()))
+        .active(|button| button.bg(theme::panel_lift()))
+        .focus(|button| button.border_color(theme::focus()))
+        .on_click(cx.listener(|view, _, window, cx| view.toggle_terminal(window, cx)))
+        .child(
+            svg()
+                .path("icons/terminal.svg")
                 .size(px(14.0))
                 .text_color(if open {
                     theme::data()

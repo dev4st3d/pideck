@@ -9,9 +9,9 @@ use std::time::{Duration, Instant};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use gpui::{
-    Bounds, ClipboardItem, Context, DispatchPhase, Entity, FocusHandle, Focusable, FontWeight,
-    HitboxBehavior, Image, ImageFormat, IntoElement, ListAlignment, ListOffset, ListState,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit, PathBuilder,
+    Bounds, ClipboardItem, Context, CursorStyle, DispatchPhase, Entity, FocusHandle, Focusable,
+    FontWeight, HitboxBehavior, Image, ImageFormat, IntoElement, ListAlignment, ListOffset,
+    ListState, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit, PathBuilder,
     PathPromptOptions, Pixels, Render, ScrollHandle, ScrollWheelEvent, StyledImage, Subscription,
     Task, Window, canvas, div, fill, img, list, point, prelude::*, px, size, svg,
 };
@@ -21,7 +21,7 @@ use crate::actions::{
     HistoryActivate, HistoryFirst, HistoryFold, HistoryLast, HistoryNext, HistoryPrevious,
     HistoryUnfold, ImagePreviewClose, ImagePreviewNext, ImagePreviewPrevious, IncreaseFontSize,
     ORCHESTRATION_ROW_CONTEXT, OpenCommandPalette, OrchestrationActivate, Retry, ShowHotkeys, Stop,
-    ToggleInspector, ToggleSidebar,
+    ToggleInspector, ToggleSidebar, ToggleTerminal,
 };
 use crate::command_catalog::{
     CommandCatalog, CommandEntry, CommandTarget, InvocationResolution, NativeAction,
@@ -50,6 +50,7 @@ use crate::services::projects::{
     AddProjectOutcome, ProjectEntry, ProjectRegistry, ProjectRegistryError, project_key,
 };
 use crate::services::session_catalog::{SessionCatalogConfig, SessionSummary, scan_sessions};
+use crate::services::terminal::TerminalSize;
 use crate::state::history::{HistoryBrowser, HistoryFilter};
 use crate::state::runtime::{
     BashStatus, CompactionState, DialogAnswer, DialogRequest, MessageBlock, MessageRole,
@@ -65,6 +66,7 @@ use crate::views::conversation::{
     ActivityDetail, ActivityDisclosureState, ConversationDiffSummary, ConversationListModel,
     ConversationScrollMotion, TranscriptTextCache, latest_completed_response_key,
 };
+use crate::views::terminal::{TerminalPanelEvent, TerminalView};
 
 mod composer_bar;
 mod inspector;
@@ -306,6 +308,7 @@ pub struct RootView {
     theme_menu_open: bool,
     font_scale: theme::FontScale,
     composer: Entity<Composer>,
+    terminal: Entity<TerminalView>,
     compaction_composer: Entity<Composer>,
     session_name_composer: Entity<Composer>,
     history_search_composer: Entity<Composer>,
@@ -398,6 +401,12 @@ pub struct RootView {
     sidebar_open: bool,
     /// Bumps on each toggle so width animation only runs after user action.
     sidebar_motion_key: u64,
+    /// Bottom workspace terminal visibility.
+    terminal_open: bool,
+    /// User-adjusted terminal panel height in logical pixels.
+    terminal_height: f32,
+    /// Pointer Y and height captured when a splitter drag begins.
+    terminal_drag_origin: Option<(Pixels, f32)>,
     /// Right-hand Inspector panel visibility (animated open/close).
     inspector_open: bool,
     /// Bumps on each toggle so width animation only runs after user action.
@@ -434,6 +443,7 @@ pub struct RootView {
     focus_handle: FocusHandle,
     _activity_disclosure_observation: Subscription,
     _composer_subscription: Subscription,
+    _terminal_subscription: Subscription,
     _compaction_subscription: Subscription,
     _session_name_subscription: Subscription,
     _history_search_observation: Subscription,
@@ -468,6 +478,8 @@ impl RootView {
         window.set_rem_size(font_scale.rem_size());
         let focus_handle = cx.focus_handle();
         let composer = cx.new(Composer::new);
+        let terminal_workspace = projects.active_path().to_path_buf();
+        let terminal = cx.new(|cx| TerminalView::new(terminal_workspace, cx));
         let compaction_composer = cx.new(|cx| {
             Composer::scoped(
                 "compaction-focus",
@@ -579,6 +591,10 @@ impl RootView {
             cx.subscribe_in(&composer, window, |view, _, event, window, cx| {
                 view.on_composer_event(event, window, cx)
             });
+        let terminal_subscription =
+            cx.subscribe_in(&terminal, window, |view, _, event, window, cx| {
+                view.on_terminal_panel_event(event, window, cx)
+            });
         let compaction_subscription = cx.subscribe_in(
             &compaction_composer,
             window,
@@ -662,6 +678,7 @@ impl RootView {
             theme_menu_open: false,
             font_scale,
             composer,
+            terminal,
             compaction_composer,
             session_name_composer,
             history_search_composer,
@@ -759,6 +776,9 @@ impl RootView {
             history_open: false,
             sidebar_open: true,
             sidebar_motion_key: 0,
+            terminal_open: false,
+            terminal_height: 260.0,
+            terminal_drag_origin: None,
             inspector_open: true,
             inspector_motion_key: 0,
             session_rename_open: false,
@@ -793,6 +813,7 @@ impl RootView {
             focus_handle,
             _activity_disclosure_observation: activity_disclosure_observation,
             _composer_subscription: composer_subscription,
+            _terminal_subscription: terminal_subscription,
             _compaction_subscription: compaction_subscription,
             _session_name_subscription: session_name_subscription,
             _history_search_observation: history_search_observation,
@@ -848,6 +869,94 @@ impl RootView {
         }
         self.sidebar_open = true;
         self.sidebar_motion_key = self.sidebar_motion_key.wrapping_add(1);
+    }
+
+    fn set_terminal_open(&mut self, open: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.terminal_open == open {
+            return;
+        }
+        self.terminal_open = open;
+        self.terminal_drag_origin = None;
+        if open {
+            self.terminal
+                .update(cx, |terminal, cx| terminal.activate(cx));
+            window.focus(&self.terminal.read(cx).focus_handle(cx));
+        } else {
+            window.focus(&self.composer.read(cx).focus_handle(cx));
+        }
+        cx.notify();
+    }
+
+    fn toggle_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.set_terminal_open(!self.terminal_open, window, cx);
+    }
+
+    fn on_toggle_terminal(
+        &mut self,
+        _: &ToggleTerminal,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.toggle_terminal(window, cx);
+    }
+
+    fn on_terminal_panel_event(
+        &mut self,
+        event: &TerminalPanelEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            TerminalPanelEvent::CloseRequested => self.set_terminal_open(false, window, cx),
+        }
+    }
+
+    fn begin_terminal_resize(&mut self, pointer_y: Pixels, cx: &mut Context<Self>) {
+        self.terminal_drag_origin = Some((pointer_y, self.terminal_height));
+        cx.notify();
+    }
+
+    fn update_terminal_resize(
+        &mut self,
+        pointer_y: Pixels,
+        viewport_height: Pixels,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some((start_y, start_height)) = self.terminal_drag_origin else {
+            return false;
+        };
+        let delta = f32::from(start_y - pointer_y);
+        let max_height = (f32::from(viewport_height) - theme::TITLE_H - 210.0).max(180.0);
+        let next = (start_height + delta).clamp(180.0, max_height);
+        if (next - self.terminal_height).abs() >= 0.5 {
+            self.terminal_height = next;
+            cx.notify();
+        }
+        true
+    }
+
+    fn end_terminal_resize(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.terminal_drag_origin.take().is_none() {
+            return false;
+        }
+        cx.notify();
+        true
+    }
+
+    fn terminal_size(&self, window: &Window) -> TerminalSize {
+        let mut width = f32::from(window.viewport_size().width);
+        if self.sidebar_open {
+            width -= theme::SIDE_W;
+        }
+        if self.history_open {
+            width -= theme::HISTORY_W;
+        }
+        if self.inspector_open {
+            width -= theme::INSPECT_W;
+        }
+        let rows = ((self.terminal_height - 50.0) / 18.0).floor().max(4.0) as u16;
+        let cols = ((width - 24.0) / 7.4).floor().max(24.0) as u16;
+        TerminalSize::new(rows, cols)
     }
 
     fn toggle_inspector(&mut self, _window: &mut Window, cx: &mut Context<Self>) {

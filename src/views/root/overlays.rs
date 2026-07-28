@@ -2449,6 +2449,7 @@ pub(super) fn hotkey_help_overlay(cx: &mut Context<RootView>) -> impl IntoElemen
         ("Command palette", "Ctrl+Shift+P"),
         ("Hotkey help", "Ctrl+/"),
         ("Toggle workspace sidebar", "Ctrl+B"),
+        ("Toggle terminal", "Ctrl+`"),
         ("Toggle inspector", "Ctrl+I"),
         ("Increase font size", "Ctrl++"),
         ("Decrease font size", "Ctrl+-"),

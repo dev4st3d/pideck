@@ -5,8 +5,8 @@ use gpui::{
 use crate::actions::{
     ActivateRecovery, Connect, DecreaseFontSize, FocusNext, FocusPrevious, IncreaseFontSize,
     OpenCommandPalette, RECOVERY_BUTTON_CONTEXT, Retry, ShowHotkeys, Stop, ToggleInspector,
-    ToggleSidebar, composer_key_bindings, history_key_bindings, image_preview_key_bindings,
-    orchestration_key_bindings, transcript_key_bindings,
+    ToggleSidebar, ToggleTerminal, composer_key_bindings, history_key_bindings,
+    image_preview_key_bindings, orchestration_key_bindings, transcript_key_bindings,
 };
 use crate::assets::Assets;
 use crate::controller::RuntimeController;
@@ -44,6 +44,7 @@ pub fn run() {
             KeyBinding::new("ctrl-shift-p", OpenCommandPalette, None),
             KeyBinding::new("ctrl-/", ShowHotkeys, None),
             KeyBinding::new("ctrl-b", ToggleSidebar, None),
+            KeyBinding::new("ctrl-`", ToggleTerminal, None),
             KeyBinding::new("ctrl-i", ToggleInspector, None),
             KeyBinding::new("ctrl-+", IncreaseFontSize, None),
             KeyBinding::new("ctrl-=", IncreaseFontSize, None),

@@ -7,14 +7,26 @@ use super::overlays::{
     hotkey_help_overlay, pasted_image_overlay, runtime_notification_stack,
 };
 use super::shell::{
-    HistoryPanelParams, SessionsPanelParams, history_panel, sessions_panel, titlebar,
+    HistoryPanelParams, SessionsPanelParams, TitlebarParams, history_panel, sessions_panel,
+    titlebar,
 };
 use super::*;
 use crate::views::diff_summary::diff_overlay;
 
 impl Render for RootView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         theme::set_active(self.active_theme);
+        if self.terminal_open {
+            let max_terminal_height =
+                (f32::from(window.viewport_size().height) - theme::TITLE_H - 210.0).max(180.0);
+            self.terminal_height = self.terminal_height.clamp(180.0, max_terminal_height);
+            let workspace = PathBuf::from(&self.render_projections.shell.workspace);
+            let terminal_size = self.terminal_size(window);
+            self.terminal.update(cx, |terminal, cx| {
+                terminal.set_workspace(workspace, cx);
+                terminal.resize(terminal_size, cx);
+            });
+        }
         let thread_statuses = self.thread_statuses();
         let projection = &self.render_projections.shell;
         let catalog = &self.render_projections.catalog;
@@ -45,6 +57,7 @@ impl Render for RootView {
             .on_action(cx.listener(Self::on_open_command_palette))
             .on_action(cx.listener(Self::on_show_hotkeys))
             .on_action(cx.listener(Self::on_toggle_sidebar))
+            .on_action(cx.listener(Self::on_toggle_terminal))
             .on_action(cx.listener(Self::on_toggle_inspector))
             .on_action(cx.listener(Self::on_increase_font_size))
             .on_action(cx.listener(Self::on_decrease_font_size))
@@ -70,20 +83,23 @@ impl Render for RootView {
             .text_size(theme::text_size(16.0))
             .text_color(theme::bone())
             .child(titlebar(
-                projection,
-                &self.conversation,
-                catalog.pending_session_file.is_some(),
-                &self.session_name_composer,
-                self.session_rename_open,
-                matches!(
-                    self.conversation.lifecycle,
-                    RuntimeLifecycle::Ready | RuntimeLifecycle::Settled
-                ) && self.conversation.pending_operation.is_none()
-                    && catalog.current_session_file.is_some()
-                    && !catalog.switching,
-                self.theme_menu_open,
-                self.sidebar_open,
-                self.inspector_open,
+                TitlebarParams {
+                    projection,
+                    conversation: &self.conversation,
+                    opening_thread: catalog.pending_session_file.is_some(),
+                    name_composer: &self.session_name_composer,
+                    rename_open: self.session_rename_open,
+                    rename_enabled: matches!(
+                        self.conversation.lifecycle,
+                        RuntimeLifecycle::Ready | RuntimeLifecycle::Settled
+                    ) && self.conversation.pending_operation.is_none()
+                        && catalog.current_session_file.is_some()
+                        && !catalog.switching,
+                    theme_menu_open: self.theme_menu_open,
+                    sidebar_open: self.sidebar_open,
+                    terminal_open: self.terminal_open,
+                    inspector_open: self.inspector_open,
+                },
                 cx,
             ))
             .child(
@@ -189,6 +205,21 @@ impl Render for RootView {
                                 },
                                 cx,
                             ))
+                            .when(self.terminal_open, |column| {
+                                column
+                                    .child(terminal_splitter(
+                                        cx.entity(),
+                                        self.terminal_drag_origin.is_some(),
+                                        window.viewport_size().height,
+                                    ))
+                                    .child(
+                                        div()
+                                            .h(px(self.terminal_height))
+                                            .min_h(px(180.0))
+                                            .flex_shrink_0()
+                                            .child(self.terminal.clone()),
+                                    )
+                            })
                             .into_any_element(),
                     })
                     .child(inspector(
@@ -292,4 +323,72 @@ impl Render for RootView {
                 ))
             })
     }
+}
+
+fn terminal_splitter(
+    root: Entity<RootView>,
+    dragging: bool,
+    viewport_height: Pixels,
+) -> impl IntoElement {
+    let mouse_down_root = root.clone();
+    let mouse_move_root = root.clone();
+    let mouse_up_root = root;
+
+    canvas(
+        |bounds, window, _| window.insert_hitbox(bounds, HitboxBehavior::Normal),
+        move |bounds, _hitbox, window, _| {
+            let track = Bounds::new(
+                point(bounds.left(), bounds.top() + px(3.0)),
+                size(bounds.size.width, px(if dragging { 2.0 } else { 1.0 })),
+            );
+            window.paint_quad(fill(
+                track,
+                if dragging {
+                    theme::focus()
+                } else {
+                    theme::edge_hard()
+                },
+            ));
+
+            let mouse_down_bounds = bounds;
+            window.on_mouse_event(move |event: &MouseDownEvent, phase, _, cx| {
+                if phase != DispatchPhase::Capture
+                    || event.button != MouseButton::Left
+                    || !mouse_down_bounds.contains(&event.position)
+                {
+                    return;
+                }
+                mouse_down_root.update(cx, |view, cx| {
+                    view.begin_terminal_resize(event.position.y, cx)
+                });
+                cx.stop_propagation();
+            });
+
+            window.on_mouse_event(move |event: &MouseMoveEvent, phase, _, cx| {
+                if phase != DispatchPhase::Capture {
+                    return;
+                }
+                let handled = mouse_move_root.update(cx, |view, cx| {
+                    view.update_terminal_resize(event.position.y, viewport_height, cx)
+                });
+                if handled {
+                    cx.stop_propagation();
+                }
+            });
+
+            window.on_mouse_event(move |event: &MouseUpEvent, phase, _, cx| {
+                if phase != DispatchPhase::Capture || event.button != MouseButton::Left {
+                    return;
+                }
+                let handled = mouse_up_root.update(cx, |view, cx| view.end_terminal_resize(cx));
+                if handled {
+                    cx.stop_propagation();
+                }
+            });
+        },
+    )
+    .h(px(7.0))
+    .w_full()
+    .flex_shrink_0()
+    .cursor(CursorStyle::ResizeRow)
 }
