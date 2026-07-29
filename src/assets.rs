@@ -31,6 +31,7 @@ impl AssetSource for Assets {
             "icons/sidebar.svg" => &include_bytes!("../assets/icons/sidebar.svg")[..],
             "icons/sun.svg" => &include_bytes!("../assets/icons/sun.svg")[..],
             "icons/terminal.svg" => &include_bytes!("../assets/icons/terminal.svg")[..],
+            "icons/trash.svg" => &include_bytes!("../assets/icons/trash.svg")[..],
             "icons/undo.svg" => &include_bytes!("../assets/icons/undo.svg")[..],
             _ => return Ok(None),
         };
@@ -65,6 +66,7 @@ impl AssetSource for Assets {
                 "sidebar.svg".into(),
                 "sun.svg".into(),
                 "terminal.svg".into(),
+                "trash.svg".into(),
                 "undo.svg".into(),
             ],
             _ => Vec::new(),

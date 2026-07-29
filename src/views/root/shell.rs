@@ -616,6 +616,7 @@ pub(super) struct SessionsPanelParams<'a> {
     pub(super) projects: &'a ProjectRegistry,
     pub(super) project_catalogs: &'a HashMap<String, ProjectCatalogCache>,
     pub(super) thread_statuses: &'a HashMap<String, ThreadRuntimeStatus>,
+    pub(super) hovered_thread_key: Option<&'a str>,
     pub(super) project_feedback: Option<&'a str>,
     pub(super) project_picker_pending: bool,
     pub(super) project_switch_enabled: bool,
@@ -635,6 +636,7 @@ pub(super) fn sessions_panel(
         projects,
         project_catalogs,
         thread_statuses,
+        hovered_thread_key,
         project_feedback,
         project_picker_pending,
         project_switch_enabled,
@@ -832,6 +834,7 @@ pub(super) fn sessions_panel(
                                     pending_path,
                                     project_switch_enabled,
                                     thread_statuses,
+                                    hovered_thread_key,
                                     can_remove: projects.projects().len() > 1,
                                 },
                                 cx,
@@ -1233,6 +1236,7 @@ struct ProjectGroupParams<'a> {
     project_switch_enabled: bool,
     can_remove: bool,
     thread_statuses: &'a HashMap<String, ThreadRuntimeStatus>,
+    hovered_thread_key: Option<&'a str>,
 }
 
 fn project_group(params: ProjectGroupParams<'_>, cx: &mut Context<RootView>) -> AnyElement {
@@ -1246,6 +1250,7 @@ fn project_group(params: ProjectGroupParams<'_>, cx: &mut Context<RootView>) -> 
         project_switch_enabled,
         can_remove,
         thread_statuses,
+        hovered_thread_key,
     } = params;
     let cached_while_loading = cached_catalog.filter(|catalog| {
         active
@@ -1485,6 +1490,11 @@ fn project_group(params: ProjectGroupParams<'_>, cx: &mut Context<RootView>) -> 
                     }
                 })
                 .children(sessions.iter().map(|session| {
+                    let thread_key = format!(
+                        "{}::{}",
+                        project_key(&project.path),
+                        project_key(&session.path)
+                    );
                     project_thread_row(
                         ProjectThreadRowParams {
                             project_path: project.path.clone(),
@@ -1499,6 +1509,8 @@ fn project_group(params: ProjectGroupParams<'_>, cx: &mut Context<RootView>) -> 
                                     .is_some_and(|path| sidebar_paths_match(path, &session.path)),
                             enabled: project_switch_enabled,
                             runtime_status: thread_statuses.get(&project_key(&session.path)),
+                            hovered: hovered_thread_key == Some(thread_key.as_str()),
+                            thread_key,
                         },
                         cx,
                     )
@@ -1554,6 +1566,8 @@ struct ProjectThreadRowParams<'a> {
     switching: bool,
     enabled: bool,
     runtime_status: Option<&'a ThreadRuntimeStatus>,
+    hovered: bool,
+    thread_key: String,
 }
 
 fn project_thread_row(
@@ -1568,14 +1582,21 @@ fn project_thread_row(
         switching,
         enabled,
         runtime_status,
+        hovered,
+        thread_key,
     } = params;
     let session_path = session.path.clone();
     let click_project = project_path.clone();
     let click_session = session_path.clone();
-    let key_project = project_path;
-    let key_session = session_path;
+    let key_project = project_path.clone();
+    let key_session = session_path.clone();
+    let trash_project = project_path;
+    let trash_session = session_path;
+    let hover_key = thread_key.clone();
     let click_root = cx.entity();
     let key_root = click_root.clone();
+    let hover_root = click_root.clone();
+    let trash_root = click_root.clone();
     let title = sidebar_thread_title(
         session.name.as_deref(),
         session.first_user_summary.as_deref(),
@@ -1590,16 +1611,23 @@ fn project_thread_row(
             runtime_activity,
             Some(ThreadActivity::Working | ThreadActivity::Cancelling | ThreadActivity::Attention)
         );
+    // Active/busy rows keep the date; only idle non-active threads expose delete on hover.
+    let can_delete = crate::services::session_catalog::reversible_trash_available()
+        && !selected
+        && !switching
+        && !show_activity;
+    let show_delete = can_delete && hovered;
+    let row_id = SharedString::from(format!(
+        "project-thread-{}-{}",
+        project_key(&click_project),
+        session.id
+    ));
 
     div()
-        .id(SharedString::from(format!(
-            "project-thread-{}-{}",
-            project_key(&click_project),
-            session.id
-        )))
+        .id(row_id)
         .h(px(34.0))
         .pl(px(32.0))
-        .pr(px(12.0))
+        .pr(px(10.0))
         .relative()
         .flex()
         .flex_row()
@@ -1607,8 +1635,20 @@ fn project_thread_row(
         .gap(px(8.0))
         .bg(if selected {
             theme::panel_lift()
+        } else if hovered {
+            theme::panel()
         } else {
             gpui::rgba(0x0000_0000)
+        })
+        .on_hover(move |hovered, _, cx| {
+            let key = hover_key.clone();
+            hover_root.update(cx, |view, cx| {
+                if *hovered {
+                    view.set_hovered_thread(Some(key), cx);
+                } else if view.hovered_thread_key.as_deref() == Some(key.as_str()) {
+                    view.set_hovered_thread(None, cx);
+                }
+            });
         })
         .when(selected, |row| {
             row.child(
@@ -1624,7 +1664,6 @@ fn project_thread_row(
         .when(enabled && !selected, |row| {
             row.tab_index(0)
                 .cursor_pointer()
-                .hover(|row| row.bg(theme::panel()))
                 .active(|row| row.bg(theme::panel_hover()))
                 .focus(|row| row.bg(theme::panel_lift()).text_color(theme::focus()))
                 .on_click(move |_, window, cx| {
@@ -1697,11 +1736,87 @@ fn project_thread_row(
         .child(
             div()
                 .flex_shrink_0()
-                .font_family(theme::mono())
-                .text_size(theme::text_size(theme::T_TINY))
-                .whitespace_nowrap()
-                .text_color(trailing.color)
-                .child(trailing.label),
+                .h(px(22.0))
+                // Keep the trailing column stable so the date ↔ delete swap does not shove the title.
+                .when(can_delete, |slot| slot.min_w(px(36.0)))
+                .flex()
+                .items_center()
+                .justify_end()
+                .when(!show_delete, |slot| {
+                    slot.child(
+                        div()
+                            .font_family(theme::mono())
+                            .text_size(theme::text_size(theme::T_TINY))
+                            .whitespace_nowrap()
+                            .text_color(trailing.color)
+                            .child(trailing.label),
+                    )
+                })
+                .when(show_delete, |slot| {
+                    let trash_id = SharedString::from(format!(
+                        "project-thread-trash-{}-{}",
+                        project_key(&trash_project),
+                        session.id
+                    ));
+                    let trash_group = trash_id.clone();
+                    let key_trash_project = trash_project.clone();
+                    let key_trash_session = trash_session.clone();
+                    let key_trash_root = trash_root.clone();
+                    slot.child(
+                        div()
+                            .id(trash_id)
+                            .group(trash_group.clone())
+                            .size(px(22.0))
+                            .rounded(px(theme::RADIUS_SM))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .tab_index(0)
+                            .cursor_pointer()
+                            .hover(|button| button.bg(theme::canvas()))
+                            .active(|button| button.bg(theme::panel_hover()))
+                            .focus(|button| {
+                                button
+                                    .bg(theme::canvas())
+                                    .border_1()
+                                    .border_color(theme::focus())
+                            })
+                            .on_key_down(move |event: &gpui::KeyDownEvent, _, cx| {
+                                if matches!(
+                                    event.keystroke.key.as_str(),
+                                    "enter" | "space" | "delete" | "backspace"
+                                ) {
+                                    cx.stop_propagation();
+                                    key_trash_root.update(cx, |view, cx| {
+                                        view.trash_thread(
+                                            key_trash_project.clone(),
+                                            key_trash_session.clone(),
+                                            cx,
+                                        );
+                                    });
+                                }
+                            })
+                            .on_click(move |_, _, cx| {
+                                cx.stop_propagation();
+                                trash_root.update(cx, |view, cx| {
+                                    view.trash_thread(
+                                        trash_project.clone(),
+                                        trash_session.clone(),
+                                        cx,
+                                    );
+                                });
+                            })
+                            .child(
+                                svg()
+                                    .path("icons/trash.svg")
+                                    .size(px(13.0))
+                                    .text_color(theme::smoke())
+                                    .group_hover(trash_group, |style| {
+                                        style.text_color(theme::error())
+                                    }),
+                            ),
+                    )
+                }),
         )
         .into_any_element()
 }

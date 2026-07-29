@@ -150,6 +150,100 @@ pub fn trash_eligibility(
     TrashEligibility::Eligible
 }
 
+/// Windows Recycle Bin via `SHFileOperation`. Other platforms stay unavailable
+/// until a reversible provider is proven there.
+pub fn reversible_trash_available() -> bool {
+    cfg!(windows)
+}
+
+pub fn trash_eligibility_message(eligibility: TrashEligibility) -> &'static str {
+    match eligibility {
+        TrashEligibility::Eligible => "Thread can be moved to the Recycle Bin.",
+        TrashEligibility::ActiveSession => "Switch to another thread before deleting this one.",
+        TrashEligibility::OutsideCatalogRoot => {
+            "That thread is outside this project's session catalog."
+        }
+        TrashEligibility::ReversibleProviderUnavailable => {
+            "Recycle Bin is unavailable on this platform."
+        }
+    }
+}
+
+/// Move a catalog-owned session JSONL into the platform Recycle Bin.
+///
+/// Rejects the active session file and anything outside `catalog_root`.
+pub fn trash_session_file(
+    target: &Path,
+    active_session: Option<&Path>,
+    catalog_root: &Path,
+) -> Result<(), String> {
+    let eligibility = trash_eligibility(
+        target,
+        active_session,
+        catalog_root,
+        reversible_trash_available(),
+    );
+    if eligibility != TrashEligibility::Eligible {
+        return Err(trash_eligibility_message(eligibility).to_owned());
+    }
+    if !target.is_file() {
+        return Err("That thread file is no longer available.".to_owned());
+    }
+    move_path_to_trash(target)
+}
+
+fn move_path_to_trash(path: &Path) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        move_path_to_trash_windows(path)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = path;
+        Err(trash_eligibility_message(TrashEligibility::ReversibleProviderUnavailable).to_owned())
+    }
+}
+
+#[cfg(windows)]
+fn move_path_to_trash_windows(path: &Path) -> Result<(), String> {
+    use std::os::windows::ffi::OsStrExt;
+
+    use windows_sys::Win32::UI::Shell::{
+        FO_DELETE, FOF_ALLOWUNDO, FOF_NOCONFIRMATION, FOF_NOERRORUI, FOF_SILENT, SHFILEOPSTRUCTW,
+        SHFileOperationW,
+    };
+
+    // SHFileOperation requires a double-null-terminated list of absolute paths.
+    let mut from: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .chain(std::iter::once(0))
+        .collect();
+
+    let mut file_op = SHFILEOPSTRUCTW {
+        hwnd: std::ptr::null_mut(),
+        wFunc: FO_DELETE,
+        pFrom: from.as_mut_ptr(),
+        pTo: std::ptr::null(),
+        fFlags: (FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_NOERRORUI | FOF_SILENT) as u16,
+        fAnyOperationsAborted: 0,
+        hNameMappings: std::ptr::null_mut(),
+        lpszProgressTitle: std::ptr::null(),
+    };
+
+    // SAFETY: `from` stays alive for the call; double-null terminator is present;
+    // flags request silent undoable delete with no UI.
+    let result = unsafe { SHFileOperationW(&mut file_op) };
+    if result != 0 || file_op.fAnyOperationsAborted != 0 {
+        return Err("Windows could not move that thread to the Recycle Bin.".to_owned());
+    }
+    if path.exists() {
+        return Err("The thread file is still present after the Recycle Bin request.".to_owned());
+    }
+    Ok(())
+}
+
 pub fn scan_sessions(
     config: &SessionCatalogConfig,
 ) -> Result<SessionCatalogScan, SessionCatalogError> {
@@ -719,6 +813,25 @@ mod tests {
             trash_eligibility(&inactive, Some(&active), &root, true),
             TrashEligibility::Eligible
         );
+        assert!(
+            trash_session_file(&active, Some(&active), &root)
+                .unwrap_err()
+                .contains("Switch to another thread")
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn trash_session_moves_inactive_file_out_of_the_catalog() {
+        let root = temp_dir("catalog-trash-session");
+        let active = root.join("active.jsonl");
+        let inactive = root.join("inactive.jsonl");
+        fs::write(&active, "active").unwrap();
+        fs::write(&inactive, "inactive").unwrap();
+        trash_session_file(&inactive, Some(&active), &root).unwrap();
+        assert!(!inactive.exists());
+        assert!(active.exists());
         let _ = fs::remove_dir_all(root);
     }
 }

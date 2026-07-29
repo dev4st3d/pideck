@@ -50,7 +50,9 @@ use crate::services::git_diff::{WorkspaceDiff, load_workspace_diff};
 use crate::services::projects::{
     AddProjectOutcome, ProjectEntry, ProjectRegistry, ProjectRegistryError, project_key,
 };
-use crate::services::session_catalog::{SessionCatalogConfig, SessionSummary, scan_sessions};
+use crate::services::session_catalog::{
+    SessionCatalogConfig, SessionSummary, scan_sessions, trash_session_file,
+};
 use crate::services::terminal::TerminalSize;
 use crate::state::history::HistoryBrowser;
 use crate::state::runtime::{
@@ -385,6 +387,8 @@ pub struct RootView {
     next_runtime_id: u64,
     runtime_clock: u64,
     project_catalogs: HashMap<String, ProjectCatalogCache>,
+    /// Sidebar thread row under the pointer; drives hover-only delete chrome.
+    hovered_thread_key: Option<String>,
     project_feedback: Option<String>,
     project_picker_pending: bool,
     attachment_picker_pending: bool,
@@ -754,6 +758,7 @@ impl RootView {
             next_runtime_id: initial_runtime_id + 1,
             runtime_clock: 1,
             project_catalogs: HashMap::new(),
+            hovered_thread_key: None,
             project_feedback,
             project_picker_pending: false,
             attachment_picker_pending: false,
@@ -3637,6 +3642,148 @@ impl RootView {
             window,
             cx,
         );
+    }
+
+    fn set_hovered_thread(&mut self, key: Option<String>, cx: &mut Context<Self>) {
+        if self.hovered_thread_key == key {
+            return;
+        }
+        self.hovered_thread_key = key;
+        cx.notify();
+    }
+
+    fn trash_thread(
+        &mut self,
+        project_path: PathBuf,
+        session_path: PathBuf,
+        cx: &mut Context<Self>,
+    ) {
+        let session_key = project_key(&session_path);
+        let live_runtime_id = self
+            .runtime_slots
+            .iter()
+            .find(|slot| {
+                [
+                    slot.projection.session_file.as_ref(),
+                    slot.projection.pending_session_file.as_ref(),
+                    slot.requested_session.as_ref(),
+                ]
+                .into_iter()
+                .flatten()
+                .any(|path| project_key(path) == session_key)
+            })
+            .map(|slot| slot.id);
+
+        if let Some(runtime_id) = live_runtime_id {
+            let Some(slot) = self.runtime_slots.iter().find(|slot| slot.id == runtime_id) else {
+                return;
+            };
+            let is_active_session = runtime_id == self.active_runtime_id
+                || self
+                    .render_projections
+                    .catalog
+                    .pending_session_file
+                    .as_ref()
+                    .or(self
+                        .render_projections
+                        .catalog
+                        .current_session_file
+                        .as_ref())
+                    .is_some_and(|path| project_key(path) == session_key);
+            if is_active_session {
+                self.project_feedback =
+                    Some("Switch to another thread before deleting this one.".to_owned());
+                cx.notify();
+                return;
+            }
+            if slot.projection.keeps_background_process() || !slot.ui.can_evict() {
+                self.project_feedback = Some(
+                    "Finish background work and clear drafts before deleting this thread."
+                        .to_owned(),
+                );
+                cx.notify();
+                return;
+            }
+        }
+
+        let catalog_root = self
+            .render_projections
+            .catalog
+            .root
+            .as_ref()
+            .filter(|_| self.projects.is_active(&project_path))
+            .map(|root| root.path.clone())
+            .unwrap_or_else(|| {
+                SessionCatalogConfig::from_environment(project_path.clone())
+                    .resolve_root()
+                    .path
+            });
+        let active_session = self
+            .render_projections
+            .catalog
+            .pending_session_file
+            .as_ref()
+            .or(self
+                .render_projections
+                .catalog
+                .current_session_file
+                .as_ref())
+            .cloned();
+
+        if let Err(error) =
+            trash_session_file(&session_path, active_session.as_deref(), &catalog_root)
+        {
+            self.project_feedback = Some(error);
+            cx.notify();
+            return;
+        }
+
+        if let Some(runtime_id) = live_runtime_id
+            && let Some(index) = self
+                .runtime_slots
+                .iter()
+                .position(|slot| slot.id == runtime_id)
+        {
+            let slot = self.runtime_slots.remove(index);
+            slot.controller
+                .update(cx, |controller, _| controller.shutdown());
+            self.runtime_observations.remove(&runtime_id);
+        }
+
+        let project_cache_key = project_key(&project_path);
+        if let Some(cache) = self.project_catalogs.get_mut(&project_cache_key) {
+            let sessions = Arc::make_mut(&mut cache.sessions);
+            sessions.retain(|session| project_key(&session.path) != session_key);
+            cache.status = if sessions.is_empty() {
+                CatalogStatus::Empty
+            } else {
+                CatalogStatus::Ready
+            };
+        }
+
+        if self.projects.is_active(&project_path) {
+            self.controller.update(cx, |controller, cx| {
+                controller.refresh_sessions(cx);
+            });
+        } else {
+            self.refresh_project_catalogs(cx);
+        }
+
+        if self
+            .projects
+            .projects()
+            .iter()
+            .find(|project| project_key(&project.path) == project_cache_key)
+            .and_then(|project| project.last_session.as_ref())
+            .is_some_and(|last| project_key(last) == session_key)
+            && self.projects.set_last_session(&project_path, None)
+        {
+            self.persist_projects(cx);
+        }
+
+        self.hovered_thread_key = None;
+        self.project_feedback = Some("Thread moved to the Recycle Bin.".to_owned());
+        cx.notify();
     }
 
     fn refresh_sessions(&mut self, cx: &mut Context<Self>) {

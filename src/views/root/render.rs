@@ -115,6 +115,7 @@ impl Render for RootView {
                             projects: &self.projects,
                             project_catalogs: &self.project_catalogs,
                             thread_statuses: &thread_statuses,
+                            hovered_thread_key: self.hovered_thread_key.as_deref(),
                             project_feedback: self.project_feedback.as_deref(),
                             project_picker_pending: self.project_picker_pending,
                             project_switch_enabled,
