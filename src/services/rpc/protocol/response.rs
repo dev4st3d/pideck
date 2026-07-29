@@ -25,6 +25,7 @@ pub enum ResponseResult {
     GetAvailableModels(AvailableModelsData),
     SetThinkingLevel,
     CycleThinkingLevel(Option<ThinkingLevelData>),
+    GetAvailableThinkingLevels(AvailableThinkingLevelsData),
     SetSteeringMode,
     SetFollowUpMode,
     Compact(CompactionResult),
@@ -78,6 +79,11 @@ pub struct AvailableModelsData {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ThinkingLevelData {
     pub level: ThinkingLevel,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AvailableThinkingLevelsData {
+    pub levels: Vec<ThinkingLevel>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -146,6 +152,7 @@ impl ResponseResult {
             Self::GetAvailableModels(_) => "get_available_models",
             Self::SetThinkingLevel => "set_thinking_level",
             Self::CycleThinkingLevel(_) => "cycle_thinking_level",
+            Self::GetAvailableThinkingLevels(_) => "get_available_thinking_levels",
             Self::SetSteeringMode => "set_steering_mode",
             Self::SetFollowUpMode => "set_follow_up_mode",
             Self::Compact(_) => "compact",
@@ -184,6 +191,7 @@ impl ResponseResult {
             Self::CycleModel(data) => value!(data),
             Self::GetAvailableModels(data) => value!(data),
             Self::CycleThinkingLevel(data) => value!(data),
+            Self::GetAvailableThinkingLevels(data) => value!(data),
             Self::Compact(data) => value!(data),
             Self::Bash(data) => value!(data),
             Self::GetSessionStats(data) => value!(data),
@@ -327,6 +335,9 @@ impl RpcResponse {
             "get_available_models" => ResponseResult::GetAvailableModels(decode(object, command)?),
             "set_thinking_level" => ResponseResult::SetThinkingLevel,
             "cycle_thinking_level" => ResponseResult::CycleThinkingLevel(decode(object, command)?),
+            "get_available_thinking_levels" => {
+                ResponseResult::GetAvailableThinkingLevels(decode(object, command)?)
+            }
             "set_steering_mode" => ResponseResult::SetSteeringMode,
             "set_follow_up_mode" => ResponseResult::SetFollowUpMode,
             "compact" => ResponseResult::Compact(decode(object, command)?),

@@ -55,7 +55,7 @@ test("orchestration reconnect grace hides quick adapter replacement", { timeout:
       ? `\\\\.\\pipe\\pi-gui-bridge-${process.pid}-${randomUUID()}`
       : join(root, "orchestration.sock");
   mkdirSync(join(sdkRoot, "dist"), { recursive: true });
-  writeFileSync(join(sdkRoot, "package.json"), '{"version":"0.82.0","type":"module"}\n');
+  writeFileSync(join(sdkRoot, "package.json"), '{"version":"0.82.1","type":"module"}\n');
   writeFileSync(join(sdkRoot, "dist", "index.js"), "export {};\n");
 
   const child = spawn(

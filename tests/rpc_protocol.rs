@@ -50,6 +50,10 @@ fn all_commands() -> Vec<(&'static str, Command)> {
         ),
         ("cycle_thinking_level", Command::CycleThinkingLevel),
         (
+            "get_available_thinking_levels",
+            Command::GetAvailableThinkingLevels,
+        ),
+        (
             "set_steering_mode",
             Command::SetSteeringMode {
                 mode: QueueMode::All,
@@ -255,6 +259,10 @@ fn every_installed_response_shape_decodes() {
         success_response("get_available_models", Some(json!({"models":[model()]}))),
         success_response("cycle_thinking_level", Some(json!({"level":"minimal"}))),
         success_response(
+            "get_available_thinking_levels",
+            Some(json!({"levels":["off","low","high"]})),
+        ),
+        success_response(
             "compact",
             Some(json!({
                 "summary":"summary","firstKeptEntryId":"entry-1","tokensBefore":100,
@@ -295,7 +303,7 @@ fn every_installed_response_shape_decodes() {
         success_response("get_commands", Some(json!({"commands":[]}))),
     ]);
 
-    assert_eq!(responses.len(), 31);
+    assert_eq!(responses.len(), 32);
     for value in responses {
         let expected_command = value["command"].as_str().unwrap().to_owned();
         let record = IncomingRecord::from_value(value).expect("installed response should decode");
@@ -432,7 +440,7 @@ fn every_assistant_streaming_variant_decodes() {
         "role":"assistant","content":[],"api":"synthetic-api","provider":"synthetic-provider",
         "model":"synthetic-model","usage":{"input":0,"output":0,"cacheRead":0,
         "cacheWrite":0,"totalTokens":0,"cost":{"input":0.0,"output":0.0,
-        "cacheRead":0.0,"cacheWrite":0.0,"total":0.0}},"stopReason":"stop","timestamp":1
+        "cacheRead":0.0,"cacheWrite":0.0,"total":0.0}},"stopReason":"pending","timestamp":1
     });
     let variants = [
         json!({"type":"start","partial":assistant}),

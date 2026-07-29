@@ -23,7 +23,7 @@ The visible shell now shows only live or explicitly Loading, Awaiting, Unknown, 
 - real workspace-filtered v1-v3 JSONL thread catalogs for every saved project, with loading, empty, inaccessible, corrupt, refreshing/stale, and active-switch states;
 - atomic new/switch/rename/export operations that retain the old transcript read-only until Pi confirms a replacement and never replay an uncertain prompt.
 - a compact History tools panel focused on the active tip, with stock fork-before-tip and clone-path actions, labels, and explicit same-file/new-file confirmations;
-- a negotiated Pi SDK 0.82.0 stdio JSONL bridge for same-file navigation, optional branch summaries, labels, active-path JSONL export, and safe import into a new session file. Unsupported bridge actions stay hidden.
+- a negotiated Pi SDK 0.82.1 stdio JSONL bridge for same-file navigation, optional branch summaries, labels, active-path JSONL export, and safe import into a new session file. Unsupported bridge actions stay hidden.
 - cached-first provider and model catalogs with background refresh, stale/per-provider failures, a searchable model switcher and thinking chips attached to the prompt box, and Providers/Models/Thinking/Usage settings;
 - provider-owned API-key, browser, device-code, text, select, progress, cancel, and logout flows. Secret input is masked and redacted from Rust debug output; catalogs expose no credential values, resolved environment values, headers, base URLs, or raw provider errors;
 - honest separation between the active session model/thinking state (stock RPC) and Pi's persisted defaults/model cycle order (SDK settings), plus nullable current context, lifetime token/cache/reasoning totals, and estimated cost with zero pricing labeled as unpriced rather than free.
@@ -37,7 +37,7 @@ The visible shell now shows only live or explicitly Loading, Awaiting, Unknown, 
 - a capability-gated Resource Center inventory for extensions, tools, skills, prompt templates, themes, packages, context files, and dynamically registered providers, including global/project/package scope, loaded/disabled/error state, source path, provenance, trust, diagnostics, active-tool state, and reload;
 - rejected project trust for the sidecar execution plane: project resources are inventoried through Pi's public SDK but project extension/package code is never loaded. Missing packages use Pi's explicit non-installing resolution path;
 - package install/remove/update/config advertised as unsupported until arbitrary-code confirmation, progress, pin/filter handling, and rollback-safe error UX exist.
-- a session-scoped orchestration Inspector backed by `pi-tasks`, `pi-subagents`, and `pi-goal` stores and event-bus APIs: task dependency/blocker/output details and guarded execute/stop actions; live subagent lifecycle, queue, concurrency, schedules, worktrees, memory, and steer/stop/resume actions; and goal objective, status, token budget, elapsed time, queue, pause/resume/edit/clear actions;
+- a session-scoped orchestration Inspector backed by `pi-tasks`, `pi-subagents`, and `pi-goal` stores and event-bus APIs: task dependency/blocker/output details and guarded execute/stop actions; live subagent lifecycle, queue, concurrency, schedules, worktrees, memory, and steer/stop/resume actions; and goal objective, status, token budget, elapsed time, automatic-response/no-progress guards, ordered-queue freeze state, and guarded pause/resume/edit/clear actions;
 - a conversation-style subagent overlay opened from any Inspector agent row, with the authoritative bounded live transcript tail, visible stale-ID and reconnect states, worktree/result metadata, and an agent-scoped composer. Generic transcript tool cards remain unchanged.
 
 Accepted idle input uses `prompt`. While Pi is running, the primary action uses `steer` and follow-ups use `follow_up`. A composer line beginning with `!` executes the remaining text through Pi's direct `bash` RPC; `!!` does the same with `excludeFromContext=true`. Direct Bash is recorded locally until the authoritative session message reconciles it. Escape and the visible abort action route to `abort_bash` while direct Bash is active, independently from agent `abort`. Empty and rapid duplicate submissions are rejected. Prompt drafts clear only after the matching accepted response; Bash drafts clear when the local execution is recorded. Rejection and uncertain disconnect never trigger replay.
@@ -51,7 +51,7 @@ Rendered Markdown links are styled but not yet clickable. There is no share UI. 
 Install the tested Pi package. Existing Pi credentials are detected automatically, and providers can also be configured from the app's Providers settings:
 
 ```powershell
-npm install -g @earendil-works/pi-coding-agent@0.82.0
+npm install -g @earendil-works/pi-coding-agent@0.82.1
 cargo run
 ```
 
@@ -121,7 +121,7 @@ Typography uses installed system fonts. Open `/settings` and choose separate Mai
 - `src/services/sdk_bridge.rs`, `bridge/pi-bridge.mjs`, and `bridge/protocol.schema.json` - negotiated, versioned, cancellable stdio JSONL SDK sidecar for the Phase 11 session gaps, Phase 12 ModelRuntime/settings/auth gaps, Phase 15 resource inventory/reload plane, and Phase 16 orchestration adapter transport
 - `src/orchestration.rs`, `bridge/orchestration-adapter.mjs`, and `bridge/orchestration-core.mjs` - typed task/subagent/goal snapshots, stale/session guards, Pi event-bus actions, task DAG checks, schedule restoration, and bounded live subagent transcripts
 - `src/resource_center.rs` - secret-free resource inventory contract, trust/load state, package mutation policy, and UI filters
-- `src/services/rpc/` - Pi 0.82.0 wire contract, strict JSONL framing, correlated client, and runtime adapter
+- `src/services/rpc/` - Pi 0.82.1 wire contract, strict JSONL framing, correlated client, and runtime adapter
 - `src/services/pi_process/` - executable discovery, capability probing, launch policy, and process-tree supervision
 - `src/state/runtime.rs` - normalized owned runtime/transcript state, safe message metadata, stamped inputs, requests, and effects
 - `src/state/reducer.rs` - pure lifecycle, hydration, streaming reconciliation, tool, queue, and extension reducer

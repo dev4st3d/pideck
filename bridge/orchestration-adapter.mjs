@@ -242,7 +242,8 @@ async function subagentSnapshots(ctx, knownIds, entries) {
 }
 
 function goalSnapshot(ctx, entries = sessionEntries(ctx)) {
-  return latestGoalState(entries);
+  const settings = readJson(join(AGENT_DIR, "pi-goal.json"), {});
+  return latestGoalState(entries, settings);
 }
 
 function actionError(code, message) {
@@ -677,6 +678,12 @@ export default function orchestrationAdapter(pi) {
         const current = goalSnapshot(currentCtx);
         if (!current?.active || current.active.id !== String(action.goalId ?? "")) {
           throw actionError("stale_id", "The active goal has changed.");
+        }
+        if (current.queueFrozen && action.kind !== "goal_clear") {
+          throw actionError(
+            "guard",
+            "The ordered goal queue is disabled. Re-enable it in pi-goal settings or clear it.",
+          );
         }
         return { invokeCommand: goalCommand(action) };
       }

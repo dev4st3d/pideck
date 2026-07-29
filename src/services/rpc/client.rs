@@ -501,6 +501,7 @@ fn command_class(command: &Command) -> CommandClass {
     match command {
         Command::GetState
         | Command::GetAvailableModels
+        | Command::GetAvailableThinkingLevels
         | Command::GetSessionStats
         | Command::GetForkMessages
         | Command::GetEntries { .. }
@@ -526,6 +527,7 @@ fn command_name(command: &Command) -> Option<&'static str> {
         Command::GetAvailableModels => "get_available_models",
         Command::SetThinkingLevel { .. } => "set_thinking_level",
         Command::CycleThinkingLevel => "cycle_thinking_level",
+        Command::GetAvailableThinkingLevels => "get_available_thinking_levels",
         Command::SetSteeringMode { .. } => "set_steering_mode",
         Command::SetFollowUpMode { .. } => "set_follow_up_mode",
         Command::Compact { .. } => "compact",

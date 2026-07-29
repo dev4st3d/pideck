@@ -116,7 +116,7 @@ export function agentQueuePositions(records) {
   return new Map(queued.map((record, index) => [String(record.id), index + 1]));
 }
 
-export function latestGoalState(entries) {
+export function latestGoalState(entries, rawSettings = {}) {
   const state = [...(Array.isArray(entries) ? entries : [])]
     .reverse()
     .find((entry) => entry?.type === "custom" && entry.customType === "goal-state")?.data;
@@ -124,12 +124,51 @@ export function latestGoalState(entries) {
   const queue = Array.isArray(state.queue) ? state.queue.filter(isRecord).map(normalizeGoal) : [];
   const pendingAction = isRecord(state.pendingAction) ? state.pendingAction : undefined;
   if (!isRecord(state.goal) && queue.length === 0 && !pendingAction) return undefined;
+  const active = isRecord(state.goal) ? normalizeGoal(state.goal) : undefined;
+  const settings = normalizeGoalSettings(rawSettings);
+  const hasOrderedState = active?.status === "queued" || queue.length > 0 || pendingAction !== undefined;
   return {
-    active: isRecord(state.goal) ? normalizeGoal(state.goal) : undefined,
+    active,
     queue,
     pendingAction,
-    queueFrozen: false,
+    queueFrozen: hasOrderedState && !settings.experimentalGoals,
+    automaticTurnLimit: settings.automaticTurnLimit,
+    noProgressTurnLimit: settings.noProgressTurnLimit,
   };
+}
+
+export function normalizeGoalSettings(value) {
+  const defaults = {
+    experimentalGoals: false,
+    automaticTurnLimit: undefined,
+    noProgressTurnLimit: 3,
+  };
+  if (!isRecord(value)) return defaults;
+
+  const toolVisibility = value.toolVisibility ?? "always";
+  if (toolVisibility !== "always" && toolVisibility !== "after-first-goal") return defaults;
+  const experimental = value.experimental ?? {};
+  if (!isRecord(experimental) || (experimental.goals !== undefined && typeof experimental.goals !== "boolean")) {
+    return defaults;
+  }
+  const limits = value.continuationLimits ?? {};
+  if (!isRecord(limits)) return defaults;
+  const automaticTurnLimit = continuationLimit(limits.automaticTurns, undefined);
+  const noProgressTurnLimit = continuationLimit(limits.noProgressTurns, 3);
+  if (automaticTurnLimit === null || noProgressTurnLimit === null) return defaults;
+
+  return {
+    experimentalGoals: experimental.goals === true,
+    automaticTurnLimit: automaticTurnLimit.value,
+    noProgressTurnLimit: noProgressTurnLimit.value,
+  };
+}
+
+function continuationLimit(value, fallback) {
+  if (value === undefined) return { value: fallback };
+  if (value === null) return { value: undefined };
+  if (Number.isSafeInteger(value) && value > 0) return { value };
+  return null;
 }
 
 function normalizeGoal(goal) {
@@ -140,6 +179,10 @@ function normalizeGoal(goal) {
     goal.status === "active" && activeStartedAt !== undefined
       ? Math.max(0, Date.now() - activeStartedAt) / 1000
       : 0;
+  const safetyPauseCause =
+    goal.safetyPauseCause === "continuation_limit" || goal.safetyPauseCause === "no_progress"
+      ? goal.safetyPauseCause
+      : undefined;
   return {
     id: String(goal.id ?? ""),
     objective: String(goal.text ?? ""),
@@ -151,7 +194,14 @@ function normalizeGoal(goal) {
     tokensUsed: finiteNumber(goal.tokensUsed),
     timeUsedSeconds: finiteNumber(goal.timeUsedSeconds) + activeElapsed,
     activeStartedAt,
+    automaticModelTurns: safeCounter(goal.automaticModelTurns),
+    toolFreeRepeatCount: safeCounter(goal.toolFreeRepeatCount),
+    safetyPauseCause,
   };
+}
+
+function safeCounter(value) {
+  return Number.isSafeInteger(value) && value >= 0 ? value : 0;
 }
 
 function finiteNumber(value) {

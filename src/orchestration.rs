@@ -242,6 +242,8 @@ pub struct GoalSnapshot {
     pub queue: Vec<GoalItemSnapshot>,
     pub pending_action: Option<Value>,
     pub queue_frozen: bool,
+    pub automatic_turn_limit: Option<u64>,
+    pub no_progress_turn_limit: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -257,6 +259,18 @@ pub struct GoalItemSnapshot {
     pub tokens_used: u64,
     pub time_used_seconds: f64,
     pub active_started_at: Option<u64>,
+    #[serde(default)]
+    pub automatic_model_turns: u64,
+    #[serde(default)]
+    pub tool_free_repeat_count: u64,
+    pub safety_pause_cause: Option<GoalSafetyPauseCause>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GoalSafetyPauseCause {
+    ContinuationLimit,
+    NoProgress,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -471,6 +485,43 @@ mod tests {
             updated_at: 1,
             output: None,
         }
+    }
+
+    #[test]
+    fn goal_snapshot_decodes_current_safety_and_queue_settings() {
+        let snapshot: GoalSnapshot = serde_json::from_value(serde_json::json!({
+            "active": {
+                "id": "goal-1",
+                "objective": "Ship compatibility",
+                "status": "paused",
+                "startedAt": 1,
+                "updatedAt": 2,
+                "iteration": 3,
+                "tokenBudget": 10_000,
+                "tokensUsed": 4_000,
+                "timeUsedSeconds": 12.5,
+                "activeStartedAt": null,
+                "automaticModelTurns": 7,
+                "toolFreeRepeatCount": 3,
+                "safetyPauseCause": "no_progress"
+            },
+            "queue": [],
+            "pendingAction": null,
+            "queueFrozen": false,
+            "automaticTurnLimit": 12,
+            "noProgressTurnLimit": 4
+        }))
+        .expect("decode current pi-goal snapshot");
+
+        let goal = snapshot.active.expect("active goal");
+        assert_eq!(goal.automatic_model_turns, 7);
+        assert_eq!(goal.tool_free_repeat_count, 3);
+        assert_eq!(
+            goal.safety_pause_cause,
+            Some(GoalSafetyPauseCause::NoProgress)
+        );
+        assert_eq!(snapshot.automatic_turn_limit, Some(12));
+        assert_eq!(snapshot.no_progress_turn_limit, Some(4));
     }
 
     #[test]

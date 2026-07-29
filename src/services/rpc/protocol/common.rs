@@ -185,6 +185,8 @@ pub struct AssistantMessageDiagnostic {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum StopReason {
+    #[serde(rename = "pending")]
+    Pending,
     #[serde(rename = "stop")]
     Stop,
     #[serde(rename = "length")]

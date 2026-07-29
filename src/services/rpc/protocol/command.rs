@@ -60,6 +60,7 @@ pub enum Command {
         level: ThinkingLevel,
     },
     CycleThinkingLevel,
+    GetAvailableThinkingLevels,
     SetSteeringMode {
         mode: QueueMode,
     },

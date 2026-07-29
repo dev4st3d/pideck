@@ -152,8 +152,8 @@ test("schedule restoration normalizes persisted jobs without inventing state", (
   ]);
 });
 
-test("goal snapshots retain budget and elapsed state and actions stay command-backed", () => {
-  const goal = latestGoalState([
+test("goal snapshots retain current safety, queue, and accounting state", () => {
+  const entries = [
     {
       type: "custom",
       customType: "goal-state",
@@ -166,17 +166,35 @@ test("goal snapshots retain budget and elapsed state and actions stay command-ba
           tokensUsed: 1250,
           timeUsedSeconds: 42.5,
           iteration: 2,
+          automaticModelTurns: 7,
+          toolFreeRepeatCount: 3,
+          safetyPauseCause: "no_progress",
         },
         queue: [{ id: "g2", text: "Follow-up", status: "queued" }],
       },
     },
-  ]);
+  ];
+  const goal = latestGoalState(entries, {
+    experimental: { goals: true },
+    continuationLimits: { automaticTurns: 12, noProgressTurns: 4 },
+  });
 
   assert.equal(goal.active.id, "g1");
   assert.equal(goal.active.tokenBudget, 5000);
   assert.equal(goal.active.tokensUsed, 1250);
   assert.equal(goal.active.timeUsedSeconds, 42.5);
+  assert.equal(goal.active.automaticModelTurns, 7);
+  assert.equal(goal.active.toolFreeRepeatCount, 3);
+  assert.equal(goal.active.safetyPauseCause, "no_progress");
   assert.equal(goal.queue[0].objective, "Follow-up");
+  assert.equal(goal.queueFrozen, false);
+  assert.equal(goal.automaticTurnLimit, 12);
+  assert.equal(goal.noProgressTurnLimit, 4);
+
+  const frozen = latestGoalState(entries);
+  assert.equal(frozen.queueFrozen, true);
+  assert.equal(frozen.automaticTurnLimit, undefined);
+  assert.equal(frozen.noProgressTurnLimit, 3);
   assert.equal(goalCommand({ kind: "goal_pause" }), "/goal pause");
   assert.equal(goalCommand({ kind: "goal_resume" }), "/goal resume");
   assert.equal(

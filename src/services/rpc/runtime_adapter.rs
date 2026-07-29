@@ -696,11 +696,12 @@ fn runtime_message(message: AgentMessage) -> RuntimeMessage {
                 total_cost: message.usage.cost.total,
             };
             let stop_reason = match message.stop_reason {
-                StopReason::Stop => MessageStopReason::Stop,
-                StopReason::Length => MessageStopReason::Length,
-                StopReason::ToolUse => MessageStopReason::ToolUse,
-                StopReason::Error => MessageStopReason::Error,
-                StopReason::Aborted => MessageStopReason::Aborted,
+                StopReason::Pending => None,
+                StopReason::Stop => Some(MessageStopReason::Stop),
+                StopReason::Length => Some(MessageStopReason::Length),
+                StopReason::ToolUse => Some(MessageStopReason::ToolUse),
+                StopReason::Error => Some(MessageStopReason::Error),
+                StopReason::Aborted => Some(MessageStopReason::Aborted),
             };
             RuntimeMessage {
                 key: message_key("assistant", message.timestamp, identity),
@@ -709,7 +710,7 @@ fn runtime_message(message: AgentMessage) -> RuntimeMessage {
                 content,
                 visible: true,
                 terminal: false,
-                stop_reason: Some(stop_reason),
+                stop_reason,
                 error: message
                     .error_message
                     .map(|_| "Assistant request failed".to_owned()),

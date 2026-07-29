@@ -798,14 +798,17 @@ fn goal_panel(
             .into_any_element();
     };
     let Some(active) = goal.active.as_ref() else {
+        let queue_note = if goal.queue_frozen {
+            "Ordered goals are disabled in pi-goal settings. Re-enable them or clear the queue."
+        } else {
+            "No active goal. Pi still has queued goal work."
+        };
         return div()
             .flex()
             .flex_col()
             .gap(px(7.0))
             .child(controls::section_label("Goal queue"))
-            .child(controls::empty_list_note(
-                "No active goal. Pi still has queued goal work.",
-            ))
+            .child(controls::empty_list_note(queue_note))
             .child(
                 controls::divider_list().children(goal.queue.iter().enumerate().map(
                     |(index, item)| {
@@ -822,10 +825,16 @@ fn goal_panel(
     let pause_id = goal_id.clone();
     let resume_id = goal_id.clone();
     let clear_id = goal_id.clone();
-    let resumable = matches!(
-        active.status.as_str(),
-        "paused" | "blocked" | "usage_limited" | "budget_limited"
-    );
+    let resumable = !goal.queue_frozen
+        && matches!(
+            active.status.as_str(),
+            "paused" | "blocked" | "usage_limited" | "budget_limited"
+        );
+    let displayed_status = if goal.queue_frozen {
+        "queue off"
+    } else {
+        active.status.as_str()
+    };
     div()
         .flex()
         .flex_col()
@@ -840,8 +849,8 @@ fn goal_panel(
                     div()
                         .font_family(theme::mono())
                         .text_size(theme::text_size(theme::T_TINY))
-                        .text_color(goal_status_color(&active.status))
-                        .child(active.status.clone()),
+                        .text_color(goal_status_color(displayed_status))
+                        .child(displayed_status.to_owned()),
                 ),
         )
         .child(
@@ -863,7 +872,17 @@ fn goal_panel(
                         .text_color(theme::bone())
                         .child(active.objective.clone()),
                 )
-                .child(goal_metrics(active, goal.queue.len()))
+                .child(goal_metrics(
+                    active,
+                    goal.queue.len(),
+                    goal.automatic_turn_limit,
+                    goal.no_progress_turn_limit,
+                ))
+                .when(goal.queue_frozen, |card| {
+                    card.child(controls::empty_list_note(
+                        "Re-enable ordered goals in pi-goal settings before editing or resuming.",
+                    ))
+                })
                 .child(
                     div()
                         .flex()
@@ -874,7 +893,7 @@ fn goal_panel(
                             format!("goal-pause-{goal_id}"),
                             "Pause",
                             false,
-                            active.status == "active",
+                            active.status == "active" && !goal.queue_frozen,
                             Box::new(cx.listener(move |view, _, _, cx| {
                                 view.dispatch_orchestration_action(
                                     OrchestrationAction::GoalPause {
@@ -914,7 +933,9 @@ fn goal_panel(
                         )),
                 ),
         )
-        .child(goal_edit_composer.clone())
+        .when(!goal.queue_frozen, |panel| {
+            panel.child(goal_edit_composer.clone())
+        })
         .when(!goal.queue.is_empty(), |panel| {
             panel.child(
                 controls::divider_list().children(goal.queue.iter().enumerate().map(
@@ -930,21 +951,44 @@ fn goal_panel(
         .into_any_element()
 }
 
-fn goal_metrics(goal: &GoalItemSnapshot, queued: usize) -> impl IntoElement {
+fn goal_metrics(
+    goal: &GoalItemSnapshot,
+    queued: usize,
+    automatic_turn_limit: Option<u64>,
+    no_progress_turn_limit: Option<u64>,
+) -> impl IntoElement {
     let budget = goal
         .token_budget
         .map(|budget| format!("{} / {} tokens", goal.tokens_used, budget))
         .unwrap_or_else(|| format!("{} tokens", goal.tokens_used));
+    let automatic = automatic_turn_limit
+        .map(|limit| format!("auto {}/{}", goal.automatic_model_turns, limit))
+        .unwrap_or_else(|| format!("auto {}/unlimited", goal.automatic_model_turns));
+    let safety = match goal.safety_pause_cause {
+        Some(crate::orchestration::GoalSafetyPauseCause::ContinuationLimit) => {
+            " · paused at automatic-response limit".to_owned()
+        }
+        Some(crate::orchestration::GoalSafetyPauseCause::NoProgress) => format!(
+            " · paused after {} no-progress runs",
+            goal.tool_free_repeat_count
+        ),
+        None if goal.tool_free_repeat_count > 0 => no_progress_turn_limit
+            .map(|limit| format!(" · no-progress {}/{limit}", goal.tool_free_repeat_count))
+            .unwrap_or_default(),
+        None => String::new(),
+    };
     div()
         .font_family(theme::mono())
         .text_size(theme::text_size(theme::T_TINY))
         .text_color(theme::ash())
         .child(format!(
-            "{} · {} elapsed · iteration {} · {} queued",
+            "{} · {} · {} elapsed · iteration {} · {} queued{}",
             budget,
+            automatic,
             format_elapsed(goal.time_used_seconds),
             goal.iteration,
-            queued
+            queued,
+            safety
         ))
 }
 

@@ -13,7 +13,7 @@ use serde::Deserialize;
 use super::diagnostics::redact_diagnostic;
 use super::platform::{ExitStatus, spawn_contained};
 
-pub const SUPPORTED_PI_VERSION: &str = "0.82.0";
+pub const SUPPORTED_PI_VERSION: &str = "0.82.1";
 const MAX_PROBE_OUTPUT: usize = 256 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -660,7 +660,7 @@ mod tests {
         fs::write(package.join("dist/cli.js"), "fake cli").expect("write cli");
         fs::write(
             package.join("package.json"),
-            r#"{"name":"@earendil-works/pi-coding-agent","version":"0.82.0","bin":{"pi":"dist/cli.js"}}"#,
+            r#"{"name":"@earendil-works/pi-coding-agent","version":"0.82.1","bin":{"pi":"dist/cli.js"}}"#,
         )
         .expect("write manifest");
 
