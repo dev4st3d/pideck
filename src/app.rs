@@ -1,5 +1,6 @@
 use gpui::{
-    App, Application, Bounds, KeyBinding, WindowBounds, WindowOptions, prelude::*, px, size,
+    App, Application, Bounds, KeyBinding, SharedString, TitlebarOptions, WindowBounds,
+    WindowOptions, prelude::*, px, size,
 };
 
 use crate::actions::{
@@ -72,6 +73,12 @@ pub fn run() {
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 window_min_size: Some(size(px(1080.0), px(640.0))),
+                titlebar: Some(TitlebarOptions {
+                    title: Some(SharedString::from("πdeck")),
+                    appears_transparent: false,
+                    traffic_light_position: None,
+                }),
+                app_id: Some("pideck".into()),
                 ..Default::default()
             },
             move |window, cx| {

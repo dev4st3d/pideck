@@ -1,6 +1,8 @@
 use std::time::Duration;
 
-use gpui::{Animation, AnimationExt, AnyElement, SharedString, deferred, ease_out_quint, svg};
+use gpui::{
+    Animation, AnimationExt, AnyElement, SharedString, deferred, ease_out_quint, relative, svg,
+};
 
 use super::shared::{action_id, runtime_operation_label, short_path};
 use super::*;
@@ -95,13 +97,35 @@ pub(super) fn titlebar(params: TitlebarParams<'_>, cx: &mut Context<RootView>) -
                 .flex_1()
                 .child(sidebar_toggle_button(sidebar_open, cx))
                 .child(
+                    // One unit with the row: same 28px chrome height as sidebar /
+                    // rename. No baseline tricks — keep πdeck locked together and
+                    // flex-center it with the neighboring controls.
                     div()
-                        .font_family(theme::main())
-                        .text_size(theme::text_size(theme::T_WORDMARK))
-                        .font_weight(FontWeight::NORMAL)
-                        .text_color(theme::bone())
+                        .h(px(28.0))
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(1.0))
                         .flex_shrink_0()
-                        .child("Pideck"),
+                        .font_family(theme::main())
+                        // Font metrics hang low vs the 28px icon boxes; lift the whole mark.
+                        .mt(px(-2.0))
+                        .child(
+                            div()
+                                .text_size(theme::text_size(19.0))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(theme::live())
+                                .line_height(relative(1.0))
+                                .child("π"),
+                        )
+                        .child(
+                            div()
+                                .text_size(theme::text_size(theme::T_WORDMARK))
+                                .font_weight(FontWeight::NORMAL)
+                                .text_color(theme::bone())
+                                .line_height(relative(1.0))
+                                .child("deck"),
+                        ),
                 )
                 .child(
                     div()

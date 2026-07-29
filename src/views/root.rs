@@ -679,7 +679,7 @@ impl RootView {
             cx.subscribe_in(&goal_edit_composer, window, |view, _, event, _, cx| {
                 view.on_goal_edit_event(event, cx)
             });
-        window.set_window_title("Pideck");
+        window.set_window_title("πdeck");
         let initial_project_path = projects.active_path().to_path_buf();
         let initial_projection = controller.read(cx).thread_runtime_projection();
         let mut runtime_observations = HashMap::new();
@@ -789,7 +789,7 @@ impl RootView {
             sessions_scroll_motion: ConversationScrollMotion::default(),
             subagent_dialog_focus,
             subagent_dialog_scroll: ScrollHandle::new(),
-            window_title: "Pideck".to_owned(),
+            window_title: "πdeck".to_owned(),
             history: HistoryBrowser::default(),
             history_focus,
             history_open: false,
@@ -2093,7 +2093,7 @@ impl RootView {
             .as_deref()
             .map(single_line_title)
             .filter(|title| !title.is_empty())
-            .unwrap_or_else(|| "Pideck".to_owned());
+            .unwrap_or_else(|| "πdeck".to_owned());
         if title != self.window_title {
             window.set_window_title(&title);
             self.window_title = title;
