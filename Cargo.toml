@@ -3,7 +3,10 @@ name = "pi-gui"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
-description = "A native desktop app built with Rust and GPUI"
+description = "Pideck — a native desktop shell for the Pi coding agent (GPUI)"
+license = "MIT"
+repository = "https://github.com/DevastedDev/pideck"
+readme = "README.md"
 
 [dependencies]
 async-channel = "2.5.0"
