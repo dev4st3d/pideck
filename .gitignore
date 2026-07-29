@@ -1,6 +1,5 @@
 /target/
 /temp/
-/docs/
 *.pdb
 
 .pi/tasks/

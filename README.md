@@ -1,140 +1,100 @@
+<div align="center">
+
 # Pideck
 
-Pideck is a native Windows-first desktop shell for Pi, built with Rust and GPUI 0.2.2.
+**The desktop home for [Pi](https://github.com/earendil-works/pi)** — a native shell that turns the coding agent you already run from the terminal into a focused, keyboard-first workspace.
 
-## Current maturity
+![Rust 1.85+](https://img.shields.io/badge/rust-1.85%2B-informational)
+![GPUI 0.2.2](https://img.shields.io/badge/GPUI-0.2.2-blueviolet)
 
-Phases 9 through 16 complete run-control recovery UX, Pi's persisted session lifecycle, native branch history, the model/provider experience, the unified command system, the stock RPC extension UI host, the audited SDK resource plane, and native orchestration for installed Pi task, subagent, and goal extensions. Startup, discovery, correlated readiness, hydration, prompt acceptance, message streaming, tools, retries, compaction, session catalog scanning, direct Bash, SDK session/model/resource operations, orchestration snapshots/actions, command discovery, and shutdown all run behind dedicated workers. The GPUI-owned controller observes normalized state and never performs I/O from `render`.
+</div>
 
-The visible shell now shows only live or explicitly Loading, Awaiting, Unknown, stale, stopped, and error values:
+---
 
-- active session, lifecycle, and cost in the title bar;
-- a persistent, collapsible project sidebar with background thread catalogs, native folder picking, project switching/removal, canonical active-workspace state, and live per-thread foreground/background work status;
-- context, input/output tokens, cache usage, cost, model, and thinking in the inspector;
-- one applicable Connect, Retry, or Stop action with pointer and keyboard paths;
-- a native multiline composer with model and thinking pickers in the prompt chrome, grapheme-safe editing, IME, clipboard, selection, undo, wrapping, scrolling, and visible pending/accepted/rejected/uncertain delivery state;
-- native multi-file picker and drag/drop attachments: images keep Pi's RPC image transport, small UTF-8 text/code files are snapshotted into bounded named prompt blocks, larger readable files remain explicit live path references, and unsupported binaries are rejected without blocking the UI;
-- the authoritative current transcript with Markdown-rendered user input, assistant output, and thinking; visible custom messages; branch/compaction summaries; generic running/success/error/cancelled tool and Bash cards; lifecycle notices; and in-place accumulated partial updates;
-- expandable sanitized tool arguments, bounded text/diff previews, image results, opaque detail fallback, copy controls, elapsed time, truncation metadata, and explicit full-output Reveal/Open folder actions;
-- a read-only Git workspace change summary after completed responses, with per-file counts, untracked and binary awareness, expandable file rows, and a bounded file-oriented diff viewer with a scrollable folder tree, navigation, readable hunks, and compact line numbers;
-- provider/model/time/stop/usage metadata with raw provider diagnostics and private payloads excluded from normalized diagnostics;
-- selectable transcript text and near-bottom-only auto-follow, preserving manual scroll and selection during streaming.
-- complete steering/follow-up queue visibility and delivery modes, scoped abort controls, retry countdown/attempt/final-error state, manual compaction with optional focus instructions, and auto-compaction/auto-retry controls;
-- real workspace-filtered v1-v3 JSONL thread catalogs for every saved project, with loading, empty, inaccessible, corrupt, refreshing/stale, and active-switch states;
-- atomic new/switch/rename/export operations that retain the old transcript read-only until Pi confirms a replacement and never replay an uncertain prompt.
-- a compact History tools panel focused on the active tip, with stock fork-before-tip and clone-path actions, labels, and explicit same-file/new-file confirmations;
-- a negotiated Pi SDK 0.82.1 stdio JSONL bridge for same-file navigation, optional branch summaries, labels, active-path JSONL export, and safe import into a new session file. Unsupported bridge actions stay hidden.
-- cached-first provider and model catalogs with background refresh, stale/per-provider failures, a searchable model switcher and thinking chips attached to the prompt box, and Providers/Models/Thinking/Usage settings;
-- provider-owned API-key, browser, device-code, text, select, progress, cancel, and logout flows. Secret input is masked and redacted from Rust debug output; catalogs expose no credential values, resolved environment values, headers, base URLs, or raw provider errors;
-- honest separation between the active session model/thinking state (stock RPC) and Pi's persisted defaults/model cycle order (SDK settings), plus nullable current context, lifetime token/cache/reasoning totals, and estimated cost with zero pricing labeled as unpriced rather than free.
-- `/` autocomplete plus a `Ctrl+Shift+P` palette merging native actions with Pi-discovered extension, prompt-template, and skill commands. Results are grouped by kind, retain duplicate/suffixed names, and show installed scope/origin/source/path provenance;
-- compact `@` file autocomplete in the composer against the active workspace (directory drill-in, fuzzy search, quoted paths with spaces, keyboard navigation shared with `/`);
-- native model/session/tree/fork/clone/compact/export/copy/abort/settings/help actions that never round-trip through the model, with argument hints for native commands and a refresh command for retained stale catalogs.
-- native RPC notifications are shown as dismissible in-app notices, while installed TUI-only layout commands such as `/box`, `/rail`, and `/topbar` are omitted and guarded from model delivery.
-- stock `select`, `confirm`, `input`, and `editor` extension dialogs in a deterministic FIFO modal queue, with focus containment, Escape cancellation, answer-type validation, one response per request ID, and timeout/process/session tombstones that prevent late or duplicate answers;
-- keyed `setStatus` and text-line `setWidget` replacement/clear semantics, above/below-composer widget placement, native window `setTitle`, immediate last-write-wins `set_editor_text`, and redacted extension errors that retain only source basename and event context;
-- an explicit RPC capability boundary: `custom()` overlays/components, component-factory widgets, custom editor/header/footer, TUI renderers, themes, and the process-local extension event bus are unsupported. Extension dialogs are untrusted application content, not secure permission prompts, because stock requests carry no verified provenance.
-- a capability-gated Resource Center inventory for extensions, tools, skills, prompt templates, themes, packages, context files, and dynamically registered providers, including global/project/package scope, loaded/disabled/error state, source path, provenance, trust, diagnostics, active-tool state, and reload;
-- rejected project trust for the sidecar execution plane: project resources are inventoried through Pi's public SDK but project extension/package code is never loaded. Missing packages use Pi's explicit non-installing resolution path;
-- package install/remove/update/config advertised as unsupported until arbitrary-code confirmation, progress, pin/filter handling, and rollback-safe error UX exist.
-- a session-scoped orchestration Inspector backed by `pi-tasks`, `pi-subagents`, and `pi-goal` stores and event-bus APIs: task dependency/blocker/output details and guarded execute/stop actions; live subagent lifecycle, queue, concurrency, schedules, worktrees, memory, and steer/stop/resume actions; and goal objective, status, token budget, elapsed time, automatic-response/no-progress guards, ordered-queue freeze state, and guarded pause/resume/edit/clear actions;
-- a conversation-style subagent overlay opened from any Inspector agent row, with the authoritative bounded live transcript tail, visible stale-ID and reconnect states, worktree/result metadata, and an agent-scoped composer. Generic transcript tool cards remain unchanged.
+Pideck is written in **Rust** on **GPUI 0.2.2**. Pi remains the agent runtime and credential owner; Pideck discovers it, supervises it, and gives its full capability set — sessions, tools, extensions, orchestration — a polished interface.
 
-Accepted idle input uses `prompt`. While Pi is running, the primary action uses `steer` and follow-ups use `follow_up`. A composer line beginning with `!` executes the remaining text through Pi's direct `bash` RPC; `!!` does the same with `excludeFromContext=true`. Direct Bash is recorded locally until the authoritative session message reconciles it. Escape and the visible abort action route to `abort_bash` while direct Bash is active, independently from agent `abort`. Empty and rapid duplicate submissions are rejected. Prompt drafts clear only after the matching accepted response; Bash drafts clear when the local execution is recorded. Rejection and uncertain disconnect never trigger replay.
+## Features
 
-Discovered extension, prompt-template, and skill commands always invoke through Pi's `prompt` RPC. Prompt/skill commands use `streamingBehavior` while a run is active; extension commands execute immediately as Pi specifies. Exact dynamic-command arguments are preserved. Known TUI-only built-ins such as `/login`, `/logout`, `/resume`, `/share`, and `/theme` are rejected locally instead of becoming ordinary model prompts.
+- Collapsible project sidebar with multi-thread catalogs, live background-work status, and session switch / rename / export
+- Multiline composer with drag-and-drop attachments, `@` file completion, `/` command completion, and direct Bash (`!` / `!!`)
+- Steer mid-run with `Enter`, queue follow-ups with `Alt+Enter`, delivery state always visible
+- Streaming Markdown transcript with tool cards, expandable args, diff and image previews, copy, and elapsed time
+- Read-only Git change summary with a bounded per-file diff viewer after each response
+- Provider authentication, searchable model switcher, and thinking controls — Pideck never stores credentials
+- Command palette (`Ctrl+Shift+P`) merging native actions with discovered extension, skill, and prompt-template commands
+- Embedded PTY terminal, keyboard-first recovery (connect / retry / stop), and hotkey help (`Ctrl+/`)
+- Resource Center inventory for extensions, tools, skills, prompt templates, themes, and packages
+- No telemetry, no analytics, no remote reporting
 
-Rendered Markdown links are styled but not yet clickable. There is no share UI. Saved threads can run in parallel: opening another thread reuses an idle same-project Pi runtime for the original fast switch when no local state must be preserved, or starts an independent supervised runtime when prior work must continue in the background; the sidebar exposes working, cancelling, opening, and attention states. Resource Center management is deliberately read-mostly; package mutation remains unavailable. Main-session queue items are authoritative and read-only because stock Pi RPC has no remove/restore operation. Hover a non-active thread in the sidebar to move it to the Recycle Bin (Windows); active, busy, and out-of-catalog files stay protected.
+## Supported extensions
 
-## Prerequisite and launch
+Every installed Pi extension is hosted natively: `select`, `confirm`, `input`, and `editor` dialogs become native windows, status lines and widgets render in place, window titles update the title bar, and extension commands join the palette.
 
-Install the tested Pi package. Existing Pi credentials are detected automatically, and providers can also be configured from the app's Providers settings:
+**First-class Inspector supervision**
+
+| Extension | What you get |
+|---|---|
+| `@tintinweb/pi-tasks` | Task lists with dependencies, blockers, and outputs; guarded execute and stop |
+| `@tintinweb/pi-subagents` | Live lifecycle, queue, concurrency, schedules, worktrees, and memory; steer, stop, and resume agents; conversation overlay with a bounded live transcript |
+| `pi-goal` | Objective, status, budget, and elapsed time; guarded pause, resume, edit, and clear |
+
+**Tested through the runtime**
+
+- `ask-user-question` — multi-question flows, choices, previews, notes, and multi-select answered through native dialogs
+
+
+## Requirements
+
+| | |
+|---|---|
+| OS | Windows |
+| Rust | 1.85+ (stable, see `rust-toolchain.toml`) |
+| Pi | `@earendil-works/pi-coding-agent@0.82.1` |
+| Node | Required only for Pi and the SDK bridge sidecar |
+
+## Quick start
 
 ```powershell
 npm install -g @earendil-works/pi-coding-agent@0.82.1
 cargo run
 ```
 
-If Cargo is not on `PATH` on Windows:
+If Cargo is not on `PATH`:
 
 ```powershell
 & "$env:USERPROFILE\.cargo\bin\cargo.exe" run
 ```
 
-The launch folder is added to the persistent project sidebar. The app reopens the last available active project and stores project expansion and last-thread state in `pideck-projects.json` under Pi's agent directory. The active project connects with:
+On first launch, pick or open a project — it joins the sidebar and reopens next time. Existing Pi credentials are reused; you can also authenticate from **Settings → Providers**.
 
-- `ProjectTrust::Reject` (`--no-approve`);
-- a persisted session directory resolved with Pi precedence (`PI_CODING_AGENT_SESSION_DIR`, configured `sessionDir`, then the encoded default under the agent directory);
-- installed extensions, skills, and prompt templates discovered for the command catalog under rejected project trust;
-- TUI chrome extensions replaced by native UI (`activity-rail`, `box-editor`, `quiet-topbar`, `compact-resources`, `pi-bar`) omitted from the GUI Pi process only — they stay installed for the TUI and are never deleted;
-- themes disabled because the native shell owns appearance; context files (`AGENTS.md` / `CLAUDE.md`) load the same way as stock Pi;
-- built-in Pi tools enabled so generic tool cards can observe their execution;
-- offline mode disabled so Pi can resolve existing Pi-managed credentials and models.
+## Keyboard essentials
 
-Tool events are observational, not a permission prompt. Tools and direct Bash run with the user's normal account permissions. Returned `fullOutputPath` values are treated as untrusted: the app never reads or executes them automatically, and only passes them as direct process arguments after an explicit Reveal or Open folder action.
-
-If no model is available, open Settings > Providers, authenticate, refresh catalogs, and choose a model. Pi remains the credential owner. The GUI transports provider prompts but never includes credential values in catalog state or diagnostics.
-
-## Keyboard
-
-| Action | Shortcut |
+| Action | Keys |
 |---|---|
-| Connect | `Ctrl+Alt+C` |
-| Retry | `Ctrl+Alt+R` |
-| Stop | `Ctrl+Alt+S` |
-| Open command palette | `Ctrl+Shift+P` |
+| Command palette | `Ctrl+Shift+P` |
+| Connect · Retry · Stop | `Ctrl+Alt+C` · `Ctrl+Alt+R` · `Ctrl+Alt+S` |
+| Workspace terminal | `` Ctrl+` `` |
 | Attach files | `Ctrl+O` or drag onto the composer |
-| Toggle workspace terminal | Ctrl + backtick |
-| `@` file completion (in composer) | type `@` then `↑` `↓` `Enter` / `Esc` |
-| `/` command completion (in composer) | type `/` then `↑` `↓` `Enter` / `Esc` |
-| Show native hotkey help | `Ctrl+/` |
-| Increase font size | `Ctrl++` (or `Ctrl+=`) |
-| Decrease font size | `Ctrl+-` |
-| Send while idle / steer while running | `Enter` |
-| Insert newline | `Shift+Enter` |
-| Queue follow-up while running | `Alt+Enter` |
-| Run direct Bash / exclude it from context | `!command` / `!!command` |
-| Abort active agent run or direct Bash scope | `Escape` |
-| Move within an extension select/confirm dialog | Arrow keys |
-| Accept the highlighted extension choice | `Enter` or `Space` |
-| Cancel an extension dialog | `Escape` |
-| Keep focus inside an extension dialog | `Tab` or `Shift+Tab` |
-| Send a subagent steer/resume message | `Enter` |
-| Close the subagent conversation | `Escape` |
-| Activate visible recovery action | `Enter` or `Space` |
-| Next focus | `Tab` |
-| Previous focus | `Shift+Tab` |
+| Send / steer · newline · queue follow-up | `Enter` · `Shift+Enter` · `Alt+Enter` |
+| Direct Bash · Bash excluded from context | `!cmd` · `!!cmd` |
+| Abort the active run | `Escape` |
+| Hotkey help | `Ctrl+/` |
 
-Typography uses installed system fonts. Open `/settings` and choose separate Main, Sans, and Mono families in the Type tab; selections apply immediately and persist locally. Use `Ctrl++` or `Ctrl+-` to adjust the overall font size for the current run.
+The full map lives in [info/README.md](info/README.md).
 
-## Architecture
+## Documentation
 
-- `src/app.rs` - window bootstrap, service injection, keybindings, automatic connection, and send-only window-close shutdown
-- `src/actions.rs` - logical runtime and focus actions
-- `src/command_catalog.rs` - declarative native commands, installed provenance, filtering, duplicate identity, stale state, and TUI-only guards
-- `src/controller.rs` - GPUI-owned controller plus pure attempt/generation gate
-- `src/services/runtime_worker.rs` - injectable GPUI-independent service boundary and responsive worker coordinator
-- `src/services/session_catalog.rs` - strict streaming v1-v3 JSONL metadata scanner, directory precedence, canonical workspace filtering, corruption reporting, and stale-scan worker
-- `src/services/git_diff.rs` - bounded read-only Git and untracked-file inspection for post-response workspace change snapshots
-- `src/services/terminal.rs` and `src/views/terminal.rs` - lazy, bounded real-PTY transport with an adjustable multi-instance terminal tab panel
-- `src/model_runtime.rs` - secret-free provider/model catalog, cached refresh, auth prompt state machine, sparse thinking, pricing-tier, and streaming-change policy
-- `src/services/sdk_bridge.rs`, `bridge/pi-bridge.mjs`, and `bridge/protocol.schema.json` - negotiated, versioned, cancellable stdio JSONL SDK sidecar for the Phase 11 session gaps, Phase 12 ModelRuntime/settings/auth gaps, Phase 15 resource inventory/reload plane, and Phase 16 orchestration adapter transport
-- `src/orchestration.rs`, `bridge/orchestration-adapter.mjs`, and `bridge/orchestration-core.mjs` - typed task/subagent/goal snapshots, stale/session guards, Pi event-bus actions, task DAG checks, schedule restoration, and bounded live subagent transcripts
-- `src/resource_center.rs` - secret-free resource inventory contract, trust/load state, package mutation policy, and UI filters
-- `src/services/rpc/` - Pi 0.82.1 wire contract, strict JSONL framing, correlated client, and runtime adapter
-- `src/services/pi_process/` - executable discovery, capability probing, launch policy, and process-tree supervision
-- `src/state/runtime.rs` - normalized owned runtime/transcript state, safe message metadata, stamped inputs, requests, and effects
-- `src/state/reducer.rs` - pure lifecycle, hydration, streaming reconciliation, tool, queue, and extension reducer
-- `src/state.rs` - truthful owned shell projections with stale/unknown semantics
-- `src/views/root.rs` - observed runtime shell, conversation ownership, scroll pinning, and draft/acceptance correlation
-- `src/views/conversation.rs` and `src/views/markdown.rs` - turn-grouped live transcript, stable selectable text entities, safe CommonMark presentation, metadata, and notices
-- `src/views/tool_card.rs` - generic tool/Bash payload normalization, bounded previews, image/diff rendering, copy, and explicit output-path actions
-- `src/views/diff_summary.rs` - response-tail changed-file disclosure and bounded file-oriented diff viewer
-- `src/views/composer/` - native GPUI input handler, text buffer, multiline layout/paint, and focused tests
-- `src/views/controls.rs` - focus-visible recovery control and inspector rows
+| Doc | Contents |
+|---|---|
+| [info/README.md](info/README.md) | Launch policy, keyboard map, architecture map |
+| [AGENTS.md](AGENTS.md) | Conventions for contributors and coding agents |
 
-The worker uses a controller attempt generation in addition to `ConnectionGeneration` and `SessionEpoch`. A retry starts a fresh process and generation; prior-attempt startup/results cannot overwrite it, and a late obsolete client is stopped immediately. Recovery hydrates state and never resends a prompt.
+## Development
 
-`RootView` owns a bounded pool of thread runtimes rather than one eager runtime per project. Up to eight live thread runtimes may coexist; idle draft-free navigation reuses a same-project process for pre-pool switch latency, running and connecting threads remain supervised in the background, retained controllers keep their hydrated transcript/history/model state so revisits render immediately, the least-recently-used evictable runtime is retired only when the pool needs room, and unsent drafts remain attached to their thread. Each runtime/SDK bridge pair receives a unique orchestration endpoint so parallel threads in the same workspace cannot replace each other's adapter connection.
+```powershell
+cargo fmt --all -- --check
+cargo check --all-targets
+cargo test --all-targets
+```
 
-Initial, recovery, and session-replacement hydration request `get_state` first, then messages, durable entries, session statistics, commands, available models, and fork candidates. Tree state is rebuilt from the flat durable entries instead of requesting Pi's recursively nested tree response, so long sessions cannot exceed the JSON decoder's recursion limit. Opening a saved session starts a fresh supervised connection directly on that file and retires the prior generation off the UI thread, preventing an in-process session handoff from leaving the shell disconnected. Fork, clone, import, and same-file navigation advance the session epoch before rebuilding every session-bound surface. Recovery resumes the persisted session and requests entries after the last durable cursor; an invalid cursor falls back to one full rebuild. Optional facet failures preserve prior valid values and do not make an otherwise ready connection unusable. Window/controller release requests shutdown without waiting on the GPUI event loop.
+Dev builds use `opt-level = 1` so GPUI rendering stays fluid without a full release profile; the hot rendering crates compile at `opt-level = 3`.
