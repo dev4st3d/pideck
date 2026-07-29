@@ -513,7 +513,9 @@ pub fn chip_button(
         )
 }
 
-/// Compact select trigger for model / thinking controls in the prompt chrome.
+/// Compact select trigger for model / thinking / theme chrome controls.
+///
+/// Shared 28px height keeps titlebar and prompt selects aligned with icon toggles.
 pub fn compact_select(
     id: impl Into<SharedString>,
     label: impl Into<SharedString>,
@@ -524,7 +526,7 @@ pub fn compact_select(
 ) -> impl IntoElement {
     div()
         .id(id.into())
-        .h(px(26.0))
+        .h(px(28.0))
         .max_w(px(max_width))
         .px(px(8.0))
         .rounded(px(theme::RADIUS_SM))

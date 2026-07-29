@@ -866,6 +866,8 @@ pub(super) fn activity_detail_overlay(
 }
 
 fn activity_detail_close_button(focus: &FocusHandle, cx: &mut Context<RootView>) -> AnyElement {
+    // Match `controls::quiet_button` metrics and resting treatment so header
+    // dismiss actions share one chrome language (focus tracking stays local).
     div()
         .id("close-activity-detail")
         .track_focus(focus)
@@ -879,14 +881,10 @@ fn activity_detail_close_button(focus: &FocusHandle, cx: &mut Context<RootView>)
         .tab_index(0)
         .cursor_pointer()
         .whitespace_nowrap()
-        .font_family(theme::main())
-        .text_size(theme::text_size(theme::T_TINY))
-        .font_weight(FontWeight::SEMIBOLD)
-        .bg(theme::canvas())
-        .text_color(theme::ash())
-        .hover(|button| button.bg(theme::panel_hover()).text_color(theme::bone()))
+        .text_color(theme::bone_dim())
+        .hover(|button| button.bg(theme::panel()).text_color(theme::bone()))
         .active(|button| button.bg(theme::panel_lift()))
-        .focus(|button| button.bg(theme::panel_hover()).text_color(theme::focus()))
+        .focus(|button| button.bg(theme::panel()).text_color(theme::focus()))
         .on_click(cx.listener(|view, _, window, cx| view.close_activity_detail(window, cx)))
         .on_key_down(cx.listener(|view, event: &gpui::KeyDownEvent, window, cx| {
             if matches!(event.keystroke.key.as_str(), "enter" | "space") {
@@ -894,7 +892,13 @@ fn activity_detail_close_button(focus: &FocusHandle, cx: &mut Context<RootView>)
                 view.close_activity_detail(window, cx);
             }
         }))
-        .child("Close · Esc")
+        .child(
+            div()
+                .font_family(theme::main())
+                .text_size(theme::text_size(theme::T_UI_SM))
+                .font_weight(FontWeight::SEMIBOLD)
+                .child("Close · Esc"),
+        )
         .into_any_element()
 }
 

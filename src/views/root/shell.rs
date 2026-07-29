@@ -209,15 +209,17 @@ pub(super) fn titlebar(params: TitlebarParams<'_>, cx: &mut Context<RootView>) -
                         .relative()
                         .flex_shrink_0()
                         .child(
+                            // Height/padding/type match `compact_select` and sit
+                            // flush with the 28px titlebar icon toggles beside it.
                             div()
                                 .id("theme-switcher")
-                                .h(px(24.0))
-                                .px(px(7.0))
+                                .h(px(28.0))
+                                .px(px(8.0))
                                 .rounded(px(theme::RADIUS_SM))
                                 .flex()
                                 .flex_row()
                                 .items_center()
-                                .gap(px(5.0))
+                                .gap(px(6.0))
                                 .bg(if theme_menu_open {
                                     theme::panel_lift()
                                 } else {
@@ -230,19 +232,19 @@ pub(super) fn titlebar(params: TitlebarParams<'_>, cx: &mut Context<RootView>) -
                                     theme::panel()
                                 })
                                 .font_family(theme::main())
-                                .text_size(theme::text_size(theme::T_TINY))
-                                .font_weight(FontWeight::MEDIUM)
+                                .text_size(theme::text_size(theme::T_LABEL))
+                                .font_weight(FontWeight::SEMIBOLD)
                                 .text_color(if theme_menu_open {
                                     theme::bone()
                                 } else {
-                                    theme::ash()
+                                    theme::bone_dim()
                                 })
                                 .whitespace_nowrap()
                                 .cursor_pointer()
                                 .hover(|switcher| {
                                     switcher
                                         .bg(theme::panel_lift())
-                                        .border_color(theme::edge())
+                                        .border_color(theme::panel_lift())
                                         .text_color(theme::bone())
                                 })
                                 .active(|switcher| switcher.bg(theme::panel_hover()))
@@ -274,7 +276,7 @@ pub(super) fn titlebar(params: TitlebarParams<'_>, cx: &mut Context<RootView>) -
                                         } else {
                                             "icons/chevron-down.svg"
                                         })
-                                        .size(px(11.0))
+                                        .size(px(12.0))
                                         .text_color(if theme_menu_open {
                                             theme::data()
                                         } else {
