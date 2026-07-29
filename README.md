@@ -7,11 +7,40 @@
 ![Rust 1.85+](https://img.shields.io/badge/rust-1.85%2B-informational)
 ![GPUI 0.2.2](https://img.shields.io/badge/GPUI-0.2.2-blueviolet)
 
+<br />
+
+![Pideck workspace](assets/screenshots/intro-2.png)
+
 </div>
 
 ---
 
 Pideck is written in **Rust** on **GPUI 0.2.2**. Pi remains the agent runtime and credential owner; Pideck discovers it, supervises it, and gives its full capability set — sessions, tools, extensions, orchestration — a polished interface.
+
+## Screenshots
+
+<table>
+  <tr>
+    <td align="center" width="50%">
+      <img src="assets/screenshots/intro.png" alt="Session workspace" /><br />
+      <b>Session & sidebar</b>
+    </td>
+    <td align="center" width="50%">
+      <img src="assets/screenshots/themes.png" alt="Theme picker" /><br />
+      <b>Themes</b>
+    </td>
+  </tr>
+  <tr>
+    <td align="center" width="50%">
+      <img src="assets/screenshots/diff-viewer.png" alt="Diff viewer" /><br />
+      <b>Diff viewer</b>
+    </td>
+    <td align="center" width="50%">
+      <img src="assets/screenshots/terminal.png" alt="Embedded terminal" /><br />
+      <b>Terminal</b>
+    </td>
+  </tr>
+</table>
 
 ## Features
 
