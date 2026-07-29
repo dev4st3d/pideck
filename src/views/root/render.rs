@@ -1,6 +1,8 @@
 use super::composer_bar::{ComposerBarParams, composer_bar};
 use super::inspector::{InspectorParams, inspector, subagent_dialog};
-use super::model_panels::{ModelSettingsPanelParams, model_settings_panel};
+use super::model_panels::{
+    ModelSettingsPanelParams, ProviderAuthModalParams, model_settings_panel, provider_auth_modal,
+};
 use super::overlays::{
     ConversationAreaParams, PastedImageOverlayParams, activity_detail_overlay,
     command_palette_overlay, compaction_dialog, conversation_area, extension_dialog_overlay,
@@ -156,8 +158,6 @@ impl Render for RootView {
                                 font_role: self.font_role,
                                 font_feedback: self.font_feedback.as_deref(),
                                 pi_scroll: &self.pi_settings_scroll,
-                                auth_input: &self.auth_input_composer,
-                                auth_secret: &self.auth_secret_composer,
                             },
                             cx,
                         )
@@ -321,6 +321,38 @@ impl Render for RootView {
                     &self.extension_dialog_focus,
                     &self.extension_input_composer,
                     &self.extension_editor_composer,
+                    cx,
+                ))
+            })
+            .when_some(models.auth.as_ref(), |shell, auth| {
+                shell.child(provider_auth_modal(
+                    ProviderAuthModalParams {
+                        auth,
+                        provider_name: models
+                            .catalog
+                            .as_ref()
+                            .and_then(|catalog| {
+                                catalog
+                                    .providers
+                                    .iter()
+                                    .find(|provider| provider.id == auth.provider)
+                                    .map(|provider| provider.name.as_str())
+                            })
+                            .unwrap_or(&auth.provider),
+                        auth_input: &self.auth_input_composer,
+                        auth_secret: &self.auth_secret_composer,
+                        focus: &self.provider_auth_focus,
+                        browser_retry_url: self
+                            .last_auth_browser_launch
+                            .as_ref()
+                            .filter(|(operation, _)| *operation == auth.operation)
+                            .map(|(_, url)| url.as_str()),
+                        browser_feedback: self
+                            .auth_browser_feedback
+                            .as_ref()
+                            .map(|(message, tone)| (message.as_str(), *tone)),
+                        provider_feedback: models.feedback.as_deref(),
+                    },
                     cx,
                 ))
             })

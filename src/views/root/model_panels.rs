@@ -13,8 +13,6 @@ pub(super) struct ModelSettingsPanelParams<'a> {
     pub(super) font_role: FontRole,
     pub(super) font_feedback: Option<&'a str>,
     pub(super) pi_scroll: &'a ScrollHandle,
-    pub(super) auth_input: &'a Entity<Composer>,
-    pub(super) auth_secret: &'a Entity<Composer>,
 }
 
 pub(super) fn model_settings_panel(
@@ -33,8 +31,6 @@ pub(super) fn model_settings_panel(
         font_role,
         font_feedback,
         pi_scroll,
-        auth_input,
-        auth_secret,
     } = params;
     let refreshing = if tab == ModelSettingsTab::Resources {
         matches!(resources.phase, ResourcePhase::Refreshing)
@@ -167,9 +163,7 @@ pub(super) fn model_settings_panel(
                 ),
         )
         .child(match tab {
-            ModelSettingsTab::Providers => {
-                providers_settings(projection, auth_input, auth_secret, cx).into_any_element()
-            }
+            ModelSettingsTab::Providers => providers_settings(projection, cx).into_any_element(),
             ModelSettingsTab::Models => models_settings(projection, search, cx).into_any_element(),
             ModelSettingsTab::Thinking => thinking_settings(projection, cx).into_any_element(),
             ModelSettingsTab::Pi => pi_settings(projection, pi_scroll, cx),
@@ -1268,8 +1262,6 @@ pub(super) fn thinking_choices(projection: &ModelRuntimeProjection) -> Vec<Think
 
 fn providers_settings(
     projection: &ModelRuntimeProjection,
-    auth_input: &Entity<Composer>,
-    auth_secret: &Entity<Composer>,
     cx: &mut Context<RootView>,
 ) -> impl IntoElement {
     let providers = projection
@@ -1289,9 +1281,6 @@ fn providers_settings(
         .flex()
         .flex_col()
         .gap(px(12.0))
-        .when_some(projection.auth.as_ref(), |panel, auth| {
-            panel.child(auth_flow_panel(auth, auth_input, auth_secret, cx))
-        })
         .child(controls::panel_note(
             "Pi owns credentials. The GUI only hosts provider prompts and never stores secret values in catalog state.",
             controls::ControlTone::Normal,
@@ -1362,8 +1351,8 @@ fn providers_settings(
                                         method.label(),
                                         false,
                                         !auth_busy,
-                                        Box::new(cx.listener(move |view, _, _, cx| {
-                                            view.login_provider(id.clone(), method, cx)
+                                        Box::new(cx.listener(move |view, _, window, cx| {
+                                            view.login_provider(id.clone(), method, window, cx)
                                         })),
                                     )
                                 }))
@@ -1385,59 +1374,92 @@ fn providers_settings(
         )
 }
 
-fn auth_flow_panel(
-    auth: &crate::model_runtime::AuthFlow,
-    auth_input: &Entity<Composer>,
-    auth_secret: &Entity<Composer>,
+pub(super) struct ProviderAuthModalParams<'a> {
+    pub(super) auth: &'a AuthFlow,
+    pub(super) provider_name: &'a str,
+    pub(super) auth_input: &'a Entity<Composer>,
+    pub(super) auth_secret: &'a Entity<Composer>,
+    pub(super) focus: &'a FocusHandle,
+    pub(super) browser_retry_url: Option<&'a str>,
+    pub(super) browser_feedback: Option<(&'a str, controls::ControlTone)>,
+    pub(super) provider_feedback: Option<&'a str>,
+}
+
+pub(super) fn provider_auth_modal(
+    params: ProviderAuthModalParams<'_>,
     cx: &mut Context<RootView>,
 ) -> impl IntoElement {
+    let ProviderAuthModalParams {
+        auth,
+        provider_name,
+        auth_input,
+        auth_secret,
+        focus,
+        browser_retry_url,
+        browser_feedback,
+        provider_feedback,
+    } = params;
+    let browser_retry_url = browser_retry_url.filter(|_| {
+        !matches!(
+            &auth.stage,
+            AuthStage::Browser { .. } | AuthStage::DeviceCode { .. }
+        )
+    });
     let stage = match &auth.stage {
         AuthStage::Starting => controls::panel_note(
-            "Starting provider-owned authentication...",
+            "Starting provider authentication...",
             controls::ControlTone::Normal,
         )
         .into_any_element(),
         AuthStage::Info { message, links } => div()
             .flex()
             .flex_col()
-            .gap(px(6.0))
+            .gap(px(8.0))
             .child(controls::panel_note(
                 message.clone(),
                 controls::ControlTone::Normal,
             ))
-            .children(links.iter().cloned().map(|link| {
+            .children(links.iter().cloned().enumerate().map(|(index, link)| {
                 let url = link.url;
                 controls::quiet_button(
-                    gpui::SharedString::from(format!("auth-link-{url}")),
+                    gpui::SharedString::from(format!("auth-info-link-{index}")),
                     link.label
                         .unwrap_or_else(|| "Open provider page".to_owned()),
                     true,
-                    Box::new(move |_, _, _| {
-                        let _ = crate::services::path_actions::open_provider_auth_url(&url);
-                    }),
+                    Box::new(cx.listener(move |view, _, _, cx| {
+                        view.open_provider_auth_url(url.clone(), cx)
+                    })),
                 )
             }))
             .into_any_element(),
         AuthStage::Browser { url, instructions } => {
-            let url = url.clone();
+            let open_url = url.clone();
             div()
                 .flex()
                 .flex_col()
-                .gap(px(6.0))
+                .gap(px(10.0))
                 .child(controls::panel_note(
                     instructions
                         .clone()
-                        .unwrap_or_else(|| "Continue authentication in your browser.".to_owned()),
+                        .unwrap_or_else(|| "Finish authentication in your browser.".to_owned()),
                     controls::ControlTone::Normal,
                 ))
+                .child(
+                    div()
+                        .font_family(theme::mono())
+                        .text_size(theme::text_size(theme::T_TINY))
+                        .text_color(theme::smoke())
+                        .child(format!("Destination: {}", provider_auth_destination(url))),
+                )
                 .child(controls::quiet_button(
                     "open-provider-auth-url",
-                    "Open browser",
+                    "Open browser again",
                     true,
-                    Box::new(move |_, _, _| {
-                        let _ = crate::services::path_actions::open_provider_auth_url(&url);
-                    }),
+                    Box::new(cx.listener(move |view, _, _, cx| {
+                        view.open_provider_auth_url(open_url.clone(), cx)
+                    })),
                 ))
+                .child(controls::meta_text("Enter reopens browser · Esc cancels"))
                 .into_any_element()
         }
         AuthStage::DeviceCode {
@@ -1445,28 +1467,76 @@ fn auth_flow_panel(
             verification_uri,
             expires_in_seconds,
         } => {
-            let url = verification_uri.clone();
+            let open_url = verification_uri.clone();
+            let copy_code = user_code.clone();
             div()
                 .flex()
                 .flex_col()
-                .gap(px(6.0))
+                .gap(px(10.0))
                 .child(controls::panel_note(
-                    format!(
-                        "Enter device code {}{}",
-                        user_code,
-                        expires_in_seconds
-                            .map(|seconds| format!(" · expires in {seconds}s"))
-                            .unwrap_or_default()
-                    ),
+                    "Enter this one-time code on the provider verification page.",
                     controls::ControlTone::Normal,
                 ))
-                .child(controls::quiet_button(
-                    "open-device-code-url",
-                    "Open verification page",
-                    true,
-                    Box::new(move |_, _, _| {
-                        let _ = crate::services::path_actions::open_provider_auth_url(&url);
-                    }),
+                .child(
+                    div()
+                        .px(px(14.0))
+                        .py(px(12.0))
+                        .rounded(px(theme::RADIUS_SM))
+                        .bg(theme::canvas())
+                        .border_1()
+                        .border_color(theme::edge_hard())
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .justify_between()
+                        .gap(px(12.0))
+                        .child(
+                            div()
+                                .font_family(theme::mono())
+                                .text_size(theme::text_size(theme::T_TITLE))
+                                .font_weight(FontWeight::BOLD)
+                                .text_color(theme::bone())
+                                .child(user_code.clone()),
+                        )
+                        .when_some(*expires_in_seconds, |row, seconds| {
+                            row.child(controls::meta_text(format!("Expires in {seconds}s")))
+                        }),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .flex_wrap()
+                        .gap(px(8.0))
+                        .child(controls::quiet_button(
+                            "copy-provider-device-code",
+                            "Copy code",
+                            true,
+                            Box::new(cx.listener(move |view, _, _, cx| {
+                                view.copy_provider_auth_code(copy_code.clone(), cx)
+                            })),
+                        ))
+                        .child(controls::quiet_button(
+                            "open-device-code-url",
+                            "Open verification page",
+                            true,
+                            Box::new(cx.listener(move |view, _, _, cx| {
+                                view.open_provider_auth_url(open_url.clone(), cx)
+                            })),
+                        )),
+                )
+                .child(
+                    div()
+                        .font_family(theme::mono())
+                        .text_size(theme::text_size(theme::T_TINY))
+                        .text_color(theme::smoke())
+                        .child(format!(
+                            "Destination: {}",
+                            provider_auth_destination(verification_uri)
+                        )),
+                )
+                .child(controls::meta_text(
+                    "Enter opens page · C copies code · Esc cancels",
                 ))
                 .into_any_element()
         }
@@ -1476,30 +1546,38 @@ fn auth_flow_panel(
         AuthStage::Prompt(prompt) if prompt.kind == AuthPromptKind::Select => div()
             .flex()
             .flex_col()
-            .gap(px(6.0))
+            .gap(px(8.0))
             .child(controls::panel_note(
                 prompt.message.clone(),
                 controls::ControlTone::Normal,
             ))
-            .children(prompt.options.iter().cloned().map(|option| {
-                let prompt = prompt.clone();
-                let value = option.id;
-                controls::action_row(
-                    gpui::SharedString::from(format!("auth-select-{value}")),
-                    option.label,
-                    option.description.unwrap_or_default(),
-                    true,
-                    controls::ControlTone::Normal,
-                    Box::new(cx.listener(move |view, _, _, cx| {
-                        view.answer_auth_select(prompt.clone(), value.clone(), cx)
-                    })),
-                )
-            }))
+            .children(
+                prompt
+                    .options
+                    .iter()
+                    .cloned()
+                    .enumerate()
+                    .map(|(index, option)| {
+                        let prompt = prompt.clone();
+                        let value = option.id;
+                        controls::action_row(
+                            gpui::SharedString::from(format!("auth-select-{value}")),
+                            format!("{}. {}", index + 1, option.label),
+                            option.description.unwrap_or_default(),
+                            true,
+                            controls::ControlTone::Normal,
+                            Box::new(cx.listener(move |view, _, _, cx| {
+                                view.answer_auth_select(prompt.clone(), value.clone(), cx)
+                            })),
+                        )
+                    }),
+            )
+            .child(controls::meta_text("Press 1-9 to choose · Esc cancels"))
             .into_any_element(),
         AuthStage::Prompt(prompt) => div()
             .flex()
             .flex_col()
-            .gap(px(6.0))
+            .gap(px(8.0))
             .child(controls::panel_note(
                 prompt.message.clone(),
                 controls::ControlTone::Normal,
@@ -1509,6 +1587,13 @@ fn auth_flow_panel(
             } else {
                 auth_input.clone().into_any_element()
             })
+            .child(
+                div()
+                    .font_family(theme::mono())
+                    .text_size(theme::text_size(theme::T_TINY))
+                    .text_color(theme::smoke())
+                    .child("Enter submits · Esc cancels"),
+            )
             .into_any_element(),
         AuthStage::Cancelling => controls::panel_note(
             "Cancelling authentication...",
@@ -1516,26 +1601,111 @@ fn auth_flow_panel(
         )
         .into_any_element(),
     };
+
     div()
-        .p(px(10.0))
-        .border_1()
-        .border_color(theme::signal())
-        .rounded(px(theme::RADIUS_SM))
+        .absolute()
+        .top_0()
+        .right_0()
+        .bottom_0()
+        .left_0()
+        .occlude()
+        .bg(gpui::rgba(0x0b0a_09e6))
         .flex()
-        .flex_col()
-        .gap(px(8.0))
-        .child(controls::section_label(format!(
-            "Authenticate {} · {}",
-            auth.provider,
-            auth.method.label()
-        )))
-        .child(stage)
-        .child(controls::quiet_button(
-            "cancel-provider-auth",
-            "Cancel",
-            !matches!(auth.stage, AuthStage::Cancelling),
-            Box::new(cx.listener(|view, _, _, cx| view.cancel_provider_auth(cx))),
-        ))
+        .items_center()
+        .justify_center()
+        .p(px(18.0))
+        .track_focus(focus)
+        .tab_index(0)
+        .on_key_down(cx.listener(RootView::on_provider_auth_key_down))
+        .child(
+            div()
+                .id("provider-auth-modal")
+                .w_full()
+                .max_w(px(620.0))
+                .max_h(px(640.0))
+                .overflow_y_scroll()
+                .scrollbar_width(px(theme::SCROLLBAR))
+                .p(px(18.0))
+                .rounded(px(theme::RADIUS))
+                .bg(theme::panel())
+                .border_1()
+                .border_color(theme::edge_hard())
+                .flex()
+                .flex_col()
+                .gap(px(14.0))
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_start()
+                        .justify_between()
+                        .gap(px(14.0))
+                        .child(
+                            div()
+                                .min_w_0()
+                                .flex_1()
+                                .flex()
+                                .flex_col()
+                                .gap(px(4.0))
+                                .child(
+                                    div()
+                                        .font_family(theme::sans())
+                                        .text_size(theme::text_size(theme::T_TITLE))
+                                        .font_weight(FontWeight::BOLD)
+                                        .text_color(theme::bone())
+                                        .child(format!("Authenticate {provider_name}")),
+                                )
+                                .child(
+                                    div()
+                                        .font_family(theme::sans())
+                                        .text_size(theme::text_size(theme::T_UI_SM))
+                                        .text_color(theme::smoke())
+                                        .child(auth.method.label()),
+                                ),
+                        )
+                        .child(controls::chrome_action(
+                            "cancel-provider-auth",
+                            "Cancel · Esc",
+                            !matches!(auth.stage, AuthStage::Cancelling),
+                            Box::new(cx.listener(|view, _, _, cx| {
+                                view.cancel_provider_auth(cx)
+                            })),
+                        )),
+                )
+                .child(stage)
+                .when_some(browser_retry_url, |modal, retry_url| {
+                    let retry_url = retry_url.to_owned();
+                    modal.child(controls::quiet_button(
+                        "retry-provider-auth-browser",
+                        "Open browser again",
+                        true,
+                        Box::new(cx.listener(move |view, _, _, cx| {
+                            view.open_provider_auth_url(retry_url.clone(), cx)
+                        })),
+                    ))
+                })
+                .when_some(browser_feedback, |modal, (message, tone)| {
+                    modal.child(controls::panel_note(message.to_owned(), tone))
+                })
+                .when_some(provider_feedback, |modal, message| {
+                    modal.child(controls::panel_note(
+                        message.to_owned(),
+                        controls::ControlTone::Danger,
+                    ))
+                })
+                .child(controls::panel_note(
+                    "Pi handles and stores provider credentials. This app only displays Pi's prompts.",
+                    controls::ControlTone::Normal,
+                )),
+        )
+}
+
+fn provider_auth_destination(url: &str) -> &str {
+    let without_scheme = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+        .unwrap_or(url);
+    without_scheme.split(['/', '?', '#']).next().unwrap_or(url)
 }
 
 fn models_settings(
@@ -2631,5 +2801,22 @@ fn compact_count(value: u64) -> String {
         format!("{:.1}K", value as f64 / 1_000.0)
     } else {
         value.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::provider_auth_destination;
+
+    #[test]
+    fn auth_destination_hides_paths_and_query_values() {
+        assert_eq!(
+            provider_auth_destination("https://provider.example/oauth/start?state=private"),
+            "provider.example"
+        );
+        assert_eq!(
+            provider_auth_destination("http://localhost:9876/callback#token"),
+            "localhost:9876"
+        );
     }
 }

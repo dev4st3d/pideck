@@ -36,8 +36,8 @@ use crate::controller::{
 use crate::file_completion::{self, AtToken, FileMatch};
 use crate::fonts::{self, FontCatalog, FontRole};
 use crate::model_runtime::{
-    AuthMethod, AuthPromptKind, AuthStage, CatalogPhase, ModelCatalogEntry, ModelChangePolicy,
-    ModelIdentity, ThinkingLevel,
+    AuthFlow, AuthMethod, AuthPromptKind, AuthStage, CatalogPhase, ModelCatalogEntry,
+    ModelChangePolicy, ModelIdentity, ThinkingLevel,
 };
 use crate::orchestration::{
     GoalItemSnapshot, OrchestrationAction, OrchestrationPhase, SubagentSnapshot, SubagentStatus,
@@ -368,6 +368,10 @@ pub struct RootView {
     dismissed_slash_draft: Option<String>,
     last_slash_draft: String,
     active_auth_prompt_id: Option<String>,
+    provider_auth_focus: FocusHandle,
+    last_auth_browser_launch: Option<(u64, String)>,
+    auth_browser_feedback: Option<(String, controls::ControlTone)>,
+    model_catalog_auto_refresh_pending: bool,
     extension_ui: ExtensionUiProjection,
     active_extension_dialog_id: Option<crate::services::rpc::RequestId>,
     extension_dialog_selection: usize,
@@ -547,6 +551,7 @@ impl RootView {
             )
         });
         let history_focus = cx.focus_handle();
+        let provider_auth_focus = cx.focus_handle();
         let extension_dialog_focus = cx.focus_handle();
         let subagent_dialog_focus = cx.focus_handle();
         let activity_detail_focus = cx.focus_handle();
@@ -639,14 +644,16 @@ impl RootView {
             window,
             |view, _, event, window, cx| view.on_palette_composer_event(event, window, cx),
         );
-        let auth_input_subscription =
-            cx.subscribe_in(&auth_input_composer, window, |view, _, event, _, cx| {
-                view.on_auth_input_event(event, false, cx)
-            });
-        let auth_secret_subscription =
-            cx.subscribe_in(&auth_secret_composer, window, |view, _, event, _, cx| {
-                view.on_auth_input_event(event, true, cx)
-            });
+        let auth_input_subscription = cx.subscribe_in(
+            &auth_input_composer,
+            window,
+            |view, _, event, window, cx| view.on_auth_input_event(event, false, window, cx),
+        );
+        let auth_secret_subscription = cx.subscribe_in(
+            &auth_secret_composer,
+            window,
+            |view, _, event, window, cx| view.on_auth_input_event(event, true, window, cx),
+        );
         let extension_input_subscription = cx.subscribe_in(
             &extension_input_composer,
             window,
@@ -732,6 +739,10 @@ impl RootView {
             dismissed_slash_draft: None,
             last_slash_draft: String::new(),
             active_auth_prompt_id: None,
+            provider_auth_focus,
+            last_auth_browser_launch: None,
+            auth_browser_feedback: None,
+            model_catalog_auto_refresh_pending: false,
             extension_ui,
             active_extension_dialog_id: None,
             extension_dialog_selection: 0,
@@ -2465,8 +2476,18 @@ impl RootView {
         });
     }
 
-    fn on_auth_input_event(&mut self, event: &ComposerEvent, secret: bool, cx: &mut Context<Self>) {
+    fn on_auth_input_event(
+        &mut self,
+        event: &ComposerEvent,
+        secret: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let ComposerEvent::Accept { text, .. } = event else {
+            if matches!(event, ComposerEvent::Abort | ComposerEvent::AbortBash) {
+                self.cancel_provider_auth(cx);
+                window.focus(&self.provider_auth_focus);
+            }
             return;
         };
         let Some(AuthStage::Prompt(prompt)) = self
@@ -2505,6 +2526,10 @@ impl RootView {
 
     fn show_model_panel(&mut self, panel: ModelPanel, window: &mut Window, cx: &mut Context<Self>) {
         self.model_panel = Some(panel);
+        if matches!(panel, ModelPanel::Switcher | ModelPanel::Settings(_)) {
+            self.model_catalog_auto_refresh_pending = true;
+            self.try_auto_refresh_models(cx);
+        }
         match panel {
             ModelPanel::Switcher => {
                 self.model_provider_filter = self
@@ -2648,6 +2673,25 @@ impl RootView {
         });
     }
 
+    fn try_auto_refresh_models(&mut self, cx: &mut Context<Self>) {
+        if !self.model_catalog_auto_refresh_pending {
+            return;
+        }
+        let satisfied = self.controller.update(cx, |controller, cx| {
+            if matches!(
+                controller.model_runtime_projection().phase,
+                CatalogPhase::Refreshing
+            ) {
+                true
+            } else {
+                controller.refresh_model_catalog(cx)
+            }
+        });
+        if satisfied {
+            self.model_catalog_auto_refresh_pending = false;
+        }
+    }
+
     fn reload_resources(&mut self, cx: &mut Context<Self>) {
         self.controller.update(cx, |controller, cx| {
             controller.reload_resources(cx);
@@ -2664,10 +2708,21 @@ impl RootView {
         cx.notify();
     }
 
-    fn login_provider(&mut self, provider: String, method: AuthMethod, cx: &mut Context<Self>) {
-        self.controller.update(cx, |controller, cx| {
-            controller.login_provider(provider, method, cx);
+    fn login_provider(
+        &mut self,
+        provider: String,
+        method: AuthMethod,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.last_auth_browser_launch = None;
+        self.auth_browser_feedback = None;
+        let accepted = self.controller.update(cx, |controller, cx| {
+            controller.login_provider(provider, method, cx)
         });
+        if accepted {
+            window.focus(&self.provider_auth_focus);
+        }
     }
 
     fn logout_provider(&mut self, provider: String, cx: &mut Context<Self>) {
@@ -2680,6 +2735,153 @@ impl RootView {
         self.controller.update(cx, |controller, cx| {
             controller.cancel_provider_auth(cx);
         });
+    }
+
+    fn open_provider_auth_url(&mut self, url: String, cx: &mut Context<Self>) {
+        self.auth_browser_feedback = Some(
+            match crate::services::path_actions::open_provider_auth_url(&url) {
+                Ok(()) => (
+                    "Opened your browser. Finish authentication there, then return here."
+                        .to_owned(),
+                    controls::ControlTone::Normal,
+                ),
+                Err(summary) => (
+                    format!("Could not open the browser. {summary}"),
+                    controls::ControlTone::Danger,
+                ),
+            },
+        );
+        cx.notify();
+    }
+
+    fn copy_provider_auth_code(&mut self, code: String, cx: &mut Context<Self>) {
+        cx.write_to_clipboard(ClipboardItem::new_string(code));
+        self.auth_browser_feedback = Some((
+            "Device code copied. Paste it on the provider verification page.".to_owned(),
+            controls::ControlTone::Normal,
+        ));
+        cx.notify();
+    }
+
+    pub(in crate::views) fn on_provider_auth_key_down(
+        &mut self,
+        event: &gpui::KeyDownEvent,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let key = event.keystroke.key.as_str();
+        if key == "escape" {
+            cx.stop_propagation();
+            self.cancel_provider_auth(cx);
+            return;
+        }
+        if key == "enter" {
+            let auth = self.render_projections.models.auth.as_ref();
+            let url = auth
+                .and_then(AuthFlow::browser_target)
+                .map(str::to_owned)
+                .or_else(|| {
+                    let operation = auth.map(|auth| auth.operation)?;
+                    self.last_auth_browser_launch
+                        .as_ref()
+                        .filter(|(launched, _)| *launched == operation)
+                        .map(|(_, url)| url.clone())
+                });
+            if let Some(url) = url {
+                cx.stop_propagation();
+                self.open_provider_auth_url(url, cx);
+            }
+            return;
+        }
+        if key.eq_ignore_ascii_case("c") {
+            let code = self
+                .render_projections
+                .models
+                .auth
+                .as_ref()
+                .and_then(|auth| match &auth.stage {
+                    AuthStage::DeviceCode { user_code, .. } => Some(user_code.clone()),
+                    _ => None,
+                });
+            if let Some(code) = code {
+                cx.stop_propagation();
+                self.copy_provider_auth_code(code, cx);
+            }
+            return;
+        }
+        let Some(index) = key
+            .parse::<usize>()
+            .ok()
+            .filter(|index| (1..=9).contains(index))
+            .map(|index| index - 1)
+        else {
+            return;
+        };
+        let selection = self
+            .render_projections
+            .models
+            .auth
+            .as_ref()
+            .and_then(|auth| match &auth.stage {
+                AuthStage::Prompt(prompt) if prompt.kind == AuthPromptKind::Select => prompt
+                    .options
+                    .get(index)
+                    .map(|option| (prompt.clone(), option.id.clone())),
+                _ => None,
+            });
+        if let Some((prompt, value)) = selection {
+            cx.stop_propagation();
+            self.answer_auth_select(prompt, value, cx);
+        }
+    }
+
+    fn sync_provider_auth(
+        &mut self,
+        auth: Option<&AuthFlow>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(auth) = auth else {
+            self.active_auth_prompt_id = None;
+            self.last_auth_browser_launch = None;
+            self.auth_browser_feedback = None;
+            return;
+        };
+
+        let prompt = match &auth.stage {
+            AuthStage::Prompt(prompt) => Some(prompt),
+            _ => None,
+        };
+        let prompt_id = prompt.map(|prompt| prompt.prompt_id.clone());
+        if prompt_id != self.active_auth_prompt_id {
+            self.active_auth_prompt_id = prompt_id;
+            self.auth_input_composer
+                .update(cx, |composer, cx| composer.set_draft("", cx));
+            self.auth_secret_composer
+                .update(cx, |composer, cx| composer.set_draft("", cx));
+            if let Some(prompt) = prompt
+                && prompt.kind != AuthPromptKind::Select
+            {
+                let composer = if prompt.kind == AuthPromptKind::Secret {
+                    &self.auth_secret_composer
+                } else {
+                    &self.auth_input_composer
+                };
+                window.focus(&composer.read(cx).focus_handle(cx));
+            } else {
+                window.focus(&self.provider_auth_focus);
+            }
+        }
+
+        let Some(url) = auth.browser_target() else {
+            return;
+        };
+        let launch = (auth.operation, url.to_owned());
+        if self.last_auth_browser_launch.as_ref() == Some(&launch) {
+            return;
+        }
+        self.last_auth_browser_launch = Some(launch);
+        self.open_provider_auth_url(url.to_owned(), cx);
     }
 
     fn answer_auth_select(
@@ -3207,6 +3409,9 @@ impl RootView {
         self.history = HistoryBrowser::default();
         self.history_confirmation = None;
         self.active_auth_prompt_id = None;
+        self.last_auth_browser_launch = None;
+        self.auth_browser_feedback = None;
+        self.model_catalog_auto_refresh_pending = false;
         self.active_extension_dialog_id = None;
         self.extension_dialog_timeout_task = None;
         self.runtime_notifications.clear();
@@ -4234,6 +4439,7 @@ impl RootView {
                 controller.composer_projection(),
             )
         };
+        self.try_auto_refresh_models(cx);
         self.sync_extension_ui(extension_ui, window, cx);
         self.sync_workspace_diff(&conversation, &render_projections.shell.workspace, cx);
         if !matches!(
@@ -4362,34 +4568,7 @@ impl RootView {
                 cx,
             )
         });
-        let auth_prompt =
-            render_projections
-                .models
-                .auth
-                .as_ref()
-                .and_then(|flow| match &flow.stage {
-                    AuthStage::Prompt(prompt) => Some(prompt.clone()),
-                    _ => None,
-                });
-        let prompt_id = auth_prompt.as_ref().map(|prompt| prompt.prompt_id.clone());
-        if prompt_id != self.active_auth_prompt_id {
-            self.active_auth_prompt_id = prompt_id;
-            self.auth_input_composer
-                .update(cx, |composer, cx| composer.set_draft("", cx));
-            self.auth_secret_composer
-                .update(cx, |composer, cx| composer.set_draft("", cx));
-            if let Some(prompt) = auth_prompt
-                && self.model_panel.is_some()
-                && prompt.kind != AuthPromptKind::Select
-            {
-                let composer = if prompt.kind == AuthPromptKind::Secret {
-                    &self.auth_secret_composer
-                } else {
-                    &self.auth_input_composer
-                };
-                window.focus(&composer.read(cx).focus_handle(cx));
-            }
-        }
+        self.sync_provider_auth(render_projections.models.auth.as_ref(), window, cx);
         self.reconcile_scoped_operations(catalog, window, cx);
 
         let projection = composer_projection;
@@ -4613,6 +4792,10 @@ impl RootView {
     }
 
     fn on_focus_next(&mut self, _: &FocusNext, window: &mut Window, cx: &mut Context<Self>) {
+        if self.render_projections.models.auth.is_some() {
+            window.focus(&self.provider_auth_focus);
+            return;
+        }
         if self.activity_detail.is_some() {
             window.focus(&self.activity_detail_focus);
             return;
@@ -4639,6 +4822,10 @@ impl RootView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.render_projections.models.auth.is_some() {
+            window.focus(&self.provider_auth_focus);
+            return;
+        }
         if self.activity_detail.is_some() {
             window.focus(&self.activity_detail_focus);
             return;
@@ -4664,7 +4851,8 @@ impl RootView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.activity_detail.is_some()
+        if self.render_projections.models.auth.is_some()
+            || self.activity_detail.is_some()
             || self.pasted_image_preview.is_some()
             || self.extension_ui.active_dialog.is_some()
         {
@@ -4678,7 +4866,8 @@ impl RootView {
     }
 
     fn on_show_hotkeys(&mut self, _: &ShowHotkeys, window: &mut Window, cx: &mut Context<Self>) {
-        if self.activity_detail.is_some()
+        if self.render_projections.models.auth.is_some()
+            || self.activity_detail.is_some()
             || self.pasted_image_preview.is_some()
             || self.extension_ui.active_dialog.is_some()
         {

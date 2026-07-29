@@ -2449,7 +2449,15 @@ impl RuntimeController {
                 }
                 true
             }
-            BridgeCommand::AuthRespond { .. } => true,
+            BridgeCommand::AuthRespond { .. } => {
+                if let Err(error) = result {
+                    self.model_runtime.feedback = Some(format!(
+                        "Could not submit the provider response. {}",
+                        error.summary
+                    ));
+                }
+                true
+            }
             BridgeCommand::LogoutProvider { provider } => {
                 match result {
                     Ok(value) => {

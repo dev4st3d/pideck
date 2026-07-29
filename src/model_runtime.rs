@@ -392,6 +392,7 @@ impl ModelRuntimeState {
 
     pub fn start_auth(&mut self, provider: String, method: AuthMethod) -> u64 {
         let operation = self.take_operation();
+        self.feedback = None;
         self.auth = Some(AuthFlow {
             operation,
             provider,
@@ -466,6 +467,18 @@ pub struct AuthFlow {
     pub provider: String,
     pub method: AuthMethod,
     pub stage: AuthStage,
+}
+
+impl AuthFlow {
+    pub fn browser_target(&self) -> Option<&str> {
+        match &self.stage {
+            AuthStage::Browser { url, .. } => Some(url),
+            AuthStage::DeviceCode {
+                verification_uri, ..
+            } => Some(verification_uri),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -725,6 +738,38 @@ mod tests {
             state.auth.as_ref().map(|flow| &flow.stage),
             Some(AuthStage::Cancelling)
         ));
+    }
+
+    #[test]
+    fn browser_and_device_auth_stages_expose_their_launch_target() {
+        let mut flow = AuthFlow {
+            operation: 1,
+            provider: "provider".to_owned(),
+            method: AuthMethod::Oauth,
+            stage: AuthStage::Browser {
+                url: "https://provider.example/login?private=state".to_owned(),
+                instructions: None,
+            },
+        };
+        assert_eq!(
+            flow.browser_target(),
+            Some("https://provider.example/login?private=state")
+        );
+
+        flow.stage = AuthStage::DeviceCode {
+            user_code: "ABCD-EFGH".to_owned(),
+            verification_uri: "https://provider.example/device".to_owned(),
+            expires_in_seconds: Some(600),
+        };
+        assert_eq!(
+            flow.browser_target(),
+            Some("https://provider.example/device")
+        );
+
+        flow.stage = AuthStage::Progress {
+            message: "Waiting".to_owned(),
+        };
+        assert_eq!(flow.browser_target(), None);
     }
 
     #[test]
