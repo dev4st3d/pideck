@@ -1,21 +1,20 @@
 # AGENTS.md
-
 Rules for coding agents contributing to `pi-gui`.
 
 ## Priorities
-
 When guidance conflicts:
-
 1. The user's current request.
 2. Safety, privacy, and preservation of user work.
 3. This file.
 4. `GPUI.md` and its GPUI 0.2.2 constraints.
 5. Existing repository conventions.
 
-Optimize for polished UX, then correctness, simplicity, and maintainability. Ask before irreversible, security-sensitive, product-defining, or major scope-expanding decisions. Do not ask about trivial details the repository already answers.
+Optimize for polished UX, then correctness, simplicity, and maintainability.
+Ask before irreversible, security-sensitive, product-defining, or major scope-expanding decisions.
+Do not ask about trivial details the repository already answers.
+Finish the requested work and stop. Do not continue exploring, polishing, or re-editing after the request is satisfied.
 
 ## Project facts
-
 * Rust 2024, minimum Rust 1.85
 * Stable toolchain with rustfmt and Clippy
 * GPUI 0.2.2
@@ -23,7 +22,6 @@ Optimize for polished UX, then correctness, simplicity, and maintainability. Ask
 * Primary font: Segoe UI
 
 Key files:
-
 * `src/main.rs`: minimal entry point
 * `src/lib.rs`: modules and crate surface
 * `src/app.rs`: app/window bootstrap
@@ -35,28 +33,26 @@ Key files:
 GPUI is version-sensitive. Trust GPUI 0.2.2 rustdoc and code that compiles here. Verify newer Zed or GPUI examples before using them.
 
 ## Working rules
-
-* Inspect relevant code and guidance before editing.
-* Make the smallest coherent change that fully solves the request.
+* Begin with the user's request and the smallest set of relevant code. Load only what is required for the change.
+* Make the smallest coherent change that fully solves the request. When the request is done, stop. Do not re-inspect, re-edit, or expand scope.
 * Preserve unrelated user work.
-* Search all call sites before changing shared types, actions, tokens, public items, or behavior.
-* Read complete files when they define a contract; do not infer architecture from snippets.
-* Plan multi-file, architectural, risky, or ambiguous work. Implement straightforward local work directly.
-* Avoid unrelated cleanup, broad renames, formatting sweeps, speculative abstractions, and opportunistic upgrades.
+* Before changing shared types, actions, tokens, public items, or behavior, search the necessary call sites. Prefer targeted searches over exhaustive repo-wide scans when impact is clearly local.
+* Read a complete file only when it defines a contract you must honor. Prefer reading the relevant sections; do not load large files or unrelated modules “just in case.”
+* Plan only multi-file, architectural, risky, or ambiguous work. Implement straightforward local work directly and finish it in one pass.
+* Avoid unrelated cleanup, broad renames, formatting sweeps, speculative abstractions, opportunistic upgrades, and any work that does not directly serve the current request.
 * Do not leave `TODO`, `FIXME`, stubs, placeholders, dead alternatives, or hidden debt unless explicitly approved.
-
-Nearby cleanup is allowed only when it directly supports the requested change and remains easy to review.
+* Nearby cleanup is allowed only when it directly supports the requested change and remains easy to review.
+* Do not reopen or rewrite completed work unless a real failure appears. Validate once, then hand off.
 
 ## Architecture and Rust
-
 Keep domain logic independent of GPUI.
 
 ```text
 views/components -> theme + actions + domain
-views            -> GPUI entities + services
-services         -> domain
-domain           -> std + domain crates
-theme/domain     -X-> concrete views
+views -> GPUI entities + services
+services -> domain
+domain -> std + domain crates
+theme/domain -X-> concrete views
 ```
 
 * Keep platform/window setup in `app.rs`; keep `main.rs` minimal.
@@ -78,9 +74,7 @@ Comments explain intent, invariants, tradeoffs, safety, or version-sensitive beh
 Text files: UTF-8, LF endings, one final newline, no trailing whitespace.
 
 ## Errors, async, privacy, and performance
-
 Recoverable failures must not panic.
-
 * Use `Result` and actionable errors.
 * Add context at boundaries without repeating messages at every layer.
 * Log diagnostic detail once; show concise recovery-oriented UI copy.
@@ -97,7 +91,6 @@ Measure before optimizing. Do not add caches, concurrency, custom rendering, or 
 Dependencies may be added when they materially improve the solution. First check std, GPUI, and existing crates. Keep changes narrow and update `Cargo.lock` when resolution changes.
 
 ## UX and accessibility
-
 UI work is incomplete if it only supports the ideal pointer path.
 
 For relevant screens and controls, consider interaction states, loading/empty/error states, long text, overflow, resizing, repeated actions, interrupted work, keyboard navigation, scaling, reduced motion, and destructive-action recovery.
@@ -107,7 +100,6 @@ Use shared semantic tokens for recurring color, spacing, typography, radius, ele
 Every primary action needs a keyboard path. Focus must be visible and logically ordered. Meaning must not depend only on color, hover, position, or an unlabeled icon. UI copy should be concise, active, specific, and non-blaming.
 
 ## Validation
-
 Validation is risk-based. Run only checks that provide useful evidence, and report only checks actually run.
 
 **Tier 0 — documentation or inert metadata:** no execution when commands add no confidence.
@@ -115,7 +107,6 @@ Validation is risk-based. Run only checks that provide useful evidence, and repo
 **Tier 1 — small, low-risk changes:** format changed Rust, run the narrowest useful test if one exists, and inspect the diff.
 
 **Tier 2 — meaningful logic, API, dependency, module, or GPUI changes:**
-
 ```powershell
 cargo fmt --all -- --check
 cargo check --all-targets
@@ -123,7 +114,6 @@ cargo test <target-or-filter>
 ```
 
 **Tier 3 — major features, architectural changes, unsafe code, releases, or unresolved uncertainty:**
-
 ```powershell
 cargo fmt --all -- --check
 cargo check --all-targets
@@ -137,7 +127,6 @@ Add deterministic tests when they meaningfully protect domain logic, regressions
 Do not introduce warnings. Fix warnings caused by the change and small warnings in touched code without turning the task into repository-wide cleanup.
 
 ## Git and handoff
-
 Git inspection is allowed. Without explicit instruction, do not commit, push, branch, checkout, rebase, merge, reset, revert, stash, or discard work.
 
 Before destructive actions, confirm ownership and scope. Prefer reversible approaches. Never use destructive Git commands to make checks pass.
