@@ -58,4 +58,5 @@ jobs:
           node-version: "22"
 
       - name: Test bridge
-        run: node --test bridge
+        shell: pwsh
+        run: node --test (Get-ChildItem -Path bridge -Filter *.test.mjs).FullName
