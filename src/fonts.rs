@@ -1,4 +1,4 @@
-//! System-font discovery and persisted typography preferences.
+//! System-font discovery and local Pideck settings (typography + theme).
 
 use std::collections::HashSet;
 use std::env;
@@ -44,8 +44,7 @@ impl FontRole {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FontPreferences {
     pub main: String,
     pub sans: String,
@@ -81,10 +80,55 @@ impl FontPreferences {
     }
 }
 
+/// On-disk Pideck settings. Fonts and shell theme share one file so either
+/// preference can be updated without clobbering the other.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct SettingsDocument {
+    main: String,
+    sans: String,
+    mono: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    theme: Option<String>,
+}
+
+impl Default for SettingsDocument {
+    fn default() -> Self {
+        let fonts = FontPreferences::default();
+        Self {
+            main: fonts.main,
+            sans: fonts.sans,
+            mono: fonts.mono,
+            theme: None,
+        }
+    }
+}
+
+impl SettingsDocument {
+    fn from_parts(preferences: &FontPreferences, theme: Option<&str>) -> Self {
+        Self {
+            main: preferences.main.clone(),
+            sans: preferences.sans.clone(),
+            mono: preferences.mono.clone(),
+            theme: theme.map(str::to_owned),
+        }
+    }
+
+    fn preferences(&self) -> FontPreferences {
+        FontPreferences {
+            main: self.main.clone(),
+            sans: self.sans.clone(),
+            mono: self.mono.clone(),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct FontCatalog {
     pub families: Vec<String>,
     pub preferences: FontPreferences,
+    /// Stable theme key from settings (`ThemeId::key`), when present.
+    pub theme_key: Option<String>,
     pub settings_path: PathBuf,
     pub load_warning: Option<String>,
 }
@@ -94,20 +138,24 @@ pub fn initialize(cx: &App) -> FontCatalog {
     sort_and_deduplicate(&mut families);
 
     let settings_path = settings_path();
-    let (mut preferences, load_warning) = match load(&settings_path) {
-        Ok(preferences) => (preferences, None),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => (FontPreferences::default(), None),
+    let (document, load_warning) = match load(&settings_path) {
+        Ok(document) => (document, None),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            (SettingsDocument::default(), None)
+        }
         Err(error) => (
-            FontPreferences::default(),
-            Some(format!("Font settings could not be loaded: {error}")),
+            SettingsDocument::default(),
+            Some(format!("Settings could not be loaded: {error}")),
         ),
     };
+    let mut preferences = document.preferences();
     apply_available_defaults(&mut preferences, &families);
     install(preferences.clone());
 
     FontCatalog {
         families,
         preferences,
+        theme_key: document.theme,
         settings_path,
         load_warning,
     }
@@ -128,11 +176,12 @@ pub fn family(role: FontRole) -> SharedString {
         .unwrap_or_else(|_| SharedString::from(FontPreferences::default().family(role).to_owned()))
 }
 
-pub fn save(path: &Path, preferences: &FontPreferences) -> io::Result<()> {
+pub fn save(path: &Path, preferences: &FontPreferences, theme: Option<&str>) -> io::Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let bytes = serde_json::to_vec_pretty(preferences)
+    let document = SettingsDocument::from_parts(preferences, theme);
+    let bytes = serde_json::to_vec_pretty(&document)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
     let temporary = path.with_extension("json.tmp");
     fs::write(&temporary, bytes)?;
@@ -148,7 +197,7 @@ pub fn save(path: &Path, preferences: &FontPreferences) -> io::Result<()> {
     }
 }
 
-fn load(path: &Path) -> io::Result<FontPreferences> {
+fn load(path: &Path) -> io::Result<SettingsDocument> {
     let bytes = fs::read(path)?;
     serde_json::from_slice(&bytes)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
@@ -221,8 +270,31 @@ mod tests {
             mono: "Consolas".to_owned(),
         };
 
-        save(&path, &preferences).unwrap();
-        assert_eq!(load(&path).unwrap(), preferences);
+        save(&path, &preferences, Some("moss-foundry")).unwrap();
+        let loaded = load(&path).unwrap();
+        assert_eq!(loaded.preferences(), preferences);
+        assert_eq!(loaded.theme.as_deref(), Some("moss-foundry"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn fonts_only_settings_remain_compatible() {
+        let root = env::temp_dir().join(format!("pideck-fonts-legacy-{}", std::process::id()));
+        let path = root.join("settings.json");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            &path,
+            r#"{
+  "main": "Georgia",
+  "sans": "Segoe UI",
+  "mono": "Consolas"
+}"#,
+        )
+        .unwrap();
+
+        let loaded = load(&path).unwrap();
+        assert_eq!(loaded.main, "Georgia");
+        assert_eq!(loaded.theme, None);
         let _ = fs::remove_dir_all(root);
     }
 

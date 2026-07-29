@@ -64,7 +64,7 @@ If no model is available, open **Settings → Providers**, authenticate, refresh
 | Next focus | `Tab` |
 | Previous focus | `Shift+Tab` |
 
-Typography uses installed system fonts. Open `/settings` and choose separate Main, Sans, and Mono families in the Type tab; selections apply immediately and persist locally.
+Typography uses installed system fonts. Open `/settings` and choose separate Main, Sans, and Mono families in the Type tab; selections apply immediately and persist locally. Shell theme picks from the title-bar theme menu also apply immediately and persist in the same local settings file.
 
 ## Shell capabilities
 

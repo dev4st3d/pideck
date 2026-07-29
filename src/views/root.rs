@@ -480,10 +480,17 @@ impl RootView {
         projects: ProjectRegistry,
         project_feedback: Option<String>,
         projects_need_save: bool,
-        font_catalog: FontCatalog,
+        mut font_catalog: FontCatalog,
         cx: &mut Context<Self>,
     ) -> Self {
-        let active_theme = theme::ThemeId::PiDeckDark;
+        let active_theme = font_catalog
+            .theme_key
+            .as_deref()
+            .and_then(theme::ThemeId::from_key)
+            .unwrap_or_else(|| {
+                font_catalog.theme_key = None;
+                theme::ThemeId::PiDeckDark
+            });
         theme::set_active(active_theme);
         let font_scale = theme::FontScale::default();
         window.set_rem_size(font_scale.rem_size());
@@ -994,9 +1001,15 @@ impl RootView {
     }
 
     fn set_theme(&mut self, theme_id: theme::ThemeId, window: &mut Window, cx: &mut Context<Self>) {
-        self.active_theme = theme_id;
         self.theme_menu_open = false;
+        if self.active_theme == theme_id {
+            cx.notify();
+            return;
+        }
+        self.active_theme = theme_id;
         theme::set_active(self.active_theme);
+        self.font_catalog.theme_key = Some(self.active_theme.key().to_owned());
+        self.persist_settings(None, None, cx);
         window.refresh();
         cx.notify();
     }
@@ -2606,29 +2619,49 @@ impl RootView {
 
         self.font_catalog.preferences.set(role, family);
         fonts::install(self.font_catalog.preferences.clone());
-        self.font_feedback = Some("Saving typography…".to_owned());
+        self.persist_settings(Some("Saving typography…"), Some("Typography saved"), cx);
+        cx.notify();
+    }
+
+    fn persist_settings(
+        &mut self,
+        progress: Option<&str>,
+        success: Option<&str>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(message) = progress {
+            self.font_feedback = Some(message.to_owned());
+        }
         self.font_save_generation = self.font_save_generation.wrapping_add(1);
         let generation = self.font_save_generation;
         let path = self.font_catalog.settings_path.clone();
         let preferences = self.font_catalog.preferences.clone();
+        let theme = self.font_catalog.theme_key.clone();
+        let success = success.map(str::to_owned);
         let save = cx
             .background_executor()
-            .spawn(async move { fonts::save(&path, &preferences) });
+            .spawn(async move { fonts::save(&path, &preferences, theme.as_deref()) });
         cx.spawn(async move |view, cx| {
             let result = save.await;
             let _ = view.update(cx, |view, cx| {
                 if view.font_save_generation != generation {
                     return;
                 }
-                view.font_feedback = Some(match result {
-                    Ok(()) => "Typography saved".to_owned(),
-                    Err(error) => format!("Typography could not be saved: {error}"),
-                });
-                cx.notify();
+                match result {
+                    Ok(()) => {
+                        if let Some(message) = success {
+                            view.font_feedback = Some(message);
+                            cx.notify();
+                        }
+                    }
+                    Err(error) => {
+                        view.font_feedback = Some(format!("Settings could not be saved: {error}"));
+                        cx.notify();
+                    }
+                }
             });
         })
         .detach();
-        cx.notify();
     }
 
     fn set_model_provider_filter(&mut self, provider: Option<String>, cx: &mut Context<Self>) {

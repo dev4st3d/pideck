@@ -134,6 +134,39 @@ impl ThemeId {
         }
     }
 
+    /// Stable settings key for local persistence.
+    pub const fn key(self) -> &'static str {
+        match self {
+            Self::PiDeckDark => "pideck-dark",
+            Self::CursorDark => "cursor-dark",
+            Self::MossFoundry => "moss-foundry",
+            Self::InkHarbor => "ink-harbor",
+            Self::VoltWorkshop => "volt-workshop",
+            Self::PlumArchive => "plum-archive",
+            Self::SaltFlat => "salt-flat",
+            Self::SaffronLoom => "saffron-loom",
+            Self::JuniperCoil => "juniper-coil",
+            Self::SmokeLibrary => "smoke-library",
+            Self::PewterHall => "pewter-hall",
+            Self::OliveStudy => "olive-study",
+            Self::ParchmentDesk => "parchment-desk",
+            Self::MistOrchard => "mist-orchard",
+            Self::CoralLedger => "coral-ledger",
+            Self::ChalkBlueprint => "chalk-blueprint",
+            Self::HoneyComb => "honey-comb",
+            Self::PorcelainLab => "porcelain-lab",
+            Self::CitrusGrove => "citrus-grove",
+            Self::Letterpress => "letterpress",
+            Self::LinenGallery => "linen-gallery",
+            Self::RicePaper => "rice-paper",
+            Self::BoneChina => "bone-china",
+        }
+    }
+
+    pub fn from_key(key: &str) -> Option<Self> {
+        Self::ALL.iter().copied().find(|theme| theme.key() == key)
+    }
+
     pub const fn mode(self) -> ThemeMode {
         match self {
             Self::PiDeckDark
@@ -1238,6 +1271,21 @@ mod tests {
         }
         assert_eq!(scale.percent(), 80);
         assert!(!scale.decrease());
+    }
+
+    #[test]
+    fn theme_keys_round_trip_and_are_unique() {
+        let mut keys = std::collections::HashSet::new();
+        for theme in ThemeId::ALL {
+            assert!(
+                keys.insert(theme.key()),
+                "duplicate theme key {}",
+                theme.key()
+            );
+            assert_eq!(ThemeId::from_key(theme.key()), Some(theme));
+        }
+        assert_eq!(ThemeId::from_key("not-a-theme"), None);
+        assert_eq!(ThemeId::from_key("Pideck Dark"), None);
     }
 
     #[test]
