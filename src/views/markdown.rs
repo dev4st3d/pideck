@@ -97,19 +97,10 @@ fn join_row(cells: &[String], columns: usize) -> String {
         .join("\t")
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub(super) struct ProseBlock {
     pub text: String,
     pub spans: Vec<MarkdownSpan>,
-}
-
-impl Default for ProseBlock {
-    fn default() -> Self {
-        Self {
-            text: String::new(),
-            spans: Vec::new(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

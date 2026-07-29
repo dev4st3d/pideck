@@ -511,8 +511,8 @@ mod tests {
         fs::write(root.join("README.md"), "hi").unwrap();
         let matches = search_files(&root, "", 20);
         let paths: Vec<_> = matches.iter().map(|item| item.path.as_str()).collect();
-        assert!(paths.iter().any(|path| *path == "src/"));
-        assert!(paths.iter().any(|path| *path == "README.md"));
+        assert!(paths.contains(&"src/"));
+        assert!(paths.contains(&"README.md"));
         let _ = fs::remove_dir_all(root);
     }
 
