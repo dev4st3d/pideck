@@ -4,7 +4,8 @@ use gpui::{
 };
 
 use crate::actions::{
-    ActivateRecovery, Connect, DecreaseFontSize, FocusNext, FocusPrevious, IncreaseFontSize,
+    APP_UPDATE_BUTTON_CONTEXT, APP_UPDATE_NOTICE_CONTEXT, ActivateAppUpdate, ActivateRecovery,
+    Connect, DecreaseFontSize, FocusNext, FocusPrevious, IncreaseFontSize, OpenAppUpdates,
     OpenCommandPalette, RECOVERY_BUTTON_CONTEXT, Retry, ShowHotkeys, Stop, ToggleInspector,
     ToggleSidebar, ToggleTerminal, composer_key_bindings, history_key_bindings,
     image_preview_key_bindings, orchestration_key_bindings, transcript_key_bindings,
@@ -52,6 +53,10 @@ pub fn run() {
             KeyBinding::new("ctrl--", DecreaseFontSize, None),
             KeyBinding::new("enter", ActivateRecovery, Some(RECOVERY_BUTTON_CONTEXT)),
             KeyBinding::new("space", ActivateRecovery, Some(RECOVERY_BUTTON_CONTEXT)),
+            KeyBinding::new("enter", ActivateAppUpdate, Some(APP_UPDATE_BUTTON_CONTEXT)),
+            KeyBinding::new("space", ActivateAppUpdate, Some(APP_UPDATE_BUTTON_CONTEXT)),
+            KeyBinding::new("enter", OpenAppUpdates, Some(APP_UPDATE_NOTICE_CONTEXT)),
+            KeyBinding::new("space", OpenAppUpdates, Some(APP_UPDATE_NOTICE_CONTEXT)),
             KeyBinding::new("tab", FocusNext, None),
             KeyBinding::new("shift-tab", FocusPrevious, None),
         ]);

@@ -1,5 +1,5 @@
-# Build and publish a Windows release using the package version in Cargo.toml.
-# Run this workflow manually after bumping the package version.
+# Build and publish a Velopack Windows installer/update feed using the
+# package version in Cargo.toml. Run manually after bumping the version.
 name: Build
 
 on:
@@ -19,7 +19,7 @@ jobs:
   windows:
     name: Windows release
     runs-on: windows-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -66,19 +66,49 @@ jobs:
       - name: Build release
         run: cargo build --release
 
-      - name: Stage standalone executable
+      - name: Install Velopack CLI
+        run: dotnet tool update --global vpk --version 0.0.1298
+
+      # Delta generation is optional. The first Velopack release, or a release
+      # after a missing feed, still produces a complete full update package.
+      - name: Download previous package
+        continue-on-error: true
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force -Path "dist" | Out-Null
-          Copy-Item `
-            "target/release/pi-gui.exe" `
-            "dist/${{ steps.meta.outputs.artifact_name }}.exe"
+          vpk download github `
+            --repoUrl "https://github.com/dev4st3d/pideck" `
+            --token "${{ secrets.GITHUB_TOKEN }}" `
+            --channel win `
+            --outputDir "dist/releases"
 
-      - name: Upload build artifact
+      - name: Package installer and update feed
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path "dist/app" | Out-Null
+          Copy-Item "target/release/pi-gui.exe" "dist/app/pi-gui.exe"
+
+          vpk pack `
+            --packId "PiDeck" `
+            --packVersion "${{ steps.meta.outputs.version }}" `
+            --packDir "dist/app" `
+            --mainExe "pi-gui.exe" `
+            --packTitle "PiDeck" `
+            --packAuthors "dev4st3d" `
+            --icon "assets/app.ico" `
+            --shortcuts "Desktop,StartMenuRoot" `
+            --noPortable `
+            --channel win `
+            --outputDir "dist/releases"
+
+      - name: Upload release assets
         uses: actions/upload-artifact@v4
         with:
           name: ${{ steps.meta.outputs.artifact_name }}
-          path: dist/${{ steps.meta.outputs.artifact_name }}.exe
+          path: |
+            dist/releases/PiDeck-win-Setup.exe
+            dist/releases/PiDeck-${{ steps.meta.outputs.version }}-*.nupkg
+            dist/releases/releases.win.json
+            dist/releases/RELEASES
           if-no-files-found: error
           retention-days: 30
 
@@ -86,11 +116,15 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.meta.outputs.tag }}
-          name: ${{ steps.meta.outputs.tag }}
+          name: PiDeck ${{ steps.meta.outputs.tag }}
           target_commitish: ${{ github.sha }}
           generate_release_notes: true
           make_latest: true
-          files: dist/${{ steps.meta.outputs.artifact_name }}.exe
+          files: |
+            dist/releases/PiDeck-win-Setup.exe
+            dist/releases/PiDeck-${{ steps.meta.outputs.version }}-*.nupkg
+            dist/releases/releases.win.json
+            dist/releases/RELEASES
           fail_on_unmatched_files: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

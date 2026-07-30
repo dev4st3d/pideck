@@ -58,6 +58,8 @@ impl Render for RootView {
             .on_action(cx.listener(Self::on_focus_next))
             .on_action(cx.listener(Self::on_focus_previous))
             .on_action(cx.listener(Self::on_open_command_palette))
+            .on_action(cx.listener(Self::on_open_app_updates))
+            .on_action(cx.listener(Self::on_activate_app_update))
             .on_action(cx.listener(Self::on_show_hotkeys))
             .on_action(cx.listener(Self::on_toggle_sidebar))
             .on_action(cx.listener(Self::on_toggle_terminal))
@@ -102,6 +104,7 @@ impl Render for RootView {
                     sidebar_open: self.sidebar_open,
                     terminal_open: self.terminal_open,
                     inspector_open: self.inspector_open,
+                    app_update: &self.app_update,
                 },
                 cx,
             ))
@@ -157,6 +160,7 @@ impl Render for RootView {
                                 font_catalog: &self.font_catalog,
                                 font_role: self.font_role,
                                 font_feedback: self.font_feedback.as_deref(),
+                                app_update: &self.app_update,
                                 pi_scroll: &self.pi_settings_scroll,
                             },
                             cx,

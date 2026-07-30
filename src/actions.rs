@@ -4,6 +4,8 @@ use gpui::{KeyBinding, actions};
 
 pub(crate) const RECOVERY_BUTTON_CONTEXT: &str = "RecoveryButton";
 pub(crate) const ORCHESTRATION_ROW_CONTEXT: &str = "OrchestrationRow";
+pub(crate) const APP_UPDATE_BUTTON_CONTEXT: &str = "AppUpdateButton";
+pub(crate) const APP_UPDATE_NOTICE_CONTEXT: &str = "AppUpdateNotice";
 
 actions!(
     pi_gui,
@@ -59,7 +61,9 @@ actions!(
         OrchestrationActivate,
         ImagePreviewPrevious,
         ImagePreviewNext,
-        ImagePreviewClose
+        ImagePreviewClose,
+        ActivateAppUpdate,
+        OpenAppUpdates
     ]
 );
 

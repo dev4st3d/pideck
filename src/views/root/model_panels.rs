@@ -12,6 +12,7 @@ pub(super) struct ModelSettingsPanelParams<'a> {
     pub(super) font_catalog: &'a FontCatalog,
     pub(super) font_role: FontRole,
     pub(super) font_feedback: Option<&'a str>,
+    pub(super) app_update: &'a PiDeckUpdateState,
     pub(super) pi_scroll: &'a ScrollHandle,
 }
 
@@ -30,6 +31,7 @@ pub(super) fn model_settings_panel(
         font_catalog,
         font_role,
         font_feedback,
+        app_update,
         pi_scroll,
     } = params;
     let refreshing = if tab == ModelSettingsTab::Resources {
@@ -78,6 +80,8 @@ pub(super) fn model_settings_panel(
                                             "Typography"
                                         } else if tab == ModelSettingsTab::Pi {
                                             "Pi settings"
+                                        } else if tab == ModelSettingsTab::App {
+                                            "PiDeck"
                                         } else {
                                             "Model settings"
                                         }),
@@ -94,6 +98,8 @@ pub(super) fn model_settings_panel(
                                                 "Choose any installed system font for the app's three text roles."
                                             } else if tab == ModelSettingsTab::Pi {
                                                 "Typed controls backed by Pi's SettingsManager and effective global values."
+                                            } else if tab == ModelSettingsTab::App {
+                                                "Installed version and updates published through GitHub Releases."
                                             } else {
                                                 "Providers, defaults, cycle order, and usage. Session model and thinking live in the prompt box."
                                             },
@@ -107,7 +113,10 @@ pub(super) fn model_settings_panel(
                                 .items_center()
                                 .gap(px(6.0))
                                 .flex_shrink_0()
-                                .when(tab != ModelSettingsTab::Typography, |actions| {
+                                .when(
+                                    tab != ModelSettingsTab::Typography
+                                        && tab != ModelSettingsTab::App,
+                                    |actions| {
                                     actions.child(controls::quiet_button(
                                         "refresh-model-catalog",
                                         if refreshing {
@@ -126,7 +135,8 @@ pub(super) fn model_settings_panel(
                                             }
                                         })),
                                     ))
-                                })
+                                },
+                                )
                                 .child(controls::quiet_button(
                                     "close-model-settings",
                                     "Done",
@@ -147,6 +157,7 @@ pub(super) fn model_settings_panel(
                             (ModelSettingsTab::Usage, "Usage"),
                             (ModelSettingsTab::Typography, "Type"),
                             (ModelSettingsTab::Resources, "Resources"),
+                            (ModelSettingsTab::App, "App"),
                         ]
                         .into_iter()
                         .map(|(target, label)| {
@@ -182,9 +193,12 @@ pub(super) fn model_settings_panel(
                 cx,
             )
             .into_any_element(),
+            ModelSettingsTab::App => app_settings(app_update, cx).into_any_element(),
         })
         .when(
-            tab != ModelSettingsTab::Resources && tab != ModelSettingsTab::Typography,
+            tab != ModelSettingsTab::Resources
+                && tab != ModelSettingsTab::Typography
+                && tab != ModelSettingsTab::App,
             |panel| {
                 panel
                 .when_some(catalog_phase_note(&projection.phase), |panel, note| {
@@ -205,6 +219,147 @@ pub(super) fn model_settings_panel(
                 panel.child(controls::panel_footer_status(feedback))
             })
         })
+}
+
+fn app_settings(state: &PiDeckUpdateState, cx: &mut Context<RootView>) -> impl IntoElement {
+    let (status, detail, color, action) = match state {
+        PiDeckUpdateState::Idle | PiDeckUpdateState::Checking => (
+            "Checking GitHub Releases".to_owned(),
+            "Looking for a newer stable version of PiDeck.".to_owned(),
+            theme::working(),
+            None,
+        ),
+        PiDeckUpdateState::Current => (
+            "PiDeck is up to date".to_owned(),
+            "No newer stable release is available.".to_owned(),
+            theme::live(),
+            Some("Check again"),
+        ),
+        PiDeckUpdateState::Available { version } => (
+            format!("PiDeck {version} is available"),
+            "The package will be downloaded and verified, then PiDeck will close and reopen. Finish active work before continuing."
+                .to_owned(),
+            theme::data(),
+            Some("Update and restart"),
+        ),
+        PiDeckUpdateState::Downloading { version } => (
+            format!("Downloading PiDeck {version}"),
+            "Preparing and verifying the update. PiDeck will restart when it is ready.".to_owned(),
+            theme::working(),
+            None,
+        ),
+        PiDeckUpdateState::Restarting => (
+            "Restarting PiDeck".to_owned(),
+            "The updater is replacing the installed version in the same application location."
+                .to_owned(),
+            theme::working(),
+            None,
+        ),
+        PiDeckUpdateState::NotInstalled => (
+            "Updates require an installed copy".to_owned(),
+            "This copy was not installed by Velopack. Install PiDeck-win-Setup.exe from GitHub Releases to enable in-app updates."
+                .to_owned(),
+            theme::ash(),
+            None,
+        ),
+        PiDeckUpdateState::Error(message) => (
+            "PiDeck could not update".to_owned(),
+            message.clone(),
+            theme::error(),
+            Some("Try again"),
+        ),
+    };
+
+    div()
+        .id("app-settings-scroll")
+        .flex_1()
+        .min_h_0()
+        .overflow_y_scroll()
+        .child(
+            div()
+                .w_full()
+                .px(px(18.0))
+                .pt(px(14.0))
+                .pb(px(22.0))
+                .flex()
+                .flex_col()
+                .gap(px(18.0))
+                .child(
+                    controls::divider_list()
+                        .child(controls::setting_row(
+                            "Installed version",
+                            Some("Stable channel"),
+                            controls::meta_text(format!("v{}", app_update::CURRENT_VERSION)),
+                        ))
+                        .child(controls::setting_row(
+                            "Update source",
+                            Some("Public releases"),
+                            controls::meta_text("GitHub"),
+                        )),
+                )
+                .child(controls::panel_note(
+                    "PiDeck Setup creates Desktop and Start menu shortcuts. To pin PiDeck, right-click its running taskbar icon and choose Pin to taskbar; Windows requires that user confirmation.",
+                    controls::ControlTone::Normal,
+                ))
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(8.0))
+                        .child(
+                            div()
+                                .font_family(theme::main())
+                                .text_size(theme::text_size(theme::T_UI))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(color)
+                                .child(status),
+                        )
+                        .child(
+                            div()
+                                .max_w(px(620.0))
+                                .font_family(theme::sans())
+                                .text_size(theme::text_size(theme::T_UI_SM))
+                                .line_height(gpui::relative(1.45))
+                                .text_color(theme::bone_dim())
+                                .child(detail),
+                        )
+                        .when_some(action, |section, label| {
+                            section.child(
+                                div().pt(px(4.0)).flex().child(app_update_button(label, cx)),
+                            )
+                        }),
+                ),
+        )
+}
+
+fn app_update_button(label: &'static str, cx: &mut Context<RootView>) -> impl IntoElement {
+    div()
+        .id("app-update-action")
+        .h(px(34.0))
+        .px(px(12.0))
+        .rounded(px(theme::RADIUS_SM))
+        .flex()
+        .items_center()
+        .justify_center()
+        .bg(theme::panel_lift())
+        .border_1()
+        .border_color(theme::edge_hard())
+        .font_family(theme::main())
+        .text_size(theme::text_size(theme::T_UI_SM))
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(theme::bone())
+        .tab_index(0)
+        .key_context(APP_UPDATE_BUTTON_CONTEXT)
+        .cursor_pointer()
+        .hover(|button| button.bg(theme::panel_hover()).border_color(theme::edge()))
+        .focus(|button| {
+            button
+                .border_color(theme::focus())
+                .text_color(theme::focus())
+        })
+        .active(|button| button.bg(theme::panel()))
+        .on_click(cx.listener(|view, _, _, cx| view.activate_app_update(cx)))
+        .child(label)
 }
 
 fn typography_settings(

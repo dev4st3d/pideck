@@ -1,3 +1,4 @@
+pub mod app_update;
 pub mod git_diff;
 pub mod path_actions;
 pub mod pi_process;

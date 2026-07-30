@@ -710,7 +710,7 @@ pub fn tab_button(
     div()
         .id(id.into())
         .h(px(28.0))
-        .px(px(12.0))
+        .px(px(8.0))
         .rounded(px(2.0))
         .flex()
         .flex_1()
@@ -742,6 +742,11 @@ pub fn tab_button(
                 button.bg(theme::panel()).text_color(theme::bone())
             }
         })
+        .focus(|button| {
+            button
+                .border_color(theme::focus())
+                .text_color(theme::focus())
+        })
         .active(|button| button.bg(theme::panel_lift()))
         .on_click(move |event, window, cx| on_click(event, window, cx))
         .child(
@@ -753,6 +758,9 @@ pub fn tab_button(
                 } else {
                     FontWeight::SEMIBOLD
                 })
+                .overflow_hidden()
+                .text_ellipsis()
+                .whitespace_nowrap()
                 .child(label.into()),
         )
 }

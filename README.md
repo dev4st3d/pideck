@@ -81,7 +81,21 @@ Every installed Pi extension is hosted natively: `select`, `confirm`, `input`, a
 | Pi | `@earendil-works/pi-coding-agent@0.82.1` |
 | Node | Required only for Pi and the SDK bridge sidecar |
 
-## Quick start
+## Install on Windows
+
+1. Install Pi if it is not already available:
+
+   ```powershell
+   npm install -g @earendil-works/pi-coding-agent@0.82.1
+   ```
+
+2. Download `PiDeck-win-Setup.exe` from the [latest GitHub Release](https://github.com/dev4st3d/pideck/releases/latest) and run it.
+
+PiDeck Setup installs per user, keeps future versions in the same application location, and creates Desktop and Start menu shortcuts. To keep PiDeck on the taskbar, launch it, right-click its taskbar icon, and choose **Pin to taskbar**. Windows requires this final pinning choice from the user.
+
+PiDeck checks for stable updates at startup. When one is available, use the titlebar update notice or **Settings → App → Update and restart**. The package is downloaded and verified off the UI thread, then PiDeck closes, updates in place, and reopens.
+
+## Quick start from source
 
 ```powershell
 npm install -g @earendil-works/pi-coding-agent@0.82.1
@@ -130,4 +144,6 @@ Dev builds use `opt-level = 1` so GPUI rendering stays fluid without a full rele
 
 ## Releases
 
-Update `package.version` in `Cargo.toml`, merge that commit, then run the **Build** workflow from GitHub Actions. The workflow builds the Windows executable, creates the matching `v<version>` tag and GitHub Release, and marks it as the latest release. Version tags are immutable: rerunning is allowed from the same commit, but publishing another commit requires a version bump.
+Update `package.version` in `Cargo.toml`, merge that commit, then run the **Build** workflow from GitHub Actions. The workflow builds PiDeck, packages the per-user `PiDeck-win-Setup.exe` installer and Velopack update feed, creates the matching `v<version>` tag and GitHub Release, and marks it as latest. It also downloads the previous full package when available so Velopack can generate a smaller delta update.
+
+Version tags are immutable: rerunning is allowed from the same commit, but publishing another commit requires a version bump. The Velopack runtime and CLI are both pinned to `0.0.1298` because later releases currently raise the effective Rust requirement above PiDeck's Rust 1.85 minimum.

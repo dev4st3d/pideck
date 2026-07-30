@@ -57,6 +57,7 @@ pub(super) struct TitlebarParams<'a> {
     pub(super) sidebar_open: bool,
     pub(super) terminal_open: bool,
     pub(super) inspector_open: bool,
+    pub(super) app_update: &'a PiDeckUpdateState,
 }
 
 pub(super) fn titlebar(params: TitlebarParams<'_>, cx: &mut Context<RootView>) -> impl IntoElement {
@@ -71,11 +72,13 @@ pub(super) fn titlebar(params: TitlebarParams<'_>, cx: &mut Context<RootView>) -
         sidebar_open,
         terminal_open,
         inspector_open,
+        app_update,
     } = params;
     let action = projection.action;
     let status = titlebar_status(projection, conversation, opening_thread);
     let status_color = status.color();
     let active_theme = theme::active();
+    let update_version = app_update.available_version().map(str::to_owned);
     div()
         .h(px(theme::TITLE_H))
         .px(px(theme::PAD_X))
@@ -195,6 +198,9 @@ pub(super) fn titlebar(params: TitlebarParams<'_>, cx: &mut Context<RootView>) -
                 .justify_end()
                 .gap(px(10.0))
                 .flex_shrink_0()
+                .when_some(update_version, |row, version| {
+                    row.child(update_notice_button(version, cx))
+                })
                 .child(
                     div()
                         .flex()
@@ -336,6 +342,38 @@ pub(super) fn titlebar(params: TitlebarParams<'_>, cx: &mut Context<RootView>) -
                     ))
                 }),
         )
+}
+
+fn update_notice_button(version: String, cx: &mut Context<RootView>) -> impl IntoElement {
+    div()
+        .id("app-update-notice")
+        .h(px(28.0))
+        .px(px(9.0))
+        .rounded(px(theme::RADIUS_SM))
+        .flex()
+        .items_center()
+        .justify_center()
+        .flex_shrink_0()
+        .bg(theme::panel_lift())
+        .border_1()
+        .border_color(theme::edge_hard())
+        .font_family(theme::main())
+        .text_size(theme::text_size(theme::T_UI_SM))
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(theme::data())
+        .whitespace_nowrap()
+        .tab_index(0)
+        .key_context(APP_UPDATE_NOTICE_CONTEXT)
+        .cursor_pointer()
+        .hover(|button| button.bg(theme::panel_hover()).text_color(theme::bone()))
+        .focus(|button| {
+            button
+                .border_color(theme::focus())
+                .text_color(theme::focus())
+        })
+        .active(|button| button.bg(theme::panel()))
+        .on_click(cx.listener(|view, _, window, cx| view.open_app_updates(window, cx)))
+        .child(format!("Update {version}"))
 }
 
 fn theme_select_sheet(active: theme::ThemeId, cx: &mut Context<RootView>) -> impl IntoElement {

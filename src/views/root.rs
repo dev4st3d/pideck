@@ -17,11 +17,12 @@ use gpui::{
 };
 
 use crate::actions::{
-    AbortRun, ActivateRecovery, AttachFiles, Connect, DecreaseFontSize, FocusNext, FocusPrevious,
+    APP_UPDATE_BUTTON_CONTEXT, APP_UPDATE_NOTICE_CONTEXT, AbortRun, ActivateAppUpdate,
+    ActivateRecovery, AttachFiles, Connect, DecreaseFontSize, FocusNext, FocusPrevious,
     HistoryActivate, HistoryFirst, HistoryFold, HistoryLast, HistoryNext, HistoryPrevious,
     HistoryUnfold, ImagePreviewClose, ImagePreviewNext, ImagePreviewPrevious, IncreaseFontSize,
-    ORCHESTRATION_ROW_CONTEXT, OpenCommandPalette, OrchestrationActivate, Retry, ShowHotkeys, Stop,
-    ToggleInspector, ToggleSidebar, ToggleTerminal,
+    ORCHESTRATION_ROW_CONTEXT, OpenAppUpdates, OpenCommandPalette, OrchestrationActivate, Retry,
+    ShowHotkeys, Stop, ToggleInspector, ToggleSidebar, ToggleTerminal,
 };
 use crate::attachments::{self, PromptFile};
 use crate::command_catalog::{
@@ -46,6 +47,7 @@ use crate::orchestration::{
 use crate::resource_center::{
     ResourceLoadState, ResourcePhase, ResourceScopeFilter, ResourceStateFilter,
 };
+use crate::services::app_update::{self, CheckOutcome, InstallOutcome};
 use crate::services::git_diff::{WorkspaceDiff, load_workspace_diff};
 use crate::services::projects::{
     AddProjectOutcome, ProjectEntry, ProjectRegistry, ProjectRegistryError, project_key,
@@ -263,6 +265,28 @@ enum ModelSettingsTab {
     Usage,
     Typography,
     Resources,
+    App,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PiDeckUpdateState {
+    Idle,
+    Checking,
+    Current,
+    Available { version: String },
+    Downloading { version: String },
+    Restarting,
+    NotInstalled,
+    Error(String),
+}
+
+impl PiDeckUpdateState {
+    fn available_version(&self) -> Option<&str> {
+        match self {
+            Self::Available { version } => Some(version),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -335,6 +359,7 @@ pub struct RootView {
     font_role: FontRole,
     font_feedback: Option<String>,
     font_save_generation: u64,
+    app_update: PiDeckUpdateState,
     command_palette_open: bool,
     hotkey_help_open: bool,
     compaction_modal_open: bool,
@@ -713,6 +738,7 @@ impl RootView {
             font_catalog,
             font_role: FontRole::Sans,
             font_save_generation: 0,
+            app_update: PiDeckUpdateState::Idle,
             command_palette_open: false,
             hotkey_help_open: false,
             compaction_modal_open: false,
@@ -853,6 +879,7 @@ impl RootView {
         if projects_need_save {
             view.persist_projects(cx);
         }
+        view.check_for_app_update(cx);
         view
     }
 
@@ -2539,7 +2566,9 @@ impl RootView {
 
     fn show_model_panel(&mut self, panel: ModelPanel, window: &mut Window, cx: &mut Context<Self>) {
         self.model_panel = Some(panel);
-        if matches!(panel, ModelPanel::Switcher | ModelPanel::Settings(_)) {
+        if matches!(panel, ModelPanel::Switcher)
+            || matches!(panel, ModelPanel::Settings(tab) if tab != ModelSettingsTab::App)
+        {
             self.model_catalog_auto_refresh_pending = true;
             self.try_auto_refresh_models(cx);
         }
@@ -2599,6 +2628,97 @@ impl RootView {
             window.focus(&self.font_search_composer.read(cx).focus_handle(cx));
         }
         cx.notify();
+    }
+
+    fn open_app_updates(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.show_model_panel(ModelPanel::Settings(ModelSettingsTab::App), window, cx);
+    }
+
+    fn on_open_app_updates(
+        &mut self,
+        _: &OpenAppUpdates,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_app_updates(window, cx);
+    }
+
+    fn check_for_app_update(&mut self, cx: &mut Context<Self>) {
+        if matches!(
+            self.app_update,
+            PiDeckUpdateState::Checking
+                | PiDeckUpdateState::Downloading { .. }
+                | PiDeckUpdateState::Restarting
+        ) {
+            return;
+        }
+
+        self.app_update = PiDeckUpdateState::Checking;
+        cx.notify();
+        let check = cx
+            .background_executor()
+            .spawn(async { app_update::check_for_update() });
+        cx.spawn(async move |view, cx| {
+            let result = check.await;
+            let _ = view.update(cx, |view, cx| {
+                view.app_update = match result {
+                    Ok(CheckOutcome::Current) => PiDeckUpdateState::Current,
+                    Ok(CheckOutcome::UpdateAvailable { version }) => {
+                        PiDeckUpdateState::Available { version }
+                    }
+                    Ok(CheckOutcome::NotInstalled) => PiDeckUpdateState::NotInstalled,
+                    Err(error) => PiDeckUpdateState::Error(error.message().to_owned()),
+                };
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn activate_app_update(&mut self, cx: &mut Context<Self>) {
+        let Some(version) = self.app_update.available_version().map(str::to_owned) else {
+            if !matches!(
+                self.app_update,
+                PiDeckUpdateState::Checking
+                    | PiDeckUpdateState::Downloading { .. }
+                    | PiDeckUpdateState::Restarting
+            ) {
+                self.check_for_app_update(cx);
+            }
+            return;
+        };
+
+        self.app_update = PiDeckUpdateState::Downloading { version };
+        cx.notify();
+        let install = cx
+            .background_executor()
+            .spawn(async { app_update::download_and_schedule_update() });
+        cx.spawn(async move |view, cx| {
+            let result = install.await;
+            let _ = view.update(cx, |view, cx| {
+                view.app_update = match result {
+                    Ok(InstallOutcome::RestartScheduled) => PiDeckUpdateState::Restarting,
+                    Ok(InstallOutcome::AlreadyCurrent) => PiDeckUpdateState::Current,
+                    Ok(InstallOutcome::NotInstalled) => PiDeckUpdateState::NotInstalled,
+                    Err(error) => PiDeckUpdateState::Error(error.message().to_owned()),
+                };
+                let restart = matches!(view.app_update, PiDeckUpdateState::Restarting);
+                cx.notify();
+                if restart {
+                    cx.quit();
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn on_activate_app_update(
+        &mut self,
+        _: &ActivateAppUpdate,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.activate_app_update(cx);
     }
 
     fn set_font_role(&mut self, role: FontRole, cx: &mut Context<Self>) {
