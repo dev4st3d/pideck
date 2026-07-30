@@ -78,7 +78,7 @@ pub(super) fn render_tool_presentation(
                         .whitespace_nowrap()
                         .font_family(theme::mono())
                         .text_size(theme::text_size(theme::T_MONO))
-                        .font_weight(FontWeight::BOLD)
+                        .font_weight(FontWeight::MEDIUM)
                         .text_color(theme::bone())
                         .child(title),
                 )
@@ -186,24 +186,15 @@ fn meta_text(text: String) -> impl IntoElement {
         .child(text)
 }
 
+/// Quiet text-only affordance; the wrapping step already signals clickability.
 fn detail_hint() -> impl IntoElement {
     div()
-        .h(px(20.0))
-        .px(px(6.0))
         .flex_shrink_0()
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded(px(theme::RADIUS_SM))
-        .border_1()
-        .border_color(theme::edge_soft())
-        .overflow_hidden()
-        .bg(theme::canvas())
         .whitespace_nowrap()
         .font_family(theme::mono())
         .text_size(theme::text_size(theme::T_TINY))
         .font_weight(FontWeight::MEDIUM)
-        .text_color(theme::ash())
+        .text_color(theme::smoke())
         .child("details ↗")
 }
 

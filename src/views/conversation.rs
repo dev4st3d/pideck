@@ -12,7 +12,7 @@ use gpui::{
     FocusHandle, Focusable, FontStyle, FontWeight, HighlightStyle, IntoElement, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Render, SharedString, StrikethroughStyle,
     StyledText, TextLayout, TextRun, TextStyle, UnderlineStyle, Window, div, ease_out_quint,
-    prelude::*, px, relative, svg,
+    prelude::*, pulsating_between, px, relative, svg,
 };
 
 use crate::actions::{TranscriptCopy, TranscriptSelectAll};
@@ -45,6 +45,23 @@ const DISCLOSURE_MOTION_MS: u64 = 210;
 const DISCLOSURE_STEP_ESTIMATE_PX: f32 = 52.0;
 const DISCLOSURE_HISTORY_PAD_PX: f32 = 16.0;
 const DISCLOSURE_HISTORY_MAX_PX: f32 = 420.0;
+
+// Thread geometry shared by the prompt, activity, and reply sections of a
+// turn. Every section hangs on one rail column so the turn reads as a single
+// chain instead of a boxed card stack. Speaker nodes are larger than activity
+// beads so the eye reads structure at a glance.
+const THREAD_RAIL_W: f32 = 10.0;
+const NODE_SPEAKER: f32 = 6.0;
+const NODE_STEP: f32 = 4.0;
+/// Cap-height the node centers sit on inside their rows.
+const NODE_ALIGN: f32 = 9.0;
+const THREAD_GAP: f32 = 10.0;
+/// Deliberate prose/step measure; content does not spill to the panel edge.
+const MEASURE: f32 = 720.0;
+/// Whitespace between turns; the chain rests between links.
+const TURN_GAP: f32 = 28.0;
+/// Rhythm between sections inside one turn.
+const TURN_SECTION_GAP: f32 = 10.0;
 
 #[derive(Debug, Clone, Copy)]
 struct DisclosureMotion {
@@ -839,11 +856,6 @@ fn transcript_block_text(block: &MessageBlock) -> Option<&str> {
     }
 }
 
-struct TurnPosition {
-    index: usize,
-    is_last: bool,
-}
-
 struct ConversationRenderContext<'a> {
     projection: &'a ConversationProjection,
     texts: &'a HashMap<String, Entity<TranscriptText>>,
@@ -852,7 +864,7 @@ struct ConversationRenderContext<'a> {
 }
 
 fn turn_card(
-    position: TurnPosition,
+    number: usize,
     user: &RuntimeMessage,
     messages: &[Arc<RuntimeMessage>],
     render: &ConversationRenderContext<'_>,
@@ -860,26 +872,14 @@ fn turn_card(
 ) -> impl IntoElement {
     let prompt = message_prompt_text(user);
     let (activity, reply) = split_turn(messages, render.projection, Some(&prompt));
+    let continues = !activity.is_empty() || reply.is_some();
     div()
         .id(SharedString::from(format!("turn-{}", user.key.0)))
         .w_full()
         .flex()
         .flex_col()
-        .when(position.index == 1, |turn| {
-            turn.rounded_tl(px(theme::RADIUS))
-                .rounded_tr(px(theme::RADIUS))
-        })
-        .when(position.is_last, |turn| {
-            turn.rounded_bl(px(theme::RADIUS))
-                .rounded_br(px(theme::RADIUS))
-        })
-        .overflow_hidden()
-        .bg(theme::floor())
-        .border_1()
-        .border_color(theme::edge_soft())
-        // Keep stacked turns visually continuous without a hard double edge.
-        .when(!position.is_last, |turn| turn.border_b_0())
-        .child(user_prompt(position.index, user, render.texts))
+        .pb(px(TURN_GAP))
+        .child(user_prompt(number, user, render.texts, continues))
         .when(!activity.is_empty(), |turn| {
             turn.child(activity_band(
                 &format!("turn:{}", user.key.0),
@@ -931,14 +931,13 @@ fn optimistic_turn(
             input.request.as_str()
         )))
         .w_full()
-        .rounded(px(theme::RADIUS))
-        .overflow_hidden()
-        .border_1()
-        .border_color(theme::user_message_edge())
-        .child(user_prompt_block(
+        .child(user_prompt_section(
             SharedString::from(format!("optimistic-meta-{}", input.request.as_str())),
             meta_rows,
+            None,
+            Some(optimistic_status(input.kind)),
             true,
+            false,
             body,
         ))
 }
@@ -947,6 +946,7 @@ fn user_prompt(
     index: usize,
     message: &RuntimeMessage,
     texts: &HashMap<String, Entity<TranscriptText>>,
+    continues: bool,
 ) -> impl IntoElement {
     let mut body = Vec::new();
     let mut chips = Vec::new();
@@ -974,19 +974,92 @@ fn user_prompt(
         ("Turn".to_owned(), format!("{index:02}")),
         ("Timestamp".to_owned(), format_timestamp(message.timestamp)),
     ];
-    user_prompt_block(
+    user_prompt_section(
         SharedString::from(format!("user-meta-{}", message.key.0)),
         meta_rows,
+        Some(format_timestamp(message.timestamp)),
+        None,
         false,
+        continues,
         body,
     )
 }
 
-/// Compact editorial prompt: elevated wash, tight type, one quiet mark of identity.
-fn user_prompt_block(
+/// One node on a turn's thread: a centered dot plus, unless the turn ends
+/// here, the hairline hanging down to the next section. A live node breathes
+/// so in-flight work reads from the rail alone.
+fn thread_rail(
+    marker: gpui::Rgba,
+    dot: f32,
+    continues: bool,
+    pulse: Option<SharedString>,
+) -> impl IntoElement {
+    let node = div()
+        .mt(px(NODE_ALIGN - dot / 2.0))
+        .w(px(dot))
+        .h(px(dot))
+        .rounded_full()
+        .bg(marker)
+        .flex_shrink_0();
+    let node = match pulse {
+        Some(id) => node
+            .with_animation(
+                id,
+                Animation::new(Duration::from_millis(1600))
+                    .repeat()
+                    .with_easing(pulsating_between(0.45, 1.0)),
+                |node, delta| node.opacity(delta),
+            )
+            .into_any_element(),
+        None => node.into_any_element(),
+    };
+    div()
+        .w(px(THREAD_RAIL_W))
+        .flex_shrink_0()
+        .flex()
+        .flex_col()
+        .items_center()
+        .child(node)
+        .when(continues, |rail| {
+            rail.child(
+                div()
+                    .flex_1()
+                    .w(px(1.0))
+                    .min_h(px(8.0))
+                    .mt(px(3.0))
+                    .rounded_full()
+                    .bg(theme::edge()),
+            )
+        })
+}
+
+/// A section of a turn hung on the shared thread: rail on the left, content on
+/// a bounded measure so the whole turn reads as one composed chain.
+fn thread_section(
+    marker: gpui::Rgba,
+    dot: f32,
+    continues: bool,
+    pulse: Option<SharedString>,
+    body: impl IntoElement,
+) -> impl IntoElement {
+    div()
+        .w_full()
+        .flex()
+        .flex_row()
+        .gap(px(THREAD_GAP))
+        .child(thread_rail(marker, dot, continues, pulse))
+        .child(div().flex_1().min_w_0().max_w(px(MEASURE)).child(body))
+}
+
+/// Editorial prompt section: a quiet warm card for what was asked, hanging on
+/// the thread instead of banding a boxed turn.
+fn user_prompt_section(
     meta_id: SharedString,
     meta_rows: Vec<(String, String)>,
+    time_label: Option<String>,
+    status_label: Option<&'static str>,
     pending: bool,
+    continues: bool,
     body: Vec<AnyElement>,
 ) -> impl IntoElement {
     let mark = if pending {
@@ -994,56 +1067,49 @@ fn user_prompt_block(
     } else {
         theme::signal()
     };
-    let pending_label = meta_rows
-        .iter()
-        .find(|(key, _)| key == "Status")
-        .map(|(_, value)| value.clone());
-
-    div()
-        .relative()
-        .w_full()
-        .bg(theme::user_message())
-        .when(!pending, |block| {
-            block.border_b_1().border_color(theme::user_message_edge())
-        })
-        // Inset warm hairline — sits on the content rhythm, not the outer edge.
-        .child(
-            div()
-                .absolute()
-                .top(px(0.0))
-                .left(px(18.0))
-                .right(px(18.0))
-                .h(px(1.0))
-                .bg(theme::user_message_edge()),
-        )
-        .child(
-            div()
-                .w_full()
-                .px(px(18.0))
-                .pt(px(10.0))
-                .pb(px(11.0))
-                .flex()
-                .flex_col()
-                .gap(px(6.0))
-                .child(user_prompt_header(
-                    meta_id,
-                    meta_rows,
-                    pending_label,
-                    pending,
-                    mark,
-                ))
-                .when(!body.is_empty(), |block| {
-                    block.child(div().w_full().flex().flex_col().gap(px(5.0)).children(body))
-                }),
-        )
+    // Pending turns keep breathing on the thread until the transcript answers.
+    let pulse = pending.then(|| SharedString::from(format!("thread-pulse:{meta_id}")));
+    thread_section(
+        mark,
+        NODE_SPEAKER,
+        continues,
+        pulse,
+        div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .pb(px(TURN_SECTION_GAP))
+            .child(user_prompt_header(
+                meta_id,
+                meta_rows,
+                time_label,
+                status_label,
+                pending,
+            ))
+            .when(!body.is_empty(), |section| {
+                section.child(
+                    div()
+                        .w_full()
+                        .mt(px(7.0))
+                        .rounded(px(theme::RADIUS))
+                        .bg(theme::user_message())
+                        .px(px(13.0))
+                        .py(px(10.0))
+                        .flex()
+                        .flex_col()
+                        .gap(px(5.0))
+                        .children(body),
+                )
+            }),
+    )
 }
 
 fn user_prompt_header(
     meta_id: SharedString,
     meta_rows: Vec<(String, String)>,
-    pending_label: Option<String>,
+    time_label: Option<String>,
+    status_label: Option<&'static str>,
     pending: bool,
-    mark: gpui::Rgba,
 ) -> impl IntoElement {
     div()
         .w_full()
@@ -1054,31 +1120,15 @@ fn user_prompt_header(
         .gap(px(12.0))
         .child(
             div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(8.0))
-                .child(
-                    // Short gem — identity without a full rail.
-                    div()
-                        .w(px(2.0))
-                        .h(px(12.0))
-                        .rounded_full()
-                        .bg(mark)
-                        .flex_shrink_0(),
-                )
-                .child(
-                    div()
-                        .font_family(theme::sans())
-                        .text_size(theme::text_size(theme::T_UI_SM))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(if pending {
-                            theme::bone_dim()
-                        } else {
-                            theme::bone()
-                        })
-                        .child("You"),
-                ),
+                .font_family(theme::sans())
+                .text_size(theme::text_size(theme::T_UI_SM))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(if pending {
+                    theme::bone_dim()
+                } else {
+                    theme::bone()
+                })
+                .child("You"),
         )
         .child(
             div()
@@ -1086,8 +1136,8 @@ fn user_prompt_header(
                 .flex()
                 .flex_row()
                 .items_center()
-                .gap(px(8.0))
-                .when_some(pending_label, |row, label| {
+                .gap(px(10.0))
+                .when_some(status_label, |row, label| {
                     row.child(
                         div()
                             .font_family(theme::mono())
@@ -1095,6 +1145,15 @@ fn user_prompt_header(
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(theme::data())
                             .child(label),
+                    )
+                })
+                .when_some(time_label, |row, time| {
+                    row.child(
+                        div()
+                            .font_family(theme::mono())
+                            .text_size(theme::text_size(theme::T_TINY))
+                            .text_color(theme::smoke())
+                            .child(time),
                     )
                 })
                 .child(message_meta_info(meta_id, meta_rows)),
@@ -1633,6 +1692,7 @@ fn activity_band(
     let Some((latest_step, history)) = steps.split_last() else {
         return div().into_any_element();
     };
+    let summary = history_summary(history);
     let mut children = Vec::new();
     let mut index = 0;
     while index < history.len() {
@@ -1660,16 +1720,15 @@ fn activity_band(
                 details.push(next_detail.clone());
                 end += 1;
             }
-            let is_last = end == history.len();
-            children.push(render_tool_group(&group, &details, is_last, render.root));
+            // History steps chain straight into the latest step below them.
+            children.push(render_tool_group(&group, &details, true, render.root));
             index = end;
             continue;
         }
 
-        let is_last = index + 1 == history.len();
         children.push(render_activity_step(
             &history[index],
-            is_last,
+            true,
             render.texts,
             render.root,
         ));
@@ -1689,7 +1748,7 @@ fn activity_band(
                     CardStatus::Pending | CardStatus::Running | CardStatus::Cancelling
                 )
         );
-    let latest = render_activity_step(latest_step, true, render.texts, render.root);
+    let latest = render_activity_step(latest_step, has_reply, render.texts, render.root);
     let latest = if animate_latest {
         div()
             .w_full()
@@ -1721,26 +1780,19 @@ fn activity_band(
 
     div()
         .w_full()
-        .bg(theme::floor())
         .flex()
         .flex_col()
         .when(!history.is_empty(), |band| {
             band.child(activity_disclosure(
                 disclosure_key,
                 history.len(),
+                summary,
                 expanded,
                 render.disclosures,
             ))
         })
         .children(history_panel)
-        .child(
-            div()
-                .w_full()
-                .px(px(18.0))
-                .pt(px(7.0))
-                .pb(if has_reply { px(7.0) } else { px(12.0) })
-                .child(latest),
-        )
+        .child(latest)
         .into_any_element()
 }
 
@@ -1753,9 +1805,7 @@ fn activity_history_panel(
 ) -> AnyElement {
     let body = div()
         .w_full()
-        .px(px(18.0))
-        .pt(px(8.0))
-        .pb(px(4.0))
+        .pt(px(2.0))
         .flex()
         .flex_col()
         .children(children);
@@ -1802,9 +1852,55 @@ fn disclosure_history_estimate(history_count: usize) -> f32 {
         .clamp(36.0, DISCLOSURE_HISTORY_MAX_PX)
 }
 
+/// One-line "what is inside" for a collapsed activity history: step kinds in
+/// order of first appearance with counts, trimmed so the row stays quiet.
+fn history_summary(steps: &[ActivityStep<'_>]) -> Option<String> {
+    if steps.is_empty() {
+        return None;
+    }
+    let mut kinds: Vec<(String, usize)> = Vec::new();
+    for step in steps {
+        let token = match step {
+            ActivityStep::Thinking { .. } => "thinking".to_owned(),
+            ActivityStep::Text { .. } | ActivityStep::Notice { error: false, .. } => {
+                "note".to_owned()
+            }
+            ActivityStep::Notice { error: true, .. } => "error".to_owned(),
+            ActivityStep::Image { .. } => "image".to_owned(),
+            ActivityStep::Summary { .. } => "summary".to_owned(),
+            ActivityStep::Tool { presentation, .. } => sanitize_untrusted_text(&presentation.name),
+            ActivityStep::Custom { kind, .. } | ActivityStep::Unsupported { kind } => {
+                sanitize_untrusted_text(kind)
+            }
+        };
+        match kinds.iter_mut().find(|(name, _)| *name == token) {
+            Some((_, count)) => *count += 1,
+            None => kinds.push((token, 1)),
+        }
+    }
+
+    let mut shown = kinds
+        .iter()
+        .take(3)
+        .map(|(name, count)| {
+            if *count > 1 {
+                format!("{name} ×{count}")
+            } else {
+                name.clone()
+            }
+        })
+        .collect::<Vec<_>>();
+    let remaining = kinds.len() - shown.len();
+    if remaining > 0 {
+        shown.push(format!("+{remaining}"));
+    }
+    Some(shown.join(" · "))
+}
+
 fn activity_disclosure(
     key: &str,
     history_count: usize,
+    summary: Option<String>,
     expanded: bool,
     disclosures: &Entity<ActivityDisclosureState>,
 ) -> impl IntoElement {
@@ -1813,116 +1909,104 @@ fn activity_disclosure(
     let keyboard_key = key.to_owned();
     let keyboard_state = disclosures.clone();
     let label = if history_count == 1 {
-        "Earlier step".to_owned()
+        "1 earlier step".to_owned()
     } else {
-        "Earlier steps".to_owned()
+        format!("{history_count} earlier steps")
     };
-    let count_label = format!("{history_count:02}");
 
+    // Quiet link-style control. The bare chevron sits on the rail column so
+    // the thread reads unbroken; feedback is a color shift, not another box.
     div()
+        .id(SharedString::from(format!("activity-disclosure:{key}")))
+        .tab_index(0)
+        .cursor_pointer()
         .w_full()
-        .bg(theme::canvas())
+        .pb(px(6.0))
         .flex()
-        .flex_col()
+        .flex_row()
+        .gap(px(THREAD_GAP))
+        .text_color(theme::ash())
+        .hover(|row| row.text_color(theme::bone_dim()))
+        .focus(|row| row.text_color(theme::focus()))
+        .on_click(move |_, _, cx| {
+            click_state.update(cx, |state, cx| state.toggle(&click_key, cx));
+        })
+        .on_key_down(move |event: &gpui::KeyDownEvent, _, cx| {
+            if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                cx.stop_propagation();
+                keyboard_state.update(cx, |state, cx| state.toggle(&keyboard_key, cx));
+            }
+        })
         .child(
             div()
-                .id(SharedString::from(format!("activity-disclosure:{key}")))
-                .tab_index(0)
-                .cursor_pointer()
-                .w_full()
-                .min_h(px(32.0))
-                .px(px(15.0))
-                .py(px(5.0))
-                .rounded(px(theme::RADIUS_SM))
-                .border_1()
-                .border_color(gpui::rgba(0x0000_0000))
-                .text_color(theme::ash())
+                .w(px(THREAD_RAIL_W))
+                .flex_shrink_0()
                 .flex()
-                .flex_row()
+                .flex_col()
                 .items_center()
-                .gap(px(10.0))
-                .hover(|row| row.bg(theme::panel()).text_color(theme::bone_dim()))
-                .active(|row| row.bg(theme::panel_lift()))
-                .focus(|row| {
-                    row.bg(theme::panel())
-                        .text_color(theme::focus())
-                        .border_color(theme::edge_hard())
-                })
-                .on_click(move |_, _, cx| {
-                    click_state.update(cx, |state, cx| state.toggle(&click_key, cx));
-                })
-                .on_key_down(move |event: &gpui::KeyDownEvent, _, cx| {
-                    if matches!(event.keystroke.key.as_str(), "enter" | "space") {
-                        cx.stop_propagation();
-                        keyboard_state.update(cx, |state, cx| state.toggle(&keyboard_key, cx));
-                    }
-                })
                 .child(
-                    div()
-                        .size(px(18.0))
-                        .flex_shrink_0()
-                        .rounded(px(theme::RADIUS_SM))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .bg(theme::floor())
-                        .border_1()
-                        .border_color(theme::edge_soft())
-                        .child(
-                            svg()
-                                .path(if expanded {
-                                    "icons/chevron-down.svg"
-                                } else {
-                                    "icons/chevron-right.svg"
-                                })
-                                .size(px(10.0))
-                                .text_color(theme::smoke()),
-                        ),
+                    svg()
+                        .path(if expanded {
+                            "icons/chevron-down.svg"
+                        } else {
+                            "icons/chevron-right.svg"
+                        })
+                        .size(px(9.0))
+                        .mt(px(4.5))
+                        .text_color(theme::smoke()),
                 )
                 .child(
                     div()
-                        .min_w_0()
                         .flex_1()
+                        .w(px(1.0))
+                        .min_h(px(6.0))
+                        .mt(px(3.0))
+                        .rounded_full()
+                        .bg(theme::edge()),
+                ),
+        )
+        .child(
+            div()
+                .min_w_0()
+                .flex_1()
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .flex()
+                .flex_row()
+                .items_baseline()
+                .gap(px(10.0))
+                .child(
+                    div()
+                        .flex_shrink_0()
                         .overflow_hidden()
                         .text_ellipsis()
                         .whitespace_nowrap()
                         .font_family(theme::sans())
                         .text_size(theme::text_size(theme::T_UI_SM))
                         .font_weight(FontWeight::MEDIUM)
-                        .text_color(theme::ash())
                         .child(label),
                 )
-                .child(
-                    div()
-                        .flex_shrink_0()
-                        .px(px(6.0))
-                        .py(px(2.0))
-                        .rounded_full()
-                        .bg(theme::floor())
-                        .border_1()
-                        .border_color(theme::edge_soft())
-                        .font_family(theme::mono())
-                        .text_size(theme::text_size(theme::T_TINY))
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(theme::smoke())
-                        .child(count_label),
-                ),
-        )
-        .child(
-            div().w_full().px(px(16.0)).child(
-                div()
-                    .w_full()
-                    .h(px(1.0))
-                    .rounded_full()
-                    .bg(theme::edge_soft()),
-            ),
+                .when_some(summary, |row, summary| {
+                    row.child(
+                        div()
+                            .min_w_0()
+                            .flex_1()
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .whitespace_nowrap()
+                            .font_family(theme::mono())
+                            .text_size(theme::text_size(theme::T_TINY))
+                            .text_color(theme::smoke())
+                            .child(summary),
+                    )
+                }),
         )
 }
 
 fn render_tool_group(
     items: &[ToolPresentation],
     details: &[ActivityDetail],
-    is_last: bool,
+    continues: bool,
     root: &Entity<crate::views::RootView>,
 ) -> AnyElement {
     let marker = items
@@ -1953,9 +2037,17 @@ fn render_tool_group(
                 .join("\n"),
         )
     );
+    let live = items.iter().any(|item| {
+        matches!(
+            item.status,
+            CardStatus::Pending | CardStatus::Running | CardStatus::Cancelling
+        )
+    });
+    let pulse = live.then(|| SharedString::from(format!("thread-pulse:{trigger_id}")));
     step_shell(
-        is_last,
+        continues,
         marker,
+        pulse,
         tool_detail_trigger(
             &trigger_id,
             render_tool_presentation(items, None, false, None),
@@ -1968,7 +2060,7 @@ fn render_tool_group(
 
 fn render_activity_step(
     step: &ActivityStep<'_>,
-    is_last: bool,
+    continues: bool,
     texts: &HashMap<String, Entity<TranscriptText>>,
     root: &Entity<crate::views::RootView>,
 ) -> AnyElement {
@@ -1978,8 +2070,9 @@ fn render_activity_step(
             redacted: true,
             detail,
         } => step_shell(
-            is_last,
+            continues,
             theme::smoke(),
+            None,
             div()
                 .flex()
                 .flex_col()
@@ -2000,8 +2093,9 @@ fn render_activity_step(
             redacted: false,
             detail,
         } => step_shell(
-            is_last,
+            continues,
             theme::smoke(),
+            None,
             div()
                 .flex()
                 .flex_col()
@@ -2010,12 +2104,17 @@ fn render_activity_step(
                 .child(activity_selectable(key, texts)),
         )
         .into_any_element(),
-        ActivityStep::Text { key } => {
-            step_shell(is_last, theme::ash(), activity_selectable(key, texts)).into_any_element()
-        }
-        ActivityStep::Image { mime_type } => step_shell(
-            is_last,
+        ActivityStep::Text { key } => step_shell(
+            continues,
             theme::ash(),
+            None,
+            activity_selectable(key, texts),
+        )
+        .into_any_element(),
+        ActivityStep::Image { mime_type } => step_shell(
+            continues,
+            theme::ash(),
+            None,
             compact_label(format!("Image · {mime_type}")),
         )
         .into_any_element(),
@@ -2028,9 +2127,15 @@ fn render_activity_step(
                 .first()
                 .map(|record| record.id.as_str())
                 .unwrap_or("tool");
+            let live = matches!(
+                presentation.status,
+                CardStatus::Pending | CardStatus::Running | CardStatus::Cancelling
+            );
+            let pulse = live.then(|| SharedString::from(format!("thread-pulse:{detail_id}")));
             step_shell(
-                is_last,
+                continues,
                 status_color(presentation.status),
+                pulse,
                 tool_detail_trigger(
                     detail_id,
                     render_tool_presentation(
@@ -2046,8 +2151,9 @@ fn render_activity_step(
             .into_any_element()
         }
         ActivityStep::Summary { label, key } => step_shell(
-            is_last,
+            continues,
             theme::data(),
+            None,
             div()
                 .flex()
                 .flex_col()
@@ -2064,8 +2170,9 @@ fn render_activity_step(
         )
         .into_any_element(),
         ActivityStep::Custom { kind, key } => step_shell(
-            is_last,
+            continues,
             theme::smoke(),
+            None,
             div()
                 .flex()
                 .flex_col()
@@ -2075,18 +2182,20 @@ fn render_activity_step(
         )
         .into_any_element(),
         ActivityStep::Unsupported { kind } => step_shell(
-            is_last,
+            continues,
             theme::smoke(),
+            None,
             compact_label(format!("Unsupported · {kind}")),
         )
         .into_any_element(),
         ActivityStep::Notice { text, error } => step_shell(
-            is_last,
+            continues,
             if *error {
                 theme::error()
             } else {
                 theme::smoke()
             },
+            None,
             div()
                 .font_family(theme::sans())
                 .text_size(theme::text_size(theme::T_UI_SM))
@@ -2142,23 +2251,16 @@ fn activity_detail_link(
         .tab_index(0)
         .cursor_pointer()
         .h(px(20.0))
-        .px(px(6.0))
+        .px(px(2.0))
         .flex_shrink_0()
         .flex()
         .items_center()
-        .justify_center()
-        .rounded(px(theme::RADIUS_SM))
-        // Locked geometry for the thinking "details" chip. Same border/fill
-        // always — no active/focus fill or border retints (those read as grow).
-        .border_1()
-        .border_color(theme::edge())
         .overflow_hidden()
         .whitespace_nowrap()
         .font_family(theme::mono())
         .text_size(theme::text_size(theme::T_TINY))
         .font_weight(FontWeight::MEDIUM)
-        .bg(theme::canvas())
-        .text_color(theme::ash())
+        .text_color(theme::smoke())
         .hover(|link| link.text_color(theme::bone_dim()))
         .focus(|link| link.text_color(theme::bone_dim()))
         // Skip GPUI's mouse-down focus + active refresh on this chip. Click still
@@ -2195,22 +2297,24 @@ fn tool_detail_trigger(
     let click_detail = detail.clone();
     let click_root = root.clone();
     let keyboard_root = root.clone();
+    // Flat trigger: rested transparent so the step reads as text on the
+    // canvas; hover and keyboard focus lift the wash instead of drawing a box.
+    // The invisible border keeps geometry stable when focus retints it.
     div()
         .id(SharedString::from(format!("activity-detail-tool:{id}")))
         .tab_index(0)
         .cursor_pointer()
         .w_full()
-        .min_h(px(28.0))
+        .min_h(px(26.0))
         .px(px(4.0))
-        .py(px(3.0))
+        .py(px(2.0))
         .rounded(px(theme::RADIUS_SM))
         .border_1()
         .border_color(gpui::rgba(0x0000_0000))
-        .bg(theme::panel())
-        .hover(|trigger| trigger.bg(theme::panel_hover()))
+        .hover(|trigger| trigger.bg(theme::panel()))
         // Recess on press — a lighter active fill makes nested chips look bigger.
         .active(|trigger| trigger.bg(theme::canvas()))
-        .focus(|trigger| trigger.bg(theme::panel()).border_color(theme::edge_hard()))
+        .focus(|trigger| trigger.bg(theme::panel()).border_color(theme::edge()))
         .on_click(move |_, window, cx| {
             click_root.update(cx, |view, cx| {
                 view.open_activity_detail(click_detail.clone(), window, cx)
@@ -2227,46 +2331,26 @@ fn tool_detail_trigger(
         .into_any_element()
 }
 
-fn step_shell(is_last: bool, marker: gpui::Rgba, body: impl IntoElement) -> impl IntoElement {
-    div()
-        .flex()
-        .flex_row()
-        .gap(px(10.0))
-        .child(
-            div()
-                .w(px(10.0))
-                .flex_shrink_0()
-                .flex()
-                .flex_col()
-                .items_center()
-                .child(
-                    div()
-                        .mt(px(6.0))
-                        .w(px(5.0))
-                        .h(px(5.0))
-                        .rounded_full()
-                        .bg(marker)
-                        .flex_shrink_0(),
-                )
-                .when(!is_last, |rail| {
-                    rail.child(
-                        div()
-                            .flex_1()
-                            .w(px(1.0))
-                            .min_h(px(8.0))
-                            .mt(px(3.0))
-                            .rounded_full()
-                            .bg(theme::edge_soft()),
-                    )
-                }),
-        )
-        .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .pb(if is_last { px(4.0) } else { px(9.0) })
-                .child(body),
-        )
+/// One spine step inside a turn's activity band, hanging on the shared thread.
+fn step_shell(
+    continues: bool,
+    marker: gpui::Rgba,
+    pulse: Option<SharedString>,
+    body: impl IntoElement,
+) -> impl IntoElement {
+    thread_section(
+        marker,
+        NODE_STEP,
+        continues,
+        pulse,
+        div()
+            .pb(if continues {
+                px(TURN_SECTION_GAP)
+            } else {
+                px(4.0)
+            })
+            .child(body),
+    )
 }
 
 fn assistant_reply(
@@ -2276,66 +2360,56 @@ fn assistant_reply(
     div()
         .id(SharedString::from(format!("message-{}", message.key.0)))
         .w_full()
-        .px(px(18.0))
-        .pt(px(13.0))
-        .pb(px(15.0))
-        .bg(theme::canvas())
-        .border_t_1()
-        .border_color(theme::edge_soft())
-        .flex()
-        .flex_col()
-        .gap(px(9.0))
-        .child(
+        .child(thread_section(
+            // Quiet cool dot — pairs with the warm user node.
+            theme::working(),
+            NODE_SPEAKER,
+            false,
+            None,
             div()
+                .w_full()
+                .pb(px(2.0))
                 .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(8.0))
+                .flex_col()
+                .gap(px(7.0))
                 .child(
-                    // Quiet cool gem — pairs with the warm user mark.
-                    div()
-                        .w(px(2.0))
-                        .h(px(12.0))
-                        .rounded_full()
-                        .bg(theme::working())
-                        .flex_shrink_0(),
+                    div().flex().flex_row().items_center().gap(px(8.0)).child(
+                        div()
+                            .font_family(theme::sans())
+                            .text_size(theme::text_size(theme::T_UI_SM))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(theme::bone())
+                            .child("Pi"),
+                    ),
                 )
-                .child(
-                    div()
-                        .font_family(theme::sans())
-                        .text_size(theme::text_size(theme::T_UI_SM))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(theme::bone())
-                        .child("Pi"),
-                ),
-        )
-        .children(message.content.iter().filter_map(|block| match block {
-            MessageBlock::Text { .. } => Some(selectable(
-                &fragment_key(message, block),
-                texts,
-                theme::sans(),
-                theme::T_BODY_SM,
-                theme::bone(),
-                FontWeight::NORMAL,
-            )),
-            MessageBlock::Image { mime_type, .. } => {
-                Some(compact_label(format!("Image · {mime_type}")))
-            }
-            _ => None,
-        }))
-        .when_some(message.error.clone(), |reply, error| {
-            reply.child(error_text(error))
-        })
-        .when_some(stop_label(message), |reply, stop| {
-            reply.child(
-                div()
-                    .font_family(theme::sans())
-                    .text_size(theme::text_size(theme::T_UI_SM))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(stop_color(message.stop_reason))
-                    .child(stop),
-            )
-        })
+                .children(message.content.iter().filter_map(|block| match block {
+                    MessageBlock::Text { .. } => Some(selectable(
+                        &fragment_key(message, block),
+                        texts,
+                        theme::sans(),
+                        theme::T_BODY_SM,
+                        theme::bone(),
+                        FontWeight::NORMAL,
+                    )),
+                    MessageBlock::Image { mime_type, .. } => {
+                        Some(compact_label(format!("Image · {mime_type}")))
+                    }
+                    _ => None,
+                }))
+                .when_some(message.error.clone(), |reply, error| {
+                    reply.child(error_text(error))
+                })
+                .when_some(stop_label(message), |reply, stop| {
+                    reply.child(
+                        div()
+                            .font_family(theme::sans())
+                            .text_size(theme::text_size(theme::T_UI_SM))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(stop_color(message.stop_reason))
+                            .child(stop),
+                    )
+                }),
+        ))
 }
 
 fn preamble(
@@ -2354,11 +2428,6 @@ fn preamble(
                     .w_full()
                     .flex()
                     .flex_col()
-                    .rounded(px(theme::RADIUS))
-                    .overflow_hidden()
-                    .bg(theme::floor())
-                    .border_1()
-                    .border_color(theme::edge_soft())
                     .child(activity_band(
                         &format!("preamble:{}", message.key.0),
                         &activity,
@@ -2382,17 +2451,14 @@ fn preamble(
             if activity.is_empty() {
                 return div().into_any_element();
             }
-            div()
-                .w_full()
-                .px(px(2.0))
-                .child(activity_band(
-                    &format!("preamble:{}", message.key.0),
-                    &activity,
-                    false,
-                    render,
-                    cx,
-                ))
-                .into_any_element()
+            activity_band(
+                &format!("preamble:{}", message.key.0),
+                &activity,
+                false,
+                render,
+                cx,
+            )
+            .into_any_element()
         }
         MessageRole::User => div().into_any_element(),
     }
@@ -2411,21 +2477,14 @@ fn tail_activity(render: &ConversationRenderContext<'_>, cx: &mut App) -> Option
     }
 
     Some(
-        div()
-            .w_full()
-            .rounded(px(theme::RADIUS))
-            .overflow_hidden()
-            .bg(theme::floor())
-            .border_1()
-            .border_color(theme::edge_soft())
-            .child(activity_band(
-                &format!("tail:{}", render.projection.epoch.value()),
-                &activity,
-                false,
-                render,
-                cx,
-            ))
-            .into_any_element(),
+        activity_band(
+            &format!("tail:{}", render.projection.epoch.value()),
+            &activity,
+            false,
+            render,
+            cx,
+        )
+        .into_any_element(),
     )
 }
 
@@ -2803,6 +2862,47 @@ mod tests {
         assert!(disclosure_history_estimate(1) >= 36.0);
         assert!(disclosure_history_estimate(100) <= DISCLOSURE_HISTORY_MAX_PX);
         assert!(disclosure_history_estimate(3) > disclosure_history_estimate(1));
+    }
+
+    #[test]
+    fn history_summary_counts_kinds_in_first_seen_order() {
+        let detail = ActivityDetail {
+            title: "tool".to_owned(),
+            prompt: None,
+            records: Vec::new(),
+        };
+        let tool = |name: &str, command: &str| {
+            let mut presentation = presentation_for_bash_block(command, "", false, Some(0), false);
+            presentation.name = name.to_owned();
+            ActivityStep::Tool {
+                presentation: Box::new(presentation),
+                detail: detail.clone(),
+            }
+        };
+
+        let steps = vec![
+            ActivityStep::Text { key: "k".into() },
+            tool("read", "a"),
+            tool("read", "b"),
+            tool("bash", "c"),
+        ];
+        assert_eq!(
+            history_summary(&steps),
+            Some("note · read ×2 · bash".to_owned())
+        );
+
+        let crowded = vec![
+            tool("read", "a"),
+            tool("bash", "b"),
+            tool("edit", "c"),
+            tool("write", "d"),
+            ActivityStep::Text { key: "k".into() },
+        ];
+        assert_eq!(
+            history_summary(&crowded),
+            Some("read · bash · edit · +2".to_owned())
+        );
+        assert_eq!(history_summary(&[]), None);
     }
 
     #[test]

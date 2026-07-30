@@ -195,12 +195,9 @@ impl ConversationListModel {
                     disclosures,
                     root: &diff_summary.root,
                 };
-                connected_row(
+                turn_row(
                     super::turn_card(
-                        super::TurnPosition {
-                            index: *number,
-                            is_last: *number == self.turn_count,
-                        },
+                        *number,
                         &projection.messages[*user_index],
                         messages,
                         &render,
@@ -226,16 +223,13 @@ impl ConversationListModel {
 }
 
 fn header(turn_count: usize) -> impl IntoElement {
-    stream_gutter().pb(px(14.0)).child(
+    stream_gutter().pb(px(16.0)).child(
         div()
             .w_full()
             .flex()
             .flex_row()
             .items_baseline()
             .justify_between()
-            .pb(px(9.0))
-            .border_b_1()
-            .border_color(theme::edge_soft())
             .child(
                 div()
                     .font_family(theme::sans())
@@ -259,12 +253,14 @@ fn header(turn_count: usize) -> impl IntoElement {
 
 fn row(content: AnyElement) -> AnyElement {
     stream_gutter()
-        .pb(px(14.0))
+        .pb(px(super::TURN_GAP))
         .child(content)
         .into_any_element()
 }
 
-fn connected_row(content: AnyElement) -> AnyElement {
+/// Turns carry their own spacing (`TURN_GAP` inside `turn_card`); the gutter
+/// only keeps the thread clear of the side rails.
+fn turn_row(content: AnyElement) -> AnyElement {
     stream_gutter().child(content).into_any_element()
 }
 
@@ -291,7 +287,7 @@ fn trailing(
     stream_gutter()
         .flex()
         .flex_col()
-        .gap(px(14.0))
+        .gap(px(super::TURN_GAP))
         .children(
             projection
                 .accepted_user_inputs
