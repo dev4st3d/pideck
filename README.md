@@ -141,9 +141,3 @@ cargo test --all-targets
 ```
 
 Dev builds use `opt-level = 1` so GPUI rendering stays fluid without a full release profile; the hot rendering crates compile at `opt-level = 3`.
-
-## Releases
-
-Update `package.version` in `Cargo.toml`, merge that commit, then run the **Build** workflow from GitHub Actions. The workflow builds PiDeck, packages the per-user `PiDeck-win-Setup.exe` installer and Velopack update feed, creates the matching `v<version>` tag and GitHub Release, and marks it as latest. It also downloads the previous full package when available so Velopack can generate a smaller delta update.
-
-Version tags are immutable: rerunning is allowed from the same commit, but publishing another commit requires a version bump. The Velopack runtime and CLI are both pinned to `0.0.1298` because later releases currently raise the effective Rust requirement above PiDeck's Rust 1.85 minimum.
