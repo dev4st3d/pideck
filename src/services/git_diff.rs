@@ -229,14 +229,15 @@ struct GitOutput {
 }
 
 fn run_git(cwd: &Path, args: &[&str], limit: usize) -> Result<GitOutput, GitDiffError> {
-    let mut child = Command::new("git")
+    let mut command = Command::new("git");
+    command
         .args(args)
         .current_dir(cwd)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|_| GitDiffError::GitUnavailable)?;
+        .stderr(Stdio::null());
+    super::suppress_console_window(&mut command);
+    let mut child = command.spawn().map_err(|_| GitDiffError::GitUnavailable)?;
     let Some(stdout) = child.stdout.take() else {
         let _ = child.kill();
         let _ = child.wait();

@@ -444,21 +444,22 @@ impl SdkBridgeClient {
                 "The compatible Pi SDK bridge is unavailable.",
             ));
         }
-        let mut child = Command::new(&config.node)
+        let mut command = Command::new(&config.node);
+        command
             .arg(&config.script)
             .arg(&config.sdk_root)
             .env(ORCHESTRATION_PIPE_ENV, &config.orchestration_endpoint)
             .current_dir(&config.working_directory)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|_| {
-                BridgeError::new(
-                    BridgeErrorKind::Unavailable,
-                    "The Pi SDK bridge could not start.",
-                )
-            })?;
+            .stderr(Stdio::piped());
+        super::suppress_console_window(&mut command);
+        let mut child = command.spawn().map_err(|_| {
+            BridgeError::new(
+                BridgeErrorKind::Unavailable,
+                "The Pi SDK bridge could not start.",
+            )
+        })?;
         let stdin = child.stdin.take().ok_or_else(|| {
             BridgeError::new(
                 BridgeErrorKind::Unavailable,
