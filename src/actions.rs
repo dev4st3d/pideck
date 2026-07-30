@@ -15,6 +15,7 @@ actions!(
         FocusNext,
         FocusPrevious,
         ComposerBackspace,
+        ComposerDeleteWordBackward,
         ComposerDelete,
         ComposerLeft,
         ComposerRight,
@@ -105,6 +106,7 @@ pub(crate) fn composer_key_bindings() -> Vec<KeyBinding> {
     let context = Some("Composer");
     vec![
         KeyBinding::new("backspace", ComposerBackspace, context),
+        KeyBinding::new("ctrl-backspace", ComposerDeleteWordBackward, context),
         KeyBinding::new("delete", ComposerDelete, context),
         KeyBinding::new("left", ComposerLeft, context),
         KeyBinding::new("right", ComposerRight, context),

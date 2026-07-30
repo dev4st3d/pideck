@@ -20,10 +20,10 @@ use self::buffer::TextBuffer;
 use self::element::EditorLayout;
 use crate::actions::{
     AbortRun, AcceptInput, ComposerBackspace, ComposerCopy, ComposerCut, ComposerDelete,
-    ComposerDown, ComposerLeft, ComposerLineEnd, ComposerLineStart, ComposerPaste, ComposerRedo,
-    ComposerRight, ComposerSelectAll, ComposerSelectDown, ComposerSelectLeft,
-    ComposerSelectLineEnd, ComposerSelectLineStart, ComposerSelectRight, ComposerSelectUp,
-    ComposerUndo, ComposerUp, InsertNewline, QueueFollowUp,
+    ComposerDeleteWordBackward, ComposerDown, ComposerLeft, ComposerLineEnd, ComposerLineStart,
+    ComposerPaste, ComposerRedo, ComposerRight, ComposerSelectAll, ComposerSelectDown,
+    ComposerSelectLeft, ComposerSelectLineEnd, ComposerSelectLineStart, ComposerSelectRight,
+    ComposerSelectUp, ComposerUndo, ComposerUp, InsertNewline, QueueFollowUp,
 };
 use crate::attachments::{
     AttachmentLoadLimits, LoadedAttachment, LoadedAttachmentBatch, MAX_ATTACHMENTS,
@@ -770,6 +770,21 @@ impl Composer {
             return;
         }
         if self.buffer.delete_backward() {
+            self.after_edit(cx);
+            window.refresh();
+        }
+    }
+
+    fn delete_word_backward(
+        &mut self,
+        _: &ComposerDeleteWordBackward,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.disabled {
+            return;
+        }
+        if self.buffer.delete_word_backward() {
             self.after_edit(cx);
             window.refresh();
         }

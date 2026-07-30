@@ -178,6 +178,20 @@ fn composer_input_is_grapheme_safe_and_supports_clipboard_undo(cx: &mut TestAppC
 }
 
 #[gpui::test]
+fn composer_ctrl_backspace_deletes_the_previous_word(cx: &mut TestAppContext) {
+    cx.update(|cx| cx.bind_keys(composer_key_bindings()));
+    let (harness, cx) = cx.add_window_view(ComposerHarness::new);
+    let composer = harness.read_with(cx, |harness, _| harness.composer.clone());
+
+    cx.simulate_input("alpha café   ");
+    cx.simulate_keystrokes("ctrl-backspace");
+    assert_eq!(
+        composer.read_with(cx, |composer, _| composer.draft().to_owned()),
+        "alpha "
+    );
+}
+
+#[gpui::test]
 fn composer_pastes_clipboard_images_and_submits_them_without_text(cx: &mut TestAppContext) {
     cx.update(|cx| cx.bind_keys(composer_key_bindings()));
     let (harness, cx) = cx.add_window_view(ComposerHarness::new);

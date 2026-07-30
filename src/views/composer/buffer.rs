@@ -136,6 +136,30 @@ impl TextBuffer {
         self.replace_bytes(range, "", true)
     }
 
+    pub(super) fn delete_word_backward(&mut self) -> bool {
+        let range = if self.selection.is_empty() {
+            let cursor = self.cursor();
+            let mut start = cursor;
+            let mut segments = self.text[..cursor]
+                .split_word_bound_indices()
+                .rev()
+                .peekable();
+
+            while let Some((index, _)) =
+                segments.next_if(|(_, segment)| segment.chars().all(char::is_whitespace))
+            {
+                start = index;
+            }
+            if let Some((index, _)) = segments.next() {
+                start = index;
+            }
+            start..cursor
+        } else {
+            self.selection.clone()
+        };
+        self.replace_bytes(range, "", true)
+    }
+
     pub(super) fn delete_forward(&mut self) -> bool {
         let range = if self.selection.is_empty() {
             self.cursor()..self.next_boundary(self.cursor())
@@ -393,6 +417,21 @@ mod tests {
         assert_eq!(buffer.text(), "left 日本😀");
         assert_eq!(buffer.marked_range(), Some(&(5..15)));
         assert_eq!(&buffer.text()[buffer.selection().clone()], "😀");
+    }
+
+    #[test]
+    fn word_backspace_deletes_unicode_words_whitespace_and_selections() {
+        let mut buffer = TextBuffer::default();
+        buffer.replace_selection("alpha café   ");
+
+        assert!(buffer.delete_word_backward());
+        assert_eq!(buffer.text(), "alpha ");
+        assert!(buffer.undo());
+        assert_eq!(buffer.text(), "alpha café   ");
+
+        buffer.set_selection(0..5, false);
+        assert!(buffer.delete_word_backward());
+        assert_eq!(buffer.text(), " café   ");
     }
 
     #[test]

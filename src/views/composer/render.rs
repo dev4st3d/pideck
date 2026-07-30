@@ -108,6 +108,7 @@ impl Composer {
                             .when(handles_composer_keys, |input| {
                                 input
                                     .on_action(cx.listener(Self::backspace))
+                                    .on_action(cx.listener(Self::delete_word_backward))
                                     .on_action(cx.listener(Self::delete))
                                     .on_action(cx.listener(Self::left))
                                     .on_action(cx.listener(Self::right))
@@ -277,6 +278,7 @@ impl Composer {
             .when(handles_composer_keys, |input| {
                 input
                     .on_action(cx.listener(Self::backspace))
+                    .on_action(cx.listener(Self::delete_word_backward))
                     .on_action(cx.listener(Self::delete))
                     .on_action(cx.listener(Self::left))
                     .on_action(cx.listener(Self::right))

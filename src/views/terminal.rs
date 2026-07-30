@@ -386,6 +386,7 @@ fn terminal_key_bytes(keystroke: &Keystroke, application_cursor: bool) -> Option
     }
 
     let named = match keystroke.key.as_str() {
+        "space" => Some(b" ".as_slice()),
         "enter" => Some(b"\r".as_slice()),
         "backspace" => Some(b"\x7f".as_slice()),
         "tab" if modifiers.shift => Some(b"\x1b[Z".as_slice()),
@@ -924,6 +925,10 @@ mod tests {
         assert_eq!(
             terminal_key_bytes(&key("a", Some("a"), Modifiers::default()), false),
             Some(b"a".to_vec())
+        );
+        assert_eq!(
+            terminal_key_bytes(&key("space", None, Modifiers::default()), false),
+            Some(b" ".to_vec())
         );
         assert_eq!(
             terminal_key_bytes(&key("enter", None, Modifiers::default()), false),
