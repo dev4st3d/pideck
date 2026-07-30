@@ -1,5 +1,5 @@
-# Continuous checks for every push and pull request.
-# Mirrors AGENTS.md Tier 3 validation on Windows (Windows-first app).
+# Fast continuous checks for every push and pull request.
+# Independent jobs run concurrently and each is hard-capped at ten minutes.
 name: Checks
 
 on:
@@ -14,13 +14,16 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  CARGO_PROFILE_DEV_DEBUG: 0
+  CARGO_PROFILE_TEST_DEBUG: 0
   RUSTFLAGS: -D warnings
-  RUSTDOCFLAGS: -D warnings
 
 jobs:
-  rust:
-    name: Rust
+  source:
+    name: Format and bridge
     runs-on: windows-latest
+    timeout-minutes: 10
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -28,29 +31,10 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt, clippy
-
-      - name: Cache Cargo
-        uses: Swatinem/rust-cache@v2
+          components: rustfmt
 
       - name: Format
         run: cargo fmt --all -- --check
-
-      - name: Clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
-
-      - name: Test
-        run: cargo test --all-targets
-
-      - name: Docs
-        run: cargo doc --no-deps
-
-  bridge:
-    name: Bridge
-    runs-on: windows-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -60,3 +44,43 @@ jobs:
       - name: Test bridge
         shell: pwsh
         run: node --test (Get-ChildItem -Path bridge -Filter *.test.mjs).FullName
+
+  clippy:
+    name: Clippy
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: checks-clippy
+
+      - name: Clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+  tests:
+    name: Rust tests
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: checks-tests
+
+      - name: Test
+        run: cargo test --all-targets

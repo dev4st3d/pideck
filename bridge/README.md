@@ -2,6 +2,8 @@
 
 `pi-bridge.mjs` is the only Node process used for public Pi SDK capabilities that stock RPC does not expose. It inherits stdin, stdout, and stderr from the Rust supervisor and never binds or listens on a network port. The bridge and Pi SDK objects remain inside the Pi child/sidecar trust boundary.
 
+Release builds embed every runtime bridge module in `pi-gui.exe`. Rust materializes a content-addressed copy in the user's temporary directory because Node's ESM loader and Pi's extension loader require real file paths; release artifacts do not include a separate `bridge` folder.
+
 ## Wire ownership
 
 - Rust owns discovery, process start/stop/restart, request IDs, deadlines, cancellation requests, capability checks, stale-result rejection, and user-visible state.

@@ -9,7 +9,7 @@ use std::time::Duration;
 use pi_gui::services::pi_process::discover_and_probe;
 use pi_gui::services::sdk_bridge::{
     BridgeCommand, BridgeErrorKind, ORCHESTRATION_PIPE_ENV, SdkBridgeClient, SdkBridgeConfig,
-    allocate_orchestration_endpoint,
+    allocate_orchestration_endpoint, orchestration_adapter_path,
 };
 
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(1);
@@ -388,7 +388,7 @@ export function loadProjectContextFiles() {
     SdkBridgeConfig {
         node: PathBuf::from("node"),
         sdk_root,
-        script: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("bridge/pi-bridge.mjs"),
+        script: orchestration_adapter_path().with_file_name("pi-bridge.mjs"),
         working_directory: root.to_path_buf(),
         orchestration_endpoint: allocate_orchestration_endpoint(root),
     }

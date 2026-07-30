@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::fmt;
+use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Command, Stdio};
@@ -22,11 +23,71 @@ use crate::services::pi_process::SUPPORTED_PI_VERSION;
 const PROTOCOL_VERSION: u64 = 1;
 const MAX_RECORD_BYTES: usize = 1024 * 1024;
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
+const BRIDGE_ENTRYPOINT: &str = "pi-bridge.mjs";
+const ORCHESTRATION_ADAPTER: &str = "orchestration-adapter.mjs";
+const EMBEDDED_BRIDGE_FILES: [(&str, &[u8]); 5] = [
+    (
+        BRIDGE_ENTRYPOINT,
+        include_bytes!("../../bridge/pi-bridge.mjs"),
+    ),
+    ("jsonl.mjs", include_bytes!("../../bridge/jsonl.mjs")),
+    (
+        "pi-settings.mjs",
+        include_bytes!("../../bridge/pi-settings.mjs"),
+    ),
+    (
+        ORCHESTRATION_ADAPTER,
+        include_bytes!("../../bridge/orchestration-adapter.mjs"),
+    ),
+    (
+        "orchestration-core.mjs",
+        include_bytes!("../../bridge/orchestration-core.mjs"),
+    ),
+];
 pub const ORCHESTRATION_PIPE_ENV: &str = "PI_GUI_ORCHESTRATION_PIPE";
 static NEXT_ORCHESTRATION_INSTANCE: AtomicU64 = AtomicU64::new(1);
 
 pub fn orchestration_adapter_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("bridge/orchestration-adapter.mjs")
+    embedded_bridge_path(ORCHESTRATION_ADAPTER).unwrap_or_default()
+}
+
+fn embedded_bridge_path(file_name: &str) -> Option<PathBuf> {
+    materialize_embedded_bridge()
+        .ok()
+        .map(|directory| directory.join(file_name))
+}
+
+fn materialize_embedded_bridge() -> std::io::Result<PathBuf> {
+    // Node's ESM loader and Pi's extension loader both require filesystem paths.
+    // Revalidate on every launch so temp-directory cleanup cannot break reconnects.
+    let directory = std::env::temp_dir()
+        .join("pideck")
+        .join(format!("bridge-{:016x}", embedded_bridge_fingerprint()));
+    fs::create_dir_all(&directory)?;
+
+    for &(file_name, contents) in &EMBEDDED_BRIDGE_FILES {
+        let path = directory.join(file_name);
+        if fs::read(&path).ok().as_deref() != Some(contents) {
+            fs::write(path, contents)?;
+        }
+    }
+
+    Ok(directory)
+}
+
+fn embedded_bridge_fingerprint() -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    for &(file_name, contents) in &EMBEDDED_BRIDGE_FILES {
+        for byte in file_name
+            .bytes()
+            .chain(std::iter::once(0))
+            .chain(contents.iter().copied())
+        {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    }
+    hash
 }
 
 pub fn allocate_orchestration_endpoint(working_directory: &std::path::Path) -> String {
@@ -93,7 +154,7 @@ impl SdkBridgeConfig {
         Some(Self {
             node: installation.executable.clone(),
             sdk_root: installation.sdk_package_root()?,
-            script: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("bridge/pi-bridge.mjs"),
+            script: embedded_bridge_path(BRIDGE_ENTRYPOINT)?,
             working_directory,
             orchestration_endpoint,
         })
@@ -937,4 +998,25 @@ pub fn decode_resource_snapshot(value: Value) -> Result<ResourceInventorySnapsho
             "The bridge returned an invalid resource inventory.",
         )
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn embedded_bridge_materializes_every_runtime_module() {
+        let directory = materialize_embedded_bridge().expect("materialize embedded bridge");
+
+        for &(file_name, contents) in &EMBEDDED_BRIDGE_FILES {
+            assert_eq!(
+                fs::read(directory.join(file_name)).expect("read materialized bridge module"),
+                contents
+            );
+        }
+        assert_eq!(
+            orchestration_adapter_path(),
+            directory.join(ORCHESTRATION_ADAPTER)
+        );
+    }
 }

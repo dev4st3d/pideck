@@ -32,6 +32,7 @@ jobs:
   windows:
     name: Windows release
     runs-on: windows-latest
+    timeout-minutes: 20
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -62,32 +63,21 @@ jobs:
           "artifact_name=pideck-$version-windows-x64" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
           Write-Host "version=$version"
 
-      - name: Stage artifact
+      - name: Stage standalone executable
         shell: pwsh
         run: |
-          $out = "dist/${{ steps.meta.outputs.artifact_name }}"
-          New-Item -ItemType Directory -Force -Path $out | Out-Null
-          Copy-Item "target/release/pi-gui.exe" "$out/pi-gui.exe"
-          Copy-Item "LICENSE" "$out/LICENSE"
-          Copy-Item "README.md" "$out/README.md"
-          if (Test-Path "bridge") {
-            Copy-Item -Recurse "bridge" "$out/bridge"
-          }
+          New-Item -ItemType Directory -Force -Path "dist" | Out-Null
+          Copy-Item `
+            "target/release/pi-gui.exe" `
+            "dist/${{ steps.meta.outputs.artifact_name }}.exe"
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ steps.meta.outputs.artifact_name }}
-          path: dist/${{ steps.meta.outputs.artifact_name }}
+          path: dist/${{ steps.meta.outputs.artifact_name }}.exe
           if-no-files-found: error
           retention-days: 30
-
-      - name: Package zip for release
-        if: github.ref_type == 'tag' || inputs.create_release
-        shell: pwsh
-        run: |
-          $name = "${{ steps.meta.outputs.artifact_name }}"
-          Compress-Archive -Path "dist/$name/*" -DestinationPath "dist/$name.zip" -Force
 
       - name: Publish GitHub Release
         if: github.ref_type == 'tag' || inputs.create_release
@@ -96,7 +86,7 @@ jobs:
           tag_name: ${{ steps.meta.outputs.version }}
           name: ${{ steps.meta.outputs.version }}
           generate_release_notes: true
-          files: dist/${{ steps.meta.outputs.artifact_name }}.zip
+          files: dist/${{ steps.meta.outputs.artifact_name }}.exe
           fail_on_unmatched_files: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
