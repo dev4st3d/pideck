@@ -129,6 +129,8 @@ Do not introduce warnings. Fix warnings caused by the change and small warnings 
 ## Git and handoff
 Git inspection is allowed. Without explicit instruction, do not commit, push, branch, checkout, rebase, merge, reset, revert, stash, or discard work.
 
+When asked to commit, always use a Conventional Commits subject with the appropriate type, such as `feat:`, `fix:`, `docs:`, `refactor:`, `test:`, or `chore:`.
+
 Before destructive actions, confirm ownership and scope. Prefer reversible approaches. Never use destructive Git commands to make checks pass.
 
 Edit source inputs instead of generated outputs. Do not add `target/`, PDBs, caches, temporary files, local logs, or editor state.

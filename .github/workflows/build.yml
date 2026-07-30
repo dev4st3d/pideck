@@ -1,22 +1,9 @@
-# Build a release binary (Windows).
-# Triggers: version tags (v*) or manual workflow_dispatch.
+# Build and publish a Windows release using the package version in Cargo.toml.
+# Run this workflow manually after bumping the package version.
 name: Build
 
 on:
-  push:
-    tags:
-      - "v*"
   workflow_dispatch:
-    inputs:
-      create_release:
-        description: "Create or update a GitHub Release for this run"
-        required: false
-        default: false
-        type: boolean
-      tag:
-        description: "Tag name when creating a release (e.g. v0.1.0). Leave empty to use the run id."
-        required: false
-        type: string
 
 permissions:
   contents: write
@@ -36,6 +23,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -45,23 +34,37 @@ jobs:
         with:
           shared-key: release
 
-      - name: Build release
-        run: cargo build --release
-
-      - name: Resolve version label
+      - name: Resolve release version
         id: meta
         shell: pwsh
         run: |
-          if ($env:GITHUB_REF_TYPE -eq "tag") {
-            $version = $env:GITHUB_REF_NAME
-          } elseif ("${{ inputs.tag }}" -ne "") {
-            $version = "${{ inputs.tag }}"
-          } else {
-            $version = "build-${{ github.run_number }}"
+          $metadata = cargo metadata --no-deps --format-version 1 | ConvertFrom-Json
+          $rootManifest = (Get-Item "Cargo.toml").FullName
+          $package = $metadata.packages |
+            Where-Object { [System.IO.Path]::GetFullPath($_.manifest_path) -eq $rootManifest } |
+            Select-Object -First 1
+
+          if ($null -eq $package) {
+            throw "Could not find the root package in cargo metadata."
           }
+
+          $version = $package.version
+          $tag = "v$version"
+          $existingTag = git tag --list $tag
+          if ($existingTag) {
+            $tagCommit = git rev-list -n 1 $tag
+            if ($tagCommit -ne $env:GITHUB_SHA) {
+              throw "Tag $tag already points to $tagCommit. Bump package.version in Cargo.toml before publishing another release."
+            }
+          }
+
           "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
-          "artifact_name=pideck-$version-windows-x64" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
-          Write-Host "version=$version"
+          "tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "artifact_name=pideck-$tag-windows-x64" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          Write-Host "Publishing $tag"
+
+      - name: Build release
+        run: cargo build --release
 
       - name: Stage standalone executable
         shell: pwsh
@@ -80,12 +83,13 @@ jobs:
           retention-days: 30
 
       - name: Publish GitHub Release
-        if: github.ref_type == 'tag' || inputs.create_release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.meta.outputs.version }}
-          name: ${{ steps.meta.outputs.version }}
+          tag_name: ${{ steps.meta.outputs.tag }}
+          name: ${{ steps.meta.outputs.tag }}
+          target_commitish: ${{ github.sha }}
           generate_release_notes: true
+          make_latest: true
           files: dist/${{ steps.meta.outputs.artifact_name }}.exe
           fail_on_unmatched_files: true
         env:

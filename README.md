@@ -127,3 +127,7 @@ cargo test --all-targets
 ```
 
 Dev builds use `opt-level = 1` so GPUI rendering stays fluid without a full release profile; the hot rendering crates compile at `opt-level = 3`.
+
+## Releases
+
+Update `package.version` in `Cargo.toml`, merge that commit, then run the **Build** workflow from GitHub Actions. The workflow builds the Windows executable, creates the matching `v<version>` tag and GitHub Release, and marks it as the latest release. Version tags are immutable: rerunning is allowed from the same commit, but publishing another commit requires a version bump.
