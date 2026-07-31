@@ -352,12 +352,10 @@ fn app_update_button(label: &'static str, cx: &mut Context<RootView>) -> impl In
         .key_context(APP_UPDATE_BUTTON_CONTEXT)
         .cursor_pointer()
         .hover(|button| button.bg(theme::panel_hover()).border_color(theme::edge()))
-        .focus(|button| {
-            button
-                .border_color(theme::focus())
-                .text_color(theme::focus())
-        })
-        .active(|button| button.bg(theme::panel()))
+        // Focus is an accent border only; recoloring the label reads as a
+        // foreign link style, not this app's button language.
+        .focus(|button| button.border_color(theme::focus()))
+        .active(|button| button.bg(theme::panel_hover()))
         .on_click(cx.listener(|view, _, _, cx| view.activate_app_update(cx)))
         .child(label)
 }

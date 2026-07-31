@@ -103,7 +103,9 @@ impl Render for RootView {
                     theme_menu_open: self.theme_menu_open,
                     sidebar_open: self.sidebar_open,
                     terminal_open: self.terminal_open,
-                    inspector_open: self.inspector_open,
+                    // Reflect the effective state so a sheet on its way out
+                    // already reads as off in the titlebar toggle.
+                    inspector_open: self.inspector_open && !self.inspector_closing,
                     app_update: &self.app_update,
                 },
                 cx,
@@ -245,6 +247,7 @@ impl Render for RootView {
                         usage_tooltip_epoch: self.usage_tooltip_epoch,
                         inspector_focus: &self.inspector_focus,
                         inspector_motion_key: self.inspector_motion_key,
+                        inspector_closing: self.inspector_closing,
                     },
                     cx,
                 ))

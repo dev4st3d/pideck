@@ -394,7 +394,8 @@ pub fn tone_button(
                         .border_color(hot_border)
                         .text_color(hot_text)
                 })
-                .active(|button| button.bg(theme::panel()))
+                .focus(|button| button.border_color(theme::focus()))
+                .active(|button| button.bg(theme::panel_lift()))
                 .on_click(move |event, window, cx| on_click(event, window, cx))
         })
         .child(

@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use gpui::{Animation, AnimationExt, BoxShadow, ease_out_quint};
+use gpui::{Animation, AnimationExt, BoxShadow, ease_out_quint, quadratic};
 
 use super::shared::runtime_operation_label;
 use super::shared::{plural, short_path};
@@ -10,6 +10,8 @@ use crate::views::conversation::{TranscriptText, TranscriptTextCache};
 /// Short pop for the sheet entrance; the overlay never drives layout, so there
 /// is nothing to reflow while it plays.
 const INSPECTOR_MOTION_MS: u64 = 180;
+/// The exit runs swifter than the entrance: a dismissed companion leaves fast.
+pub(super) const INSPECTOR_EXIT_MS: u64 = 140;
 /// Air the sheet keeps from the window edges it floats near.
 const SHEET_INSET: f32 = 10.0;
 /// Calm entrance travel: a short settle from the right, never a whoosh.
@@ -29,6 +31,7 @@ pub(super) struct InspectorParams<'a> {
     pub(super) usage_tooltip_epoch: u64,
     pub(super) inspector_focus: &'a FocusHandle,
     pub(super) inspector_motion_key: u64,
+    pub(super) inspector_closing: bool,
 }
 
 pub(super) fn inspector(
@@ -47,6 +50,7 @@ pub(super) fn inspector(
         usage_tooltip_epoch,
         inspector_focus,
         inspector_motion_key,
+        inspector_closing,
     } = params;
 
     // Disposable companion: a floating sheet parked off the right edge. It
@@ -59,6 +63,11 @@ pub(super) fn inspector(
         .right(px(SHEET_INSET))
         .bottom(px(SHEET_INSET))
         .w(px(theme::INSPECT_W))
+        // Occlude: without this the click-away scrim beneath stays "hovered"
+        // through the sheet, so every in-sheet press first dismisses the
+        // companion instead of reaching the task, subagent, or control under
+        // the pointer.
+        .occlude()
         .flex()
         .flex_col()
         .bg(theme::floor())
@@ -167,6 +176,54 @@ pub(super) fn inspector(
             cx.listener(|view, _, window, cx| view.toggle_inspector(window, cx)),
         );
 
+    // Entrance: scrim washes in while the sheet settles from the right with a
+    // decelerating quint. Exit: both leave on an accelerating quadratic, the
+    // mirror image — exit slides out toward the right and fades fully away.
+    let animated_scrim = if inspector_closing {
+        scrim
+            .with_animation(
+                ("inspector-scrim", inspector_motion_key),
+                Animation::new(Duration::from_millis(INSPECTOR_EXIT_MS)).with_easing(quadratic),
+                |scrim, delta| scrim.opacity(1.0 - delta),
+            )
+            .into_any_element()
+    } else {
+        scrim
+            .with_animation(
+                ("inspector-scrim", inspector_motion_key),
+                Animation::new(Duration::from_millis(INSPECTOR_MOTION_MS))
+                    .with_easing(ease_out_quint()),
+                |scrim, delta| scrim.opacity(delta),
+            )
+            .into_any_element()
+    };
+    let animated_sheet = if inspector_closing {
+        sheet
+            .with_animation(
+                ("inspector-panel", inspector_motion_key),
+                Animation::new(Duration::from_millis(INSPECTOR_EXIT_MS)).with_easing(quadratic),
+                |sheet, delta| {
+                    sheet
+                        .right(px(SHEET_INSET + SHEET_SLIDE * delta))
+                        .opacity(1.0 - delta)
+                },
+            )
+            .into_any_element()
+    } else {
+        sheet
+            .with_animation(
+                ("inspector-panel", inspector_motion_key),
+                Animation::new(Duration::from_millis(INSPECTOR_MOTION_MS))
+                    .with_easing(ease_out_quint()),
+                |sheet, delta| {
+                    sheet
+                        .right(px(SHEET_INSET + SHEET_SLIDE * (1.0 - delta)))
+                        .opacity(delta)
+                },
+            )
+            .into_any_element()
+    };
+
     // Parked under the titlebar so its inspector toggle stays in reach.
     // Focus lands here while open; Escape dismissal routes through the global
     // AbortRun cascade in RootView::on_abort_run.
@@ -179,26 +236,8 @@ pub(super) fn inspector(
         .occlude()
         .track_focus(inspector_focus)
         .tab_index(0)
-        .child(
-            scrim.with_animation(
-                ("inspector-scrim", inspector_motion_key),
-                Animation::new(Duration::from_millis(INSPECTOR_MOTION_MS))
-                    .with_easing(ease_out_quint()),
-                |scrim, delta| scrim.opacity(delta),
-            ),
-        )
-        .child(
-            sheet.with_animation(
-                ("inspector-panel", inspector_motion_key),
-                Animation::new(Duration::from_millis(INSPECTOR_MOTION_MS))
-                    .with_easing(ease_out_quint()),
-                move |sheet, delta| {
-                    sheet
-                        .right(px(SHEET_INSET + SHEET_SLIDE * (1.0 - delta)))
-                        .opacity(0.55 + 0.45 * delta)
-                },
-            ),
-        )
+        .child(animated_scrim)
+        .child(animated_sheet)
         .into_any_element()
 }
 

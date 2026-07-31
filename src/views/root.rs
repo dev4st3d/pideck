@@ -447,8 +447,11 @@ pub struct RootView {
     /// Inspector companion visibility — a floating sheet that overlays the
     /// workspace instead of taking layout space.
     inspector_open: bool,
-    /// Bumps on each reveal so the entrance motion replays per summon.
+    /// Bumps on every toggle so a fresh motion pass replays per transition
+    /// and stale exit timers can detect that they were superseded.
     inspector_motion_key: u64,
+    /// True while the sheet plays its exit motion before unmounting.
+    inspector_closing: bool,
     /// Point of focus while the sheet floats above the workspace, so
     /// keystrokes don't leak into the composer beneath it.
     inspector_focus: FocusHandle,
@@ -831,6 +834,7 @@ impl RootView {
             terminal_drag_origin: None,
             inspector_open: false,
             inspector_motion_key: 0,
+            inspector_closing: false,
             inspector_focus,
             session_rename_open: false,
             history_confirmation: None,
@@ -1009,12 +1013,33 @@ impl RootView {
     }
 
     fn toggle_inspector(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.inspector_open = !self.inspector_open;
         self.inspector_motion_key = self.inspector_motion_key.wrapping_add(1);
-        if self.inspector_open {
-            window.focus(&self.inspector_focus);
-        } else {
+        if self.inspector_open && !self.inspector_closing {
+            // Soft exit: keep the sheet mounted for a beat so it can settle out
+            // instead of vanishing mid-frame. The motion key guards the unmount
+            // against a re-summon during the exit.
+            self.inspector_closing = true;
             window.focus(&self.focus_handle);
+            let motion = self.inspector_motion_key;
+            cx.spawn(async move |view, cx| {
+                cx.background_executor()
+                    .timer(Duration::from_millis(inspector::INSPECTOR_EXIT_MS))
+                    .await;
+                let _ = view.update(cx, |view, cx| {
+                    if view.inspector_closing && view.inspector_motion_key == motion {
+                        view.inspector_open = false;
+                        view.inspector_closing = false;
+                        cx.notify();
+                    }
+                });
+            })
+            .detach();
+        } else {
+            // Summon, or cancel an in-flight exit: the entrance replays from
+            // the new motion key.
+            self.inspector_open = true;
+            self.inspector_closing = false;
+            window.focus(&self.inspector_focus);
         }
         cx.notify();
     }
@@ -1162,7 +1187,11 @@ impl RootView {
             return;
         }
         if self.inspector_open {
-            self.toggle_inspector(window, cx);
+            // Esc while the exit motion is in flight must neither reopen the
+            // sheet nor fall through to aborting the run.
+            if !self.inspector_closing {
+                self.toggle_inspector(window, cx);
+            }
             return;
         }
         let _ = self.execute_native_action(NativeAction::Abort, "", window, cx);

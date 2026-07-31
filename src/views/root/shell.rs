@@ -366,12 +366,10 @@ fn update_notice_button(version: String, cx: &mut Context<RootView>) -> impl Int
         .key_context(APP_UPDATE_NOTICE_CONTEXT)
         .cursor_pointer()
         .hover(|button| button.bg(theme::panel_hover()).text_color(theme::bone()))
-        .focus(|button| {
-            button
-                .border_color(theme::focus())
-                .text_color(theme::focus())
-        })
-        .active(|button| button.bg(theme::panel()))
+        // Match the App settings update button: accent border on focus, no
+        // label recolor, press lifts instead of dimming.
+        .focus(|button| button.border_color(theme::focus()))
+        .active(|button| button.bg(theme::panel_hover()))
         .on_click(cx.listener(|view, _, window, cx| view.open_app_updates(window, cx)))
         .child(format!("Update {version}"))
 }
