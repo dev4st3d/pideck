@@ -6,7 +6,9 @@ use gpui::{
     AnyElement, App, Entity, FontWeight, IntoElement, ListState, SharedString, div, prelude::*, px,
 };
 
-use super::{ActivityDisclosureState, TranscriptText, TranscriptTextCache};
+use super::{
+    ActivityDisclosureState, BandFingerprint, StreamBandCache, TranscriptText, TranscriptTextCache,
+};
 use crate::controller::ConversationProjection;
 use crate::services::git_diff::WorkspaceDiff;
 use crate::state::runtime::{FacetStatus, MessageRole};
@@ -33,6 +35,15 @@ pub(in crate::views) struct ConversationDiffSummary {
     pub(in crate::views) snapshot: Option<Arc<WorkspaceDiff>>,
     pub(in crate::views) files_expanded: bool,
     pub(in crate::views) root: Entity<crate::views::RootView>,
+}
+
+/// Shared per-stream entities every list item render needs; bundling keeps
+/// the render callback inside GPUI's arity limits.
+pub(in crate::views) struct ConversationStreamEntities {
+    pub(in crate::views) transcript_cache: Entity<TranscriptTextCache>,
+    pub(in crate::views) band_cache: Entity<StreamBandCache>,
+    pub(in crate::views) disclosures: Entity<ActivityDisclosureState>,
+    pub(in crate::views) diff_summary: ConversationDiffSummary,
 }
 
 #[derive(Debug, Clone)]
@@ -149,9 +160,7 @@ impl ConversationListModel {
         &self,
         item_index: usize,
         projection: &ConversationProjection,
-        cache: &Entity<TranscriptTextCache>,
-        disclosures: &Entity<ActivityDisclosureState>,
-        diff_summary: &ConversationDiffSummary,
+        stream: &ConversationStreamEntities,
         cx: &mut App,
     ) -> AnyElement {
         let Some(item) = self.items.get(item_index) else {
@@ -161,21 +170,30 @@ impl ConversationListModel {
             ConversationItem::Header => {
                 header(self.turn_count + projection.accepted_user_inputs.len()).into_any_element()
             }
-            ConversationItem::Preamble { message_index, .. } => {
-                let texts = super::cached_message_texts(
+            ConversationItem::Preamble { message_index, key } => {
+                let fingerprint = BandFingerprint::capture(
                     projection,
-                    *message_index..*message_index + 1,
-                    cache,
-                    cx,
+                    std::slice::from_ref(&projection.messages[*message_index]),
                 );
+                let model = stream.band_cache.update(cx, |bands, cx| {
+                    bands.model_for(format!("preamble:{key}"), fingerprint, cx, |cx| {
+                        super::build_preamble_model(
+                            projection,
+                            *message_index,
+                            &stream.transcript_cache,
+                            cx,
+                        )
+                    })
+                });
                 let render = super::ConversationRenderContext {
                     projection,
-                    texts: &texts,
-                    disclosures,
-                    root: &diff_summary.root,
+                    texts: &model.texts,
+                    disclosures: &stream.disclosures,
+                    root: &stream.diff_summary.root,
                 };
                 row(super::preamble(
                     &projection.messages[*message_index],
+                    &model,
                     &render,
                     cx,
                 ))
@@ -184,16 +202,28 @@ impl ConversationListModel {
                 number,
                 user_index,
                 body,
-                ..
+                key,
             } => {
-                let texts =
-                    super::cached_message_texts(projection, *user_index..body.end, cache, cx);
-                let messages = &projection.messages[body.clone()];
+                let fingerprint = BandFingerprint::capture(
+                    projection,
+                    &projection.messages[*user_index..body.end],
+                );
+                let model = stream.band_cache.update(cx, |bands, cx| {
+                    bands.model_for(format!("turn:{key}"), fingerprint, cx, |cx| {
+                        super::build_turn_model(
+                            projection,
+                            *user_index,
+                            body.clone(),
+                            &stream.transcript_cache,
+                            cx,
+                        )
+                    })
+                });
                 let render = super::ConversationRenderContext {
                     projection,
-                    texts: &texts,
-                    disclosures,
-                    root: &diff_summary.root,
+                    texts: &model.texts,
+                    disclosures: &stream.disclosures,
+                    root: &stream.diff_summary.root,
                 };
                 let links_above = item_index > 0
                     && matches!(self.items[item_index - 1], ConversationItem::Turn { .. });
@@ -206,7 +236,7 @@ impl ConversationListModel {
                     super::turn_card(
                         *number,
                         &projection.messages[*user_index],
-                        messages,
+                        &model,
                         &render,
                         links_above,
                         links_below,
@@ -216,7 +246,8 @@ impl ConversationListModel {
                 )
             }
             ConversationItem::Trailing => {
-                let texts = super::cached_optimistic_texts(projection, cache, cx);
+                let texts =
+                    super::cached_optimistic_texts(projection, &stream.transcript_cache, cx);
                 let connects_above = item_index > 0
                     && matches!(self.items[item_index - 1], ConversationItem::Turn { .. });
                 trailing(
@@ -224,8 +255,7 @@ impl ConversationListModel {
                     self.turn_count,
                     connects_above,
                     &texts,
-                    disclosures,
-                    diff_summary,
+                    stream,
                     cx,
                 )
                 .into_any_element()
@@ -287,17 +317,16 @@ fn trailing(
     completed_turns: usize,
     connects_above: bool,
     texts: &HashMap<String, Entity<TranscriptText>>,
-    disclosures: &Entity<ActivityDisclosureState>,
-    diff_summary: &ConversationDiffSummary,
+    stream: &ConversationStreamEntities,
     cx: &mut App,
 ) -> impl IntoElement {
     let render = super::ConversationRenderContext {
         projection,
         texts,
-        disclosures,
-        root: &diff_summary.root,
+        disclosures: &stream.disclosures,
+        root: &stream.diff_summary.root,
     };
-    let tail = super::tail_activity(&render, cx);
+    let tail = super::tail_activity(&render, &stream.band_cache, cx);
     let has_tail = tail.is_some();
     let input_count = projection.accepted_user_inputs.len();
     // Pending prompts and the live tail form one chain on the rail: a queued
@@ -328,11 +357,11 @@ fn trailing(
                     .when_some(tail, |chain, activity| chain.child(activity)),
             )
         })
-        .when_some(diff_summary.snapshot.clone(), |tail, snapshot| {
+        .when_some(stream.diff_summary.snapshot.clone(), |tail, snapshot| {
             tail.child(crate::views::diff_summary::summary_card(
                 &snapshot,
-                diff_summary.files_expanded,
-                diff_summary.root.clone(),
+                stream.diff_summary.files_expanded,
+                stream.diff_summary.root.clone(),
             ))
         })
         .when(

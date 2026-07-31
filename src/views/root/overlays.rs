@@ -153,6 +153,7 @@ pub(super) struct ConversationAreaParams {
     pub(super) list: Arc<ConversationListModel>,
     pub(super) list_state: ListState,
     pub(super) transcript_cache: Entity<TranscriptTextCache>,
+    pub(super) stream_bands: Entity<StreamBandCache>,
     pub(super) activity_disclosures: Entity<ActivityDisclosureState>,
     pub(super) workspace_diff: Option<Arc<WorkspaceDiff>>,
     pub(super) workspace_diff_files_expanded: bool,
@@ -165,6 +166,7 @@ pub(super) fn conversation_area(params: ConversationAreaParams) -> impl IntoElem
         list: conversation_list,
         list_state: conversation_list_state,
         transcript_cache,
+        stream_bands,
         activity_disclosures,
         workspace_diff,
         workspace_diff_files_expanded,
@@ -172,10 +174,15 @@ pub(super) fn conversation_area(params: ConversationAreaParams) -> impl IntoElem
     } = params;
     let wheel_root = root.clone();
     let scrollbar_state = conversation_list_state.clone();
-    let diff_summary = ConversationDiffSummary {
-        snapshot: workspace_diff,
-        files_expanded: workspace_diff_files_expanded,
-        root: root.clone(),
+    let stream_entities = ConversationStreamEntities {
+        transcript_cache,
+        band_cache: stream_bands,
+        disclosures: activity_disclosures,
+        diff_summary: ConversationDiffSummary {
+            snapshot: workspace_diff,
+            files_expanded: workspace_diff_files_expanded,
+            root: root.clone(),
+        },
     };
 
     // The transcript shares the center column with the composer and must yield
@@ -221,14 +228,7 @@ pub(super) fn conversation_area(params: ConversationAreaParams) -> impl IntoElem
                 )
                 .child(
                     list(conversation_list_state, move |item_index, _, cx| {
-                        conversation_list.render_item(
-                            item_index,
-                            &projection,
-                            &transcript_cache,
-                            &activity_disclosures,
-                            &diff_summary,
-                            cx,
-                        )
+                        conversation_list.render_item(item_index, &projection, &stream_entities, cx)
                     })
                     .size_full()
                     .min_w_0()

@@ -181,6 +181,7 @@ impl Render for RootView {
                                 list: Arc::clone(&self.conversation_list),
                                 list_state: self.conversation_list_state.clone(),
                                 transcript_cache: self.transcript_cache.clone(),
+                                stream_bands: self.stream_bands.clone(),
                                 activity_disclosures: self.activity_disclosures.clone(),
                                 workspace_diff: matches!(
                                     self.conversation.lifecycle,

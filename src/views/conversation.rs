@@ -1,6 +1,5 @@
 //! Live, turn-grouped conversation presentation and read-only selectable text.
 
-use std::borrow::Borrow;
 use std::collections::{HashMap, HashSet};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::ops::Range;
@@ -35,7 +34,7 @@ use crate::views::tool_card::{
 mod list;
 mod scroll;
 
-pub(super) use list::{ConversationDiffSummary, ConversationListModel};
+pub(super) use list::{ConversationDiffSummary, ConversationListModel, ConversationStreamEntities};
 pub(super) use scroll::ConversationScrollMotion;
 
 const MAX_CACHED_TRANSCRIPT_BLOCKS: usize = 256;
@@ -228,10 +227,180 @@ impl TranscriptTextCache {
     }
 }
 
+/// Cap on cached stream band models (turns, preambles). Bigger values keep
+/// long transcripts warm while scrolling far back at the cost of retaining
+/// duplicated tool payloads in the precomputed details.
+const MAX_CACHED_STREAM_BANDS: usize = 64;
+
+/// Identity of the inputs a stream band derives from: the message `Arc`s in
+/// its slice plus the shared tool/bash snapshots presentations read. The
+/// runtime replaces message `Arc`s wholesale on change and writes tool/bash
+/// state through `Arc::make_mut` while projections stay alive, so pointer
+/// equality implies identical content.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct BandFingerprint {
+    tools: usize,
+    bash: usize,
+    message_count: usize,
+    message_fold: u64,
+}
+
+impl BandFingerprint {
+    pub(super) fn capture(
+        projection: &ConversationProjection,
+        messages: &[Arc<RuntimeMessage>],
+    ) -> Self {
+        let mut fold = 0xcbf2_9ce4_8422_2325u64;
+        for message in messages {
+            fold ^= Arc::as_ptr(message) as usize as u64;
+            fold = fold.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        Self {
+            tools: Arc::as_ptr(&projection.tools) as usize,
+            bash: Arc::as_ptr(&projection.bash_executions) as usize,
+            message_count: messages.len(),
+            message_fold: fold,
+        }
+    }
+}
+
+/// Precomputed render model for one stream band (turn or preamble): shared
+/// text entities, grouped history rows, the trailing live step, the
+/// collapsed-history summary, and the final assistant reply. Expensive
+/// clones (tool payloads, sanitized details) happen once per fingerprint
+/// change instead of once per frame per visible band.
+pub(super) struct StreamBandModel {
+    pub(super) texts: HashMap<String, Entity<TranscriptText>>,
+    rows: Vec<BandRow>,
+    /// Ungrouped step count behind the disclosure, so the "N earlier steps"
+    /// label matches what folding produced before grouping.
+    history_count: usize,
+    latest: Option<ActivityStep>,
+    summary: Option<String>,
+    reply: Option<Arc<RuntimeMessage>>,
+}
+
+enum BandRow {
+    Step(ActivityStep),
+    Group(Arc<ToolGroupModel>),
+}
+
+struct ToolGroupModel {
+    presentations: Vec<ToolPresentation>,
+    detail: Arc<ActivityDetail>,
+    trigger_id: SharedString,
+    marker: gpui::Rgba,
+    live: bool,
+}
+
+struct StreamBandEntry {
+    fingerprint: BandFingerprint,
+    model: Arc<StreamBandModel>,
+    last_used: u64,
+}
+
+/// Fingerprint-keyed, LRU-bounded cache of stream band models. Sits next to
+/// `TranscriptTextCache` so an entire streaming session only recomputes the
+/// bands whose messages or tool state actually changed.
+pub(super) struct StreamBandCache {
+    epoch: SessionEpoch,
+    use_counter: u64,
+    entries: HashMap<String, StreamBandEntry>,
+    tail: Option<(BandFingerprint, Arc<StreamBandModel>)>,
+}
+
+impl StreamBandCache {
+    pub(super) fn new(epoch: SessionEpoch) -> Self {
+        Self {
+            epoch,
+            use_counter: 0,
+            entries: HashMap::new(),
+            tail: None,
+        }
+    }
+
+    pub(super) fn prepare_epoch(&mut self, epoch: SessionEpoch) {
+        if self.epoch != epoch {
+            self.reset(epoch);
+        }
+    }
+
+    pub(super) fn reset(&mut self, epoch: SessionEpoch) {
+        self.epoch = epoch;
+        self.use_counter = 0;
+        self.entries.clear();
+        self.tail = None;
+    }
+
+    pub(super) fn model_for(
+        &mut self,
+        key: String,
+        fingerprint: BandFingerprint,
+        cx: &mut Context<Self>,
+        build: impl FnOnce(&mut Context<Self>) -> StreamBandModel,
+    ) -> Arc<StreamBandModel> {
+        self.use_counter = self.use_counter.wrapping_add(1);
+        if let Some(entry) = self.entries.get_mut(&key)
+            && entry.fingerprint == fingerprint
+        {
+            entry.last_used = self.use_counter;
+            return entry.model.clone();
+        }
+
+        let model = Arc::new(build(cx));
+        self.entries.insert(
+            key,
+            StreamBandEntry {
+                fingerprint,
+                model: model.clone(),
+                last_used: self.use_counter,
+            },
+        );
+        self.trim();
+        model
+    }
+
+    pub(super) fn tail_for(
+        &mut self,
+        fingerprint: BandFingerprint,
+        cx: &mut Context<Self>,
+        build: impl FnOnce(&mut Context<Self>) -> StreamBandModel,
+    ) -> Arc<StreamBandModel> {
+        if let Some((cached_fingerprint, model)) = self.tail.as_ref()
+            && *cached_fingerprint == fingerprint
+        {
+            return model.clone();
+        }
+        let model = Arc::new(build(cx));
+        self.tail = Some((fingerprint, model.clone()));
+        model
+    }
+
+    fn trim(&mut self) {
+        while self.entries.len() > MAX_CACHED_STREAM_BANDS {
+            let eviction = self
+                .entries
+                .iter()
+                .min_by_key(|(_, entry)| entry.last_used)
+                .map(|(key, _)| key.clone());
+            let Some(eviction) = eviction else {
+                break;
+            };
+            self.entries.remove(&eviction);
+        }
+    }
+}
+
 pub(super) struct TranscriptText {
     id: SharedString,
     source_hash: u64,
     document: MarkdownDocument,
+    /// Shared snapshot of the sole prose block's text for the fast render path;
+    /// cloning it into `StyledText` is an Arc bump instead of a full copy.
+    sole_text: Option<SharedString>,
+    /// Cached `document.plain_text()` for selection and copy math; recomputed
+    /// only when the source text changes, not per pointer event.
+    plain: String,
     selection: Range<usize>,
     selection_reversed: bool,
     is_selecting: bool,
@@ -245,6 +414,8 @@ impl TranscriptText {
         Self {
             id: SharedString::from(id),
             source_hash: source_hash(text),
+            sole_text: sole_text_snapshot(&document),
+            plain: document.plain_text(),
             document,
             selection: 0..0,
             selection_reversed: false,
@@ -260,17 +431,20 @@ impl TranscriptText {
         }
 
         let document = MarkdownDocument::parse(text);
+        let sole_text = sole_text_snapshot(&document);
+        let plain = document.plain_text();
         if document.is_selectable_prose() && self.document.is_selectable_prose() {
-            let old = self.document.plain_text();
-            let new = document.plain_text();
-            self.selection = preserved_selection(&old, &new, self.selection.clone());
+            let old = std::mem::replace(&mut self.plain, plain);
+            self.selection = preserved_selection(&old, &self.plain, self.selection.clone());
         } else {
+            self.plain = plain;
             self.selection = 0..0;
         }
         if self.selection.is_empty() {
             self.selection_reversed = false;
         }
         self.source_hash = next_hash;
+        self.sole_text = sole_text;
         self.document = document;
         self.layout = None;
         cx.notify();
@@ -314,32 +488,29 @@ impl TranscriptText {
     }
 
     fn copy(&mut self, _: &TranscriptCopy, _: &mut Window, cx: &mut Context<Self>) {
-        let plain = self.document.plain_text();
         if self.document.is_selectable_prose() {
-            if let Some(text) = plain.get(self.selection.clone())
+            if let Some(text) = self.plain.get(self.selection.clone())
                 && !text.is_empty()
             {
                 cx.write_to_clipboard(ClipboardItem::new_string(text.to_owned()));
             }
             return;
         }
-        if !plain.is_empty() {
-            cx.write_to_clipboard(ClipboardItem::new_string(plain));
+        if !self.plain.is_empty() {
+            cx.write_to_clipboard(ClipboardItem::new_string(self.plain.clone()));
         }
     }
 
     fn select_all(&mut self, _: &TranscriptSelectAll, _: &mut Window, cx: &mut Context<Self>) {
         if self.document.is_selectable_prose() {
-            let len = self.document.plain_text().len();
-            self.selection = 0..len;
+            self.selection = 0..self.plain.len();
             self.selection_reversed = false;
             cx.notify();
             return;
         }
         // Multi-block documents copy everything on Select All via clipboard.
-        let plain = self.document.plain_text();
-        if !plain.is_empty() {
-            cx.write_to_clipboard(ClipboardItem::new_string(plain));
+        if !self.plain.is_empty() {
+            cx.write_to_clipboard(ClipboardItem::new_string(self.plain.clone()));
         }
     }
 
@@ -357,12 +528,19 @@ impl TranscriptText {
         let Some(layout) = self.layout.as_ref() else {
             return 0;
         };
-        let plain = self.document.plain_text();
         let index = layout
             .index_for_position(position)
             .unwrap_or_else(|nearest| nearest);
-        clamp_boundary(&plain, index)
+        clamp_boundary(&self.plain, index)
     }
+}
+
+/// Sole-prose documents render through `StyledText`; snapshot the text once
+/// per parse so frame renders share it instead of copying.
+fn sole_text_snapshot(document: &MarkdownDocument) -> Option<SharedString> {
+    document
+        .sole_prose()
+        .map(|prose| SharedString::from(prose.text.clone()))
 }
 
 fn source_hash(text: &str) -> u64 {
@@ -382,9 +560,11 @@ impl Render for TranscriptText {
         let selectable = self.document.is_selectable_prose();
         let default_style = window.text_style();
 
-        let content = if let Some(prose) = self.document.sole_prose() {
+        let content = if let (Some(prose), Some(sole_text)) =
+            (self.document.sole_prose(), self.sole_text.as_ref())
+        {
             let runs = markdown_runs(prose, self.selection.clone(), &default_style);
-            let text = StyledText::new(prose.text.clone()).with_runs(runs);
+            let text = StyledText::new(sole_text.clone()).with_runs(runs);
             self.layout = Some(text.layout().clone());
             text.into_any_element()
         } else {
@@ -621,39 +801,6 @@ fn status_chip(label: &str, tone: TableStatusTone) -> impl IntoElement {
         .child(label.to_owned())
 }
 
-fn markdown_highlights(
-    prose: &ProseBlock,
-    selection: Range<usize>,
-) -> Vec<(Range<usize>, HighlightStyle)> {
-    let mut boundaries = vec![0, prose.text.len()];
-    for span in &prose.spans {
-        boundaries.push(span.range.start);
-        boundaries.push(span.range.end);
-    }
-    if !selection.is_empty() {
-        boundaries.push(selection.start);
-        boundaries.push(selection.end);
-    }
-    boundaries.sort_unstable();
-    boundaries.dedup();
-
-    boundaries
-        .windows(2)
-        .filter_map(|boundary| {
-            let range = boundary[0]..boundary[1];
-            if range.is_empty() {
-                return None;
-            }
-            let markdown = markdown_style_for_range(prose, &range);
-            let selected = !selection.is_empty()
-                && selection.start <= range.start
-                && selection.end >= range.end;
-            let style = highlight_style(markdown, selected);
-            (style != HighlightStyle::default()).then_some((range, style))
-        })
-        .collect()
-}
-
 fn markdown_style_for_range(prose: &ProseBlock, range: &Range<usize>) -> MarkdownStyle {
     prose
         .spans
@@ -679,20 +826,48 @@ fn markdown_style_for_range(prose: &ProseBlock, range: &Range<usize>) -> Markdow
         })
 }
 
+/// Build text runs in one pass over the span/selection boundary windows:
+/// resolves each window's markdown flags and selection state together so a
+/// render does not fold the span list twice.
 fn markdown_runs(
     prose: &ProseBlock,
     selection: Range<usize>,
     default_style: &TextStyle,
 ) -> Vec<TextRun> {
-    let highlights = markdown_highlights(prose, selection);
+    let mut boundaries = Vec::with_capacity(prose.spans.len() * 2 + 4);
+    boundaries.push(0);
+    boundaries.push(prose.text.len());
+    for span in &prose.spans {
+        boundaries.push(span.range.start);
+        boundaries.push(span.range.end);
+    }
+    if !selection.is_empty() {
+        boundaries.push(selection.start);
+        boundaries.push(selection.end);
+    }
+    boundaries.sort_unstable();
+    boundaries.dedup();
+
     let mut runs = Vec::new();
-    let mut offset = 0;
-    for (range, highlight) in highlights {
-        if offset < range.start {
-            runs.push(default_style.to_run(range.start - offset));
+    for window in boundaries.windows(2) {
+        let range = window[0]..window[1];
+        if range.is_empty() {
+            continue;
         }
         let markdown = markdown_style_for_range(prose, &range);
-        let mut style = default_style.clone().highlight(highlight);
+        let selected =
+            !selection.is_empty() && selection.start <= range.start && selection.end >= range.end;
+        let highlight = highlight_style(markdown, selected);
+        let fully_default =
+            highlight == HighlightStyle::default() && !markdown.code && markdown.heading_level == 0;
+        if fully_default {
+            runs.push(default_style.to_run(range.len()));
+            continue;
+        }
+        let mut style = default_style.clone();
+        if highlight != HighlightStyle::default() {
+            style = style.highlight(highlight);
+        }
         if markdown.code {
             style.font_family = theme::mono();
             style.font_size = theme::text_size(if markdown.code_block {
@@ -712,10 +887,6 @@ fn markdown_runs(
             .into();
         }
         runs.push(style.to_run(range.len()));
-        offset = range.end;
-    }
-    if offset < prose.text.len() {
-        runs.push(default_style.to_run(prose.text.len() - offset));
     }
     runs
 }
@@ -864,15 +1035,14 @@ struct ConversationRenderContext<'a> {
 fn turn_card(
     number: usize,
     user: &RuntimeMessage,
-    messages: &[Arc<RuntimeMessage>],
+    model: &StreamBandModel,
     render: &ConversationRenderContext<'_>,
     links_above: bool,
     links_below: bool,
     cx: &mut App,
 ) -> impl IntoElement {
-    let prompt = message_prompt_text(user);
-    let (activity, reply) = split_turn(messages, render.projection, Some(&prompt));
-    let continues = !activity.is_empty() || reply.is_some();
+    let has_activity = model.latest.is_some() || !model.rows.is_empty();
+    let continues = has_activity || model.reply.is_some();
     div()
         .id(SharedString::from(format!("turn-{}", user.key.0)))
         .w_full()
@@ -886,16 +1056,16 @@ fn turn_card(
             links_above,
             continues,
         ))
-        .when(!activity.is_empty(), |turn| {
+        .when(has_activity, |turn| {
             turn.child(activity_band(
                 &format!("turn:{}", user.key.0),
-                &activity,
-                reply.is_some(),
+                model,
+                model.reply.is_some(),
                 render,
                 cx,
             ))
         })
-        .when_some(reply, |turn, message| {
+        .when_some(model.reply.as_deref(), |turn, message| {
             turn.child(assistant_reply(message, render.texts, true, links_below))
         })
         // The chain crosses the turn break: the rail spans the resting
@@ -929,13 +1099,18 @@ fn optimistic_turn(
     if !chips.is_empty() {
         body.push(attachment_chip_row(chips));
     }
-    let meta_rows = vec![
-        ("Turn".to_owned(), format!("{index:02}")),
-        (
-            "Status".to_owned(),
-            optimistic_status(input.kind).to_owned(),
-        ),
-    ];
+    let meta = UserPromptMeta {
+        id: SharedString::from(format!("optimistic-meta-{}", input.request.as_str())),
+        rows: vec![
+            ("Turn".to_owned(), format!("{index:02}")),
+            (
+                "Status".to_owned(),
+                optimistic_status(input.kind).to_owned(),
+            ),
+        ],
+        time_label: None,
+        status_label: Some(optimistic_status(input.kind)),
+    };
     div()
         .id(SharedString::from(format!(
             "optimistic-turn-{}",
@@ -943,10 +1118,7 @@ fn optimistic_turn(
         )))
         .w_full()
         .child(user_prompt_section(
-            SharedString::from(format!("optimistic-meta-{}", input.request.as_str())),
-            meta_rows,
-            None,
-            Some(optimistic_status(input.kind)),
+            meta,
             true,
             links_above,
             continues,
@@ -983,20 +1155,16 @@ fn user_prompt(
     if !chips.is_empty() {
         body.push(attachment_chip_row(chips));
     }
-    let meta_rows = vec![
-        ("Turn".to_owned(), format!("{index:02}")),
-        ("Timestamp".to_owned(), format_timestamp(message.timestamp)),
-    ];
-    user_prompt_section(
-        SharedString::from(format!("user-meta-{}", message.key.0)),
-        meta_rows,
-        Some(format_timestamp(message.timestamp)),
-        None,
-        false,
-        links_above,
-        continues,
-        body,
-    )
+    let meta = UserPromptMeta {
+        id: SharedString::from(format!("user-meta-{}", message.key.0)),
+        rows: vec![
+            ("Turn".to_owned(), format!("{index:02}")),
+            ("Timestamp".to_owned(), format_timestamp(message.timestamp)),
+        ],
+        time_label: Some(format_timestamp(message.timestamp)),
+        status_label: None,
+    };
+    user_prompt_section(meta, false, links_above, continues, body)
 }
 
 /// One node on a turn's thread: a centered dot plus, unless the turn ends
@@ -1098,11 +1266,17 @@ fn turn_bridge() -> impl IntoElement {
 
 /// Editorial prompt section: a quiet warm card for what was asked, hanging on
 /// the thread instead of banding a boxed turn.
-fn user_prompt_section(
-    meta_id: SharedString,
-    meta_rows: Vec<(String, String)>,
+/// Header meta parked behind the (i) control: identity popup rows plus the
+/// inline status/time labels.
+struct UserPromptMeta {
+    id: SharedString,
+    rows: Vec<(String, String)>,
     time_label: Option<String>,
     status_label: Option<&'static str>,
+}
+
+fn user_prompt_section(
+    meta: UserPromptMeta,
     pending: bool,
     links_above: bool,
     continues: bool,
@@ -1114,7 +1288,7 @@ fn user_prompt_section(
         theme::signal()
     };
     // Pending turns keep breathing on the thread until the transcript answers.
-    let pulse = pending.then(|| SharedString::from(format!("thread-pulse:{meta_id}")));
+    let pulse = pending.then(|| SharedString::from(format!("thread-pulse:{}", meta.id)));
     thread_section(
         mark,
         NODE_SPEAKER,
@@ -1126,13 +1300,7 @@ fn user_prompt_section(
             .flex()
             .flex_col()
             .pb(px(TURN_SECTION_GAP))
-            .child(user_prompt_header(
-                meta_id,
-                meta_rows,
-                time_label,
-                status_label,
-                pending,
-            ))
+            .child(user_prompt_header(meta, pending))
             .when(!body.is_empty(), |section| {
                 section.child(
                     div()
@@ -1151,13 +1319,7 @@ fn user_prompt_section(
     )
 }
 
-fn user_prompt_header(
-    meta_id: SharedString,
-    meta_rows: Vec<(String, String)>,
-    time_label: Option<String>,
-    status_label: Option<&'static str>,
-    pending: bool,
-) -> impl IntoElement {
+fn user_prompt_header(meta: UserPromptMeta, pending: bool) -> impl IntoElement {
     div()
         .w_full()
         .flex()
@@ -1184,7 +1346,7 @@ fn user_prompt_header(
                 .flex_row()
                 .items_center()
                 .gap(px(10.0))
-                .when_some(status_label, |row, label| {
+                .when_some(meta.status_label, |row, label| {
                     row.child(
                         div()
                             .font_family(theme::mono())
@@ -1194,7 +1356,7 @@ fn user_prompt_header(
                             .child(label),
                     )
                 })
-                .when_some(time_label, |row, time| {
+                .when_some(meta.time_label, |row, time| {
                     row.child(
                         div()
                             .font_family(theme::mono())
@@ -1203,37 +1365,39 @@ fn user_prompt_header(
                             .child(time),
                     )
                 })
-                .child(message_meta_info(meta_id, meta_rows)),
+                .child(message_meta_info(meta.id, meta.rows)),
         )
 }
 
-/// One spine step inside a turn's activity band.
-enum ActivityStep<'a> {
+/// One spine step inside a turn's activity band. Owned so a band model can
+/// be cached across frames; details carry the expensive payload clones and
+/// are shared behind `Arc` so hit-testing and overlays cost a refcount bump.
+enum ActivityStep {
     Thinking {
         key: String,
         redacted: bool,
-        detail: ActivityDetail,
+        detail: Arc<ActivityDetail>,
     },
     Text {
         key: String,
     },
     Image {
-        mime_type: &'a str,
+        mime_type: SharedString,
     },
     Tool {
         presentation: Box<ToolPresentation>,
-        detail: ActivityDetail,
+        detail: Arc<ActivityDetail>,
     },
     Summary {
         label: &'static str,
         key: String,
     },
     Custom {
-        kind: &'a str,
+        kind: SharedString,
         key: String,
     },
     Unsupported {
-        kind: &'a str,
+        kind: SharedString,
     },
     Notice {
         text: String,
@@ -1265,17 +1429,14 @@ type PersistedToolResult<'a> = (
     bool,
 );
 
-fn split_turn<'a, M>(
-    messages: &'a [M],
+fn split_turn(
+    messages: &[Arc<RuntimeMessage>],
     projection: &ConversationProjection,
     prompt: Option<&str>,
-) -> (Vec<ActivityStep<'a>>, Option<&'a RuntimeMessage>)
-where
-    M: Borrow<RuntimeMessage>,
-{
+) -> (Vec<ActivityStep>, Option<Arc<RuntimeMessage>>) {
     let call_ids = messages
         .iter()
-        .flat_map(|message| &message.borrow().content)
+        .flat_map(|message| &message.content)
         .filter_map(|block| match block {
             MessageBlock::ToolCall { id, .. } => Some(id.clone()),
             _ => None,
@@ -1283,7 +1444,7 @@ where
         .collect::<HashSet<_>>();
     let persisted_results = messages
         .iter()
-        .flat_map(|message| &message.borrow().content)
+        .flat_map(|message| &message.content)
         .filter_map(|block| match block {
             MessageBlock::ToolResult {
                 id,
@@ -1306,14 +1467,14 @@ where
         .collect::<HashMap<_, _>>();
     let reply_index = messages
         .iter()
-        .rposition(|message| is_final_assistant_reply(message.borrow()));
+        .rposition(|message| is_final_assistant_reply(message));
 
     let mut activity = Vec::new();
     for (index, message) in messages.iter().enumerate() {
         let is_reply = reply_index == Some(index);
         push_message_activity(
             &mut activity,
-            message.borrow(),
+            message,
             projection,
             &call_ids,
             &persisted_results,
@@ -1321,7 +1482,7 @@ where
             prompt,
         );
     }
-    let reply = reply_index.map(|index| messages[index].borrow());
+    let reply = reply_index.map(|index| messages[index].clone());
     (activity, reply)
 }
 
@@ -1350,12 +1511,12 @@ pub(in crate::views) fn latest_completed_response_key(
         .map(|message| message.key.0.clone())
 }
 
-fn push_message_activity<'a>(
-    activity: &mut Vec<ActivityStep<'a>>,
-    message: &'a RuntimeMessage,
+fn push_message_activity(
+    activity: &mut Vec<ActivityStep>,
+    message: &RuntimeMessage,
     projection: &ConversationProjection,
     call_ids: &HashSet<ToolCallId>,
-    persisted_results: &HashMap<ToolCallId, PersistedToolResult<'a>>,
+    persisted_results: &HashMap<ToolCallId, PersistedToolResult<'_>>,
     is_reply: bool,
     prompt: Option<&str>,
 ) {
@@ -1368,13 +1529,13 @@ fn push_message_activity<'a>(
             MessageBlock::Thinking { text, redacted, .. } => {
                 let key = fragment_key(message, block);
                 activity.push(ActivityStep::Thinking {
-                    detail: thinking_detail(message, &key, text, *redacted, prompt),
+                    detail: Arc::new(thinking_detail(message, &key, text, *redacted, prompt)),
                     key,
                     redacted: *redacted,
                 })
             }
             MessageBlock::Image { mime_type, .. } => activity.push(ActivityStep::Image {
-                mime_type: mime_type.as_str(),
+                mime_type: SharedString::from(mime_type.clone()),
             }),
             MessageBlock::File { .. } => {}
             MessageBlock::ToolCall {
@@ -1391,7 +1552,7 @@ fn push_message_activity<'a>(
                     persisted_results.get(id).copied(),
                 );
                 activity.push(ActivityStep::Tool {
-                    detail: tool_detail(&presentation, Some(message), prompt, None),
+                    detail: Arc::new(tool_detail(&presentation, Some(message), prompt, None)),
                     presentation: Box::new(presentation),
                 });
             }
@@ -1414,7 +1575,7 @@ fn push_message_activity<'a>(
                         *is_error,
                     );
                     activity.push(ActivityStep::Tool {
-                        detail: tool_detail(&presentation, Some(message), prompt, None),
+                        detail: Arc::new(tool_detail(&presentation, Some(message), prompt, None)),
                         presentation: Box::new(presentation),
                     });
                 }
@@ -1436,7 +1597,12 @@ fn push_message_activity<'a>(
                 );
                 let detail_id = fragment_key(message, block);
                 activity.push(ActivityStep::Tool {
-                    detail: tool_detail(&presentation, Some(message), prompt, Some(&detail_id)),
+                    detail: Arc::new(tool_detail(
+                        &presentation,
+                        Some(message),
+                        prompt,
+                        Some(&detail_id),
+                    )),
                     presentation: Box::new(presentation),
                 });
             }
@@ -1449,11 +1615,11 @@ fn push_message_activity<'a>(
                 key: fragment_key(message, block),
             }),
             MessageBlock::Custom { kind, .. } => activity.push(ActivityStep::Custom {
-                kind: kind.as_str(),
+                kind: SharedString::from(kind.clone()),
                 key: fragment_key(message, block),
             }),
             MessageBlock::Unsupported { kind, .. } => activity.push(ActivityStep::Unsupported {
-                kind: kind.as_str(),
+                kind: SharedString::from(kind.clone()),
             }),
         }
     }
@@ -1579,7 +1745,7 @@ fn tool_detail(
     }
 }
 
-fn grouped_tool_detail(details: &[ActivityDetail]) -> ActivityDetail {
+fn grouped_tool_detail(details: &[Arc<ActivityDetail>]) -> ActivityDetail {
     let records = details
         .iter()
         .flat_map(|detail| detail.records.iter().cloned())
@@ -1729,58 +1895,177 @@ fn format_activity_elapsed(elapsed_ms: u128) -> String {
     }
 }
 
+/// Split finished steps into the trailing live step and the display rows for
+/// the collapsed history, folding same-name groupable tool runs into a single
+/// precomputed group row. Runs once per band fingerprint, not per frame.
+fn assemble_band(
+    mut steps: Vec<ActivityStep>,
+) -> (Vec<BandRow>, usize, Option<ActivityStep>, Option<String>) {
+    let latest = steps.pop();
+    let history_count = steps.len();
+    let summary = history_summary(&steps);
+    let mut rows = Vec::new();
+    let mut steps = steps.into_iter().peekable();
+    while let Some(step) = steps.next() {
+        if let ActivityStep::Tool {
+            presentation,
+            detail,
+        } = &step
+            && presentation.groupable()
+        {
+            let group_name = presentation.name.clone();
+            let mut presentations = vec![presentation.as_ref().clone()];
+            let mut details = vec![detail.clone()];
+            while let Some(ActivityStep::Tool {
+                presentation: next,
+                detail: next_detail,
+            }) = steps.peek()
+            {
+                if next.name != group_name || !next.groupable() {
+                    break;
+                }
+                presentations.push(next.as_ref().clone());
+                details.push(next_detail.clone());
+                steps.next();
+            }
+            rows.push(BandRow::Group(Arc::new(ToolGroupModel::build(
+                presentations,
+                details,
+            ))));
+            continue;
+        }
+
+        rows.push(BandRow::Step(step));
+    }
+    (rows, history_count, latest, summary)
+}
+
+impl ToolGroupModel {
+    fn build(presentations: Vec<ToolPresentation>, details: Vec<Arc<ActivityDetail>>) -> Self {
+        let marker = presentations
+            .iter()
+            .map(|item| status_color(item.status))
+            .reduce(|left, right| {
+                // Prefer error/running over success for the rail marker.
+                if left == theme::error() || right == theme::error() {
+                    theme::error()
+                } else if left == theme::data() || right == theme::data() {
+                    theme::data()
+                } else if left == theme::signal() || right == theme::signal() {
+                    theme::signal()
+                } else {
+                    theme::live()
+                }
+            })
+            .unwrap_or_else(theme::live);
+        let detail = Arc::new(grouped_tool_detail(&details));
+        let trigger_id = SharedString::from(format!(
+            "tool-group:{:016x}",
+            source_hash(
+                &detail
+                    .records
+                    .iter()
+                    .map(|record| record.id.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            )
+        ));
+        let live = presentations.iter().any(|item| {
+            matches!(
+                item.status,
+                CardStatus::Pending | CardStatus::Running | CardStatus::Cancelling
+            )
+        });
+        Self {
+            presentations,
+            detail,
+            trigger_id,
+            marker,
+            live,
+        }
+    }
+}
+
+fn build_turn_model(
+    projection: &ConversationProjection,
+    user_index: usize,
+    body: Range<usize>,
+    cache: &Entity<TranscriptTextCache>,
+    cx: &mut App,
+) -> StreamBandModel {
+    let prompt = message_prompt_text(&projection.messages[user_index]);
+    let texts = cached_message_texts(projection, user_index..body.end, cache, cx);
+    let (steps, reply) = split_turn(&projection.messages[body], projection, Some(&prompt));
+    let (rows, history_count, latest, summary) = assemble_band(steps);
+    StreamBandModel {
+        texts,
+        rows,
+        history_count,
+        latest,
+        summary,
+        reply,
+    }
+}
+
+fn build_preamble_model(
+    projection: &ConversationProjection,
+    message_index: usize,
+    cache: &Entity<TranscriptTextCache>,
+    cx: &mut App,
+) -> StreamBandModel {
+    let texts = cached_message_texts(projection, message_index..message_index + 1, cache, cx);
+    let messages = std::slice::from_ref(&projection.messages[message_index]);
+    let (steps, reply) = split_turn(messages, projection, None);
+    let (rows, history_count, latest, summary) = assemble_band(steps);
+    StreamBandModel {
+        texts,
+        rows,
+        history_count,
+        latest,
+        summary,
+        reply,
+    }
+}
+
+fn build_tail_model(projection: &ConversationProjection) -> StreamBandModel {
+    let steps = tail_presentations(projection)
+        .into_iter()
+        .map(|presentation| ActivityStep::Tool {
+            detail: Arc::new(tool_detail(&presentation, None, None, None)),
+            presentation: Box::new(presentation),
+        })
+        .collect::<Vec<_>>();
+    let (rows, history_count, latest, summary) = assemble_band(steps);
+    StreamBandModel {
+        texts: HashMap::new(),
+        rows,
+        history_count,
+        latest,
+        summary,
+        reply: None,
+    }
+}
+
 fn activity_band(
     disclosure_key: &str,
-    steps: &[ActivityStep<'_>],
+    model: &StreamBandModel,
     has_reply: bool,
     render: &ConversationRenderContext<'_>,
     cx: &mut App,
 ) -> impl IntoElement {
-    let Some((latest_step, history)) = steps.split_last() else {
+    let Some(latest_step) = model.latest.as_ref() else {
         return div().into_any_element();
     };
-    let summary = history_summary(history);
-    let mut children = Vec::new();
-    let mut index = 0;
-    while index < history.len() {
-        if let ActivityStep::Tool {
-            presentation,
-            detail,
-        } = &history[index]
-            && presentation.groupable()
-        {
-            let mut group = vec![presentation.as_ref().clone()];
-            let mut details = vec![detail.clone()];
-            let mut end = index + 1;
-            while end < history.len() {
-                let ActivityStep::Tool {
-                    presentation: next,
-                    detail: next_detail,
-                } = &history[end]
-                else {
-                    break;
-                };
-                if next.name != presentation.name || !next.groupable() {
-                    break;
-                }
-                group.push(next.as_ref().clone());
-                details.push(next_detail.clone());
-                end += 1;
-            }
+    let step_count = model.history_count + 1;
+    let children = model
+        .rows
+        .iter()
+        .map(|row| match row {
             // History steps chain straight into the latest step below them.
-            children.push(render_tool_group(&group, &details, true, render.root));
-            index = end;
-            continue;
-        }
-
-        children.push(render_activity_step(
-            &history[index],
-            true,
-            render.texts,
-            render.root,
-        ));
-        index += 1;
-    }
+            BandRow::Step(step) => render_activity_step(step, true, &model.texts, render.root),
+            BandRow::Group(group) => render_tool_group(group, true, render.root),
+        })
+        .collect::<Vec<_>>();
 
     let expanded = render.disclosures.read(cx).is_expanded(disclosure_key);
     let show_history = render.disclosures.read(cx).shows_history(disclosure_key);
@@ -1795,15 +2080,14 @@ fn activity_band(
                     CardStatus::Pending | CardStatus::Running | CardStatus::Cancelling
                 )
         );
-    let latest = render_activity_step(latest_step, has_reply, render.texts, render.root);
+    let latest = render_activity_step(latest_step, has_reply, &model.texts, render.root);
     let latest = if animate_latest {
         div()
             .w_full()
             .child(latest)
             .with_animation(
                 SharedString::from(format!(
-                    "activity-latest-tool:{disclosure_key}:{}",
-                    steps.len()
+                    "activity-latest-tool:{disclosure_key}:{step_count}"
                 )),
                 Animation::new(Duration::from_millis(180)).with_easing(ease_out_quint()),
                 |row, delta| row.ml(px(6.0 * (1.0 - delta))).opacity(0.68 + 0.32 * delta),
@@ -1813,10 +2097,10 @@ fn activity_band(
         latest
     };
 
-    let history_panel = if show_history && !history.is_empty() {
+    let history_panel = if show_history && model.history_count > 0 {
         Some(activity_history_panel(
             disclosure_key,
-            history.len(),
+            model.history_count,
             expanded,
             motion,
             children,
@@ -1829,11 +2113,11 @@ fn activity_band(
         .w_full()
         .flex()
         .flex_col()
-        .when(!history.is_empty(), |band| {
+        .when(model.history_count > 0, |band| {
             band.child(activity_disclosure(
                 disclosure_key,
-                history.len(),
-                summary,
+                model.history_count,
+                model.summary.clone(),
                 expanded,
                 render.disclosures,
             ))
@@ -1901,7 +2185,7 @@ fn disclosure_history_estimate(history_count: usize) -> f32 {
 
 /// One-line "what is inside" for a collapsed activity history: step kinds in
 /// order of first appearance with counts, trimmed so the row stays quiet.
-fn history_summary(steps: &[ActivityStep<'_>]) -> Option<String> {
+fn history_summary(steps: &[ActivityStep]) -> Option<String> {
     if steps.is_empty() {
         return None;
     }
@@ -2051,54 +2335,21 @@ fn activity_disclosure(
 }
 
 fn render_tool_group(
-    items: &[ToolPresentation],
-    details: &[ActivityDetail],
+    group: &Arc<ToolGroupModel>,
     continues: bool,
     root: &Entity<crate::views::RootView>,
 ) -> AnyElement {
-    let marker = items
-        .iter()
-        .map(|item| status_color(item.status))
-        .reduce(|left, right| {
-            // Prefer error/running over success for the rail marker.
-            if left == theme::error() || right == theme::error() {
-                theme::error()
-            } else if left == theme::data() || right == theme::data() {
-                theme::data()
-            } else if left == theme::signal() || right == theme::signal() {
-                theme::signal()
-            } else {
-                theme::live()
-            }
-        })
-        .unwrap_or_else(theme::live);
-    let detail = grouped_tool_detail(details);
-    let trigger_id = format!(
-        "tool-group:{:016x}",
-        source_hash(
-            &detail
-                .records
-                .iter()
-                .map(|record| record.id.as_str())
-                .collect::<Vec<_>>()
-                .join("\n"),
-        )
-    );
-    let live = items.iter().any(|item| {
-        matches!(
-            item.status,
-            CardStatus::Pending | CardStatus::Running | CardStatus::Cancelling
-        )
-    });
-    let pulse = live.then(|| SharedString::from(format!("thread-pulse:{trigger_id}")));
+    let pulse = group
+        .live
+        .then(|| SharedString::from(format!("thread-pulse:{}", group.trigger_id)));
     step_shell(
         continues,
-        marker,
+        group.marker,
         pulse,
         tool_detail_trigger(
-            &trigger_id,
-            render_tool_presentation(items, None, false, None),
-            detail,
+            &group.trigger_id,
+            render_tool_presentation(&group.presentations, None, false, None),
+            group.detail.clone(),
             root,
         ),
     )
@@ -2106,7 +2357,7 @@ fn render_tool_group(
 }
 
 fn render_activity_step(
-    step: &ActivityStep<'_>,
+    step: &ActivityStep,
     continues: bool,
     texts: &HashMap<String, Entity<TranscriptText>>,
     root: &Entity<crate::views::RootView>,
@@ -2259,7 +2510,7 @@ fn render_activity_step(
 }
 
 fn thinking_detail_header(
-    detail: &ActivityDetail,
+    detail: &Arc<ActivityDetail>,
     root: &Entity<crate::views::RootView>,
 ) -> impl IntoElement {
     div()
@@ -2281,7 +2532,7 @@ fn thinking_detail_header(
 }
 
 fn activity_detail_link(
-    detail: &ActivityDetail,
+    detail: &Arc<ActivityDetail>,
     root: &Entity<crate::views::RootView>,
 ) -> AnyElement {
     let id = detail
@@ -2338,11 +2589,12 @@ fn activity_detail_link(
 fn tool_detail_trigger(
     id: &str,
     body: impl IntoElement,
-    detail: ActivityDetail,
+    detail: Arc<ActivityDetail>,
     root: &Entity<crate::views::RootView>,
 ) -> AnyElement {
     let click_detail = detail.clone();
     let click_root = root.clone();
+    let keyboard_detail = detail;
     let keyboard_root = root.clone();
     // Flat trigger: rested transparent so the step reads as text on the
     // canvas; hover and keyboard focus lift the wash instead of drawing a box.
@@ -2370,7 +2622,7 @@ fn tool_detail_trigger(
         .on_key_down(move |event: &gpui::KeyDownEvent, window, cx| {
             if matches!(event.keystroke.key.as_str(), "enter" | "space") {
                 cx.stop_propagation();
-                let detail = detail.clone();
+                let detail = keyboard_detail.clone();
                 keyboard_root.update(cx, |view, cx| view.open_activity_detail(detail, window, cx));
             }
         })
@@ -2465,14 +2717,14 @@ fn assistant_reply(
 
 fn preamble(
     message: &RuntimeMessage,
+    model: &StreamBandModel,
     render: &ConversationRenderContext<'_>,
     cx: &mut App,
 ) -> AnyElement {
+    let has_activity = model.latest.is_some() || !model.rows.is_empty();
     match message.role {
-        MessageRole::Assistant if is_final_assistant_reply(message) => {
-            let messages = [message];
-            let (activity, _) = split_turn(&messages, render.projection, None);
-            if activity.is_empty() {
+        MessageRole::Assistant if model.reply.is_some() => {
+            if !has_activity {
                 assistant_reply(message, render.texts, false, false).into_any_element()
             } else {
                 div()
@@ -2481,7 +2733,7 @@ fn preamble(
                     .flex_col()
                     .child(activity_band(
                         &format!("preamble:{}", message.key.0),
-                        &activity,
+                        model,
                         true,
                         render,
                         cx,
@@ -2497,14 +2749,12 @@ fn preamble(
         | MessageRole::BranchSummary
         | MessageRole::CompactionSummary
         | MessageRole::Unknown => {
-            let messages = [message];
-            let (activity, _) = split_turn(&messages, render.projection, None);
-            if activity.is_empty() {
+            if !has_activity {
                 return div().into_any_element();
             }
             activity_band(
                 &format!("preamble:{}", message.key.0),
-                &activity,
+                model,
                 false,
                 render,
                 cx,
@@ -2515,22 +2765,23 @@ fn preamble(
     }
 }
 
-fn tail_activity(render: &ConversationRenderContext<'_>, cx: &mut App) -> Option<AnyElement> {
-    let activity = tail_presentations(render.projection)
-        .into_iter()
-        .map(|presentation| ActivityStep::Tool {
-            detail: tool_detail(&presentation, None, None, None),
-            presentation: Box::new(presentation),
-        })
-        .collect::<Vec<_>>();
-    if activity.is_empty() {
+fn tail_activity(
+    render: &ConversationRenderContext<'_>,
+    bands: &Entity<StreamBandCache>,
+    cx: &mut App,
+) -> Option<AnyElement> {
+    let fingerprint = BandFingerprint::capture(render.projection, &render.projection.messages);
+    let model = bands.update(cx, |bands, cx| {
+        bands.tail_for(fingerprint, cx, |_cx| build_tail_model(render.projection))
+    });
+    if model.latest.is_none() && model.rows.is_empty() {
         return None;
     }
 
     Some(
         activity_band(
             &format!("tail:{}", render.projection.epoch.value()),
-            &activity,
+            &model,
             false,
             render,
             cx,
@@ -2917,11 +3168,11 @@ mod tests {
 
     #[test]
     fn history_summary_counts_kinds_in_first_seen_order() {
-        let detail = ActivityDetail {
+        let detail = Arc::new(ActivityDetail {
             title: "tool".to_owned(),
             prompt: None,
             records: Vec::new(),
-        };
+        });
         let tool = |name: &str, command: &str| {
             let mut presentation = presentation_for_bash_block(command, "", false, Some(0), false);
             presentation.name = name.to_owned();
@@ -3093,7 +3344,7 @@ mod tests {
         };
         assert_eq!(detail.prompt.as_deref(), Some("show files"));
         assert_eq!(detail.records[0].parameters.as_deref(), Some("{}"));
-        assert_eq!(reply.map(|m| m.key.0.as_str()), Some("a2"));
+        assert_eq!(reply.as_deref().map(|m| m.key.0.as_str()), Some("a2"));
         assert_eq!(
             latest_completed_response_key(&projection).as_deref(),
             Some("a2")

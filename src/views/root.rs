@@ -69,7 +69,8 @@ use crate::views::composer::{Composer, ComposerAvailability, ComposerEvent, Comp
 use crate::views::controls;
 use crate::views::conversation::{
     ActivityDetail, ActivityDisclosureState, ConversationDiffSummary, ConversationListModel,
-    ConversationScrollMotion, TranscriptTextCache, latest_completed_response_key,
+    ConversationScrollMotion, ConversationStreamEntities, StreamBandCache, TranscriptTextCache,
+    latest_completed_response_key,
 };
 use crate::views::terminal::{TerminalPanelEvent, TerminalView};
 
@@ -465,8 +466,9 @@ pub struct RootView {
     conversation_scroll_motion: ConversationScrollMotion,
     conversation_scrollbar_drag_offset: Option<Pixels>,
     transcript_cache: Entity<TranscriptTextCache>,
+    stream_bands: Entity<StreamBandCache>,
     activity_disclosures: Entity<ActivityDisclosureState>,
-    activity_detail: Option<ActivityDetail>,
+    activity_detail: Option<Arc<ActivityDetail>>,
     activity_detail_focus: FocusHandle,
     activity_detail_restore_focus: Option<FocusHandle>,
     activity_detail_scroll: ScrollHandle,
@@ -628,6 +630,7 @@ impl RootView {
             offset_in_item: px(0.0),
         });
         let transcript_cache = cx.new(|_| TranscriptTextCache::new(conversation.epoch));
+        let stream_bands = cx.new(|_| StreamBandCache::new(conversation.epoch));
         let activity_disclosures = cx.new(|_| ActivityDisclosureState::new(conversation.epoch));
         window.focus(&composer.read(cx).focus_handle(cx));
         let initial_runtime_id = 1;
@@ -846,6 +849,7 @@ impl RootView {
             conversation_scroll_motion: ConversationScrollMotion::default(),
             conversation_scrollbar_drag_offset: None,
             transcript_cache,
+            stream_bands,
             activity_disclosures,
             activity_detail: None,
             activity_detail_focus,
@@ -4514,7 +4518,7 @@ impl RootView {
 
     pub(in crate::views) fn open_activity_detail(
         &mut self,
-        detail: ActivityDetail,
+        detail: Arc<ActivityDetail>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -4675,6 +4679,13 @@ impl RootView {
                 cache.reset(conversation.epoch);
             } else {
                 cache.prepare_epoch(conversation.epoch);
+            }
+        });
+        self.stream_bands.update(cx, |bands, _| {
+            if force_epoch_reset {
+                bands.reset(conversation.epoch);
+            } else {
+                bands.prepare_epoch(conversation.epoch);
             }
         });
         self.activity_disclosures.update(cx, |disclosures, _| {
