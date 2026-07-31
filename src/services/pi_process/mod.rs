@@ -64,20 +64,6 @@ pub struct ResourcePolicy {
 }
 
 impl ResourcePolicy {
-    pub fn discover_all() -> Self {
-        Self {
-            discover_extensions: true,
-            extensions: Vec::new(),
-            discover_skills: true,
-            skills: Vec::new(),
-            discover_prompt_templates: true,
-            prompt_templates: Vec::new(),
-            discover_themes: true,
-            themes: Vec::new(),
-            discover_context_files: true,
-        }
-    }
-
     pub fn disabled() -> Self {
         Self {
             discover_extensions: false,

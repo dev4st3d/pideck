@@ -140,13 +140,6 @@ impl TerminalWorker {
         self.write_bytes(bytes)
     }
 
-    /// Sends Ctrl+C to the foreground process in the PTY.
-    pub fn interrupt(&self) -> bool {
-        self.commands
-            .try_send(TerminalCommand::Write(vec![0x03]))
-            .is_ok()
-    }
-
     pub fn resize(&self, size: TerminalSize) -> bool {
         self.commands
             .try_send(TerminalCommand::Resize(size))

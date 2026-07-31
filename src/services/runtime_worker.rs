@@ -106,41 +106,6 @@ impl RpcRuntimeService {
         }
     }
 
-    pub fn default_profile(working_directory: impl Into<std::path::PathBuf>) -> Self {
-        let working_directory = working_directory.into();
-        let endpoint =
-            crate::services::sdk_bridge::allocate_orchestration_endpoint(&working_directory);
-        Self::default_profile_with_endpoint(working_directory, endpoint)
-    }
-
-    pub fn default_profile_with_endpoint(
-        working_directory: impl Into<std::path::PathBuf>,
-        orchestration_endpoint: String,
-    ) -> Self {
-        let working_directory = working_directory.into();
-        let mut config = PiLaunchConfig::new(
-            working_directory.clone(),
-            ProjectTrust::Reject,
-            SessionLaunch::Ephemeral,
-            ResourcePolicy::command_sources(),
-        );
-        config.disable_tools = false;
-        config.offline = false;
-        attach_orchestration_adapter(&mut config, orchestration_endpoint);
-        apply_native_shell_extension_policy(&mut config, &working_directory);
-        Self::new(config)
-    }
-
-    pub fn persisted_profile(
-        working_directory: impl Into<std::path::PathBuf>,
-        session_directory: impl Into<std::path::PathBuf>,
-    ) -> Self {
-        let working_directory = working_directory.into();
-        let endpoint =
-            crate::services::sdk_bridge::allocate_orchestration_endpoint(&working_directory);
-        Self::persisted_profile_with_endpoint(working_directory, session_directory, endpoint)
-    }
-
     pub fn persisted_profile_with_endpoint(
         working_directory: impl Into<std::path::PathBuf>,
         session_directory: impl Into<std::path::PathBuf>,

@@ -520,20 +520,6 @@ pub enum RetryState {
     Cancelling,
 }
 
-impl RetryState {
-    pub fn remaining_ms(&self, now: Instant) -> Option<u64> {
-        let Self::Waiting {
-            delay_ms,
-            started_at,
-            ..
-        } = self
-        else {
-            return None;
-        };
-        Some(delay_ms.saturating_sub(now.saturating_duration_since(*started_at).as_millis() as u64))
-    }
-}
-
 #[derive(Debug, Clone, PartialEq)]
 pub enum CompactionState {
     Idle,
