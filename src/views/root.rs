@@ -444,10 +444,14 @@ pub struct RootView {
     terminal_height: f32,
     /// Pointer Y and height captured when a splitter drag begins.
     terminal_drag_origin: Option<(Pixels, f32)>,
-    /// Right-hand Inspector panel visibility (animated open/close).
+    /// Inspector companion visibility — a floating sheet that overlays the
+    /// workspace instead of taking layout space.
     inspector_open: bool,
-    /// Bumps on each toggle so width animation only runs after user action.
+    /// Bumps on each reveal so the entrance motion replays per summon.
     inspector_motion_key: u64,
+    /// Point of focus while the sheet floats above the workspace, so
+    /// keystrokes don't leak into the composer beneath it.
+    inspector_focus: FocusHandle,
     session_rename_open: bool,
     history_confirmation: Option<HistoryConfirmation>,
     summarize_navigation: bool,
@@ -587,6 +591,7 @@ impl RootView {
         let extension_dialog_focus = cx.focus_handle();
         let subagent_dialog_focus = cx.focus_handle();
         let activity_detail_focus = cx.focus_handle();
+        let inspector_focus = cx.focus_handle();
         let workspace_diff_focus = cx.focus_handle();
         let (conversation, extension_ui, render_projections, command_catalog_source) = {
             let controller = controller.read(cx);
@@ -824,8 +829,9 @@ impl RootView {
             terminal_open: false,
             terminal_height: 260.0,
             terminal_drag_origin: None,
-            inspector_open: true,
+            inspector_open: false,
             inspector_motion_key: 0,
+            inspector_focus,
             session_rename_open: false,
             history_confirmation: None,
             summarize_navigation: false,
@@ -996,17 +1002,20 @@ impl RootView {
         if self.history_open {
             width -= theme::HISTORY_W;
         }
-        if self.inspector_open {
-            width -= theme::INSPECT_W;
-        }
+        // The inspector overlays the workspace; it never shrinks the terminal.
         let rows = ((self.terminal_height - 50.0) / 18.0).floor().max(4.0) as u16;
         let cols = ((width - 24.0) / 7.4).floor().max(24.0) as u16;
         TerminalSize::new(rows, cols)
     }
 
-    fn toggle_inspector(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+    fn toggle_inspector(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.inspector_open = !self.inspector_open;
         self.inspector_motion_key = self.inspector_motion_key.wrapping_add(1);
+        if self.inspector_open {
+            window.focus(&self.inspector_focus);
+        } else {
+            window.focus(&self.focus_handle);
+        }
         cx.notify();
     }
 
@@ -1145,6 +1154,15 @@ impl RootView {
             return;
         }
         if self.cancel_extension_dialog(window, cx) {
+            return;
+        }
+        // Dismiss the inspector's transient layers before touching the run.
+        if self.selected_subagent_id.is_some() {
+            self.close_subagent(window, cx);
+            return;
+        }
+        if self.inspector_open {
+            self.toggle_inspector(window, cx);
             return;
         }
         let _ = self.execute_native_action(NativeAction::Abort, "", window, cx);

@@ -1,14 +1,21 @@
 use std::time::Duration;
 
-use gpui::{Animation, AnimationExt, ease_out_quint};
+use gpui::{Animation, AnimationExt, BoxShadow, ease_out_quint};
 
 use super::shared::runtime_operation_label;
 use super::shared::{plural, short_path};
 use super::*;
 use crate::views::conversation::{TranscriptText, TranscriptTextCache};
 
-/// Matches the workspace sidebar motion; keep under 300ms per GPUI guidance.
-const INSPECTOR_MOTION_MS: u64 = 220;
+/// Short pop for the sheet entrance; the overlay never drives layout, so there
+/// is nothing to reflow while it plays.
+const INSPECTOR_MOTION_MS: u64 = 180;
+/// Air the sheet keeps from the window edges it floats near.
+const SHEET_INSET: f32 = 10.0;
+/// Calm entrance travel: a short settle from the right, never a whoosh.
+const SHEET_SLIDE: f32 = 16.0;
+/// Card header height; slimmer than the titlebar the sheet no longer docks with.
+const SHEET_HEADER_H: f32 = 40.0;
 
 pub(super) struct InspectorParams<'a> {
     pub(super) projection: &'a ShellProjection,
@@ -20,7 +27,7 @@ pub(super) struct InspectorParams<'a> {
     pub(super) usage_tooltip_hovered: bool,
     pub(super) usage_tooltip_visible: bool,
     pub(super) usage_tooltip_epoch: u64,
-    pub(super) inspector_open: bool,
+    pub(super) inspector_focus: &'a FocusHandle,
     pub(super) inspector_motion_key: u64,
 }
 
@@ -38,27 +45,38 @@ pub(super) fn inspector(
         usage_tooltip_hovered,
         usage_tooltip_visible,
         usage_tooltip_epoch,
-        inspector_open,
+        inspector_focus,
         inspector_motion_key,
     } = params;
-    let expanded_w = theme::INSPECT_W;
-    let target_w = if inspector_open { expanded_w } else { 0.0 };
 
-    // Fixed-width body so collapse clips instead of reflowing mid-transition.
-    let body = div()
-        .id("inspector-panel-body")
-        .w(px(expanded_w))
-        .h_full()
-        .flex_shrink_0()
+    // Disposable companion: a floating sheet parked off the right edge. It
+    // overlays the workspace, so summoning or dismissing it costs zero layout
+    // work in the conversation and composer.
+    let sheet = div()
+        .id("inspector-panel")
+        .absolute()
+        .top(px(SHEET_INSET))
+        .right(px(SHEET_INSET))
+        .bottom(px(SHEET_INSET))
+        .w(px(theme::INSPECT_W))
         .flex()
         .flex_col()
         .bg(theme::floor())
-        .border_l_1()
+        .overflow_hidden()
+        .rounded(px(theme::RADIUS))
+        .border_1()
         .border_color(theme::edge_hard())
+        // One tight, low-offset shadow cast downward. Deliberate lift, no bloom.
+        .shadow(vec![BoxShadow {
+            color: gpui::rgba(0x0000_0059).into(),
+            offset: point(px(0.0), px(6.0)),
+            blur_radius: px(14.0),
+            spread_radius: px(-2.0),
+        }])
         .child(
             div()
-                .px(px(16.0))
-                .h(px(theme::TITLE_H))
+                .px(px(12.0))
+                .h(px(SHEET_HEADER_H))
                 .flex()
                 .flex_row()
                 .items_center()
@@ -74,7 +92,12 @@ pub(super) fn inspector(
                         .text_color(theme::bone_dim())
                         .child("Inspector"),
                 )
-                .child(inspector_collapse_icon_button(cx)),
+                .child(controls::chrome_action(
+                    "dismiss-inspector",
+                    "Esc",
+                    true,
+                    Box::new(cx.listener(|view, _, window, cx| view.toggle_inspector(window, cx))),
+                )),
         )
         .child(
             div()
@@ -88,12 +111,12 @@ pub(super) fn inspector(
                 .child(
                     div()
                         .w_full()
-                        .px(px(14.0))
-                        .pt(px(14.0))
-                        .pb(px(22.0))
+                        .px(px(12.0))
+                        .pt(px(12.0))
+                        .pb(px(16.0))
                         .flex()
                         .flex_col()
-                        .gap(px(18.0))
+                        .gap(px(14.0))
                         .child(controls::session_usage(controls::SessionUsageParams {
                             context: projection.context.label().into(),
                             pct: context_pct(&projection.context.label()),
@@ -116,7 +139,7 @@ pub(super) fn inspector(
                                 .w_full()
                                 .flex()
                                 .flex_col()
-                                .gap(px(18.0))
+                                .gap(px(14.0))
                                 .child(orchestration_panel(
                                     orchestration,
                                     selected_task_id,
@@ -129,65 +152,54 @@ pub(super) fn inspector(
                 ),
         );
 
-    // Right-align body so width collapse clips from the left (slides off-screen right).
-    let shell = div()
-        .id("inspector-panel")
-        .h_full()
-        .flex_shrink_0()
-        .overflow_hidden()
-        .flex()
-        .flex_row()
-        .justify_end()
-        .child(body);
+    // Click-away layer: pressing outside the sheet dismisses the companion.
+    // Half-strength tint keeps the transcript legible while peeking.
+    let scrim = div()
+        .id("inspector-scrim")
+        .absolute()
+        .top_0()
+        .right_0()
+        .bottom_0()
+        .left_0()
+        .bg(gpui::rgba(0x0b0a_0980))
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|view, _, window, cx| view.toggle_inspector(window, cx)),
+        );
 
-    if inspector_motion_key == 0 {
-        shell.w(px(target_w)).into_any_element()
-    } else {
-        let open = inspector_open;
-        shell
-            .with_animation(
+    // Parked under the titlebar so its inspector toggle stays in reach.
+    // Focus lands here while open; Escape dismissal routes through the global
+    // AbortRun cascade in RootView::on_abort_run.
+    div()
+        .absolute()
+        .top(px(theme::TITLE_H + 2.0))
+        .right_0()
+        .bottom_0()
+        .left_0()
+        .occlude()
+        .track_focus(inspector_focus)
+        .tab_index(0)
+        .child(
+            scrim.with_animation(
+                ("inspector-scrim", inspector_motion_key),
+                Animation::new(Duration::from_millis(INSPECTOR_MOTION_MS))
+                    .with_easing(ease_out_quint()),
+                |scrim, delta| scrim.opacity(delta),
+            ),
+        )
+        .child(
+            sheet.with_animation(
                 ("inspector-panel", inspector_motion_key),
                 Animation::new(Duration::from_millis(INSPECTOR_MOTION_MS))
                     .with_easing(ease_out_quint()),
-                move |panel, delta| {
-                    let (from, to) = if open {
-                        (0.0, expanded_w)
-                    } else {
-                        (expanded_w, 0.0)
-                    };
-                    let fade = if open {
-                        0.55 + 0.45 * delta
-                    } else {
-                        1.0 - 0.45 * delta
-                    };
-                    panel.w(px(from + (to - from) * delta)).opacity(fade)
+                move |sheet, delta| {
+                    sheet
+                        .right(px(SHEET_INSET + SHEET_SLIDE * (1.0 - delta)))
+                        .opacity(0.55 + 0.45 * delta)
                 },
-            )
-            .into_any_element()
-    }
-}
-
-fn inspector_collapse_icon_button(cx: &mut Context<RootView>) -> impl IntoElement {
-    div()
-        .id("collapse-inspector")
-        .size(px(28.0))
-        .rounded(px(theme::RADIUS_SM))
-        .flex()
-        .items_center()
-        .justify_center()
-        .flex_shrink_0()
-        .text_color(theme::bone_dim())
-        .tab_index(0)
-        .cursor_pointer()
-        .hover(|button| button.bg(theme::panel()).text_color(theme::bone()))
-        .active(|button| button.bg(theme::panel_lift()))
-        .on_click(cx.listener(|view, _, window, cx| view.toggle_inspector(window, cx)))
-        .child(
-            svg()
-                .path("icons/chevron-right.svg")
-                .size(px(12.0))
-                .text_color(theme::ash()),
+            ),
         )
+        .into_any_element()
 }
 
 fn orchestration_panel(

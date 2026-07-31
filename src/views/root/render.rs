@@ -227,24 +227,28 @@ impl Render for RootView {
                                     )
                             })
                             .into_any_element(),
-                    })
-                    .child(inspector(
-                        InspectorParams {
-                            projection,
-                            conversation: &self.conversation,
-                            orchestration,
-                            selected_task_id: self.selected_task_id.as_deref(),
-                            goal_edit_composer: &self.goal_edit_composer,
-                            delivery_focus: self.delivery_focus,
-                            usage_tooltip_hovered: self.usage_tooltip_hovered,
-                            usage_tooltip_visible: self.usage_tooltip_visible,
-                            usage_tooltip_epoch: self.usage_tooltip_epoch,
-                            inspector_open: self.inspector_open,
-                            inspector_motion_key: self.inspector_motion_key,
-                        },
-                        cx,
-                    )),
+                    }),
             )
+            // The inspector is a summoned companion sheet, not a layout sidebar:
+            // it floats over the workspace and never reflows it.
+            .when(self.inspector_open, |shell| {
+                shell.child(inspector(
+                    InspectorParams {
+                        projection,
+                        conversation: &self.conversation,
+                        orchestration,
+                        selected_task_id: self.selected_task_id.as_deref(),
+                        goal_edit_composer: &self.goal_edit_composer,
+                        delivery_focus: self.delivery_focus,
+                        usage_tooltip_hovered: self.usage_tooltip_hovered,
+                        usage_tooltip_visible: self.usage_tooltip_visible,
+                        usage_tooltip_epoch: self.usage_tooltip_epoch,
+                        inspector_focus: &self.inspector_focus,
+                        inspector_motion_key: self.inspector_motion_key,
+                    },
+                    cx,
+                ))
+            })
             .when_some(self.activity_detail.clone(), |shell, detail| {
                 shell.child(activity_detail_overlay(
                     &detail,

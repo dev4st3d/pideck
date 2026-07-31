@@ -56,8 +56,6 @@ const NODE_STEP: f32 = 4.0;
 /// Cap-height the node centers sit on inside their rows.
 const NODE_ALIGN: f32 = 9.0;
 const THREAD_GAP: f32 = 10.0;
-/// Deliberate prose/step measure; content does not spill to the panel edge.
-const MEASURE: f32 = 720.0;
 /// Whitespace between turns; the chain rests between links.
 const TURN_GAP: f32 = 28.0;
 /// Rhythm between sections inside one turn.
@@ -1033,8 +1031,8 @@ fn thread_rail(
         })
 }
 
-/// A section of a turn hung on the shared thread: rail on the left, content on
-/// a bounded measure so the whole turn reads as one composed chain.
+/// A section of a turn hung on the shared thread: rail on the left, content
+/// using the full stream width so the turn reads as one composed chain.
 fn thread_section(
     marker: gpui::Rgba,
     dot: f32,
@@ -1048,7 +1046,7 @@ fn thread_section(
         .flex_row()
         .gap(px(THREAD_GAP))
         .child(thread_rail(marker, dot, continues, pulse))
-        .child(div().flex_1().min_w_0().max_w(px(MEASURE)).child(body))
+        .child(div().flex_1().min_w_0().w_full().child(body))
 }
 
 /// Editorial prompt section: a quiet warm card for what was asked, hanging on
