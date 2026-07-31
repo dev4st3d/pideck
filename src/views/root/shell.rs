@@ -57,6 +57,8 @@ pub(super) struct TitlebarParams<'a> {
     pub(super) sidebar_open: bool,
     pub(super) terminal_open: bool,
     pub(super) inspector_open: bool,
+    pub(super) workspace_diff_available: bool,
+    pub(super) workspace_diff_open: bool,
     pub(super) app_update: &'a PiDeckUpdateState,
 }
 
@@ -72,6 +74,8 @@ pub(super) fn titlebar(params: TitlebarParams<'_>, cx: &mut Context<RootView>) -
         sidebar_open,
         terminal_open,
         inspector_open,
+        workspace_diff_available,
+        workspace_diff_open,
         app_update,
     } = params;
     let action = projection.action;
@@ -233,6 +237,11 @@ pub(super) fn titlebar(params: TitlebarParams<'_>, cx: &mut Context<RootView>) -
                         .child("|"),
                 )
                 .child(terminal_toggle_button(terminal_open, cx))
+                .child(diff_toggle_button(
+                    workspace_diff_open,
+                    workspace_diff_available,
+                    cx,
+                ))
                 .child(inspector_toggle_button(inspector_open, cx))
                 .child(
                     div()
@@ -1103,6 +1112,67 @@ fn terminal_toggle_button(open: bool, cx: &mut Context<RootView>) -> impl IntoEl
                     theme::data()
                 } else {
                     theme::bone_dim()
+                }),
+        )
+}
+
+/// Persistent doorway to the workspace diff; the tail summary card can
+/// scroll away or vanish between turns, so the modal gets chrome of its own.
+fn diff_toggle_button(open: bool, available: bool, cx: &mut Context<RootView>) -> impl IntoElement {
+    let active = open && available;
+    div()
+        .id("toggle-workspace-diff")
+        .size(px(28.0))
+        .rounded(px(theme::RADIUS_SM))
+        .flex()
+        .items_center()
+        .justify_center()
+        .flex_shrink_0()
+        .bg(if active {
+            theme::panel_lift()
+        } else {
+            gpui::rgba(0x0000_0000)
+        })
+        .border_1()
+        .border_color(if active {
+            theme::edge_hard()
+        } else {
+            gpui::rgba(0x0000_0000)
+        })
+        .text_color(if available {
+            theme::bone_dim()
+        } else {
+            theme::smoke()
+        })
+        .when(available, |button| {
+            button
+                .tab_index(0)
+                .cursor_pointer()
+                .hover(|button| button.bg(theme::panel()).text_color(theme::bone()))
+                .active(|button| button.bg(theme::panel_lift()))
+                .focus(|button| button.border_color(theme::focus()))
+                .on_click(
+                    cx.listener(|view, _, window, cx| {
+                        view.toggle_workspace_diff_overlay(window, cx)
+                    }),
+                )
+                .on_key_down(cx.listener(|view, event: &gpui::KeyDownEvent, window, cx| {
+                    if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                        cx.stop_propagation();
+                        view.toggle_workspace_diff_overlay(window, cx);
+                    }
+                }))
+        })
+        .child(
+            svg()
+                .path("icons/diff.svg")
+                .size(px(14.0))
+                .text_color(if active {
+                    theme::data()
+                } else if available {
+                    theme::bone_dim()
+                } else {
+                    theme::smoke()
                 }),
         )
 }

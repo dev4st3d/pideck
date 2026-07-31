@@ -50,12 +50,12 @@ const DISCLOSURE_HISTORY_MAX_PX: f32 = 420.0;
 // turn. Every section hangs on one rail column so the turn reads as a single
 // chain instead of a boxed card stack. Speaker nodes are larger than activity
 // beads so the eye reads structure at a glance.
-const THREAD_RAIL_W: f32 = 10.0;
+pub(super) const THREAD_RAIL_W: f32 = 10.0;
 const NODE_SPEAKER: f32 = 6.0;
 const NODE_STEP: f32 = 4.0;
 /// Cap-height the node centers sit on inside their rows.
 const NODE_ALIGN: f32 = 9.0;
-const THREAD_GAP: f32 = 10.0;
+pub(super) const THREAD_GAP: f32 = 10.0;
 /// Whitespace between turns; the chain rests between links.
 const TURN_GAP: f32 = 28.0;
 /// Rhythm between sections inside one turn.
@@ -866,6 +866,8 @@ fn turn_card(
     user: &RuntimeMessage,
     messages: &[Arc<RuntimeMessage>],
     render: &ConversationRenderContext<'_>,
+    links_above: bool,
+    links_below: bool,
     cx: &mut App,
 ) -> impl IntoElement {
     let prompt = message_prompt_text(user);
@@ -876,8 +878,14 @@ fn turn_card(
         .w_full()
         .flex()
         .flex_col()
-        .pb(px(TURN_GAP))
-        .child(user_prompt(number, user, render.texts, continues))
+        .when(!links_below, |turn| turn.pb(px(TURN_GAP)))
+        .child(user_prompt(
+            number,
+            user,
+            render.texts,
+            links_above,
+            continues,
+        ))
         .when(!activity.is_empty(), |turn| {
             turn.child(activity_band(
                 &format!("turn:{}", user.key.0),
@@ -888,14 +896,19 @@ fn turn_card(
             ))
         })
         .when_some(reply, |turn, message| {
-            turn.child(assistant_reply(message, render.texts))
+            turn.child(assistant_reply(message, render.texts, true, links_below))
         })
+        // The chain crosses the turn break: the rail spans the resting
+        // whitespace so a follow-up grows straight out of the reply.
+        .when(links_below, |turn| turn.child(turn_bridge()))
 }
 
 fn optimistic_turn(
     index: usize,
     input: &AcceptedUserInput,
     texts: &HashMap<String, Entity<TranscriptText>>,
+    links_above: bool,
+    continues: bool,
 ) -> impl IntoElement {
     let key = format!("optimistic:{}:text", input.request.as_str());
     let mut body = Vec::new();
@@ -935,7 +948,8 @@ fn optimistic_turn(
             None,
             Some(optimistic_status(input.kind)),
             true,
-            false,
+            links_above,
+            continues,
             body,
         ))
 }
@@ -944,6 +958,7 @@ fn user_prompt(
     index: usize,
     message: &RuntimeMessage,
     texts: &HashMap<String, Entity<TranscriptText>>,
+    links_above: bool,
     continues: bool,
 ) -> impl IntoElement {
     let mut body = Vec::new();
@@ -978,6 +993,7 @@ fn user_prompt(
         Some(format_timestamp(message.timestamp)),
         None,
         false,
+        links_above,
         continues,
         body,
     )
@@ -989,16 +1005,23 @@ fn user_prompt(
 fn thread_rail(
     marker: gpui::Rgba,
     dot: f32,
+    links_above: bool,
     continues: bool,
     pulse: Option<SharedString>,
 ) -> impl IntoElement {
     let node = div()
-        .mt(px(NODE_ALIGN - dot / 2.0))
         .w(px(dot))
         .h(px(dot))
         .rounded_full()
         .bg(marker)
         .flex_shrink_0();
+    // When the chain reaches in from an earlier row, the node hangs off the
+    // incoming hairline instead of floating at the top of its own row.
+    let node = if links_above {
+        node
+    } else {
+        node.mt(px(NODE_ALIGN - dot / 2.0))
+    };
     let node = match pulse {
         Some(id) => node
             .with_animation(
@@ -1017,6 +1040,14 @@ fn thread_rail(
         .flex()
         .flex_col()
         .items_center()
+        .when(links_above, |rail| {
+            rail.child(
+                div()
+                    .w(px(1.0))
+                    .h(px(NODE_ALIGN - dot / 2.0))
+                    .bg(theme::edge()),
+            )
+        })
         .child(node)
         .when(continues, |rail| {
             rail.child(
@@ -1036,6 +1067,7 @@ fn thread_rail(
 fn thread_section(
     marker: gpui::Rgba,
     dot: f32,
+    links_above: bool,
     continues: bool,
     pulse: Option<SharedString>,
     body: impl IntoElement,
@@ -1045,8 +1077,23 @@ fn thread_section(
         .flex()
         .flex_row()
         .gap(px(THREAD_GAP))
-        .child(thread_rail(marker, dot, continues, pulse))
+        .child(thread_rail(marker, dot, links_above, continues, pulse))
         .child(div().flex_1().min_w_0().w_full().child(body))
+}
+
+/// The rail continuing through the resting whitespace between turns, so one
+/// turn's last section chains straight into the next prompt.
+fn turn_bridge() -> impl IntoElement {
+    div().w_full().h(px(TURN_GAP)).flex().flex_row().child(
+        div()
+            .w(px(THREAD_RAIL_W))
+            .flex_shrink_0()
+            .h_full()
+            .flex()
+            .flex_col()
+            .items_center()
+            .child(div().w(px(1.0)).flex_1().bg(theme::edge())),
+    )
 }
 
 /// Editorial prompt section: a quiet warm card for what was asked, hanging on
@@ -1057,6 +1104,7 @@ fn user_prompt_section(
     time_label: Option<String>,
     status_label: Option<&'static str>,
     pending: bool,
+    links_above: bool,
     continues: bool,
     body: Vec<AnyElement>,
 ) -> impl IntoElement {
@@ -1070,6 +1118,7 @@ fn user_prompt_section(
     thread_section(
         mark,
         NODE_SPEAKER,
+        links_above,
         continues,
         pulse,
         div()
@@ -2339,6 +2388,7 @@ fn step_shell(
     thread_section(
         marker,
         NODE_STEP,
+        false,
         continues,
         pulse,
         div()
@@ -2354,6 +2404,8 @@ fn step_shell(
 fn assistant_reply(
     message: &RuntimeMessage,
     texts: &HashMap<String, Entity<TranscriptText>>,
+    links_above: bool,
+    continues: bool,
 ) -> impl IntoElement {
     div()
         .id(SharedString::from(format!("message-{}", message.key.0)))
@@ -2362,7 +2414,8 @@ fn assistant_reply(
             // Quiet cool dot — pairs with the warm user node.
             theme::working(),
             NODE_SPEAKER,
-            false,
+            links_above,
+            continues,
             None,
             div()
                 .w_full()
@@ -2420,7 +2473,7 @@ fn preamble(
             let messages = [message];
             let (activity, _) = split_turn(&messages, render.projection, None);
             if activity.is_empty() {
-                assistant_reply(message, render.texts).into_any_element()
+                assistant_reply(message, render.texts, false, false).into_any_element()
             } else {
                 div()
                     .w_full()
@@ -2433,7 +2486,7 @@ fn preamble(
                         render,
                         cx,
                     ))
-                    .child(assistant_reply(message, render.texts))
+                    .child(assistant_reply(message, render.texts, true, false))
                     .into_any_element()
             }
         }

@@ -195,12 +195,21 @@ impl ConversationListModel {
                     disclosures,
                     root: &diff_summary.root,
                 };
+                let links_above = item_index > 0
+                    && matches!(self.items[item_index - 1], ConversationItem::Turn { .. });
+                let links_below = match self.items.get(item_index + 1) {
+                    Some(ConversationItem::Turn { .. }) => true,
+                    Some(ConversationItem::Trailing) => !projection.accepted_user_inputs.is_empty(),
+                    _ => false,
+                };
                 turn_row(
                     super::turn_card(
                         *number,
                         &projection.messages[*user_index],
                         messages,
                         &render,
+                        links_above,
+                        links_below,
                         cx,
                     )
                     .into_any_element(),
@@ -208,9 +217,12 @@ impl ConversationListModel {
             }
             ConversationItem::Trailing => {
                 let texts = super::cached_optimistic_texts(projection, cache, cx);
+                let connects_above = item_index > 0
+                    && matches!(self.items[item_index - 1], ConversationItem::Turn { .. });
                 trailing(
                     projection,
                     self.turn_count,
+                    connects_above,
                     &texts,
                     disclosures,
                     diff_summary,
@@ -273,6 +285,7 @@ fn stream_gutter() -> gpui::Div {
 fn trailing(
     projection: &ConversationProjection,
     completed_turns: usize,
+    connects_above: bool,
     texts: &HashMap<String, Entity<TranscriptText>>,
     disclosures: &Entity<ActivityDisclosureState>,
     diff_summary: &ConversationDiffSummary,
@@ -284,32 +297,43 @@ fn trailing(
         disclosures,
         root: &diff_summary.root,
     };
+    let tail = super::tail_activity(&render, cx);
+    let has_tail = tail.is_some();
+    let input_count = projection.accepted_user_inputs.len();
+    // Pending prompts and the live tail form one chain on the rail: a queued
+    // or steering prompt keeps the thread alive while work streams below it.
+    let has_chain = input_count > 0 || has_tail;
     stream_gutter()
         .flex()
         .flex_col()
         .gap(px(super::TURN_GAP))
-        .children(
-            projection
-                .accepted_user_inputs
-                .iter()
-                .enumerate()
-                .map(|(index, input)| {
-                    super::optimistic_turn(completed_turns + index + 1, input, texts)
-                }),
-        )
-        .when_some(super::tail_activity(&render, cx), |tail, activity| {
-            tail.child(activity)
+        .when(has_chain, |list| {
+            list.child(
+                div()
+                    .w_full()
+                    .flex()
+                    .flex_col()
+                    .children(projection.accepted_user_inputs.iter().enumerate().map(
+                        |(index, input)| {
+                            let continues = index + 1 < input_count || has_tail;
+                            super::optimistic_turn(
+                                completed_turns + index + 1,
+                                input,
+                                texts,
+                                connects_above || index > 0,
+                                continues,
+                            )
+                        },
+                    ))
+                    .when_some(tail, |chain, activity| chain.child(activity)),
+            )
         })
         .when_some(diff_summary.snapshot.clone(), |tail, snapshot| {
-            tail.child(
-                div()
-                    .pt(px(12.0))
-                    .child(crate::views::diff_summary::summary_card(
-                        &snapshot,
-                        diff_summary.files_expanded,
-                        diff_summary.root.clone(),
-                    )),
-            )
+            tail.child(crate::views::diff_summary::summary_card(
+                &snapshot,
+                diff_summary.files_expanded,
+                diff_summary.root.clone(),
+            ))
         })
         .when(
             projection.messages.is_empty()

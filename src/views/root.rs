@@ -4616,6 +4616,18 @@ impl RootView {
         cx.notify();
     }
 
+    pub(in crate::views) fn toggle_workspace_diff_overlay(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.workspace_diff_open {
+            self.close_workspace_diff(window, cx);
+        } else {
+            self.open_workspace_diff(window, cx);
+        }
+    }
+
     fn sync_runtime_state(
         &mut self,
         force_epoch_reset: bool,

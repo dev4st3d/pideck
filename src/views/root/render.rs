@@ -106,6 +106,8 @@ impl Render for RootView {
                     // Reflect the effective state so a sheet on its way out
                     // already reads as off in the titlebar toggle.
                     inspector_open: self.inspector_open && !self.inspector_closing,
+                    workspace_diff_available: self.workspace_diff.is_some(),
+                    workspace_diff_open: self.workspace_diff_open,
                     app_update: &self.app_update,
                 },
                 cx,
