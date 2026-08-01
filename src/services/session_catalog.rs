@@ -90,21 +90,38 @@ pub struct SessionCounts {
 }
 
 impl SessionSummary {
-    /// Synthetic row for view-layer tests that must not touch the filesystem.
-    #[cfg(test)]
-    pub(crate) fn test_stub(id: &str, path: PathBuf) -> Self {
+    /// Transient row for a live runtime whose assigned JSONL path has not been
+    /// created on disk yet. Pi defers that write until the first assistant message.
+    pub(crate) fn live(path: PathBuf, name: Option<String>) -> Self {
+        let id = path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .filter(|stem| !stem.is_empty())
+            .unwrap_or("live-session")
+            .to_owned();
         Self {
-            id: id.to_owned(),
-            name: Some(id.to_owned()),
+            id,
+            name,
             first_user_summary: None,
-            created_at: "2026-01-02T03:04:05.000Z".to_owned(),
-            updated_at: "2026-01-02T03:04:05.000Z".to_owned(),
+            created_at: "Now".to_owned(),
+            updated_at: "Now".to_owned(),
             parent_session: None,
             path,
             version: 3,
             counts: SessionCounts::default(),
-            modified_sort_key: 0,
+            modified_sort_key: u128::MAX,
         }
+    }
+
+    /// Synthetic row for view-layer tests that must not touch the filesystem.
+    #[cfg(test)]
+    pub(crate) fn test_stub(id: &str, path: PathBuf) -> Self {
+        let mut summary = Self::live(path, Some(id.to_owned()));
+        summary.id = id.to_owned();
+        summary.created_at = "2026-01-02T03:04:05.000Z".to_owned();
+        summary.updated_at = "2026-01-02T03:04:05.000Z".to_owned();
+        summary.modified_sort_key = 0;
+        summary
     }
 }
 

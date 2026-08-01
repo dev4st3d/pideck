@@ -102,6 +102,8 @@ enum ThreadActivity {
 #[derive(Debug, Clone)]
 struct ThreadRuntimeStatus {
     project: String,
+    session: PathBuf,
+    session_name: Option<String>,
     active: bool,
     activity: ThreadActivity,
 }
@@ -948,10 +950,12 @@ impl RootView {
     /// Painted workspace rows in scroll order; shared with the sidebar render
     /// pass so the keyboard cursor can never address a row that is not visible.
     fn sidebar_rows(&self) -> Vec<shell::SidebarRow> {
+        let thread_statuses = self.thread_statuses();
         let slices = shell::sidebar_project_slices(
             &self.projects,
             &self.render_projections.catalog,
             &self.project_catalogs,
+            &thread_statuses,
         );
         shell::sidebar_rows(&slices)
     }
@@ -3898,6 +3902,8 @@ impl RootView {
                     project_key(session),
                     ThreadRuntimeStatus {
                         project: project_key(&slot.project_path),
+                        session: session.clone(),
+                        session_name: slot.projection.session_name.clone(),
                         active: slot.id == self.active_runtime_id,
                         activity,
                     },

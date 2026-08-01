@@ -2802,12 +2802,19 @@ impl RuntimeController {
         crate::services::rpc::SessionEpoch,
         Option<String>,
         Option<String>,
+        Option<u64>,
     ) {
         let session = self.core.runtime.session.data.as_ref();
+        let assistant_messages = self.core.runtime.stats.data.as_ref().and_then(|stats| {
+            session
+                .filter(|session| session.id == stats.session_id)
+                .map(|_| stats.assistant_messages)
+        });
         (
             self.core.runtime.display_epoch,
             session.and_then(|session| session.file.clone()),
             session.and_then(|session| session.name.clone()),
+            assistant_messages,
         )
     }
 

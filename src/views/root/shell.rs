@@ -829,12 +829,48 @@ pub(super) struct SidebarProjectSlice {
     corrupt_count: usize,
 }
 
+fn sessions_with_live_threads(
+    project_path: &std::path::Path,
+    catalog_sessions: &Arc<Vec<SessionSummary>>,
+    thread_statuses: &HashMap<String, ThreadRuntimeStatus>,
+) -> Arc<Vec<SessionSummary>> {
+    let project = project_key(project_path);
+    let mut live = thread_statuses
+        .values()
+        .filter(|status| status.project == project)
+        .filter(|status| {
+            !catalog_sessions
+                .iter()
+                .any(|session| sidebar_paths_match(&session.path, &status.session))
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    if live.is_empty() {
+        return Arc::clone(catalog_sessions);
+    }
+    live.sort_by(|left, right| {
+        right
+            .active
+            .cmp(&left.active)
+            .then_with(|| project_key(&left.session).cmp(&project_key(&right.session)))
+    });
+
+    let mut sessions = Vec::with_capacity(live.len() + catalog_sessions.len());
+    sessions.extend(
+        live.into_iter()
+            .map(|status| SessionSummary::live(status.session, status.session_name)),
+    );
+    sessions.extend(catalog_sessions.iter().cloned());
+    Arc::new(sessions)
+}
+
 /// Resolves every project exactly once; the render loop and the keyboard
 /// handlers both walk this same ordering.
 pub(super) fn sidebar_project_slices(
     projects: &ProjectRegistry,
     active_catalog: &CatalogProjection,
     cached: &HashMap<String, ProjectCatalogCache>,
+    thread_statuses: &HashMap<String, ThreadRuntimeStatus>,
 ) -> Vec<SidebarProjectSlice> {
     projects
         .projects()
@@ -846,11 +882,13 @@ pub(super) fn sidebar_project_slices(
                 active_catalog,
                 cached.get(&project_key(&project.path)),
             );
+            let sessions =
+                sessions_with_live_threads(&project.path, &resolved.sessions, thread_statuses);
             SidebarProjectSlice {
                 path: project.path.clone(),
                 expanded: project.expanded,
                 status: resolved.status,
-                sessions: resolved.sessions,
+                sessions,
                 error: resolved.error,
                 corrupt_count: resolved.corrupt_count,
             }
@@ -1000,7 +1038,7 @@ pub(super) fn sessions_panel(
     let target_w = if sidebar_open { expanded_w } else { 0.0 };
 
     // Painted rows and keyboard navigation share this flattened order.
-    let slices = sidebar_project_slices(projects, catalog, project_catalogs);
+    let slices = sidebar_project_slices(projects, catalog, project_catalogs, thread_statuses);
     let slice_index: HashMap<String, usize> = slices
         .iter()
         .enumerate()
@@ -2842,6 +2880,47 @@ mod tests {
             error: error.map(str::to_owned),
             corrupt_count: corrupt,
         }
+    }
+
+    #[test]
+    fn live_runtime_precedes_catalog_while_its_session_file_is_deferred() {
+        let catalog = Arc::new(vec![SessionSummary::test_stub(
+            "stored",
+            PathBuf::from("p1/stored.jsonl"),
+        )]);
+        let live_path = PathBuf::from("p1/live.jsonl");
+        let statuses = HashMap::from([
+            (
+                project_key(&live_path),
+                ThreadRuntimeStatus {
+                    project: project_key(std::path::Path::new("p1")),
+                    session: live_path.clone(),
+                    session_name: Some("Live work".to_owned()),
+                    active: true,
+                    activity: ThreadActivity::Working,
+                },
+            ),
+            (
+                project_key(std::path::Path::new("p2/other.jsonl")),
+                ThreadRuntimeStatus {
+                    project: project_key(std::path::Path::new("p2")),
+                    session: PathBuf::from("p2/other.jsonl"),
+                    session_name: None,
+                    active: false,
+                    activity: ThreadActivity::Working,
+                },
+            ),
+        ]);
+
+        let sessions = sessions_with_live_threads(std::path::Path::new("p1"), &catalog, &statuses);
+
+        assert_eq!(sessions.len(), 2);
+        assert_eq!(sessions[0].path, live_path);
+        assert_eq!(sessions[0].name.as_deref(), Some("Live work"));
+        assert_eq!(sessions[1].path, PathBuf::from("p1/stored.jsonl"));
+
+        let resolved = sessions_with_live_threads(std::path::Path::new("p1"), &sessions, &statuses);
+        assert!(Arc::ptr_eq(&resolved, &sessions));
     }
 
     #[test]

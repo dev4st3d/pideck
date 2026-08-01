@@ -219,6 +219,49 @@ fn accepted_extension_command_refreshes_catalog_without_forcing_running_state() 
 }
 
 #[test]
+fn first_prompt_refreshes_a_new_session_file_identity() {
+    let mut state = command_ready_state(RuntimeLifecycle::Ready);
+    state.session.data.as_mut().unwrap().file = None;
+    let request = RequestId::from("first-prompt");
+    let submit = RuntimeRequest::Submit {
+        request: request.clone(),
+        text: "Start working".to_owned(),
+        images: Vec::new(),
+        files: Vec::new(),
+        kind: SubmissionKind::Prompt,
+    };
+    apply(
+        &mut state,
+        RuntimeInput::Intent(RuntimeIntent::Submit {
+            request,
+            text: "Start working".to_owned(),
+            images: Vec::new(),
+            files: Vec::new(),
+            kind: SubmissionKind::Prompt,
+        }),
+    );
+
+    let effects = response(&mut state, submit, Ok(NormalizedResponse::Accepted));
+
+    assert_eq!(effects.len(), 1);
+    assert!(matches!(
+        effects[0].effect,
+        EffectKind::Request(RuntimeRequest::GetState)
+    ));
+    response(
+        &mut state,
+        RuntimeRequest::GetState,
+        Ok(NormalizedResponse::State(session_state(
+            "commands", true, 0,
+        ))),
+    );
+    assert_eq!(
+        state.session.data.as_ref().unwrap().file.as_deref(),
+        Some("commands.jsonl")
+    );
+}
+
+#[test]
 fn command_normalization_retains_complete_installed_source_info() {
     let mut state = command_ready_state(RuntimeLifecycle::Ready);
     let effects = apply(

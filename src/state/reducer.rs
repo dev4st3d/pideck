@@ -518,7 +518,8 @@ fn reduce_response(
             Vec::new()
         }
         (RuntimeRequest::Submit { request, kind, .. }, Ok(NormalizedResponse::Accepted)) => {
-            if prompt_request_matches(&state.prompt_delivery, &request) {
+            let accepted = prompt_request_matches(&state.prompt_delivery, &request);
+            if accepted {
                 state.prompt_delivery = PromptDelivery::Accepted {
                     request: request.clone(),
                     kind,
@@ -537,7 +538,18 @@ fn reduce_response(
                 }
                 state.pending_prompt_settled = false;
             }
-            Vec::new()
+            if accepted
+                && kind == SubmissionKind::Prompt
+                && state
+                    .session
+                    .data
+                    .as_ref()
+                    .is_some_and(|session| session.file.is_none())
+            {
+                vec![effect(state, RuntimeRequest::GetState)]
+            } else {
+                Vec::new()
+            }
         }
         (
             RuntimeRequest::InvokeCommand {
@@ -548,7 +560,8 @@ fn reduce_response(
             },
             Ok(NormalizedResponse::Accepted),
         ) => {
-            if prompt_request_matches(&state.prompt_delivery, &request) {
+            let accepted = prompt_request_matches(&state.prompt_delivery, &request);
+            if accepted {
                 state.prompt_delivery = PromptDelivery::Accepted {
                     request: request.clone(),
                     kind,
@@ -570,12 +583,23 @@ fn reduce_response(
                 }
                 state.pending_prompt_settled = false;
             }
+            let mut effects = Vec::new();
+            if accepted
+                && source != CommandSource::Extension
+                && kind == SubmissionKind::Prompt
+                && state
+                    .session
+                    .data
+                    .as_ref()
+                    .is_some_and(|session| session.file.is_none())
+            {
+                effects.push(effect(state, RuntimeRequest::GetState));
+            }
             if source == CommandSource::Extension {
                 state.commands.loading();
-                vec![effect(state, RuntimeRequest::GetCommands)]
-            } else {
-                Vec::new()
+                effects.push(effect(state, RuntimeRequest::GetCommands));
             }
+            effects
         }
         (RuntimeRequest::Submit { request, kind, .. }, Err(failure)) => {
             if prompt_request_matches(&state.prompt_delivery, &request) {
