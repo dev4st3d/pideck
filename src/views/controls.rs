@@ -3,9 +3,9 @@
 use std::{rc::Rc, time::Duration};
 
 use gpui::{
-    Animation, AnimationExt, ClickEvent, DispatchPhase, FontWeight, HitboxBehavior, IntoElement,
-    ScrollHandle, ScrollWheelEvent, SharedString, Window, canvas, deferred, div, ease_out_quint,
-    point, prelude::*, px, relative, rgba, svg,
+    Animation, AnimationExt, AnyView, App, ClickEvent, Context, DispatchPhase, FontWeight,
+    HitboxBehavior, IntoElement, Render, ScrollHandle, ScrollWheelEvent, SharedString, Window,
+    canvas, deferred, div, ease_out_quint, point, prelude::*, px, relative, rgba, svg,
 };
 
 use crate::actions::RECOVERY_BUTTON_CONTEXT;
@@ -71,6 +71,63 @@ pub fn meta_text(text: impl Into<SharedString>) -> impl IntoElement {
         .text_ellipsis()
         .whitespace_nowrap()
         .child(text.into())
+}
+
+/// Compact one-line hover tooltip for icon-only chrome and clarifying hints.
+///
+/// Built as a view because GPUI resolves tooltips through `AnyView`.
+pub struct TextTooltip {
+    label: SharedString,
+    hint: Option<SharedString>,
+}
+
+impl Render for TextTooltip {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        let mut tip = div()
+            .px(px(8.0))
+            .py(px(5.0))
+            .rounded(px(theme::RADIUS_SM))
+            .bg(theme::panel_lift())
+            .border_1()
+            .border_color(theme::edge_hard())
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(6.0))
+            .font_family(theme::main())
+            .text_size(theme::text_size(theme::T_LABEL))
+            .font_weight(FontWeight::SEMIBOLD)
+            .text_color(theme::bone())
+            .whitespace_nowrap()
+            .child(self.label.clone());
+        if let Some(hint) = self.hint.clone() {
+            tip = tip.child(
+                div()
+                    .font_family(theme::mono())
+                    .text_size(theme::text_size(theme::T_TINY))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(theme::smoke())
+                    .child(hint),
+            );
+        }
+        tip
+    }
+}
+
+/// Builds the GPUI tooltip closure for a [`TextTooltip`].
+pub fn text_tooltip(
+    label: impl Into<SharedString>,
+    hint: Option<impl Into<SharedString>>,
+) -> impl Fn(&mut Window, &mut App) -> AnyView + 'static {
+    let label = label.into();
+    let hint = hint.map(Into::into);
+    move |_, cx| {
+        cx.new(|_| TextTooltip {
+            label: label.clone(),
+            hint: hint.clone(),
+        })
+        .into()
+    }
 }
 
 pub fn meta_sep() -> impl IntoElement {
@@ -249,56 +306,6 @@ pub fn recovery_button(
         )
 }
 
-pub fn icon_button(
-    id: impl Into<SharedString>,
-    glyph: impl Into<SharedString>,
-    selected: bool,
-    enabled: bool,
-    on_click: ClickHandler,
-) -> impl IntoElement {
-    div()
-        .id(id.into())
-        .size(px(28.0))
-        .rounded(px(theme::RADIUS_SM))
-        .flex()
-        .items_center()
-        .justify_center()
-        .bg(if selected {
-            theme::panel_lift()
-        } else {
-            clear()
-        })
-        .border_1()
-        .border_color(if selected {
-            theme::edge_hard()
-        } else {
-            clear()
-        })
-        .text_color(if enabled {
-            theme::bone_dim()
-        } else {
-            theme::smoke()
-        })
-        .when(enabled, |button| {
-            button
-                .tab_index(0)
-                .cursor_pointer()
-                .hover(|button| button.bg(theme::panel()).text_color(theme::bone()))
-                .active(|button| button.bg(theme::panel_lift()))
-                .on_click(move |event, window, cx| on_click(event, window, cx))
-        })
-        .child(
-            div()
-                .relative()
-                .top(px(-1.0))
-                .font_family(theme::sans())
-                .text_size(theme::text_size(16.0))
-                .line_height(gpui::relative(1.0))
-                .font_weight(FontWeight::MEDIUM)
-                .child(glyph.into()),
-        )
-}
-
 pub fn quiet_button(
     id: impl Into<SharedString>,
     label: impl Into<SharedString>,
@@ -310,6 +317,8 @@ pub fn quiet_button(
         .h(px(28.0))
         .px(px(8.0))
         .rounded(px(theme::RADIUS_SM))
+        .border_1()
+        .border_color(clear())
         .flex()
         .items_center()
         .justify_center()
@@ -323,6 +332,7 @@ pub fn quiet_button(
                 .tab_index(0)
                 .cursor_pointer()
                 .hover(|button| button.bg(theme::panel()).text_color(theme::bone()))
+                .focus(|button| button.border_color(theme::focus()))
                 .active(|button| button.bg(theme::panel_lift()))
                 .on_click(move |event, window, cx| on_click(event, window, cx))
         })
@@ -566,6 +576,7 @@ pub fn compact_select(
                         .border_color(theme::panel_lift())
                         .text_color(theme::bone())
                 })
+                .focus(|button| button.border_color(theme::focus()))
                 .active(|button| button.bg(theme::panel_hover()))
                 .on_click(move |event, window, cx| on_click(event, window, cx))
         })

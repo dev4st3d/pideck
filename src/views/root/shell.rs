@@ -102,7 +102,18 @@ pub(super) fn titlebar(params: TitlebarParams<'_>, cx: &mut Context<RootView>) -
                 .gap(px(12.0))
                 .min_w_0()
                 .flex_1()
-                .child(sidebar_toggle_button(sidebar_open, cx))
+                .child(titlebar_icon_toggle(
+                    ChromeIconSpec {
+                        id: "toggle-sidebar",
+                        icon_path: "icons/sidebar.svg",
+                        tooltip_label: "Workspace sidebar",
+                        tooltip_hint: Some("Ctrl+B"),
+                        on: sidebar_open,
+                        enabled: true,
+                        action: |view, window, cx| view.toggle_sidebar(window, cx),
+                    },
+                    cx,
+                ))
                 .child(
                     // One unit with the row: same 28px chrome height as sidebar /
                     // rename. No baseline tricks — keep πdeck locked together and
@@ -161,7 +172,18 @@ pub(super) fn titlebar(params: TitlebarParams<'_>, cx: &mut Context<RootView>) -
                                 .whitespace_nowrap()
                                 .child(projection.session.label()),
                         )
-                        .child(session_rename_button(rename_open, rename_enabled, cx))
+                        .child(titlebar_icon_toggle(
+                            ChromeIconSpec {
+                                id: "rename-session",
+                                icon_path: "icons/pencil.svg",
+                                tooltip_label: "Rename session",
+                                tooltip_hint: None,
+                                on: rename_open,
+                                enabled: rename_enabled,
+                                action: |view, window, cx| view.toggle_session_rename(window, cx),
+                            },
+                            cx,
+                        ))
                         .when(rename_open, |title| {
                             title.child(deferred(
                                 div()
@@ -236,13 +258,42 @@ pub(super) fn titlebar(params: TitlebarParams<'_>, cx: &mut Context<RootView>) -
                         .flex_shrink_0()
                         .child("|"),
                 )
-                .child(terminal_toggle_button(terminal_open, cx))
-                .child(diff_toggle_button(
-                    workspace_diff_open,
-                    workspace_diff_available,
+                .child(titlebar_icon_toggle(
+                    ChromeIconSpec {
+                        id: "toggle-terminal",
+                        icon_path: "icons/terminal.svg",
+                        tooltip_label: "Terminal",
+                        tooltip_hint: Some("Ctrl+`"),
+                        on: terminal_open,
+                        enabled: true,
+                        action: |view, window, cx| view.toggle_terminal(window, cx),
+                    },
                     cx,
                 ))
-                .child(inspector_toggle_button(inspector_open, cx))
+                .child(titlebar_icon_toggle(
+                    ChromeIconSpec {
+                        id: "toggle-workspace-diff",
+                        icon_path: "icons/diff.svg",
+                        tooltip_label: "Workspace changes",
+                        tooltip_hint: None,
+                        on: workspace_diff_open && workspace_diff_available,
+                        enabled: workspace_diff_available,
+                        action: |view, window, cx| view.toggle_workspace_diff_overlay(window, cx),
+                    },
+                    cx,
+                ))
+                .child(titlebar_icon_toggle(
+                    ChromeIconSpec {
+                        id: "toggle-inspector",
+                        icon_path: "icons/inspector.svg",
+                        tooltip_label: "Inspector",
+                        tooltip_hint: Some("Ctrl+I"),
+                        on: inspector_open,
+                        enabled: true,
+                        action: |view, window, cx| view.toggle_inspector(window, cx),
+                    },
+                    cx,
+                ))
                 .child(
                     div()
                         .relative()
@@ -287,10 +338,20 @@ pub(super) fn titlebar(params: TitlebarParams<'_>, cx: &mut Context<RootView>) -
                                         .text_color(theme::bone())
                                 })
                                 .active(|switcher| switcher.bg(theme::panel_hover()))
+                                .focus(|switcher| switcher.border_color(theme::focus()))
                                 .tab_index(0)
                                 .on_click(cx.listener(|view, _, window, cx| {
                                     view.toggle_theme_menu(window, cx)
                                 }))
+                                .on_key_down(cx.listener(
+                                    |view, event: &gpui::KeyDownEvent, window, cx| {
+                                        if matches!(event.keystroke.key.as_str(), "enter" | "space")
+                                        {
+                                            cx.stop_propagation();
+                                            view.toggle_theme_menu(window, cx);
+                                        }
+                                    },
+                                ))
                                 .child(
                                     svg()
                                         .path(match active_theme.mode() {
@@ -682,6 +743,203 @@ fn titlebar_status_for(input: TitlebarStatusInput<'_>) -> TitlebarStatus {
     }
 }
 
+/// One keyboard-navigable destination in the workspace tree.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum SidebarNode {
+    Project(PathBuf),
+    Thread { project: PathBuf, session: PathBuf },
+}
+
+/// Non-interactive status line under an expanded project; still consumes a
+/// scroll slot so keyboard scroll-into-view matches painted children.
+#[derive(Debug, Clone)]
+pub(super) enum SidebarNote {
+    Loading,
+    Empty,
+    Unavailable,
+    Corrupt(usize),
+}
+
+/// One scroll child in the workspace list, in painted order.
+#[derive(Debug, Clone)]
+pub(super) enum SidebarRow {
+    Node(SidebarNode),
+    Note { project: PathBuf, note: SidebarNote },
+    Error { project: PathBuf, message: String },
+}
+
+/// Shared resolution of "which sessions this project shows", so the painted
+/// list and keyboard navigation can never disagree.
+struct ResolvedProjectCatalog {
+    status: CatalogStatus,
+    sessions: Arc<Vec<SessionSummary>>,
+    corrupt_count: usize,
+    error: Option<String>,
+}
+
+fn resolve_project_catalog(
+    active: bool,
+    active_catalog: &CatalogProjection,
+    cached_catalog: Option<&ProjectCatalogCache>,
+) -> ResolvedProjectCatalog {
+    let cached_while_loading = cached_catalog.filter(|catalog| {
+        active
+            && active_catalog.status == CatalogStatus::Loading
+            && active_catalog.sessions.is_empty()
+            && !catalog.sessions.is_empty()
+    });
+    if let Some(catalog) = cached_while_loading {
+        ResolvedProjectCatalog {
+            status: CatalogStatus::Loading,
+            sessions: Arc::clone(&catalog.sessions),
+            corrupt_count: catalog.corrupt_count,
+            error: None,
+        }
+    } else if active {
+        ResolvedProjectCatalog {
+            status: active_catalog.status,
+            sessions: Arc::clone(&active_catalog.sessions),
+            corrupt_count: active_catalog.corrupt.len(),
+            error: active_catalog.error.clone(),
+        }
+    } else if let Some(catalog) = cached_catalog {
+        ResolvedProjectCatalog {
+            status: catalog.status,
+            sessions: Arc::clone(&catalog.sessions),
+            corrupt_count: catalog.corrupt_count,
+            error: catalog.error.clone(),
+        }
+    } else {
+        ResolvedProjectCatalog {
+            status: CatalogStatus::Loading,
+            sessions: Arc::new(Vec::new()),
+            corrupt_count: 0,
+            error: None,
+        }
+    }
+}
+
+/// Resolved per-project input for the flattened workspace rows.
+pub(super) struct SidebarProjectSlice {
+    path: PathBuf,
+    expanded: bool,
+    status: CatalogStatus,
+    sessions: Arc<Vec<SessionSummary>>,
+    error: Option<String>,
+    corrupt_count: usize,
+}
+
+/// Resolves every project exactly once; the render loop and the keyboard
+/// handlers both walk this same ordering.
+pub(super) fn sidebar_project_slices(
+    projects: &ProjectRegistry,
+    active_catalog: &CatalogProjection,
+    cached: &HashMap<String, ProjectCatalogCache>,
+) -> Vec<SidebarProjectSlice> {
+    projects
+        .projects()
+        .iter()
+        .map(|project| {
+            let active = projects.is_active(&project.path);
+            let resolved = resolve_project_catalog(
+                active,
+                active_catalog,
+                cached.get(&project_key(&project.path)),
+            );
+            SidebarProjectSlice {
+                path: project.path.clone(),
+                expanded: project.expanded,
+                status: resolved.status,
+                sessions: resolved.sessions,
+                error: resolved.error,
+                corrupt_count: resolved.corrupt_count,
+            }
+        })
+        .collect()
+}
+
+/// Flattens projects and their expanded threads into painted row order.
+/// Notes are real scroll children, so they consume slots here as well.
+pub(super) fn sidebar_rows(slices: &[SidebarProjectSlice]) -> Vec<SidebarRow> {
+    let mut rows = Vec::new();
+    for slice in slices {
+        let project = slice.path.clone();
+        rows.push(SidebarRow::Node(SidebarNode::Project(project.clone())));
+        if !slice.expanded {
+            continue;
+        }
+        if slice.sessions.is_empty() {
+            let note = match slice.status {
+                CatalogStatus::Loading => SidebarNote::Loading,
+                CatalogStatus::Empty | CatalogStatus::Ready => SidebarNote::Empty,
+                CatalogStatus::Inaccessible | CatalogStatus::Stale => SidebarNote::Unavailable,
+            };
+            rows.push(SidebarRow::Note {
+                project: project.clone(),
+                note,
+            });
+        }
+        rows.extend(slice.sessions.iter().map(|session| {
+            SidebarRow::Node(SidebarNode::Thread {
+                project: project.clone(),
+                session: session.path.clone(),
+            })
+        }));
+        if slice.error.is_some() {
+            rows.push(SidebarRow::Error {
+                project: project.clone(),
+                message: slice.error.clone().unwrap_or_default(),
+            });
+        }
+        if slice.corrupt_count > 0 {
+            rows.push(SidebarRow::Note {
+                project,
+                note: SidebarNote::Corrupt(slice.corrupt_count),
+            });
+        }
+    }
+    rows
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum SidebarCursorMove {
+    First,
+    Previous,
+    Next,
+    Last,
+}
+
+/// Moves the workspace cursor across node rows; notes and error blocks are
+/// never destinations. Returns the node plus its flat scroll-child index so
+/// the caller can scroll it into view.
+pub(super) fn sidebar_moved_cursor(
+    rows: &[SidebarRow],
+    current: Option<&SidebarNode>,
+    movement: SidebarCursorMove,
+) -> Option<(SidebarNode, usize)> {
+    let mut node_slots: Vec<(usize, &SidebarNode)> = Vec::new();
+    for (slot, row) in rows.iter().enumerate() {
+        if let SidebarRow::Node(node) = row {
+            node_slots.push((slot, node));
+        }
+    }
+    if node_slots.is_empty() {
+        return None;
+    }
+    let position =
+        current.and_then(|current| node_slots.iter().position(|(_, node)| *node == current));
+    let next = match (movement, position) {
+        (SidebarCursorMove::First, _) => 0,
+        (SidebarCursorMove::Last, _) => node_slots.len() - 1,
+        (SidebarCursorMove::Next, None) => 0,
+        (SidebarCursorMove::Next, Some(position)) => (position + 1).min(node_slots.len() - 1),
+        (SidebarCursorMove::Previous, None) => node_slots.len() - 1,
+        (SidebarCursorMove::Previous, Some(position)) => position.saturating_sub(1),
+    };
+    let (slot, node) = node_slots[next];
+    Some((node.clone(), slot))
+}
+
 pub(super) struct SessionsPanelParams<'a> {
     pub(super) catalog: &'a CatalogProjection,
     pub(super) projects: &'a ProjectRegistry,
@@ -695,6 +953,9 @@ pub(super) struct SessionsPanelParams<'a> {
     pub(super) history_open: bool,
     pub(super) sidebar_open: bool,
     pub(super) sidebar_motion_key: u64,
+    pub(super) cursor: Option<&'a SidebarNode>,
+    pub(super) tree_focused: bool,
+    pub(super) tree_focus: &'a FocusHandle,
     pub(super) scroll: &'a ScrollHandle,
 }
 
@@ -715,6 +976,9 @@ pub(super) fn sessions_panel(
         history_open,
         sidebar_open,
         sidebar_motion_key,
+        cursor,
+        tree_focused,
+        tree_focus,
         scroll,
     } = params;
     let wheel_root = cx.entity();
@@ -734,6 +998,124 @@ pub(super) fn sessions_panel(
 
     let expanded_w = theme::SIDE_W;
     let target_w = if sidebar_open { expanded_w } else { 0.0 };
+
+    // Painted rows and keyboard navigation share this flattened order.
+    let slices = sidebar_project_slices(projects, catalog, project_catalogs);
+    let slice_index: HashMap<String, usize> = slices
+        .iter()
+        .enumerate()
+        .map(|(index, slice)| (project_key(&slice.path), index))
+        .collect();
+    let rows = sidebar_rows(&slices);
+
+    let mut tree_children: Vec<AnyElement> = Vec::with_capacity(rows.len());
+    for (slot, row) in rows.iter().enumerate() {
+        let top_gap = if slot == 0 {
+            0.0
+        } else if matches!(row, SidebarRow::Node(SidebarNode::Project(_))) {
+            TREE_GROUP_GAP
+        } else {
+            TREE_ROW_GAP
+        };
+        match row {
+            SidebarRow::Node(SidebarNode::Project(path)) => {
+                let key = project_key(path);
+                let Some(&index) = slice_index.get(&key) else {
+                    continue;
+                };
+                let slice = &slices[index];
+                let entry = projects
+                    .projects()
+                    .iter()
+                    .find(|entry| project_key(&entry.path) == key);
+                let Some(entry) = entry else {
+                    continue;
+                };
+                let active = projects.is_active(path);
+                let working_count = thread_statuses
+                    .values()
+                    .filter(|status| {
+                        status.project == key
+                            && matches!(
+                                status.activity,
+                                ThreadActivity::Opening
+                                    | ThreadActivity::Working
+                                    | ThreadActivity::Cancelling
+                            )
+                    })
+                    .count();
+                tree_children.push(project_row(
+                    ProjectRowParams {
+                        path: path.clone(),
+                        name: entry.name(),
+                        expanded: entry.expanded,
+                        active,
+                        status: slice.status,
+                        session_count: slice.sessions.len(),
+                        working_count,
+                        cursored: cursor == Some(&SidebarNode::Project(path.clone())),
+                        tree_focused,
+                        top_gap,
+                    },
+                    cx,
+                ));
+            }
+            SidebarRow::Node(SidebarNode::Thread { project, session }) => {
+                let key = project_key(project);
+                let Some(&index) = slice_index.get(&key) else {
+                    continue;
+                };
+                let summary = slices[index]
+                    .sessions
+                    .iter()
+                    .find(|entry| project_key(&entry.path) == project_key(session));
+                let Some(summary) = summary else {
+                    continue;
+                };
+                let active_project = projects.is_active(project);
+                let thread_key = format!("{}::{}", key, project_key(&summary.path));
+                tree_children.push(project_thread_row(
+                    ProjectThreadRowParams {
+                        project_path: project.clone(),
+                        session: summary,
+                        active_project,
+                        selected: active_project
+                            && pending_path
+                                .or(current_path)
+                                .is_some_and(|path| sidebar_paths_match(path, &summary.path)),
+                        switching: active_project
+                            && pending_path
+                                .is_some_and(|path| sidebar_paths_match(path, &summary.path)),
+                        enabled: project_switch_enabled,
+                        runtime_status: thread_statuses.get(&project_key(&summary.path)),
+                        hovered: hovered_thread_key == Some(thread_key.as_str()),
+                        cursored: cursor
+                            == Some(&SidebarNode::Thread {
+                                project: project.clone(),
+                                session: session.clone(),
+                            }),
+                        tree_focused,
+                        thread_key,
+                        top_gap,
+                    },
+                    cx,
+                ));
+            }
+            SidebarRow::Note { project, note } => {
+                tree_children.push(sidebar_note_row(project, note, top_gap));
+            }
+            SidebarRow::Error { project, message } => {
+                tree_children.push(sidebar_error_row(
+                    project,
+                    message,
+                    !projects.is_active(project),
+                    project_count > 1,
+                    top_gap,
+                    cx,
+                ));
+            }
+        }
+    }
 
     // Fixed-width body so collapse clips instead of reflowing labels mid-transition.
     let body = div()
@@ -778,34 +1160,62 @@ pub(super) fn sessions_panel(
                         .flex()
                         .flex_row()
                         .items_center()
-                        .child(controls::icon_button(
-                            "add-project",
-                            "+",
-                            false,
-                            !project_picker_pending,
-                            Box::new(cx.listener(|view, _, _, cx| view.choose_projects(cx))),
+                        .child(sidebar_header_icon_button(
+                            ChromeIconSpec {
+                                id: "add-project",
+                                icon_path: "icons/plus.svg",
+                                tooltip_label: "Add project folders",
+                                tooltip_hint: None,
+                                on: false,
+                                enabled: !project_picker_pending,
+                                action: |view, _window, cx| view.choose_projects(cx),
+                            },
+                            sidebar_open,
+                            cx,
                         ))
-                        .child(controls::icon_button(
-                            "refresh-projects",
-                            "↻",
-                            false,
-                            catalog.status != CatalogStatus::Loading,
-                            Box::new(cx.listener(|view, _, _, cx| view.refresh_sessions(cx))),
+                        .child(sidebar_header_icon_button(
+                            ChromeIconSpec {
+                                id: "refresh-projects",
+                                icon_path: "icons/refresh.svg",
+                                tooltip_label: "Refresh threads",
+                                tooltip_hint: None,
+                                on: false,
+                                enabled: catalog.status != CatalogStatus::Loading,
+                                action: |view, _window, cx| view.refresh_sessions(cx),
+                            },
+                            sidebar_open,
+                            cx,
                         ))
-                        .child(sidebar_collapse_icon_button(cx)),
+                        .child(sidebar_header_icon_button(
+                            ChromeIconSpec {
+                                id: "collapse-sidebar",
+                                icon_path: "icons/chevron-left.svg",
+                                tooltip_label: "Collapse sidebar",
+                                tooltip_hint: Some("Ctrl+B"),
+                                on: false,
+                                enabled: true,
+                                action: |view, window, cx| view.toggle_sidebar(window, cx),
+                            },
+                            sidebar_open,
+                            cx,
+                        )),
                 ),
         )
         .child(
             div()
                 .px(px(SIDE_PAD))
                 .pt(px(10.0))
-                .pb(px(10.0))
+                .pb(px(8.0))
                 .flex()
                 .flex_col()
                 .gap(px(6.0))
                 .border_b_1()
                 .border_color(theme::edge_soft())
-                .child(sidebar_new_thread_button(new_thread_enabled, cx))
+                .child(sidebar_new_thread_button(
+                    new_thread_enabled,
+                    sidebar_open,
+                    cx,
+                ))
                 .child(
                     div()
                         .flex()
@@ -817,19 +1227,21 @@ pub(super) fn sessions_panel(
                             "History",
                             history_open,
                             true,
-                            Box::new(cx.listener(|view, _, window, cx| {
+                            sidebar_open,
+                            |view, window, cx| {
                                 let _ =
                                     view.execute_native_action(NativeAction::Tree, "", window, cx);
-                            })),
+                            },
+                            cx,
                         ))
                         .child(sidebar_secondary_button(
                             "export-session",
                             "Export",
                             false,
                             export_enabled,
-                            Box::new(
-                                cx.listener(|view, _, window, cx| view.export_session(window, cx)),
-                            ),
+                            sidebar_open,
+                            |view, window, cx| view.export_session(window, cx),
+                            cx,
                         )),
                 ),
         )
@@ -853,10 +1265,31 @@ pub(super) fn sessions_panel(
             },
         )
         .child(
+            // The tree owns one tab stop and a roving cursor. Focus
+            // indication lives on the cursor ROW and follows web
+            // :focus-visible rules: clicking never flashes a section-sized
+            // frame; only keyboard navigation earns the strong ring.
             div()
+                .id("workspace-tree")
+                .track_focus(tree_focus)
+                .when(sidebar_open, |tree| tree.tab_index(0))
                 .flex_1()
                 .min_h_0()
                 .relative()
+                .my(px(4.0))
+                .on_key_down(cx.listener(
+                    |view: &mut RootView, event: &gpui::KeyDownEvent, window, cx| {
+                        view.on_workspace_tree_key(event, window, cx);
+                    },
+                ))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|view, _, window, _cx| {
+                        view.sidebar_tree_pointer_focus = true;
+                        let focus = view.sidebar_tree_focus.clone();
+                        focus.focus(window);
+                    }),
+                )
                 .child(
                     canvas(
                         |bounds, window, _| window.insert_hitbox(bounds, HitboxBehavior::Normal),
@@ -889,28 +1322,13 @@ pub(super) fn sessions_panel(
                         .track_scroll(scroll)
                         .scrollbar_width(px(theme::SCROLLBAR))
                         .w_full()
-                        .pt(px(6.0))
-                        .pb(px(8.0))
+                        .px(px(4.0))
+                        .pt(px(2.0))
+                        .pb(px(6.0))
                         .flex()
                         .flex_col()
-                        .children(projects.projects().iter().map(|project| {
-                            project_group(
-                                ProjectGroupParams {
-                                    project,
-                                    active: projects.is_active(&project.path),
-                                    active_catalog: catalog,
-                                    cached_catalog: project_catalogs
-                                        .get(&project_key(&project.path)),
-                                    current_path,
-                                    pending_path,
-                                    project_switch_enabled,
-                                    thread_statuses,
-                                    hovered_thread_key,
-                                    can_remove: projects.projects().len() > 1,
-                                },
-                                cx,
-                            )
-                        })),
+                        .when(rows.is_empty(), |list| list.child(empty_projects_note()))
+                        .children(tree_children),
                 ),
         )
         .child(
@@ -943,16 +1361,11 @@ pub(super) fn sessions_panel(
                         .whitespace_nowrap()
                         .child(short_path(&active_path.to_string_lossy())),
                 )
-                .child(controls::quiet_button(
-                    "remove-active-project",
-                    "Remove",
+                .child(sidebar_remove_project_button(
                     can_remove_active,
-                    {
-                        let path = active_path;
-                        Box::new(cx.listener(move |view, _, window, cx| {
-                            view.remove_project(path.clone(), window, cx)
-                        }))
-                    },
+                    active_path,
+                    sidebar_open,
+                    cx,
                 )),
         );
 
@@ -991,33 +1404,55 @@ pub(super) fn sessions_panel(
     }
 }
 
-fn session_rename_button(
-    open: bool,
+/// View-method action shared by chrome buttons so click and Enter/Space can
+/// never drift apart.
+type ChromeAction = fn(&mut RootView, &mut Window, &mut Context<RootView>);
+
+/// Parameters for an icon-only chrome button.
+struct ChromeIconSpec {
+    id: &'static str,
+    icon_path: &'static str,
+    tooltip_label: &'static str,
+    tooltip_hint: Option<&'static str>,
+    /// Toggle look (pressed-in); header actions always pass `false`.
+    on: bool,
     enabled: bool,
-    cx: &mut Context<RootView>,
-) -> impl IntoElement {
+    action: ChromeAction,
+}
+
+/// Icon-only chrome toggle: tooltip, focus ring, and a real keyboard path.
+fn titlebar_icon_toggle(spec: ChromeIconSpec, cx: &mut Context<RootView>) -> impl IntoElement {
+    let ChromeIconSpec {
+        id,
+        icon_path,
+        tooltip_label,
+        tooltip_hint,
+        on,
+        enabled,
+        action,
+    } = spec;
     let icon_color = if !enabled {
         theme::smoke()
-    } else if open {
+    } else if on {
         theme::data()
     } else {
         theme::bone_dim()
     };
     div()
-        .id("rename-session")
+        .id(id)
         .size(px(28.0))
         .rounded(px(theme::RADIUS_SM))
         .flex()
         .items_center()
         .justify_center()
         .flex_shrink_0()
-        .bg(if open {
+        .bg(if on {
             theme::panel_lift()
         } else {
             gpui::rgba(0x0000_0000)
         })
         .border_1()
-        .border_color(if open {
+        .border_color(if on {
             theme::edge_hard()
         } else {
             gpui::rgba(0x0000_0000)
@@ -1028,216 +1463,83 @@ fn session_rename_button(
                 .tab_index(0)
                 .cursor_pointer()
                 .hover(|button| button.bg(theme::panel()).text_color(theme::bone()))
-                .active(|button| button.bg(theme::panel_lift()))
-                .on_click(cx.listener(|view, _, window, cx| view.toggle_session_rename(window, cx)))
-        })
-        .child(
-            svg()
-                .path("icons/pencil.svg")
-                .size(px(14.0))
-                .text_color(icon_color),
-        )
-}
-
-fn sidebar_toggle_button(open: bool, cx: &mut Context<RootView>) -> impl IntoElement {
-    div()
-        .id("toggle-sidebar")
-        .size(px(28.0))
-        .rounded(px(theme::RADIUS_SM))
-        .flex()
-        .items_center()
-        .justify_center()
-        .flex_shrink_0()
-        .bg(if open {
-            theme::panel_lift()
-        } else {
-            gpui::rgba(0x0000_0000)
-        })
-        .border_1()
-        .border_color(if open {
-            theme::edge_hard()
-        } else {
-            gpui::rgba(0x0000_0000)
-        })
-        .text_color(theme::bone_dim())
-        .tab_index(0)
-        .cursor_pointer()
-        .hover(|button| button.bg(theme::panel()).text_color(theme::bone()))
-        .active(|button| button.bg(theme::panel_lift()))
-        .on_click(cx.listener(|view, _, window, cx| view.toggle_sidebar(window, cx)))
-        .child(
-            svg()
-                .path("icons/sidebar.svg")
-                .size(px(14.0))
-                .text_color(if open {
-                    theme::data()
-                } else {
-                    theme::bone_dim()
-                }),
-        )
-}
-
-fn terminal_toggle_button(open: bool, cx: &mut Context<RootView>) -> impl IntoElement {
-    div()
-        .id("toggle-terminal")
-        .size(px(28.0))
-        .rounded(px(theme::RADIUS_SM))
-        .flex()
-        .items_center()
-        .justify_center()
-        .flex_shrink_0()
-        .bg(if open {
-            theme::panel_lift()
-        } else {
-            gpui::rgba(0x0000_0000)
-        })
-        .border_1()
-        .border_color(if open {
-            theme::edge_hard()
-        } else {
-            gpui::rgba(0x0000_0000)
-        })
-        .text_color(theme::bone_dim())
-        .tab_index(0)
-        .cursor_pointer()
-        .hover(|button| button.bg(theme::panel()).text_color(theme::bone()))
-        .active(|button| button.bg(theme::panel_lift()))
-        .focus(|button| button.border_color(theme::focus()))
-        .on_click(cx.listener(|view, _, window, cx| view.toggle_terminal(window, cx)))
-        .child(
-            svg()
-                .path("icons/terminal.svg")
-                .size(px(14.0))
-                .text_color(if open {
-                    theme::data()
-                } else {
-                    theme::bone_dim()
-                }),
-        )
-}
-
-/// Persistent doorway to the workspace diff; the tail summary card can
-/// scroll away or vanish between turns, so the modal gets chrome of its own.
-fn diff_toggle_button(open: bool, available: bool, cx: &mut Context<RootView>) -> impl IntoElement {
-    let active = open && available;
-    div()
-        .id("toggle-workspace-diff")
-        .size(px(28.0))
-        .rounded(px(theme::RADIUS_SM))
-        .flex()
-        .items_center()
-        .justify_center()
-        .flex_shrink_0()
-        .bg(if active {
-            theme::panel_lift()
-        } else {
-            gpui::rgba(0x0000_0000)
-        })
-        .border_1()
-        .border_color(if active {
-            theme::edge_hard()
-        } else {
-            gpui::rgba(0x0000_0000)
-        })
-        .text_color(if available {
-            theme::bone_dim()
-        } else {
-            theme::smoke()
-        })
-        .when(available, |button| {
-            button
-                .tab_index(0)
-                .cursor_pointer()
-                .hover(|button| button.bg(theme::panel()).text_color(theme::bone()))
-                .active(|button| button.bg(theme::panel_lift()))
                 .focus(|button| button.border_color(theme::focus()))
-                .on_click(
-                    cx.listener(|view, _, window, cx| {
-                        view.toggle_workspace_diff_overlay(window, cx)
+                .active(|button| button.bg(theme::panel_lift()))
+                .tooltip(controls::text_tooltip(tooltip_label, tooltip_hint))
+                .on_click(cx.listener(move |view, _, window, cx| action(view, window, cx)))
+                .on_key_down(
+                    cx.listener(move |view, event: &gpui::KeyDownEvent, window, cx| {
+                        if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                            cx.stop_propagation();
+                            action(view, window, cx);
+                        }
                     }),
                 )
-                .on_key_down(cx.listener(|view, event: &gpui::KeyDownEvent, window, cx| {
-                    if matches!(event.keystroke.key.as_str(), "enter" | "space") {
-                        cx.stop_propagation();
-                        view.toggle_workspace_diff_overlay(window, cx);
-                    }
-                }))
         })
-        .child(
-            svg()
-                .path("icons/diff.svg")
-                .size(px(14.0))
-                .text_color(if active {
-                    theme::data()
-                } else if available {
-                    theme::bone_dim()
-                } else {
-                    theme::smoke()
-                }),
-        )
+        .child(svg().path(icon_path).size(px(14.0)).text_color(icon_color))
 }
 
-fn sidebar_collapse_icon_button(cx: &mut Context<RootView>) -> impl IntoElement {
+/// Icon-only sidebar header action; drops out of the tab order while the
+/// sidebar is collapsed so focus never lands on invisible chrome.
+fn sidebar_header_icon_button(
+    spec: ChromeIconSpec,
+    sidebar_open: bool,
+    cx: &mut Context<RootView>,
+) -> impl IntoElement {
+    let ChromeIconSpec {
+        id,
+        icon_path,
+        tooltip_label,
+        tooltip_hint,
+        on: _,
+        enabled,
+        action,
+    } = spec;
+    let icon_color = if enabled {
+        theme::ash()
+    } else {
+        theme::smoke()
+    };
     div()
-        .id("collapse-sidebar")
+        .id(id)
         .size(px(28.0))
         .rounded(px(theme::RADIUS_SM))
         .flex()
         .items_center()
         .justify_center()
-        .text_color(theme::bone_dim())
-        .tab_index(0)
-        .cursor_pointer()
-        .hover(|button| button.bg(theme::panel()).text_color(theme::bone()))
-        .active(|button| button.bg(theme::panel_lift()))
-        .on_click(cx.listener(|view, _, window, cx| view.toggle_sidebar(window, cx)))
-        .child(
-            svg()
-                .path("icons/chevron-left.svg")
-                .size(px(12.0))
-                .text_color(theme::ash()),
-        )
-}
-
-pub(super) fn inspector_toggle_button(open: bool, cx: &mut Context<RootView>) -> impl IntoElement {
-    div()
-        .id("toggle-inspector")
-        .size(px(28.0))
-        .rounded(px(theme::RADIUS_SM))
-        .flex()
-        .items_center()
-        .justify_center()
-        .flex_shrink_0()
-        .bg(if open {
-            theme::panel_lift()
-        } else {
-            gpui::rgba(0x0000_0000)
-        })
         .border_1()
-        .border_color(if open {
-            theme::edge_hard()
-        } else {
-            gpui::rgba(0x0000_0000)
+        .border_color(gpui::rgba(0x0000_0000))
+        .when(enabled, |button| {
+            button
+                .when(sidebar_open, |button| button.tab_index(0))
+                .cursor_pointer()
+                .hover(|button| button.bg(theme::panel()))
+                .focus(|button| button.border_color(theme::focus()))
+                .active(|button| button.bg(theme::panel_lift()))
+                .tooltip(controls::text_tooltip(tooltip_label, tooltip_hint))
+                .on_click(cx.listener(move |view, _, window, cx| action(view, window, cx)))
+                .on_key_down(
+                    cx.listener(move |view, event: &gpui::KeyDownEvent, window, cx| {
+                        if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                            cx.stop_propagation();
+                            action(view, window, cx);
+                        }
+                    }),
+                )
         })
-        .text_color(theme::bone_dim())
-        .tab_index(0)
-        .cursor_pointer()
-        .hover(|button| button.bg(theme::panel()).text_color(theme::bone()))
-        .active(|button| button.bg(theme::panel_lift()))
-        .on_click(cx.listener(|view, _, window, cx| view.toggle_inspector(window, cx)))
-        .child(
-            svg()
-                .path("icons/inspector.svg")
-                .size(px(14.0))
-                .text_color(if open {
-                    theme::data()
-                } else {
-                    theme::bone_dim()
-                }),
-        )
+        .child(svg().path(icon_path).size(px(13.0)).text_color(icon_color))
 }
 
-fn sidebar_new_thread_button(enabled: bool, cx: &mut Context<RootView>) -> impl IntoElement {
+fn sidebar_new_thread_button(
+    enabled: bool,
+    sidebar_open: bool,
+    cx: &mut Context<RootView>,
+) -> impl IntoElement {
+    let icon_color = if enabled {
+        theme::signal()
+    } else {
+        theme::smoke()
+    };
     div()
         .id("new-session")
         .h(px(30.0))
@@ -1267,25 +1569,28 @@ fn sidebar_new_thread_button(enabled: bool, cx: &mut Context<RootView>) -> impl 
         })
         .when(enabled, |button| {
             button
-                .tab_index(0)
+                .when(sidebar_open, |button| button.tab_index(0))
                 .cursor_pointer()
                 .hover(|button| button.bg(theme::panel_hover()).border_color(theme::edge()))
+                .focus(|button| button.border_color(theme::focus()))
                 .active(|button| button.bg(theme::panel()))
+                .tooltip(controls::text_tooltip("New thread", None::<&str>))
                 .on_click(cx.listener(|view, _, window, cx| {
                     let _ = view.execute_native_action(NativeAction::NewSession, "", window, cx);
                 }))
+                .on_key_down(cx.listener(|view, event: &gpui::KeyDownEvent, window, cx| {
+                    if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                        cx.stop_propagation();
+                        let _ =
+                            view.execute_native_action(NativeAction::NewSession, "", window, cx);
+                    }
+                }))
         })
         .child(
-            div()
-                .font_family(theme::main())
-                .text_size(theme::text_size(theme::T_UI_SM))
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(if enabled {
-                    theme::signal()
-                } else {
-                    theme::smoke()
-                })
-                .child("+"),
+            svg()
+                .path("icons/plus.svg")
+                .size(px(12.0))
+                .text_color(icon_color),
         )
         .child(
             div()
@@ -1301,7 +1606,9 @@ fn sidebar_secondary_button(
     label: impl Into<SharedString>,
     selected: bool,
     enabled: bool,
-    on_click: controls::ClickHandler,
+    sidebar_open: bool,
+    action: ChromeAction,
+    cx: &mut Context<RootView>,
 ) -> impl IntoElement {
     div()
         .id(id.into())
@@ -1333,7 +1640,7 @@ fn sidebar_secondary_button(
         })
         .when(enabled, |button| {
             button
-                .tab_index(0)
+                .when(sidebar_open, |button| button.tab_index(0))
                 .cursor_pointer()
                 .hover(|button| {
                     if selected {
@@ -1342,8 +1649,17 @@ fn sidebar_secondary_button(
                         button.bg(theme::panel()).text_color(theme::bone())
                     }
                 })
+                .focus(|button| button.border_color(theme::focus()))
                 .active(|button| button.bg(theme::panel_lift()))
-                .on_click(move |event, window, cx| on_click(event, window, cx))
+                .on_click(cx.listener(move |view, _, window, cx| action(view, window, cx)))
+                .on_key_down(
+                    cx.listener(move |view, event: &gpui::KeyDownEvent, window, cx| {
+                        if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                            cx.stop_propagation();
+                            action(view, window, cx);
+                        }
+                    }),
+                )
         })
         .child(
             div()
@@ -1358,336 +1674,372 @@ fn sidebar_secondary_button(
         )
 }
 
-struct ProjectGroupParams<'a> {
-    project: &'a ProjectEntry,
-    active: bool,
-    active_catalog: &'a CatalogProjection,
-    cached_catalog: Option<&'a ProjectCatalogCache>,
-    current_path: Option<&'a PathBuf>,
-    pending_path: Option<&'a PathBuf>,
-    project_switch_enabled: bool,
-    can_remove: bool,
-    thread_statuses: &'a HashMap<String, ThreadRuntimeStatus>,
-    hovered_thread_key: Option<&'a str>,
+/// Row metrics for the flattened workspace tree.
+const TREE_ROW_H: f32 = 32.0;
+const TREE_ROW_GAP: f32 = 2.0;
+const TREE_GROUP_GAP: f32 = 6.0;
+
+/// Cursor ring policy, mirroring :focus-visible: a strong accent ring requires
+/// keyboard focus in the tree; a cursor parked by the pointer reads as a quiet
+/// outline (and collapses into the existing active/selected edge).
+fn cursor_border(cursored: bool, tree_keyboard_focused: bool, emphasized: bool) -> gpui::Rgba {
+    if cursored && tree_keyboard_focused {
+        theme::focus()
+    } else if cursored || emphasized {
+        theme::edge_soft()
+    } else {
+        gpui::rgba(0x0000_0000)
+    }
 }
 
-fn project_group(params: ProjectGroupParams<'_>, cx: &mut Context<RootView>) -> AnyElement {
-    let ProjectGroupParams {
-        project,
+struct ProjectRowParams {
+    path: PathBuf,
+    name: String,
+    expanded: bool,
+    active: bool,
+    status: CatalogStatus,
+    session_count: usize,
+    working_count: usize,
+    cursored: bool,
+    tree_focused: bool,
+    top_gap: f32,
+}
+
+fn project_row(params: ProjectRowParams, cx: &mut Context<RootView>) -> AnyElement {
+    let ProjectRowParams {
+        path,
+        name,
+        expanded,
         active,
-        active_catalog,
-        cached_catalog,
-        current_path,
-        pending_path,
-        project_switch_enabled,
-        can_remove,
-        thread_statuses,
-        hovered_thread_key,
+        status,
+        session_count,
+        working_count,
+        cursored,
+        tree_focused,
+        top_gap,
     } = params;
-    let cached_while_loading = cached_catalog.filter(|catalog| {
-        active
-            && active_catalog.status == CatalogStatus::Loading
-            && active_catalog.sessions.is_empty()
-            && !catalog.sessions.is_empty()
-    });
-    let (status, sessions, corrupt_count, error) = if let Some(catalog) = cached_while_loading {
-        (
-            CatalogStatus::Loading,
-            Arc::clone(&catalog.sessions),
-            catalog.corrupt_count,
-            None,
-        )
-    } else if active {
-        (
-            active_catalog.status,
-            Arc::clone(&active_catalog.sessions),
-            active_catalog.corrupt.len(),
-            active_catalog.error.clone(),
-        )
-    } else if let Some(catalog) = cached_catalog {
-        (
-            catalog.status,
-            Arc::clone(&catalog.sessions),
-            catalog.corrupt_count,
-            catalog.error.clone(),
-        )
-    } else {
-        (CatalogStatus::Loading, Arc::new(Vec::new()), 0, None)
-    };
     let count = match status {
         CatalogStatus::Inaccessible => "!".to_owned(),
-        CatalogStatus::Stale => format!("{}!", sessions.len()),
+        CatalogStatus::Stale => format!("{session_count}!"),
         CatalogStatus::Loading | CatalogStatus::Ready | CatalogStatus::Empty => {
-            sessions.len().to_string()
+            session_count.to_string()
         }
     };
-    let path = project.path.clone();
+    let project_id = project_key(&path);
+    let activity_key = list_animation_key(&project_id);
+
+    let row_bg = if active {
+        theme::panel()
+    } else {
+        gpui::rgba(0x0000_0000)
+    };
+    let hover_bg = if active {
+        theme::panel_hover()
+    } else {
+        theme::panel()
+    };
+    let row_border = cursor_border(cursored, tree_focused, active);
+
+    let row_id = SharedString::from(format!("project-{project_id}"));
+    let toggle_id = SharedString::from(format!("toggle-project-{project_id}"));
     let click_path = path.clone();
-    let key_path = path.clone();
-    let left_path = path.clone();
-    let right_path = path.clone();
-    let toggle_path = path.clone();
+    let toggle_path = path;
     let click_root = cx.entity();
-    let key_root = click_root.clone();
-    let left_root = click_root.clone();
-    let right_root = click_root.clone();
     let toggle_root = click_root.clone();
-    let expanded = project.expanded;
-    let project_runtime_key = project_key(&path);
-    let working_count = thread_statuses
-        .values()
-        .filter(|status| {
-            status.project == project_runtime_key
-                && matches!(
-                    status.activity,
-                    ThreadActivity::Opening | ThreadActivity::Working | ThreadActivity::Cancelling
-                )
-        })
-        .count();
-    let activity_key = list_animation_key(&project_runtime_key);
 
     div()
-        .w_full()
+        .id(row_id)
+        .h(px(TREE_ROW_H))
+        .mt(px(top_gap))
+        .pl(px(4.0))
+        .pr(px(8.0))
+        .rounded(px(theme::RADIUS))
+        .border_1()
+        .border_color(row_border)
+        .bg(row_bg)
+        .cursor_pointer()
         .flex()
-        .flex_col()
-        .mb(px(2.0))
+        .flex_row()
+        .items_center()
+        .gap(px(6.0))
+        .hover(|row| row.bg(hover_bg))
+        .on_click(move |_, window, cx| {
+            click_root.update(cx, |view, cx| {
+                view.activate_project(click_path.clone(), None, window, cx)
+            });
+        })
         .child(
             div()
-                .id(SharedString::from(format!(
-                    "project-{}",
-                    project_key(&path)
-                )))
-                .h(px(32.0))
-                .pl(px(8.0))
-                .pr(px(10.0))
-                .tab_index(0)
+                .id(toggle_id)
+                .size(px(18.0))
+                .flex_shrink_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(theme::RADIUS_SM))
                 .cursor_pointer()
-                .relative()
+                .hover(|button| button.bg(theme::panel_hover()))
+                .tooltip(controls::text_tooltip(
+                    if expanded {
+                        "Collapse project"
+                    } else {
+                        "Expand project"
+                    },
+                    None::<&str>,
+                ))
+                .on_click(move |_, _, cx| {
+                    cx.stop_propagation();
+                    toggle_root.update(cx, |view, cx| view.toggle_project(toggle_path.clone(), cx));
+                })
+                .child(
+                    svg()
+                        .path(if expanded {
+                            "icons/chevron-down.svg"
+                        } else {
+                            "icons/chevron-right.svg"
+                        })
+                        .size(px(10.0))
+                        .text_color(theme::smoke()),
+                ),
+        )
+        .child(
+            svg()
+                .path("icons/folder.svg")
+                .size(px(13.0))
+                .flex_shrink_0()
+                .text_color(if active { theme::data() } else { theme::ash() }),
+        )
+        .child(
+            div()
+                .min_w_0()
+                .flex_1()
+                .overflow_hidden()
+                .text_ellipsis()
+                .whitespace_nowrap()
+                .font_family(theme::sans())
+                .text_size(theme::text_size(theme::T_UI_SM))
+                .font_weight(if active {
+                    FontWeight::SEMIBOLD
+                } else {
+                    FontWeight::MEDIUM
+                })
+                .text_color(if active {
+                    theme::bone()
+                } else {
+                    theme::bone_dim()
+                })
+                .child(name),
+        )
+        .child(
+            div()
+                .flex_shrink_0()
                 .flex()
                 .flex_row()
                 .items_center()
                 .gap(px(6.0))
-                .bg(if active {
-                    theme::panel()
-                } else {
-                    gpui::rgba(0x0000_0000)
-                })
-                .hover(|row| row.bg(theme::panel()))
-                .focus(|row| row.bg(theme::panel_lift()).text_color(theme::focus()))
-                .on_click(move |_, window, cx| {
-                    click_root.update(cx, |view, cx| {
-                        view.activate_project(click_path.clone(), None, window, cx)
-                    });
-                })
-                .on_key_down(move |event: &gpui::KeyDownEvent, window, cx| {
-                    match event.keystroke.key.as_str() {
-                        "enter" | "space" => {
-                            cx.stop_propagation();
-                            key_root.update(cx, |view, cx| {
-                                view.activate_project(key_path.clone(), None, window, cx)
-                            });
-                        }
-                        "left" if expanded => {
-                            cx.stop_propagation();
-                            left_root.update(cx, |view, cx| {
-                                view.set_project_expanded(left_path.clone(), false, cx)
-                            });
-                        }
-                        "right" if !expanded => {
-                            cx.stop_propagation();
-                            right_root.update(cx, |view, cx| {
-                                view.set_project_expanded(right_path.clone(), true, cx)
-                            });
-                        }
-                        _ => {}
-                    }
-                })
-                .when(active, |row| {
-                    row.child(
-                        div()
-                            .absolute()
-                            .left_0()
-                            .top(px(8.0))
-                            .bottom(px(8.0))
-                            .w(px(2.0))
-                            .bg(theme::signal()),
-                    )
-                })
-                .child(
-                    div()
-                        .id(SharedString::from(format!(
-                            "toggle-project-{}",
-                            project_key(&path)
-                        )))
-                        .size(px(18.0))
-                        .flex_shrink_0()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .rounded(px(theme::RADIUS_SM))
-                        .hover(|button| button.bg(theme::panel_hover()))
-                        .on_click(move |_, _, cx| {
-                            cx.stop_propagation();
-                            toggle_root.update(cx, |view, cx| {
-                                view.toggle_project(toggle_path.clone(), cx)
-                            });
-                        })
-                        .child(
-                            svg()
-                                .path(if expanded {
-                                    "icons/chevron-down.svg"
-                                } else {
-                                    "icons/chevron-right.svg"
-                                })
-                                .size(px(10.0))
-                                .text_color(theme::smoke()),
-                        ),
-                )
-                .child(
-                    svg()
-                        .path("icons/folder.svg")
-                        .size(px(13.0))
-                        .flex_shrink_0()
-                        .text_color(if active { theme::data() } else { theme::ash() }),
+                .when(
+                    working_count > 0 || (status == CatalogStatus::Loading && session_count > 0),
+                    |meta| {
+                        meta.child(controls::square_status_indicator(
+                            activity_key,
+                            true,
+                            Duration::from_millis(900),
+                            theme::working(),
+                        ))
+                    },
                 )
                 .child(
                     div()
-                        .min_w_0()
-                        .flex_1()
-                        .overflow_hidden()
-                        .text_ellipsis()
-                        .whitespace_nowrap()
-                        .font_family(theme::sans())
-                        .text_size(theme::text_size(theme::T_UI_SM))
-                        .font_weight(if active {
-                            FontWeight::SEMIBOLD
-                        } else {
-                            FontWeight::MEDIUM
-                        })
-                        .text_color(if active {
-                            theme::bone()
-                        } else {
-                            theme::bone_dim()
-                        })
-                        .child(project.name()),
-                )
-                .child(
-                    div()
-                        .flex_shrink_0()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(6.0))
-                        .when(
-                            working_count > 0
-                                || (status == CatalogStatus::Loading && !sessions.is_empty()),
-                            |meta| {
-                                meta.child(controls::square_status_indicator(
-                                    activity_key,
-                                    true,
-                                    Duration::from_millis(900),
-                                    theme::working(),
-                                ))
+                        .font_family(theme::mono())
+                        .text_size(theme::text_size(theme::T_TINY))
+                        .text_color(
+                            if matches!(status, CatalogStatus::Inaccessible | CatalogStatus::Stale)
+                            {
+                                theme::error()
+                            } else {
+                                theme::smoke()
                             },
                         )
-                        .child(
-                            div()
-                                .font_family(theme::mono())
-                                .text_size(theme::text_size(theme::T_TINY))
-                                .text_color(
-                                    if matches!(
-                                        status,
-                                        CatalogStatus::Inaccessible | CatalogStatus::Stale
-                                    ) {
-                                        theme::error()
-                                    } else {
-                                        theme::smoke()
-                                    },
-                                )
-                                .child(count),
-                        ),
+                        .child(count),
                 ),
         )
-        .when(project.expanded, |group| {
-            group
-                .when(sessions.is_empty(), |group| match status {
-                    CatalogStatus::Loading => {
-                        group.child(project_tree_loading_note(activity_key, "Scanning threads"))
-                    }
-                    CatalogStatus::Empty | CatalogStatus::Ready => {
-                        group.child(project_tree_note("No saved threads yet."))
-                    }
-                    CatalogStatus::Inaccessible | CatalogStatus::Stale => {
-                        group.child(project_tree_note("Project threads are unavailable."))
-                    }
-                })
-                .children(sessions.iter().map(|session| {
-                    let thread_key = format!(
-                        "{}::{}",
-                        project_key(&project.path),
-                        project_key(&session.path)
-                    );
-                    project_thread_row(
-                        ProjectThreadRowParams {
-                            project_path: project.path.clone(),
-                            session,
-                            active_project: active,
-                            selected: active
-                                && pending_path
-                                    .or(current_path)
-                                    .is_some_and(|path| sidebar_paths_match(path, &session.path)),
-                            switching: active
-                                && pending_path
-                                    .is_some_and(|path| sidebar_paths_match(path, &session.path)),
-                            enabled: project_switch_enabled,
-                            runtime_status: thread_statuses.get(&project_key(&session.path)),
-                            hovered: hovered_thread_key == Some(thread_key.as_str()),
-                            thread_key,
-                        },
-                        cx,
-                    )
-                }))
-                .when_some(error, |group, error| {
-                    let remove_path = project.path.clone();
-                    group.child(
-                        div()
-                            .pl(px(32.0))
-                            .pr(px(12.0))
-                            .py(px(6.0))
-                            .flex()
-                            .flex_col()
-                            .gap(px(4.0))
-                            .child(
-                                div()
-                                    .font_family(theme::sans())
-                                    .text_size(theme::text_size(theme::T_TINY))
-                                    .line_height(gpui::relative(1.35))
-                                    .text_color(theme::error())
-                                    .child(error),
-                            )
-                            .when(!active, |note| {
-                                note.child(controls::quiet_button(
-                                    SharedString::from(format!(
-                                        "remove-project-{}",
-                                        project_key(&remove_path)
-                                    )),
-                                    "Remove from sidebar",
-                                    can_remove,
-                                    Box::new(cx.listener(move |view, _, window, cx| {
-                                        view.remove_project(remove_path.clone(), window, cx)
-                                    })),
-                                ))
-                            }),
-                    )
-                })
-                .when(corrupt_count > 0, |group| {
-                    group.child(project_tree_note(format!(
-                        "{corrupt_count} corrupt thread{} skipped.",
-                        if corrupt_count == 1 { "" } else { "s" }
-                    )))
-                })
+        .into_any_element()
+}
+
+/// Non-interactive status line inside the flattened tree.
+fn sidebar_note_row(project: &std::path::Path, note: &SidebarNote, top_gap: f32) -> AnyElement {
+    // Reserved transparent border keeps note text aligned with thread rows,
+    // which carry the same 1px frame.
+    fn frame(top_gap: f32) -> gpui::Div {
+        div()
+            .h(px(TREE_ROW_H))
+            .mt(px(top_gap))
+            .pl(px(28.0))
+            .pr(px(12.0))
+            .border_1()
+            .border_color(gpui::rgba(0x0000_0000))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(8.0))
+            .font_family(theme::sans())
+            .text_size(theme::text_size(theme::T_TINY))
+            .text_color(theme::smoke())
+    }
+    match note {
+        SidebarNote::Loading => frame(top_gap)
+            .child(controls::square_status_indicator(
+                list_animation_key(&format!("loading-{}", project_key(project))),
+                true,
+                Duration::from_millis(900),
+                theme::working(),
+            ))
+            .child("Scanning threads")
+            .into_any_element(),
+        SidebarNote::Empty => frame(top_gap)
+            .child("No saved threads yet.")
+            .into_any_element(),
+        SidebarNote::Unavailable => frame(top_gap)
+            .child("Project threads are unavailable.")
+            .into_any_element(),
+        SidebarNote::Corrupt(count) => frame(top_gap)
+            .child(format!(
+                "{count} corrupt thread{} skipped.",
+                if *count == 1 { "" } else { "s" }
+            ))
+            .into_any_element(),
+    }
+}
+
+/// Per-project catalog failure, with a way out of the sidebar for dead folders.
+fn sidebar_error_row(
+    project: &std::path::Path,
+    message: &str,
+    show_remove: bool,
+    can_remove: bool,
+    top_gap: f32,
+    cx: &mut Context<RootView>,
+) -> AnyElement {
+    let remove_path: PathBuf = project.to_path_buf();
+    div()
+        .mt(px(top_gap))
+        .pl(px(28.0))
+        .pr(px(12.0))
+        .py(px(6.0))
+        .border_1()
+        .border_color(gpui::rgba(0x0000_0000))
+        .flex()
+        .flex_col()
+        .gap(px(4.0))
+        .child(
+            div()
+                .font_family(theme::sans())
+                .text_size(theme::text_size(theme::T_TINY))
+                .line_height(gpui::relative(1.35))
+                .text_color(theme::error())
+                .child(message.to_owned()),
+        )
+        .when(show_remove, |note| {
+            note.child(controls::quiet_button(
+                SharedString::from(format!("remove-project-{}", project_key(&remove_path))),
+                "Remove from sidebar",
+                can_remove,
+                Box::new(cx.listener(move |view, _, window, cx| {
+                    view.remove_project(remove_path.clone(), window, cx)
+                })),
+            ))
         })
         .into_any_element()
+}
+
+/// Guidance shown instead of the tree when the sidebar has no projects.
+fn empty_projects_note() -> AnyElement {
+    div()
+        .mx(px(2.0))
+        .mt(px(6.0))
+        .px(px(10.0))
+        .py(px(9.0))
+        .rounded(px(theme::RADIUS_SM))
+        .bg(theme::panel())
+        .border_1()
+        .border_color(theme::edge_soft())
+        .flex()
+        .flex_col()
+        .gap(px(3.0))
+        .child(
+            div()
+                .font_family(theme::sans())
+                .text_size(theme::text_size(theme::T_UI_SM))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(theme::bone_dim())
+                .child("No projects yet."),
+        )
+        .child(
+            div()
+                .font_family(theme::sans())
+                .text_size(theme::text_size(theme::T_TINY))
+                .line_height(gpui::relative(1.4))
+                .text_color(theme::smoke())
+                .child("Add a folder with the + button above to keep its threads here."),
+        )
+        .into_any_element()
+}
+
+/// Footer action: drops the active project from the sidebar (folders on disk
+/// are never touched).
+fn sidebar_remove_project_button(
+    enabled: bool,
+    path: PathBuf,
+    sidebar_open: bool,
+    cx: &mut Context<RootView>,
+) -> impl IntoElement {
+    let click_path = path.clone();
+    let key_path = path;
+    div()
+        .id("remove-active-project")
+        .h(px(28.0))
+        .px(px(8.0))
+        .rounded(px(theme::RADIUS_SM))
+        .flex()
+        .items_center()
+        .justify_center()
+        .border_1()
+        .border_color(gpui::rgba(0x0000_0000))
+        .text_color(if enabled {
+            theme::bone_dim()
+        } else {
+            theme::smoke()
+        })
+        .when(enabled, |button| {
+            button
+                .when(sidebar_open, |button| button.tab_index(0))
+                .cursor_pointer()
+                .hover(|button| button.bg(theme::error_wash()).text_color(theme::error()))
+                .focus(|button| button.border_color(theme::focus()))
+                .active(|button| button.bg(theme::panel_lift()))
+                .tooltip(controls::text_tooltip(
+                    "Remove project from sidebar",
+                    None::<&str>,
+                ))
+                .on_click(cx.listener(move |view, _, window, cx| {
+                    view.remove_project(click_path.clone(), window, cx)
+                }))
+                .on_key_down(
+                    cx.listener(move |view, event: &gpui::KeyDownEvent, window, cx| {
+                        if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                            cx.stop_propagation();
+                            view.remove_project(key_path.clone(), window, cx);
+                        }
+                    }),
+                )
+        })
+        .child(
+            div()
+                .font_family(theme::main())
+                .text_size(theme::text_size(theme::T_UI_SM))
+                .font_weight(FontWeight::SEMIBOLD)
+                .child("Remove"),
+        )
 }
 
 struct ProjectThreadRowParams<'a> {
@@ -1699,7 +2051,10 @@ struct ProjectThreadRowParams<'a> {
     enabled: bool,
     runtime_status: Option<&'a ThreadRuntimeStatus>,
     hovered: bool,
+    cursored: bool,
+    tree_focused: bool,
     thread_key: String,
+    top_gap: f32,
 }
 
 fn project_thread_row(
@@ -1715,20 +2070,19 @@ fn project_thread_row(
         enabled,
         runtime_status,
         hovered,
+        cursored,
+        tree_focused,
         thread_key,
+        top_gap,
     } = params;
-    let session_path = session.path.clone();
     let click_project = project_path.clone();
-    let click_session = session_path.clone();
-    let key_project = project_path.clone();
-    let key_session = session_path.clone();
+    let click_session = session.path.clone();
     let trash_project = project_path;
-    let trash_session = session_path;
+    let trash_session = session.path.clone();
     let hover_key = thread_key.clone();
     let click_root = cx.entity();
-    let key_root = click_root.clone();
-    let hover_root = click_root.clone();
     let trash_root = click_root.clone();
+    let hover_root = click_root.clone();
     let title = sidebar_thread_title(
         session.name.as_deref(),
         session.first_user_summary.as_deref(),
@@ -1755,23 +2109,30 @@ fn project_thread_row(
         session.id
     ));
 
+    let row_bg = if selected {
+        theme::panel_lift()
+    } else if hovered {
+        theme::panel()
+    } else {
+        gpui::rgba(0x0000_0000)
+    };
+    let row_border = cursor_border(cursored, tree_focused, selected);
+
     div()
         .id(row_id)
-        .h(px(34.0))
-        .pl(px(32.0))
-        .pr(px(10.0))
+        .h(px(TREE_ROW_H))
+        .mt(px(top_gap))
+        .pl(px(28.0))
+        .pr(px(8.0))
         .relative()
+        .rounded(px(theme::RADIUS))
+        .border_1()
+        .border_color(row_border)
+        .bg(row_bg)
         .flex()
         .flex_row()
         .items_center()
         .gap(px(8.0))
-        .bg(if selected {
-            theme::panel_lift()
-        } else if hovered {
-            theme::panel()
-        } else {
-            gpui::rgba(0x0000_0000)
-        })
         .on_hover(move |hovered, _, cx| {
             let key = hover_key.clone();
             hover_root.update(cx, |view, cx| {
@@ -1782,22 +2143,9 @@ fn project_thread_row(
                 }
             });
         })
-        .when(selected, |row| {
-            row.child(
-                div()
-                    .absolute()
-                    .left_0()
-                    .top(px(8.0))
-                    .bottom(px(8.0))
-                    .w(px(2.0))
-                    .bg(theme::signal()),
-            )
-        })
         .when(enabled && !selected, |row| {
-            row.tab_index(0)
-                .cursor_pointer()
+            row.cursor_pointer()
                 .active(|row| row.bg(theme::panel_hover()))
-                .focus(|row| row.bg(theme::panel_lift()).text_color(theme::focus()))
                 .on_click(move |_, window, cx| {
                     click_root.update(cx, |view, cx| {
                         if active_project {
@@ -1811,23 +2159,6 @@ fn project_thread_row(
                             );
                         }
                     });
-                })
-                .on_key_down(move |event: &gpui::KeyDownEvent, window, cx| {
-                    if matches!(event.keystroke.key.as_str(), "enter" | "space") {
-                        cx.stop_propagation();
-                        key_root.update(cx, |view, cx| {
-                            if active_project {
-                                view.switch_session(key_session.clone(), window, cx);
-                            } else {
-                                view.activate_project(
-                                    key_project.clone(),
-                                    Some(key_session.clone()),
-                                    window,
-                                    cx,
-                                );
-                            }
-                        });
-                    }
                 })
         })
         .child(
@@ -1905,11 +2236,15 @@ fn project_thread_row(
                             .justify_center()
                             .tab_index(0)
                             .cursor_pointer()
-                            .hover(|button| button.bg(theme::canvas()))
+                            .tooltip(controls::text_tooltip(
+                                "Move thread to the Recycle Bin",
+                                None::<&str>,
+                            ))
+                            .hover(|button| button.bg(theme::error_wash()))
                             .active(|button| button.bg(theme::panel_hover()))
                             .focus(|button| {
                                 button
-                                    .bg(theme::canvas())
+                                    .bg(theme::error_wash())
                                     .border_1()
                                     .border_color(theme::focus())
                             })
@@ -2084,42 +2419,6 @@ fn compact_session_timestamp(timestamp: &str) -> String {
         return timestamp.to_owned();
     }
     format!("{day}, {time}")
-}
-
-fn project_tree_loading_note(animation_key: usize, text: &'static str) -> AnyElement {
-    div()
-        .h(px(32.0))
-        .pl(px(32.0))
-        .pr(px(12.0))
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap(px(8.0))
-        .font_family(theme::sans())
-        .text_size(theme::text_size(theme::T_TINY))
-        .text_color(theme::smoke())
-        .child(controls::square_status_indicator(
-            animation_key.wrapping_add(1),
-            true,
-            Duration::from_millis(900),
-            theme::working(),
-        ))
-        .child(text)
-        .into_any_element()
-}
-
-fn project_tree_note(text: impl Into<SharedString>) -> AnyElement {
-    div()
-        .h(px(32.0))
-        .pl(px(32.0))
-        .pr(px(12.0))
-        .flex()
-        .items_center()
-        .font_family(theme::sans())
-        .text_size(theme::text_size(theme::T_TINY))
-        .text_color(theme::smoke())
-        .child(text.into())
-        .into_any_element()
 }
 
 pub(super) struct HistoryPanelParams<'a> {
@@ -2485,6 +2784,7 @@ pub(super) fn history_panel(
 mod tests {
     use super::*;
     use crate::state::runtime::CompactionKind;
+    use std::path::PathBuf;
 
     fn runtime_status(
         lifecycle: RuntimeLifecycle,
@@ -2518,6 +2818,160 @@ mod tests {
         assert_eq!(
             status,
             TitlebarStatus::new("Opening thread", TitlebarStatusTone::Working, true)
+        );
+    }
+
+    fn project_slice(
+        path: &str,
+        expanded: bool,
+        sessions: Vec<(&str, &str)>,
+        error: Option<&str>,
+        corrupt: usize,
+        status: CatalogStatus,
+    ) -> SidebarProjectSlice {
+        SidebarProjectSlice {
+            path: PathBuf::from(path),
+            expanded,
+            status,
+            sessions: Arc::new(
+                sessions
+                    .into_iter()
+                    .map(|(id, path)| SessionSummary::test_stub(id, PathBuf::from(path)))
+                    .collect(),
+            ),
+            error: error.map(str::to_owned),
+            corrupt_count: corrupt,
+        }
+    }
+
+    #[test]
+    fn sidebar_rows_flatten_projects_threads_and_notes() {
+        let rows = sidebar_rows(&[
+            project_slice(
+                "p1",
+                true,
+                vec![("s1", "p1/a.jsonl"), ("s2", "p1/b.jsonl")],
+                None,
+                0,
+                CatalogStatus::Ready,
+            ),
+            project_slice("p2", false, vec![], None, 0, CatalogStatus::Ready),
+            project_slice(
+                "p3",
+                true,
+                vec![],
+                Some("unreadable"),
+                2,
+                CatalogStatus::Inaccessible,
+            ),
+        ]);
+        let projects: Vec<_> = rows
+            .iter()
+            .filter_map(|row| match row {
+                SidebarRow::Node(SidebarNode::Project(path)) => Some(path.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            projects,
+            [
+                PathBuf::from("p1"),
+                PathBuf::from("p2"),
+                PathBuf::from("p3")
+            ]
+        );
+        let threads: Vec<_> = rows
+            .iter()
+            .filter_map(|row| match row {
+                SidebarRow::Node(SidebarNode::Thread { session, .. }) => Some(session.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            threads,
+            [PathBuf::from("p1/a.jsonl"), PathBuf::from("p1/b.jsonl")]
+        );
+        // Collapsed p2 emits no note; p3 lists note, error, then corrupt count.
+        assert_eq!(rows.len(), 8, "unexpected row layout: {rows:?}");
+        assert!(matches!(
+            &rows[5],
+            SidebarRow::Note {
+                note: SidebarNote::Unavailable,
+                ..
+            }
+        ));
+        assert!(matches!(
+            &rows[6],
+            SidebarRow::Error { message, .. } if message == "unreadable"
+        ));
+        assert!(matches!(
+            &rows[7],
+            SidebarRow::Note {
+                note: SidebarNote::Corrupt(2),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn sidebar_cursor_skips_notes_and_clamps_at_ends() {
+        let rows = sidebar_rows(&[
+            project_slice(
+                "p1",
+                true,
+                vec![("s1", "p1/a.jsonl")],
+                None,
+                0,
+                CatalogStatus::Ready,
+            ),
+            project_slice("p2", true, vec![], None, 0, CatalogStatus::Loading),
+            project_slice("p3", false, vec![], None, 0, CatalogStatus::Empty),
+        ]);
+        let first = SidebarNode::Project(PathBuf::from("p1"));
+        let thread = SidebarNode::Thread {
+            project: PathBuf::from("p1"),
+            session: PathBuf::from("p1/a.jsonl"),
+        };
+        let second = SidebarNode::Project(PathBuf::from("p2"));
+        let last = SidebarNode::Project(PathBuf::from("p3"));
+
+        assert_eq!(
+            sidebar_moved_cursor(&rows, None, SidebarCursorMove::Next).map(|(node, _)| node),
+            Some(first.clone())
+        );
+        assert_eq!(
+            sidebar_moved_cursor(&rows, None, SidebarCursorMove::Previous).map(|(node, _)| node),
+            Some(last.clone())
+        );
+        // From the thread, Next must pass over the loading note row: node is
+        // p2's project but the scroll slot is 2, not the note's 3.
+        let (node, slot) =
+            sidebar_moved_cursor(&rows, Some(&thread), SidebarCursorMove::Next).unwrap();
+        assert_eq!(node, second);
+        assert_eq!(slot, 2);
+        // Ends clamp instead of wrapping.
+        assert_eq!(
+            sidebar_moved_cursor(&rows, Some(&last), SidebarCursorMove::Next).map(|(node, _)| node),
+            Some(last.clone())
+        );
+        assert_eq!(
+            sidebar_moved_cursor(&rows, Some(&first), SidebarCursorMove::Previous)
+                .map(|(node, _)| node),
+            Some(first.clone())
+        );
+        // A cursor pointing at a removed row reseeds from the edge.
+        assert_eq!(
+            sidebar_moved_cursor(
+                &rows,
+                Some(&SidebarNode::Project(PathBuf::from("gone"))),
+                SidebarCursorMove::First,
+            )
+            .map(|(node, _)| node),
+            Some(first)
+        );
+        assert_eq!(
+            sidebar_moved_cursor(&[], Some(&last), SidebarCursorMove::First),
+            None
         );
     }
 

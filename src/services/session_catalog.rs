@@ -89,6 +89,25 @@ pub struct SessionCounts {
     pub branches: u64,
 }
 
+impl SessionSummary {
+    /// Synthetic row for view-layer tests that must not touch the filesystem.
+    #[cfg(test)]
+    pub(crate) fn test_stub(id: &str, path: PathBuf) -> Self {
+        Self {
+            id: id.to_owned(),
+            name: Some(id.to_owned()),
+            first_user_summary: None,
+            created_at: "2026-01-02T03:04:05.000Z".to_owned(),
+            updated_at: "2026-01-02T03:04:05.000Z".to_owned(),
+            parent_session: None,
+            path,
+            version: 3,
+            counts: SessionCounts::default(),
+            modified_sort_key: 0,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionSummary {
     pub id: String,

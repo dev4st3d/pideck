@@ -132,6 +132,11 @@ impl Render for RootView {
                             history_open: self.history_open,
                             sidebar_open: self.sidebar_open,
                             sidebar_motion_key: self.sidebar_motion_key,
+                            cursor: self.sidebar_cursor.as_ref(),
+                            // Strong cursor ring is keyboard-only (:focus-visible).
+                            tree_focused: self.sidebar_tree_focus.is_focused(window)
+                                && !self.sidebar_tree_pointer_focus,
+                            tree_focus: &self.sidebar_tree_focus,
                             scroll: &self.sessions_scroll,
                         },
                         cx,

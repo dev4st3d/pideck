@@ -50,7 +50,7 @@ use crate::resource_center::{
 use crate::services::app_update::{self, CheckOutcome, InstallOutcome};
 use crate::services::git_diff::{WorkspaceDiff, load_workspace_diff};
 use crate::services::projects::{
-    AddProjectOutcome, ProjectEntry, ProjectRegistry, ProjectRegistryError, project_key,
+    AddProjectOutcome, ProjectRegistry, ProjectRegistryError, project_key,
 };
 use crate::services::session_catalog::{
     SessionCatalogConfig, SessionSummary, scan_sessions, trash_session_file,
@@ -439,6 +439,13 @@ pub struct RootView {
     sidebar_open: bool,
     /// Bumps on each toggle so width animation only runs after user action.
     sidebar_motion_key: u64,
+    /// Roving keyboard cursor inside the workspace tree (None until navigated).
+    sidebar_cursor: Option<shell::SidebarNode>,
+    /// Focus for the sidebar's single tree tab stop.
+    sidebar_tree_focus: FocusHandle,
+    /// True when the tree last took focus from the pointer: the strong focus
+    /// ring is keyboard-only (like :focus-visible on the web).
+    sidebar_tree_pointer_focus: bool,
     /// Bottom workspace terminal visibility.
     terminal_open: bool,
     /// User-adjusted terminal panel height in logical pixels.
@@ -832,6 +839,9 @@ impl RootView {
             history_open: false,
             sidebar_open: true,
             sidebar_motion_key: 0,
+            sidebar_cursor: None,
+            sidebar_tree_pointer_focus: false,
+            sidebar_tree_focus: cx.focus_handle(),
             terminal_open: false,
             terminal_height: 260.0,
             terminal_drag_origin: None,
@@ -902,13 +912,18 @@ impl RootView {
         cx.notify();
     }
 
-    fn toggle_sidebar(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+    fn toggle_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.sidebar_open = !self.sidebar_open;
         self.sidebar_motion_key = self.sidebar_motion_key.wrapping_add(1);
         if !self.sidebar_open {
             // History sits beside the workspace list; hide it when the rail closes.
             self.history_open = false;
             self.history_confirmation = None;
+            self.hovered_thread_key = None;
+            // Never leave focus parked on chrome that just became invisible.
+            if self.sidebar_tree_focus.is_focused(window) {
+                window.focus(&self.focus_handle);
+            }
         }
         cx.notify();
     }
@@ -928,6 +943,155 @@ impl RootView {
         }
         self.sidebar_open = true;
         self.sidebar_motion_key = self.sidebar_motion_key.wrapping_add(1);
+    }
+
+    /// Painted workspace rows in scroll order; shared with the sidebar render
+    /// pass so the keyboard cursor can never address a row that is not visible.
+    fn sidebar_rows(&self) -> Vec<shell::SidebarRow> {
+        let slices = shell::sidebar_project_slices(
+            &self.projects,
+            &self.render_projections.catalog,
+            &self.project_catalogs,
+        );
+        shell::sidebar_rows(&slices)
+    }
+
+    /// The tree's single tab stop routes all of its keys here.
+    fn on_workspace_tree_key(
+        &mut self,
+        event: &gpui::KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // Any key dismisses pointer modality; the ring returns to the
+        // keyboard-driven focus color.
+        self.sidebar_tree_pointer_focus = false;
+        match event.keystroke.key.as_str() {
+            "down" => self.move_sidebar_cursor(shell::SidebarCursorMove::Next, cx),
+            "up" => self.move_sidebar_cursor(shell::SidebarCursorMove::Previous, cx),
+            "home" => self.move_sidebar_cursor(shell::SidebarCursorMove::First, cx),
+            "end" => self.move_sidebar_cursor(shell::SidebarCursorMove::Last, cx),
+            "left" => self.collapse_sidebar_cursor(cx),
+            "right" => self.expand_sidebar_cursor(cx),
+            "enter" | "space" => self.activate_sidebar_cursor(window, cx),
+            "delete" | "backspace" => self.trash_sidebar_cursor(cx),
+            _ => return,
+        }
+        cx.stop_propagation();
+    }
+
+    fn move_sidebar_cursor(&mut self, movement: shell::SidebarCursorMove, cx: &mut Context<Self>) {
+        let rows = self.sidebar_rows();
+        let Some((node, slot)) =
+            shell::sidebar_moved_cursor(&rows, self.sidebar_cursor.as_ref(), movement)
+        else {
+            return;
+        };
+        if self.sidebar_cursor.as_ref() != Some(&node) {
+            self.sidebar_cursor = Some(node);
+            cx.notify();
+        }
+        self.sessions_scroll.scroll_to_item(slot);
+    }
+
+    fn expand_sidebar_cursor(&mut self, cx: &mut Context<Self>) {
+        let Some(shell::SidebarNode::Project(path)) = self.sidebar_cursor.clone() else {
+            return;
+        };
+        let expanded = self
+            .projects
+            .projects()
+            .iter()
+            .find(|project| project_key(&project.path) == project_key(&path))
+            .is_some_and(|project| project.expanded);
+        if expanded {
+            // Already open: step down into the first child (or the next node).
+            self.move_sidebar_cursor(shell::SidebarCursorMove::Next, cx);
+        } else {
+            self.set_project_expanded(path, true, cx);
+        }
+    }
+
+    fn collapse_sidebar_cursor(&mut self, cx: &mut Context<Self>) {
+        let Some(node) = self.sidebar_cursor.clone() else {
+            return;
+        };
+        match node {
+            shell::SidebarNode::Project(path) => {
+                let expanded = self
+                    .projects
+                    .projects()
+                    .iter()
+                    .find(|project| project_key(&project.path) == project_key(&path))
+                    .is_some_and(|project| project.expanded);
+                if expanded {
+                    self.set_project_expanded(path, false, cx);
+                }
+            }
+            shell::SidebarNode::Thread { project, .. } => {
+                self.sidebar_cursor = Some(shell::SidebarNode::Project(project));
+                cx.notify();
+            }
+        }
+    }
+
+    fn activate_sidebar_cursor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(node) = self.sidebar_cursor.clone() else {
+            return;
+        };
+        match node {
+            shell::SidebarNode::Project(path) => self.activate_project(path, None, window, cx),
+            shell::SidebarNode::Thread { project, session } => {
+                if self.projects.is_active(&project) {
+                    self.switch_session(session, window, cx);
+                } else {
+                    self.activate_project(project, Some(session), window, cx);
+                }
+            }
+        }
+    }
+
+    /// Delete in the tree uses the same guard rails as hover-only trash chrome.
+    fn trash_sidebar_cursor(&mut self, cx: &mut Context<Self>) {
+        let Some(shell::SidebarNode::Thread { project, session }) = self.sidebar_cursor.clone()
+        else {
+            return;
+        };
+        if !self.sidebar_thread_deletable(&project, &session) {
+            return;
+        }
+        self.trash_thread(project, session, cx);
+    }
+
+    fn sidebar_thread_deletable(
+        &self,
+        project: &std::path::Path,
+        session: &std::path::Path,
+    ) -> bool {
+        if !crate::services::session_catalog::reversible_trash_available() {
+            return false;
+        }
+        let catalog = &self.render_projections.catalog;
+        let selected = self.projects.is_active(project)
+            && catalog
+                .pending_session_file
+                .as_ref()
+                .or(catalog.current_session_file.as_ref())
+                .is_some_and(|path| project_key(path) == project_key(session));
+        if selected {
+            return false;
+        }
+        match self.thread_statuses().get(&project_key(session)) {
+            Some(status) if status.active => false,
+            Some(status) => !matches!(
+                status.activity,
+                ThreadActivity::Opening
+                    | ThreadActivity::Working
+                    | ThreadActivity::Cancelling
+                    | ThreadActivity::Attention
+            ),
+            None => true,
+        }
     }
 
     fn set_terminal_open(&mut self, open: bool, window: &mut Window, cx: &mut Context<Self>) {
@@ -3951,10 +4115,19 @@ impl RootView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Mouse and keyboard share this path: keep the tree cursor in sync.
+        self.sidebar_cursor = Some(match &session {
+            Some(session) => shell::SidebarNode::Thread {
+                project: path.clone(),
+                session: session.clone(),
+            },
+            None => shell::SidebarNode::Project(path.clone()),
+        });
         if self.projects.is_active(&path) && session.is_none() {
             self.toggle_project(path, cx);
             return;
         }
+        cx.notify();
         let preferred_session = session.or_else(|| {
             self.projects
                 .projects()
@@ -4045,6 +4218,11 @@ impl RootView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.sidebar_cursor = Some(shell::SidebarNode::Thread {
+            project: self.projects.active_path().to_path_buf(),
+            session: path.clone(),
+        });
+        cx.notify();
         let _ = self.open_thread(
             self.projects.active_path().to_path_buf(),
             Some(path),
@@ -4191,6 +4369,15 @@ impl RootView {
         }
 
         self.hovered_thread_key = None;
+        // Let the keyboard cursor land on the trashed thread's project, not a
+        // row that no longer exists.
+        if matches!(
+            &self.sidebar_cursor,
+            Some(shell::SidebarNode::Thread { session, .. })
+                if project_key(session) == session_key
+        ) {
+            self.sidebar_cursor = Some(shell::SidebarNode::Project(project_path.clone()));
+        }
         self.project_feedback = Some("Thread moved to the Recycle Bin.".to_owned());
         cx.notify();
     }
@@ -5015,6 +5202,8 @@ impl RootView {
     }
 
     fn on_focus_next(&mut self, _: &FocusNext, window: &mut Window, cx: &mut Context<Self>) {
+        // Tab traversal counts as keyboard intent for the sidebar tree ring.
+        self.sidebar_tree_pointer_focus = false;
         if self.render_projections.models.auth.is_some() {
             window.focus(&self.provider_auth_focus);
             return;
@@ -5065,6 +5254,7 @@ impl RootView {
             window.focus(&self.compaction_composer.read(cx).focus_handle(cx));
             return;
         }
+        self.sidebar_tree_pointer_focus = false;
         window.focus_prev();
     }
 
