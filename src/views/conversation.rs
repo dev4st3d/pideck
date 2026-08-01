@@ -8,10 +8,9 @@ use std::time::Duration;
 
 use gpui::{
     Animation, AnimationExt, AnyElement, App, ClipboardItem, Context, CursorStyle, Entity,
-    FocusHandle, Focusable, FontStyle, FontWeight, HighlightStyle, IntoElement, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Render, SharedString, StrikethroughStyle,
-    StyledText, TextLayout, TextRun, TextStyle, UnderlineStyle, Window, div, ease_out_quint,
-    prelude::*, pulsating_between, px, relative, svg,
+    FocusHandle, Focusable, FontWeight, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, Pixels, Render, SharedString, StyledText, TextLayout, Window, div,
+    ease_out_quint, prelude::*, pulsating_between, px, relative, svg,
 };
 
 use crate::actions::{TranscriptCopy, TranscriptSelectAll};
@@ -23,9 +22,9 @@ use crate::state::runtime::{
     ToolImage, sanitize_untrusted_text,
 };
 use crate::theme;
-use crate::views::markdown::{
-    MarkdownBlock, MarkdownDocument, MarkdownStyle, MarkdownTable, ProseBlock, TableAlign,
-};
+use crate::views::controls::ClickHandler;
+use crate::views::markdown::MarkdownDocument;
+use crate::views::markdown::render::{self, LeafInfo, LeafPoint};
 use crate::views::tool_card::{
     CardStatus, ToolPresentation, presentation_for_bash_block, presentation_for_standalone_result,
     presentation_for_tool_call, render_tool_presentation, status_color, tail_presentations,
@@ -38,6 +37,8 @@ pub(super) use list::{ConversationDiffSummary, ConversationListModel, Conversati
 pub(super) use scroll::ConversationScrollMotion;
 
 const MAX_CACHED_TRANSCRIPT_BLOCKS: usize = 256;
+/// How long a code card's copy button stays in its acknowledged state.
+const COPIED_FEEDBACK_MS: u64 = 1_600;
 /// Open/close motion for the activity history disclosure.
 const DISCLOSURE_MOTION_MS: u64 = 210;
 /// Estimated row height used only while the disclosure is mid-animation.
@@ -401,8 +402,19 @@ pub(super) struct TranscriptText {
     /// Cached `document.plain_text()` for selection and copy math; recomputed
     /// only when the source text changes, not per pointer event.
     plain: String,
+    /// Sole-prose selection, a byte range into `plain`.
     selection: Range<usize>,
     selection_reversed: bool,
+    /// Multi-block selection endpoints `(leaf, byte offset)` into the
+    /// render-ordered `leaves`; equal endpoints mean no selection.
+    anchor: LeafPoint,
+    head: LeafPoint,
+    /// Text leaves captured by the latest multi-block render.
+    leaves: Vec<LeafInfo>,
+    /// Code card currently acknowledging a copy, tagged with a generation so
+    /// the reset timer does not clear a newer press.
+    copied: Option<usize>,
+    copy_generation: u64,
     is_selecting: bool,
     focus_handle: FocusHandle,
     layout: Option<TextLayout>,
@@ -419,6 +431,11 @@ impl TranscriptText {
             document,
             selection: 0..0,
             selection_reversed: false,
+            anchor: (0, 0),
+            head: (0, 0),
+            leaves: Vec::new(),
+            copied: None,
+            copy_generation: 0,
             is_selecting: false,
             focus_handle: cx.focus_handle(),
             layout: None,
@@ -443,9 +460,14 @@ impl TranscriptText {
         if self.selection.is_empty() {
             self.selection_reversed = false;
         }
+        // Block selection cannot survive a re-parse; leaf order may shift.
+        self.anchor = (0, 0);
+        self.head = (0, 0);
+        self.copied = None;
         self.source_hash = next_hash;
         self.sole_text = sole_text;
         self.document = document;
+        self.leaves.clear();
         self.layout = None;
         cx.notify();
     }
@@ -457,27 +479,43 @@ impl TranscriptText {
         cx: &mut Context<Self>,
     ) {
         window.focus(&self.focus_handle);
-        if !self.document.is_selectable_prose() {
+        self.is_selecting = true;
+        if self.document.is_selectable_prose() {
+            let offset = self.index_for_position(event.position);
+            if event.modifiers.shift {
+                self.select_to(offset);
+            } else {
+                self.selection = offset..offset;
+                self.selection_reversed = false;
+            }
+        } else if !self.leaves.is_empty() {
+            let point = self.leaf_point_at(event.position);
+            if event.modifiers.shift {
+                self.head = point;
+            } else {
+                self.anchor = point;
+                self.head = point;
+            }
+        } else {
             self.is_selecting = false;
             return;
-        }
-        self.is_selecting = true;
-        let offset = self.index_for_position(event.position);
-        if event.modifiers.shift {
-            self.select_to(offset);
-        } else {
-            self.selection = offset..offset;
-            self.selection_reversed = false;
         }
         cx.notify();
     }
 
     fn on_mouse_move(&mut self, event: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
-        if self.is_selecting && event.dragging() && self.document.is_selectable_prose() {
+        if !(self.is_selecting && event.dragging()) {
+            return;
+        }
+        if self.document.is_selectable_prose() {
             let offset = self.index_for_position(event.position);
             self.select_to(offset);
-            cx.notify();
+        } else if !self.leaves.is_empty() {
+            self.head = self.leaf_point_at(event.position);
+        } else {
+            return;
         }
+        cx.notify();
     }
 
     fn on_mouse_up(&mut self, _: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
@@ -496,8 +534,12 @@ impl TranscriptText {
             }
             return;
         }
-        if !self.plain.is_empty() {
-            cx.write_to_clipboard(ClipboardItem::new_string(self.plain.clone()));
+        // Without an active block selection, copy the whole message.
+        let text = self
+            .selected_leaf_text()
+            .unwrap_or_else(|| self.plain.clone());
+        if !text.is_empty() {
+            cx.write_to_clipboard(ClipboardItem::new_string(text));
         }
     }
 
@@ -508,10 +550,16 @@ impl TranscriptText {
             cx.notify();
             return;
         }
-        // Multi-block documents copy everything on Select All via clipboard.
+        if let Some((last, leaf)) = self.leaves.iter().enumerate().next_back() {
+            // Highlight all leaves, and copy the full plain text right away:
+            // leaf selections cannot span non-text blocks such as tables.
+            self.anchor = (0, 0);
+            self.head = (last, leaf.text.len());
+        }
         if !self.plain.is_empty() {
             cx.write_to_clipboard(ClipboardItem::new_string(self.plain.clone()));
         }
+        cx.notify();
     }
 
     fn select_to(&mut self, offset: usize) {
@@ -532,6 +580,88 @@ impl TranscriptText {
             .index_for_position(position)
             .unwrap_or_else(|nearest| nearest);
         clamp_boundary(&self.plain, index)
+    }
+
+    /// Nearest selectable leaf for a mouse position. Leaves stack in render
+    /// order: `Err(0)` is above a leaf, any other `Err` is past its end (or
+    /// past a line end), so the last "below" hit is the nearest block.
+    fn leaf_point_at(&self, position: gpui::Point<Pixels>) -> LeafPoint {
+        let mut below: Option<LeafPoint> = None;
+        for (index, leaf) in self.leaves.iter().enumerate() {
+            match leaf.layout.index_for_position(position) {
+                Ok(offset) => return (index, clamp_boundary(&leaf.text, offset)),
+                Err(0) => return below.unwrap_or((index, 0)),
+                Err(offset) => below = Some((index, clamp_boundary(&leaf.text, offset))),
+            }
+        }
+        below.unwrap_or((0, 0))
+    }
+
+    /// Ordered block selection; `None` when collapsed.
+    fn normalized_block_selection(&self) -> Option<(LeafPoint, LeafPoint)> {
+        if self.anchor == self.head {
+            return None;
+        }
+        if self.anchor <= self.head {
+            Some((self.anchor, self.head))
+        } else {
+            Some((self.head, self.anchor))
+        }
+    }
+
+    /// Selected text across leaves; items of one list join with a newline,
+    /// everything else with a blank line.
+    fn selected_leaf_text(&self) -> Option<String> {
+        let (start, end) = self.normalized_block_selection()?;
+        let mut text = String::new();
+        let mut previous_key = None;
+        for index in start.0..=end.0 {
+            let Some(leaf) = self.leaves.get(index) else {
+                break;
+            };
+            let lo = if index == start.0 { start.1 } else { 0 };
+            let hi = if index == end.0 {
+                end.1
+            } else {
+                leaf.text.len()
+            };
+            let lo = clamp_boundary(&leaf.text, lo.min(leaf.text.len()));
+            let hi = clamp_boundary(&leaf.text, hi.min(leaf.text.len()));
+            if lo >= hi {
+                continue;
+            }
+            if !text.is_empty() {
+                text.push_str(
+                    if leaf.list_key.is_some() && leaf.list_key == previous_key {
+                        "\n"
+                    } else {
+                        "\n\n"
+                    },
+                );
+            }
+            previous_key = leaf.list_key;
+            text.push_str(&leaf.text[lo..hi]);
+        }
+        (!text.is_empty()).then_some(text)
+    }
+
+    fn note_code_copied(&mut self, slot: usize, cx: &mut Context<Self>) {
+        self.copied = Some(slot);
+        self.copy_generation = self.copy_generation.wrapping_add(1);
+        let generation = self.copy_generation;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(COPIED_FEEDBACK_MS))
+                .await;
+            let _ = this.update(cx, |view, cx| {
+                if view.copy_generation == generation {
+                    view.copied = None;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+        cx.notify();
     }
 }
 
@@ -563,23 +693,39 @@ impl Render for TranscriptText {
         let content = if let (Some(prose), Some(sole_text)) =
             (self.document.sole_prose(), self.sole_text.as_ref())
         {
-            let runs = markdown_runs(prose, self.selection.clone(), &default_style);
+            let base_font_px = default_style.font_size.to_pixels(window.rem_size()).into();
+            let runs =
+                render::text_runs(prose, self.selection.clone(), &default_style, base_font_px);
             let text = StyledText::new(sole_text.clone()).with_runs(runs);
             self.layout = Some(text.layout().clone());
             text.into_any_element()
         } else {
             self.layout = None;
-            div()
-                .w_full()
-                .flex()
-                .flex_col()
-                .gap(px(12.0))
-                .children(self.document.blocks.iter().map(|block| match block {
-                    MarkdownBlock::Prose(prose) => prose_element(prose, &default_style),
-                    MarkdownBlock::Table(table) => render_markdown_table(table),
-                }))
-                .into_any_element()
+            let base_font_px = default_style.font_size.to_pixels(window.rem_size()).into();
+            let selection = self.normalized_block_selection();
+            let copied = self.copied;
+            let this = cx.entity().downgrade();
+            let copy_code = move |slot: usize, code: String| -> ClickHandler {
+                let this = this.clone();
+                Box::new(move |_, _, cx| {
+                    cx.write_to_clipboard(ClipboardItem::new_string(code.clone()));
+                    let _ = this.update(cx, |view, cx| view.note_code_copied(slot, cx));
+                })
+            };
+            let id = self.id.clone();
+            let options = render::MarkdownRenderOptions {
+                default_style: &default_style,
+                base_font_px,
+                selection,
+                copied,
+                copy_code: &copy_code,
+                id_prefix: &id,
+            };
+            let (element, leaves) = render::render_document(&self.document.blocks, &options);
+            self.leaves = leaves;
+            element
         };
+        let selectable = selectable || !self.leaves.is_empty();
 
         div()
             .id(self.id.clone())
@@ -601,340 +747,6 @@ impl Render for TranscriptText {
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .child(content)
-    }
-}
-
-fn prose_element(prose: &ProseBlock, default_style: &TextStyle) -> AnyElement {
-    if prose.text.is_empty() {
-        return div().into_any_element();
-    }
-    let runs = markdown_runs(prose, 0..0, default_style);
-    div()
-        .w_full()
-        .child(StyledText::new(prose.text.clone()).with_runs(runs))
-        .into_any_element()
-}
-
-fn render_markdown_table(table: &MarkdownTable) -> AnyElement {
-    let columns = table.column_count();
-    if columns == 0 {
-        return div().into_any_element();
-    }
-
-    let header = if table.headers.is_empty() {
-        None
-    } else {
-        Some(
-            div()
-                .w_full()
-                .flex()
-                .flex_row()
-                .items_center()
-                .bg(theme::panel_lift())
-                .border_b_1()
-                .border_color(theme::edge_soft())
-                .children((0..columns).map(|column| {
-                    table_cell(
-                        table.cell(&table.headers, column),
-                        table
-                            .alignments
-                            .get(column)
-                            .copied()
-                            .unwrap_or(TableAlign::None),
-                        column,
-                        columns,
-                        true,
-                        false,
-                    )
-                })),
-        )
-    };
-
-    let body_rows = table.rows.iter().enumerate().map(|(row_index, row)| {
-        let last = row_index + 1 == table.rows.len();
-        let zebra = row_index % 2 == 1;
-        div()
-            .w_full()
-            .flex()
-            .flex_row()
-            .items_center()
-            .when(zebra, |row| row.bg(theme::floor()))
-            .when(!last, |row| {
-                row.border_b_1().border_color(theme::edge_soft())
-            })
-            .children((0..columns).map(|column| {
-                table_cell(
-                    table.cell(row, column),
-                    table
-                        .alignments
-                        .get(column)
-                        .copied()
-                        .unwrap_or(TableAlign::None),
-                    column,
-                    columns,
-                    false,
-                    column == 0,
-                )
-            }))
-    });
-
-    div()
-        .w_full()
-        .min_w_0()
-        .rounded(px(theme::RADIUS))
-        .border_1()
-        .border_color(theme::edge_soft())
-        .bg(theme::panel())
-        .overflow_hidden()
-        .children(header)
-        .children(body_rows)
-        .into_any_element()
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TableStatusTone {
-    Positive,
-    Caution,
-    Negative,
-    Neutral,
-}
-
-fn table_status_tone(value: &str) -> Option<TableStatusTone> {
-    match value.trim().to_ascii_lowercase().as_str() {
-        "yes" | "true" | "ok" | "current" | "ready" | "enabled" => Some(TableStatusTone::Positive),
-        "mostly" | "partial" | "partially" | "mixed" | "warn" | "warning" => {
-            Some(TableStatusTone::Caution)
-        }
-        "no" | "false" | "error" | "failed" | "disabled" => Some(TableStatusTone::Negative),
-        "n/a" | "na" | "none" | "unknown" | "—" | "-" => Some(TableStatusTone::Neutral),
-        _ => None,
-    }
-}
-
-fn table_cell(
-    value: &str,
-    align: TableAlign,
-    column: usize,
-    columns: usize,
-    header: bool,
-    prefer_mono: bool,
-) -> AnyElement {
-    let last = column + 1 == columns;
-    let mono =
-        prefer_mono && !header && value.chars().any(|ch| matches!(ch, '/' | '_' | '.' | ':'));
-    let status = (!header).then(|| table_status_tone(value)).flatten();
-    // Last column of wider tables stays compact (status chips); body columns share space.
-    let compact = columns >= 3 && last;
-
-    let mut cell = div()
-        .when(compact, |cell| cell.flex_shrink_0().w(px(104.0)))
-        .when(!compact, |cell| {
-            cell.flex_1()
-                .min_w(px(if column == 0 { 120.0 } else { 140.0 }))
-        })
-        .min_w_0()
-        .px(px(12.0))
-        .py(px(if header { 8.0 } else { 9.0 }))
-        .flex()
-        .flex_row()
-        .items_center();
-
-    cell = match align {
-        TableAlign::Center => cell.justify_center(),
-        TableAlign::Right => cell.justify_end(),
-        TableAlign::None | TableAlign::Left => cell.justify_start(),
-    };
-
-    if !last {
-        cell = cell.border_r_1().border_color(theme::edge_soft());
-    }
-
-    if let Some(tone) = status {
-        cell.child(status_chip(value, tone)).into_any_element()
-    } else {
-        cell.child(
-            div()
-                .w_full()
-                .min_w_0()
-                .font_family(if mono { theme::mono() } else { theme::sans() })
-                .text_size(theme::text_size(if mono {
-                    theme::T_MONO
-                } else {
-                    theme::T_UI_SM
-                }))
-                .font_weight(if header {
-                    FontWeight::SEMIBOLD
-                } else {
-                    FontWeight::NORMAL
-                })
-                .text_color(if header {
-                    theme::ash()
-                } else if mono {
-                    theme::bone_dim()
-                } else {
-                    theme::bone()
-                })
-                .line_height(relative(1.35))
-                .child(value.to_owned()),
-        )
-        .into_any_element()
-    }
-}
-
-fn status_chip(label: &str, tone: TableStatusTone) -> impl IntoElement {
-    let (fg, bg) = match tone {
-        TableStatusTone::Positive => (theme::live(), theme::live_wash()),
-        TableStatusTone::Caution => (theme::data(), theme::data_wash()),
-        TableStatusTone::Negative => (theme::error(), theme::error_wash()),
-        TableStatusTone::Neutral => (theme::smoke(), theme::panel_lift()),
-    };
-
-    div()
-        .px(px(7.0))
-        .py(px(2.0))
-        .rounded_full()
-        .bg(bg)
-        .font_family(theme::sans())
-        .text_size(theme::text_size(theme::T_TINY))
-        .font_weight(FontWeight::SEMIBOLD)
-        .text_color(fg)
-        .child(label.to_owned())
-}
-
-fn markdown_style_for_range(prose: &ProseBlock, range: &Range<usize>) -> MarkdownStyle {
-    prose
-        .spans
-        .iter()
-        .filter(|span| span.range.start <= range.start && span.range.end >= range.end)
-        .fold(MarkdownStyle::default(), |mut combined, span| {
-            combined.heading |= span.style.heading;
-            if span.style.heading_level > 0
-                && (combined.heading_level == 0
-                    || span.style.heading_level < combined.heading_level)
-            {
-                combined.heading_level = span.style.heading_level;
-            }
-            combined.strong |= span.style.strong;
-            combined.emphasis |= span.style.emphasis;
-            combined.code |= span.style.code;
-            combined.code_block |= span.style.code_block;
-            combined.link |= span.style.link;
-            combined.quote |= span.style.quote;
-            combined.strikethrough |= span.style.strikethrough;
-            combined.task_marker |= span.style.task_marker;
-            combined
-        })
-}
-
-/// Build text runs in one pass over the span/selection boundary windows:
-/// resolves each window's markdown flags and selection state together so a
-/// render does not fold the span list twice.
-fn markdown_runs(
-    prose: &ProseBlock,
-    selection: Range<usize>,
-    default_style: &TextStyle,
-) -> Vec<TextRun> {
-    let mut boundaries = Vec::with_capacity(prose.spans.len() * 2 + 4);
-    boundaries.push(0);
-    boundaries.push(prose.text.len());
-    for span in &prose.spans {
-        boundaries.push(span.range.start);
-        boundaries.push(span.range.end);
-    }
-    if !selection.is_empty() {
-        boundaries.push(selection.start);
-        boundaries.push(selection.end);
-    }
-    boundaries.sort_unstable();
-    boundaries.dedup();
-
-    let mut runs = Vec::new();
-    for window in boundaries.windows(2) {
-        let range = window[0]..window[1];
-        if range.is_empty() {
-            continue;
-        }
-        let markdown = markdown_style_for_range(prose, &range);
-        let selected =
-            !selection.is_empty() && selection.start <= range.start && selection.end >= range.end;
-        let highlight = highlight_style(markdown, selected);
-        let fully_default =
-            highlight == HighlightStyle::default() && !markdown.code && markdown.heading_level == 0;
-        if fully_default {
-            runs.push(default_style.to_run(range.len()));
-            continue;
-        }
-        let mut style = default_style.clone();
-        if highlight != HighlightStyle::default() {
-            style = style.highlight(highlight);
-        }
-        if markdown.code {
-            style.font_family = theme::mono();
-            style.font_size = theme::text_size(if markdown.code_block {
-                theme::T_MONO
-            } else {
-                theme::T_UI_SM
-            })
-            .into();
-        }
-        if markdown.heading_level > 0 {
-            style.font_size = theme::text_size(match markdown.heading_level {
-                1 => theme::T_WORDMARK,
-                2 => theme::T_BODY,
-                3 => theme::T_BODY_SM,
-                _ => theme::T_UI,
-            })
-            .into();
-        }
-        runs.push(style.to_run(range.len()));
-    }
-    runs
-}
-
-fn highlight_style(markdown: MarkdownStyle, selected: bool) -> HighlightStyle {
-    HighlightStyle {
-        color: if markdown.task_marker {
-            Some(theme::live().into())
-        } else if markdown.code_block {
-            Some(theme::bone_dim().into())
-        } else if markdown.code {
-            Some(theme::focus().into())
-        } else if markdown.link {
-            Some(theme::data().into())
-        } else if markdown.heading {
-            Some(theme::bone().into())
-        } else if markdown.quote {
-            Some(theme::ash().into())
-        } else {
-            None
-        },
-        font_weight: if markdown.heading {
-            Some(FontWeight::BOLD)
-        } else if markdown.strong {
-            Some(FontWeight::SEMIBOLD)
-        } else {
-            None
-        },
-        font_style: markdown.emphasis.then_some(FontStyle::Italic),
-        background_color: if selected {
-            Some(theme::data_wash().into())
-        } else if markdown.code_block {
-            Some(theme::panel().into())
-        } else if markdown.code {
-            Some(theme::panel_lift().into())
-        } else {
-            None
-        },
-        underline: markdown.link.then_some(UnderlineStyle {
-            thickness: px(1.0),
-            color: Some(theme::data().into()),
-            ..Default::default()
-        }),
-        strikethrough: markdown.strikethrough.then_some(StrikethroughStyle {
-            thickness: px(1.0),
-            color: Some(theme::smoke().into()),
-        }),
-        fade_out: None,
     }
 }
 
@@ -2798,7 +2610,8 @@ fn selectable(
     color: gpui::Rgba,
     weight: FontWeight,
 ) -> AnyElement {
-    selectable_with_leading(key, texts, font, size, color, weight, 1.58)
+    // Compact long-read rhythm; tighter than the shell's 1.58 chat default.
+    selectable_with_leading(key, texts, font, size, color, weight, 1.45)
 }
 
 fn prompt_selectable(key: &str, texts: &HashMap<String, Entity<TranscriptText>>) -> AnyElement {
