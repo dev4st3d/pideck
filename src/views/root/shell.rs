@@ -1175,8 +1175,6 @@ pub(super) fn sessions_panel(
                 .items_center()
                 .justify_between()
                 .gap(px(8.0))
-                .border_b_1()
-                .border_color(theme::edge_soft())
                 .child(
                     div()
                         .min_w_0()
@@ -1242,8 +1240,8 @@ pub(super) fn sessions_panel(
         .child(
             div()
                 .px(px(SIDE_PAD))
-                .pt(px(10.0))
-                .pb(px(8.0))
+                .pt(px(6.0))
+                .pb(px(10.0))
                 .flex()
                 .flex_col()
                 .gap(px(6.0))
@@ -1259,7 +1257,7 @@ pub(super) fn sessions_panel(
                         .flex()
                         .flex_row()
                         .items_center()
-                        .gap(px(6.0))
+                        .gap(px(2.0))
                         .child(sidebar_secondary_button(
                             "toggle-history-inline",
                             "History",
@@ -1568,48 +1566,39 @@ fn sidebar_header_icon_button(
         .child(svg().path(icon_path).size(px(13.0)).text_color(icon_color))
 }
 
+/// The primary composer entry: one tonal row, no frame. The terracotta plus
+/// is the only accent on the rail; the trailing mono hint teaches the `/new`
+/// command where the row's right edge was previously dead space.
 fn sidebar_new_thread_button(
     enabled: bool,
     sidebar_open: bool,
     cx: &mut Context<RootView>,
 ) -> impl IntoElement {
-    let icon_color = if enabled {
-        theme::signal()
-    } else {
-        theme::smoke()
-    };
+    let hover_group = SharedString::from("new-session");
     div()
         .id("new-session")
-        .h(px(30.0))
+        .group(hover_group.clone())
+        .h(px(32.0))
         .w_full()
-        .px(px(10.0))
-        .rounded(px(theme::RADIUS_SM))
+        .pl(px(10.0))
+        .pr(px(9.0))
+        .rounded(px(theme::RADIUS))
         .flex()
         .flex_row()
         .items_center()
-        .justify_center()
-        .gap(px(6.0))
+        .gap(px(8.0))
         .bg(if enabled {
             theme::panel_lift()
         } else {
             gpui::rgba(0x0000_0000)
         })
         .border_1()
-        .border_color(if enabled {
-            theme::edge_hard()
-        } else {
-            theme::edge_soft()
-        })
-        .text_color(if enabled {
-            theme::bone()
-        } else {
-            theme::smoke()
-        })
+        .border_color(gpui::rgba(0x0000_0000))
         .when(enabled, |button| {
             button
                 .when(sidebar_open, |button| button.tab_index(0))
                 .cursor_pointer()
-                .hover(|button| button.bg(theme::panel_hover()).border_color(theme::edge()))
+                .hover(|button| button.bg(theme::panel_hover()))
                 .focus(|button| button.border_color(theme::focus()))
                 .active(|button| button.bg(theme::panel()))
                 .tooltip(controls::text_tooltip("New thread", None::<&str>))
@@ -1627,15 +1616,36 @@ fn sidebar_new_thread_button(
         .child(
             svg()
                 .path("icons/plus.svg")
-                .size(px(12.0))
-                .text_color(icon_color),
+                .size(px(13.0))
+                .flex_shrink_0()
+                .text_color(if enabled {
+                    theme::signal()
+                } else {
+                    theme::smoke()
+                })
+                .when(enabled, |icon| {
+                    icon.group_hover(hover_group, |style| style.text_color(theme::signal_hot()))
+                }),
         )
         .child(
             div()
                 .font_family(theme::main())
                 .text_size(theme::text_size(theme::T_UI_SM))
                 .font_weight(FontWeight::SEMIBOLD)
+                .text_color(if enabled {
+                    theme::bone()
+                } else {
+                    theme::smoke()
+                })
                 .child("New thread"),
+        )
+        .child(div().flex_1())
+        .child(
+            div()
+                .font_family(theme::mono())
+                .text_size(theme::text_size(theme::T_TINY))
+                .text_color(theme::smoke())
+                .child("/new"),
         )
 }
 
@@ -1648,11 +1658,11 @@ fn sidebar_secondary_button(
     action: ChromeAction,
     cx: &mut Context<RootView>,
 ) -> impl IntoElement {
+    // Ghost rail: a fill, never a frame. The pressed History state reads as
+    // a tonal lift instead of a boxed toggle; disabled collapses to quiet text.
     div()
         .id(id.into())
-        .h(px(28.0))
-        .flex_1()
-        .min_w_0()
+        .h(px(26.0))
         .px(px(8.0))
         .rounded(px(theme::RADIUS_SM))
         .flex()
@@ -1664,28 +1674,25 @@ fn sidebar_secondary_button(
             gpui::rgba(0x0000_0000)
         })
         .border_1()
-        .border_color(if selected {
-            theme::edge_hard()
-        } else {
-            theme::edge_soft()
-        })
-        .text_color(if !enabled {
-            theme::smoke()
-        } else if selected {
+        .border_color(gpui::rgba(0x0000_0000))
+        .text_color(if selected {
             theme::bone()
-        } else {
+        } else if enabled {
             theme::ash()
+        } else {
+            theme::smoke()
         })
         .when(enabled, |button| {
             button
                 .when(sidebar_open, |button| button.tab_index(0))
                 .cursor_pointer()
                 .hover(|button| {
-                    if selected {
-                        button.bg(theme::panel_hover()).text_color(theme::bone())
+                    let fill = if selected {
+                        theme::panel_hover()
                     } else {
-                        button.bg(theme::panel()).text_color(theme::bone())
-                    }
+                        theme::panel()
+                    };
+                    button.bg(fill).text_color(theme::bone())
                 })
                 .focus(|button| button.border_color(theme::focus()))
                 .active(|button| button.bg(theme::panel_lift()))
