@@ -456,6 +456,47 @@ fn composer_mouse_selection_scroll_and_delivery_feedback_preserve_drafts(cx: &mu
 }
 
 #[gpui::test]
+fn height_hold_keeps_input_expanded_while_a_prompt_sheet_owns_focus(cx: &mut TestAppContext) {
+    let (harness, cx) = cx.add_window_view(ComposerHarness::new);
+    let composer = harness.read_with(cx, |harness, _| harness.composer.clone());
+
+    composer.update(cx, |composer, cx| composer.set_input_expanded(true, cx));
+    // Let the expand motion finish so later steps can observe new motions only.
+    cx.background_executor
+        .advance_clock(std::time::Duration::from_millis(300));
+    cx.run_until_parked();
+    assert!(composer.read_with(cx, |composer, _| composer.input_height_motion().is_none()));
+
+    // A prompt sheet opens: the height pins before focus leaves for the sheet.
+    cx.update(|window, app| {
+        composer.update(app, |composer, cx| {
+            composer.set_height_hold(true, window, cx)
+        });
+    });
+    // The blur that follows clicking the tray must not start a collapse.
+    composer.update(cx, |composer, cx| composer.set_input_expanded(false, cx));
+    assert!(composer.read_with(cx, |composer, _| composer.input_expanded));
+    assert!(
+        composer.read_with(cx, |composer, _| composer.input_height_motion().is_none()),
+        "blur under height hold must not start a collapse motion"
+    );
+
+    // Release without focus: one direct motion back to the collapsed shell.
+    cx.update(|window, app| {
+        window.blur();
+        composer.update(app, |composer, cx| {
+            composer.set_height_hold(false, window, cx)
+        });
+    });
+    assert!(!composer.read_with(cx, |composer, _| composer.input_expanded));
+    let motion = composer.read_with(cx, |composer, _| composer.input_height_motion());
+    let collapsed = 20.0 + 8.0 * 2.0; // one line + desk padding
+    let motion = motion.expect("release should animate the collapse");
+    assert!((motion.from - 56.0).abs() < 0.5, "from={:?}", motion.from);
+    assert!((motion.to - collapsed).abs() < 0.5, "to={:?}", motion.to);
+}
+
+#[gpui::test]
 fn minimize_enlarged_input_animates_to_normal_not_collapsed(cx: &mut TestAppContext) {
     let (harness, cx) = cx.add_window_view(ComposerHarness::new);
     let composer = harness.read_with(cx, |harness, _| harness.composer.clone());
@@ -467,7 +508,7 @@ fn minimize_enlarged_input_animates_to_normal_not_collapsed(cx: &mut TestAppCont
     });
     let enlarged_h = composer.read_with(cx, |composer, _| composer.input_target_height());
     assert!(composer.read_with(cx, |composer, _| composer.input_enlarged()));
-    assert!((enlarged_h - 148.0).abs() < 0.5);
+    assert!((enlarged_h - 152.0).abs() < 0.5);
 
     // Clicking the chrome control blurs the field before the toggle runs.
     composer.update(cx, |composer, cx| {
@@ -483,19 +524,19 @@ fn minimize_enlarged_input_animates_to_normal_not_collapsed(cx: &mut TestAppCont
         )
     });
     assert!(!enlarged);
-    // Must settle on multi-line (52), not idle single-line (~32).
+    // Must settle on multi-line (56), not idle single-line (~36).
     assert!(
-        (target - 52.0).abs() < 0.5,
+        (target - 56.0).abs() < 0.5,
         "minimize target should be normal multi-line, got {target}"
     );
     let motion = motion.expect("minimize should animate height");
     assert!(
-        (motion.from - 148.0).abs() < 0.5,
+        (motion.from - 152.0).abs() < 0.5,
         "minimize from={:?}",
         motion.from
     );
     assert!(
-        (motion.to - 52.0).abs() < 0.5,
+        (motion.to - 56.0).abs() < 0.5,
         "minimize to={:?}",
         motion.to
     );
@@ -507,5 +548,5 @@ fn minimize_enlarged_input_animates_to_normal_not_collapsed(cx: &mut TestAppCont
     let motion_after_focus = composer.read_with(cx, |composer, _| composer.input_height_motion());
     let motion_after_focus = motion_after_focus.expect("re-focus should keep minimize motion");
     assert_eq!(motion_after_focus.generation, motion.generation);
-    assert!((motion_after_focus.to - 52.0).abs() < 0.5);
+    assert!((motion_after_focus.to - 56.0).abs() < 0.5);
 }

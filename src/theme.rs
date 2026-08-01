@@ -344,6 +344,11 @@ pub const INSPECT_W: f32 = 304.0;
 pub const TITLE_H: f32 = 50.0;
 pub const RADIUS: f32 = 4.0;
 pub const RADIUS_SM: f32 = 3.0;
+/// Softer step for controls nested inside the prompt card tray.
+pub const RADIUS_MD: f32 = 6.0;
+/// The prompt card itself: the hero surface of the desk, so it earns the
+/// softest corner in the system.
+pub const RADIUS_LG: f32 = 8.0;
 pub const PAD_X: f32 = 18.0;
 pub const STREAM_PAD_X: f32 = 32.0;
 pub const SCROLLBAR: f32 = 8.0;

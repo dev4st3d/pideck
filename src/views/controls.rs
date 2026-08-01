@@ -5,7 +5,7 @@ use std::{rc::Rc, time::Duration};
 use gpui::{
     Animation, AnimationExt, AnyView, App, ClickEvent, Context, DispatchPhase, FontWeight,
     HitboxBehavior, IntoElement, Render, ScrollHandle, ScrollWheelEvent, SharedString, Window,
-    canvas, deferred, div, ease_out_quint, point, prelude::*, px, relative, rgba, svg,
+    canvas, deferred, div, ease_out_quint, point, prelude::*, px, relative, rgba,
 };
 
 use crate::actions::RECOVERY_BUTTON_CONTEXT;
@@ -524,87 +524,6 @@ pub fn chip_button(
         )
 }
 
-/// Compact select trigger for model / thinking / theme chrome controls.
-///
-/// Shared 28px height keeps titlebar and prompt selects aligned with icon toggles.
-pub fn compact_select(
-    id: impl Into<SharedString>,
-    label: impl Into<SharedString>,
-    open: bool,
-    enabled: bool,
-    max_width: f32,
-    on_click: ClickHandler,
-) -> impl IntoElement {
-    div()
-        .id(id.into())
-        .h(px(28.0))
-        .max_w(px(max_width))
-        .px(px(8.0))
-        .rounded(px(theme::RADIUS_SM))
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap(px(6.0))
-        .flex_shrink_0()
-        // The prompt already supplies the containing surface. Keep the resting
-        // trigger quiet instead of stacking a dark bordered box inside it.
-        .bg(if open {
-            theme::panel_lift()
-        } else {
-            theme::panel()
-        })
-        .border_1()
-        .border_color(if open {
-            theme::edge_hard()
-        } else {
-            theme::panel()
-        })
-        .text_color(if !enabled {
-            theme::smoke()
-        } else if open {
-            theme::bone()
-        } else {
-            theme::bone_dim()
-        })
-        .when(enabled, |button| {
-            button
-                .tab_index(0)
-                .cursor_pointer()
-                .hover(|button| {
-                    button
-                        .bg(theme::panel_lift())
-                        .border_color(theme::panel_lift())
-                        .text_color(theme::bone())
-                })
-                .focus(|button| button.border_color(theme::focus()))
-                .active(|button| button.bg(theme::panel_hover()))
-                .on_click(move |event, window, cx| on_click(event, window, cx))
-        })
-        .child(
-            div()
-                .min_w_0()
-                .flex_1()
-                .font_family(theme::main())
-                .text_size(theme::text_size(theme::T_LABEL))
-                .font_weight(FontWeight::SEMIBOLD)
-                .overflow_hidden()
-                .text_ellipsis()
-                .whitespace_nowrap()
-                .child(label.into()),
-        )
-        .child(
-            svg()
-                .path(if open {
-                    "icons/chevron-up.svg"
-                } else {
-                    "icons/chevron-down.svg"
-                })
-                .size(px(12.0))
-                .text_color(if open { theme::data() } else { theme::smoke() })
-                .flex_shrink_0(),
-        )
-}
-
 /// Quiet icon-sized action for dense toolbars.
 pub fn chrome_action(
     id: impl Into<SharedString>,
@@ -636,65 +555,6 @@ pub fn chrome_action(
                 .text_size(theme::text_size(10.0))
                 .font_weight(FontWeight::MEDIUM)
                 .child(label.into()),
-        )
-}
-
-/// Bare SVG action for dense toolbars.
-pub fn chrome_icon_action(
-    id: impl Into<SharedString>,
-    icon_path: impl Into<SharedString>,
-    enabled: bool,
-    on_click: ClickHandler,
-) -> impl IntoElement {
-    chrome_icon_button(id, icon_path, false, enabled, on_click)
-}
-
-/// Toolbar SVG toggle with a selected (pressed-in) appearance.
-pub fn chrome_icon_toggle(
-    id: impl Into<SharedString>,
-    icon_path: impl Into<SharedString>,
-    selected: bool,
-    enabled: bool,
-    on_click: ClickHandler,
-) -> impl IntoElement {
-    chrome_icon_button(id, icon_path, selected, enabled, on_click)
-}
-
-fn chrome_icon_button(
-    id: impl Into<SharedString>,
-    icon_path: impl Into<SharedString>,
-    selected: bool,
-    enabled: bool,
-    on_click: ClickHandler,
-) -> impl IntoElement {
-    let icon_color = if selected {
-        theme::bone_dim()
-    } else {
-        theme::smoke()
-    };
-    div()
-        .id(id.into())
-        .size(px(20.0))
-        .rounded(px(theme::RADIUS_SM))
-        .flex()
-        .items_center()
-        .justify_center()
-        .flex_shrink_0()
-        .bg(if selected { theme::canvas() } else { clear() })
-        .text_color(icon_color)
-        .when(enabled, |button| {
-            button
-                .tab_index(0)
-                .cursor_pointer()
-                .hover(|button| button.bg(theme::canvas()).text_color(theme::bone_dim()))
-                .active(|button| button.bg(theme::panel_lift()))
-                .on_click(move |event, window, cx| on_click(event, window, cx))
-        })
-        .child(
-            svg()
-                .path(icon_path.into())
-                .size(px(13.0))
-                .text_color(icon_color),
         )
 }
 

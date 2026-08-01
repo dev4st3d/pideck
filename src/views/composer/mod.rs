@@ -169,6 +169,9 @@ pub struct Composer {
     command_completion_active: bool,
     /// Multiline chrome only: multi-line (focused / inputting) vs single-line (idle).
     input_expanded: bool,
+    /// Root pins this while a prompt-owned floating sheet (model or thinking
+    /// picker) owns focus, so blur cannot collapse the input beneath the sheet.
+    height_hold: bool,
     /// User-pinned taller input; stays tall until toggled off (ignores blur collapse).
     input_enlarged: bool,
     input_height_motion: Option<InputHeightMotion>,
@@ -208,6 +211,7 @@ impl Composer {
             command_completion_active: false,
             // Multiline starts collapsed; focus tracking snaps/animates open when active.
             input_expanded: false,
+            height_hold: false,
             input_enlarged: false,
             input_height_motion: None,
             input_height_motion_seq: 0,
@@ -366,12 +370,12 @@ impl Composer {
             return self.field_height();
         }
         let panel = self.chrome == ComposerChrome::Panel;
-        let padding_y = if panel { 8.0 } else { 6.0 };
+        let padding_y = 8.0;
         let line_height = if panel { 21.0 } else { 20.0 };
         let collapsed = line_height + padding_y * 2.0;
-        let normal = if panel { 64.0 } else { 52.0 };
+        let normal = if panel { 64.0 } else { 56.0 };
         // ~6 text rows: room for longer prompts without eating the whole stream.
-        let enlarged = if panel { 128.0 } else { 148.0 };
+        let enlarged = if panel { 128.0 } else { 152.0 };
         if self.input_enlarged {
             enlarged
         } else if self.input_expanded {
@@ -426,9 +430,38 @@ impl Composer {
         if self.chrome == ComposerChrome::Field || self.input_expanded == expanded {
             return;
         }
+        if self.height_hold && !expanded {
+            // A prompt-owned sheet owns focus; stay expanded so panels anchored
+            // above the prompt do not ride a resizing composer.
+            return;
+        }
         // Enlarged height is user-pinned; still track focus so leaving enlarge restores correctly.
         if self.input_enlarged {
             self.input_expanded = expanded;
+            cx.notify();
+            return;
+        }
+        let from = self.height_motion_origin();
+        self.input_expanded = expanded;
+        let to = self.input_target_height();
+        self.begin_height_motion(from, to, cx);
+    }
+
+    /// Pin or release the expanded input while a prompt-owned sheet is open.
+    ///
+    /// Blur-driven collapse is suppressed during the hold; on release the input
+    /// settles to whatever the current focus state implies.
+    pub fn set_height_hold(&mut self, hold: bool, window: &Window, cx: &mut Context<Self>) {
+        if self.chrome == ComposerChrome::Field || self.height_hold == hold {
+            return;
+        }
+        self.height_hold = hold;
+        if self.input_enlarged {
+            cx.notify();
+            return;
+        }
+        let expanded = hold || self.focus_handle.is_focused(window);
+        if self.input_expanded == expanded {
             cx.notify();
             return;
         }
@@ -672,6 +705,18 @@ impl Composer {
 
     pub fn availability(&self) -> ComposerAvailability {
         self.availability
+    }
+
+    pub(crate) fn feedback(&self) -> &ComposerFeedback {
+        &self.feedback
+    }
+
+    /// Whether the primary submit affordance is live right now.
+    pub(crate) fn can_submit(&self) -> bool {
+        !self.disabled
+            && (self.allow_empty_submit
+                || !self.buffer.text().trim().is_empty()
+                || self.has_attachments())
     }
 
     pub fn set_availability(&mut self, availability: ComposerAvailability, cx: &mut Context<Self>) {
@@ -1043,6 +1088,11 @@ impl Composer {
     }
 
     fn abort(&mut self, _: &AbortRun, _: &mut Window, cx: &mut Context<Self>) {
+        self.request_abort(cx);
+    }
+
+    /// Esc/abort affordance shared by the key handler and tray controls.
+    pub(crate) fn request_abort(&mut self, cx: &mut Context<Self>) {
         if self.command_completion_active {
             cx.emit(ComposerEvent::CommandDismiss);
             return;
@@ -1058,7 +1108,7 @@ impl Composer {
         }
     }
 
-    fn emit_accept(&mut self, follow_up: bool, cx: &mut Context<Self>) {
+    pub(crate) fn emit_accept(&mut self, follow_up: bool, cx: &mut Context<Self>) {
         if self.command_completion_active && !self.has_attachments() {
             cx.emit(ComposerEvent::CommandAccept);
             return;
@@ -1223,7 +1273,7 @@ impl Composer {
         cx.notify();
     }
 
-    fn status_text(&self) -> String {
+    pub(crate) fn status_text(&self) -> String {
         match &self.feedback {
             ComposerFeedback::Pending(SubmissionKind::Prompt) => match self.chrome {
                 ComposerChrome::Full => "Sending to Pi…".to_owned(),
@@ -1275,7 +1325,7 @@ impl Composer {
         }
     }
 
-    fn hint_text(&self) -> &'static str {
+    pub(crate) fn hint_text(&self) -> &'static str {
         match self.availability {
             ComposerAvailability::Running => {
                 "Enter steer · Alt+Enter follow up · Shift+Enter newline · Ctrl+O files · Esc abort"

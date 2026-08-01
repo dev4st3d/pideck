@@ -197,40 +197,19 @@ impl Composer {
     }
 
     fn render_multiline(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        let can_submit = !self.disabled
-            && (self.allow_empty_submit
-                || !self.buffer.text().trim().is_empty()
-                || self.has_attachments());
         let handles_composer_keys = self.availability != ComposerAvailability::Unavailable;
-        let running = self.availability == ComposerAvailability::Running;
-        let bash_running = self.availability == ComposerAvailability::BashRunning;
-        let primary_label = if running {
-            "Steer".into()
-        } else {
-            self.action_label.clone()
-        };
-        let status_color = match self.feedback {
-            ComposerFeedback::Rejected(_) | ComposerFeedback::Uncertain => theme::error(),
-            ComposerFeedback::Pending(_)
-            | ComposerFeedback::BashRunning { .. }
-            | ComposerFeedback::LoadingAttachments => theme::data(),
-            ComposerFeedback::Accepted(_) | ComposerFeedback::BashCompleted => theme::live(),
-            ComposerFeedback::Ready => theme::ash(),
-        };
         let panel = self.chrome == ComposerChrome::Panel;
-        // Full desk chrome sits inside the prompt card from RootView, so the input
-        // has no outer border; Panel chrome keeps a self-contained field look.
+        // Full desk chrome sits inside the prompt card from RootView: the card
+        // supplies the shell, border, and bottom tray, so the input rests directly
+        // on the card surface (no inner well) and no footer renders here. Panel
+        // chrome keeps a self-contained bordered field with its own status row.
         let desk = self.chrome == ComposerChrome::Full;
-        let status = self.status_text();
-        let show_status = !status.is_empty() || !panel;
-        let input_padding_x = if panel { 12.0 } else { 10.0 };
-        let input_padding_y = if panel { 8.0 } else { 6.0 };
+        let input_padding_x = 12.0;
+        let input_padding_y = 8.0;
         let input_line_height = if panel { 21.0 } else { 20.0 };
         // Idle: one row · focused: multi-line · user enlarge: taller pinned shell.
         let height_motion = self.input_height_motion();
         let settled_height = self.input_target_height();
-        let action_height = if desk { 28.0 } else { 32.0 };
-        let action_gap = if desk { 6.0 } else { 8.0 };
         let id_prefix = self.id_prefix.clone();
 
         let mut input = div()
@@ -269,10 +248,8 @@ impl Composer {
                 } else {
                     theme::panel()
                 });
-        } else {
-            // Same surface when collapsed or focused so minimize is height-only.
-            input = input.bg(theme::panel_lift());
         }
+        // Desk chrome: the input sits transparent on the prompt card surface.
 
         input = input
             .when(handles_composer_keys, |input| {
@@ -331,7 +308,7 @@ impl Composer {
 
         let attachments = self.has_attachments().then(|| self.render_attachments(cx));
 
-        div()
+        let surface = div()
             .id(id_prefix)
             .flex()
             .flex_col()
@@ -339,181 +316,190 @@ impl Composer {
             .child(input)
             .when_some(attachments, |composer, attachments| {
                 composer.child(attachments)
-            })
-            .child(
-                div()
-                    .min_h(px(if panel { 28.0 } else { 36.0 }))
-                    .px(px(if desk { 10.0 } else { 0.0 }))
-                    .py(px(if desk { 4.0 } else { 0.0 }))
-                    .when(desk, |footer| {
-                        footer.border_t_1().border_color(theme::edge_soft())
-                    })
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .justify_between()
-                    .gap(px(10.0))
-                    .child(
-                        div()
-                            .min_w_0()
-                            .flex_1()
-                            .flex()
-                            .flex_row()
-                            .items_baseline()
-                            .gap(px(8.0))
-                            .overflow_hidden()
-                            .when(show_status, |row| {
-                                row.child(
+            });
+
+        if desk {
+            // Status, hints, and actions for the desk chrome live in the prompt
+            // card's bottom tray rendered by RootView (composer_bar).
+            return surface;
+        }
+
+        // Panel chrome: self-contained status row and actions.
+        let can_submit = !self.disabled
+            && (self.allow_empty_submit
+                || !self.buffer.text().trim().is_empty()
+                || self.has_attachments());
+        let running = self.availability == ComposerAvailability::Running;
+        let bash_running = self.availability == ComposerAvailability::BashRunning;
+        let primary_label = if running {
+            "Steer".into()
+        } else {
+            self.action_label.clone()
+        };
+        let status_color = match self.feedback {
+            ComposerFeedback::Rejected(_) | ComposerFeedback::Uncertain => theme::error(),
+            ComposerFeedback::Pending(_)
+            | ComposerFeedback::BashRunning { .. }
+            | ComposerFeedback::LoadingAttachments => theme::data(),
+            ComposerFeedback::Accepted(_) | ComposerFeedback::BashCompleted => theme::live(),
+            ComposerFeedback::Ready => theme::ash(),
+        };
+        let status = self.status_text();
+        let show_status = !status.is_empty();
+        let action_height = 32.0;
+        let action_gap = 8.0;
+
+        surface.child(
+            div()
+                .min_h(px(28.0))
+                .flex()
+                .flex_row()
+                .items_center()
+                .justify_between()
+                .gap(px(10.0))
+                .child(
+                    div()
+                        .min_w_0()
+                        .flex_1()
+                        .flex()
+                        .flex_row()
+                        .items_baseline()
+                        .gap(px(8.0))
+                        .overflow_hidden()
+                        .when(show_status, |row| {
+                            row.child(
+                                div()
+                                    .min_w_0()
+                                    .font_family(theme::sans())
+                                    .text_size(theme::text_size(theme::T_UI_SM))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(status_color)
+                                    .overflow_hidden()
+                                    .text_ellipsis()
+                                    .whitespace_nowrap()
+                                    .child(status),
+                            )
+                        }),
+                )
+                .child(
+                    div()
+                        .flex_shrink_0()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(action_gap))
+                        .when(running || bash_running, |actions| {
+                            actions
+                                .child(
                                     div()
-                                        .min_w_0()
-                                        .font_family(theme::sans())
+                                        .id(gpui::SharedString::from(format!(
+                                            "{}-abort",
+                                            self.id_prefix
+                                        )))
+                                        .tab_index(0)
+                                        .cursor_pointer()
+                                        .h(px(action_height))
+                                        .px(px(8.0))
+                                        .rounded(px(theme::RADIUS_SM))
+                                        .flex()
+                                        .items_center()
+                                        .font_family(theme::main())
                                         .text_size(theme::text_size(theme::T_UI_SM))
                                         .font_weight(FontWeight::SEMIBOLD)
-                                        .text_color(status_color)
-                                        .overflow_hidden()
-                                        .text_ellipsis()
-                                        .whitespace_nowrap()
-                                        .child(status),
+                                        .text_color(theme::bone_dim())
+                                        .hover(|button| {
+                                            button.bg(theme::panel()).text_color(theme::error())
+                                        })
+                                        .focus(|button| button.text_color(theme::focus()))
+                                        .on_click(cx.listener(move |_, _, _, cx| {
+                                            cx.emit(if bash_running {
+                                                ComposerEvent::AbortBash
+                                            } else {
+                                                ComposerEvent::Abort
+                                            });
+                                        }))
+                                        .child(if bash_running { "Abort Bash" } else { "Abort" }),
                                 )
-                            })
-                            .when(!panel, |row| {
-                                row.child(
-                                    div()
-                                        .min_w_0()
-                                        .flex_1()
-                                        .font_family(theme::mono())
-                                        .text_size(theme::text_size(theme::T_TINY))
-                                        .text_color(theme::smoke())
-                                        .overflow_hidden()
-                                        .text_ellipsis()
-                                        .whitespace_nowrap()
-                                        .child(self.hint_text()),
-                                )
-                            }),
-                    )
-                    .child(
-                        div()
-                            .flex_shrink_0()
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .gap(px(action_gap))
-                            .when(running || bash_running, |actions| {
-                                actions
-                                    .child(
+                                .when(running, |actions| {
+                                    actions.child(
                                         div()
                                             .id(gpui::SharedString::from(format!(
-                                                "{}-abort",
+                                                "{}-follow-up",
                                                 self.id_prefix
                                             )))
-                                            .tab_index(0)
-                                            .cursor_pointer()
                                             .h(px(action_height))
-                                            .px(px(if desk { 7.0 } else { 8.0 }))
+                                            .px(px(8.0))
                                             .rounded(px(theme::RADIUS_SM))
                                             .flex()
                                             .items_center()
                                             .font_family(theme::main())
                                             .text_size(theme::text_size(theme::T_UI_SM))
                                             .font_weight(FontWeight::SEMIBOLD)
-                                            .text_color(theme::bone_dim())
-                                            .hover(|button| {
-                                                button.bg(theme::panel()).text_color(theme::error())
-                                            })
-                                            .focus(|button| button.text_color(theme::focus()))
-                                            .on_click(cx.listener(move |_, _, _, cx| {
-                                                cx.emit(if bash_running {
-                                                    ComposerEvent::AbortBash
-                                                } else {
-                                                    ComposerEvent::Abort
-                                                });
-                                            }))
-                                            .child(if bash_running {
-                                                "Abort Bash"
+                                            .text_color(if can_submit {
+                                                theme::bone_dim()
                                             } else {
-                                                "Abort"
-                                            }),
+                                                theme::smoke()
+                                            })
+                                            .when(can_submit, |button| {
+                                                button
+                                                    .tab_index(0)
+                                                    .cursor_pointer()
+                                                    .hover(|button| {
+                                                        button
+                                                            .bg(theme::panel())
+                                                            .text_color(theme::bone())
+                                                    })
+                                                    .focus(|button| {
+                                                        button.text_color(theme::focus())
+                                                    })
+                                                    .on_click(cx.listener(|view, _, _, cx| {
+                                                        view.emit_accept(true, cx);
+                                                    }))
+                                            })
+                                            .child("Follow up"),
                                     )
-                                    .when(running, |actions| {
-                                        actions.child(
-                                            div()
-                                                .id(gpui::SharedString::from(format!(
-                                                    "{}-follow-up",
-                                                    self.id_prefix
-                                                )))
-                                                .h(px(action_height))
-                                                .px(px(if desk { 7.0 } else { 8.0 }))
-                                                .rounded(px(theme::RADIUS_SM))
-                                                .flex()
-                                                .items_center()
-                                                .font_family(theme::main())
-                                                .text_size(theme::text_size(theme::T_UI_SM))
-                                                .font_weight(FontWeight::SEMIBOLD)
-                                                .text_color(if can_submit {
-                                                    theme::bone_dim()
-                                                } else {
-                                                    theme::smoke()
-                                                })
-                                                .when(can_submit, |button| {
-                                                    button
-                                                        .tab_index(0)
-                                                        .cursor_pointer()
-                                                        .hover(|button| {
-                                                            button
-                                                                .bg(theme::panel())
-                                                                .text_color(theme::bone())
-                                                        })
-                                                        .focus(|button| {
-                                                            button.text_color(theme::focus())
-                                                        })
-                                                        .on_click(cx.listener(|view, _, _, cx| {
-                                                            view.emit_accept(true, cx);
-                                                        }))
-                                                })
-                                                .child("Follow up"),
-                                        )
-                                    })
-                            })
-                            .child(
-                                div()
-                                    .id(gpui::SharedString::from(format!(
-                                        "{}-submit",
-                                        self.id_prefix
-                                    )))
-                                    .h(px(action_height))
-                                    .min_w(px(if desk { 64.0 } else { 68.0 }))
-                                    .px(px(if desk { 12.0 } else { 14.0 }))
-                                    .rounded(px(theme::RADIUS_SM))
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .bg(if can_submit {
-                                        theme::signal()
-                                    } else {
-                                        theme::panel_lift()
-                                    })
-                                    .text_color(if can_submit {
-                                        theme::canvas()
-                                    } else {
-                                        theme::smoke()
-                                    })
-                                    .when(can_submit, |button| {
-                                        button
-                                            .tab_index(0)
-                                            .cursor_pointer()
-                                            .hover(|button| button.bg(theme::signal_hot()))
-                                            .active(|button| button.bg(theme::signal_deep()))
-                                            .on_click(cx.listener(|view, _, _, cx| {
-                                                view.emit_accept(false, cx);
-                                            }))
-                                    })
-                                    .font_family(theme::main())
-                                    .text_size(theme::text_size(theme::T_UI_SM))
-                                    .font_weight(FontWeight::BOLD)
-                                    .child(primary_label),
-                            ),
-                    ),
-            )
+                                })
+                        })
+                        .child(
+                            div()
+                                .id(gpui::SharedString::from(format!(
+                                    "{}-submit",
+                                    self.id_prefix
+                                )))
+                                .h(px(action_height))
+                                .min_w(px(68.0))
+                                .px(px(14.0))
+                                .rounded(px(theme::RADIUS_SM))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .bg(if can_submit {
+                                    theme::signal()
+                                } else {
+                                    theme::panel_lift()
+                                })
+                                .text_color(if can_submit {
+                                    theme::canvas()
+                                } else {
+                                    theme::smoke()
+                                })
+                                .when(can_submit, |button| {
+                                    button
+                                        .tab_index(0)
+                                        .cursor_pointer()
+                                        .hover(|button| button.bg(theme::signal_hot()))
+                                        .active(|button| button.bg(theme::signal_deep()))
+                                        .on_click(cx.listener(|view, _, _, cx| {
+                                            view.emit_accept(false, cx);
+                                        }))
+                                })
+                                .font_family(theme::main())
+                                .text_size(theme::text_size(theme::T_UI_SM))
+                                .font_weight(FontWeight::BOLD)
+                                .child(primary_label),
+                        ),
+                ),
+        )
     }
 
     fn render_attachments(&mut self, cx: &mut Context<Self>) -> AnyElement {

@@ -2,47 +2,23 @@ use super::*;
 
 pub(super) fn popup_sheet() -> gpui::Div {
     // Fully opaque fill so conversation chrome cannot show through the overlay.
+    // Soft corner and a tight directional shadow keep every prompt popover in
+    // family with the card it floats above.
     div()
         .w_full()
         .flex()
         .flex_col()
-        .rounded(px(theme::RADIUS_SM))
+        .rounded(px(theme::RADIUS_LG))
         .border_1()
-        .border_color(theme::panel_hover())
+        .border_color(theme::edge())
         .bg(theme::panel())
+        .shadow(vec![gpui::BoxShadow {
+            color: gpui::rgba(0x0000_0047).into(),
+            offset: point(px(0.0), px(10.0)),
+            blur_radius: px(24.0),
+            spread_radius: px(-10.0),
+        }])
         .overflow_hidden()
-}
-
-pub(super) fn popup_sheet_header(
-    title: &'static str,
-    close_id: &'static str,
-    cx: &mut Context<RootView>,
-) -> impl IntoElement {
-    div()
-        .h(px(28.0))
-        .px(px(8.0))
-        .flex()
-        .flex_row()
-        .items_center()
-        .justify_between()
-        .gap(px(8.0))
-        .bg(theme::panel())
-        .border_b_1()
-        .border_color(theme::panel_hover())
-        .child(
-            div()
-                .font_family(theme::sans())
-                .text_size(theme::text_size(theme::T_TINY))
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(theme::ash())
-                .child(title),
-        )
-        .child(controls::chrome_action(
-            close_id,
-            "Close",
-            true,
-            Box::new(cx.listener(|view, _, window, cx| view.close_model_panel(window, cx))),
-        ))
 }
 
 pub(super) fn short_path(path: &str) -> String {

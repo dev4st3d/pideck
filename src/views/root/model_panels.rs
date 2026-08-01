@@ -1,4 +1,4 @@
-use super::shared::{popup_sheet, popup_sheet_header};
+use super::shared::popup_sheet;
 use super::*;
 
 pub(super) struct ModelSettingsPanelParams<'a> {
@@ -633,8 +633,6 @@ pub(super) fn model_switcher_sheet(
                         .flex()
                         .flex_col()
                         .bg(theme::floor())
-                        .border_r_1()
-                        .border_color(theme::edge_soft())
                         .child(model_provider_button(
                             None,
                             selected_provider.is_none(),
@@ -676,15 +674,13 @@ pub(super) fn model_switcher_sheet(
                         .bg(theme::panel())
                         .child(
                             div()
-                                .h(px(48.0))
+                                .h(px(46.0))
                                 .px(px(12.0))
                                 .flex_shrink_0()
                                 .flex()
                                 .flex_row()
                                 .items_center()
                                 .gap(px(10.0))
-                                .border_b_1()
-                                .border_color(theme::edge_soft())
                                 .child(
                                     div()
                                         .w(px(116.0))
@@ -708,8 +704,6 @@ pub(super) fn model_switcher_sheet(
                                     .py(px(7.0))
                                     .flex_shrink_0()
                                     .bg(theme::canvas())
-                                    .border_b_1()
-                                    .border_color(theme::edge_soft())
                                     .font_family(theme::sans())
                                     .text_size(theme::text_size(theme::T_TINY))
                                     .text_color(theme::ash())
@@ -755,22 +749,16 @@ pub(super) fn model_switcher_sheet(
                                                     "switch-model-{}-{}",
                                                     model.identity.provider, model.identity.id
                                                 )))
-                                                .min_h(px(58.0))
-                                                .mx(px(8.0))
-                                                .my(px(2.0))
-                                                .px(px(12.0))
+                                                .min_h(px(56.0))
+                                                .mx(px(6.0))
+                                                .my(px(1.0))
+                                                .px(px(10.0))
                                                 .py(px(8.0))
                                                 .flex()
                                                 .flex_row()
                                                 .items_center()
                                                 .gap(px(12.0))
-                                                .rounded(px(theme::RADIUS))
-                                                .border_1()
-                                                .border_color(if selected {
-                                                    theme::edge_hard()
-                                                } else {
-                                                    theme::panel()
-                                                })
+                                                .rounded(px(theme::RADIUS_MD))
                                                 .bg(if selected {
                                                     theme::panel_lift()
                                                 } else {
@@ -782,8 +770,7 @@ pub(super) fn model_switcher_sheet(
                                                         .hover(|row| row.bg(theme::panel_lift()))
                                                         .active(|row| row.bg(theme::panel_hover()))
                                                         .focus(|row| {
-                                                            row.bg(theme::panel_lift())
-                                                                .border_color(theme::focus())
+                                                            row.bg(theme::panel_hover())
                                                         })
                                                         .on_click(cx.listener(
                                                             move |view, _, window, cx| {
@@ -826,11 +813,7 @@ pub(super) fn model_switcher_sheet(
                                                                 .text_size(theme::text_size(
                                                                     theme::T_UI,
                                                                 ))
-                                                                .font_weight(if selected {
-                                                                    FontWeight::BOLD
-                                                                } else {
-                                                                    FontWeight::SEMIBOLD
-                                                                })
+                                                                .font_weight(FontWeight::SEMIBOLD)
                                                                 .text_color(if !can_change {
                                                                     theme::smoke()
                                                                 } else if selected {
@@ -875,16 +858,11 @@ pub(super) fn model_switcher_sheet(
                                                         )
                                                         .when(selected, |meta| {
                                                             meta.child(
-                                                                div()
-                                                                    .font_family(theme::sans())
-                                                                    .text_size(theme::text_size(
-                                                                        theme::T_TINY,
-                                                                    ))
-                                                                    .font_weight(
-                                                                        FontWeight::SEMIBOLD,
-                                                                    )
+                                                                svg()
+                                                                    .path("icons/check.svg")
+                                                                    .size(px(13.0))
                                                                     .text_color(theme::data())
-                                                                    .child("Active"),
+                                                                    .flex_shrink_0(),
                                                             )
                                                         }),
                                                 )
@@ -894,10 +872,10 @@ pub(super) fn model_switcher_sheet(
                         .when_some(projection.feedback.clone(), |list, feedback| {
                             list.child(
                                 div()
-                                    .px(px(10.0))
-                                    .py(px(6.0))
+                                    .px(px(12.0))
+                                    .py(px(7.0))
                                     .flex_shrink_0()
-                                    .bg(theme::panel())
+                                    .bg(theme::canvas())
                                     .border_t_1()
                                     .border_color(theme::edge_soft())
                                     .font_family(theme::mono())
@@ -916,22 +894,18 @@ pub(super) fn model_switcher_sheet(
 fn model_switcher_close_button(cx: &mut Context<RootView>) -> gpui::AnyElement {
     div()
         .id("close-model-switcher")
-        .h(px(26.0))
-        .px(px(8.0))
+        .size(px(26.0))
         .flex_shrink_0()
         .flex()
         .items_center()
         .justify_center()
-        .rounded(px(theme::RADIUS_SM))
+        .rounded(px(theme::RADIUS_MD))
         .tab_index(0)
         .cursor_pointer()
-        .font_family(theme::main())
-        .text_size(theme::text_size(theme::T_TINY))
-        .font_weight(FontWeight::SEMIBOLD)
-        .text_color(theme::ash())
-        .hover(|button| button.bg(theme::canvas()).text_color(theme::bone()))
-        .active(|button| button.bg(theme::panel_lift()))
-        .focus(|button| button.bg(theme::canvas()).text_color(theme::focus()))
+        .text_color(theme::smoke())
+        .hover(|button| button.bg(theme::panel_lift()).text_color(theme::bone()))
+        .active(|button| button.bg(theme::panel_hover()))
+        .focus(|button| button.bg(theme::panel_hover()).text_color(theme::focus()))
         .on_click(cx.listener(|view, _, window, cx| view.close_model_panel(window, cx)))
         .on_key_down(cx.listener(|view, event: &gpui::KeyDownEvent, window, cx| {
             if matches!(event.keystroke.key.as_str(), "enter" | "space") {
@@ -939,7 +913,14 @@ fn model_switcher_close_button(cx: &mut Context<RootView>) -> gpui::AnyElement {
                 view.close_model_panel(window, cx);
             }
         }))
-        .child("Close")
+        .tooltip(controls::text_tooltip("Close", Some("Esc")))
+        .child(
+            svg()
+                .path("icons/close.svg")
+                .size(px(12.0))
+                .text_color(theme::smoke())
+                .flex_shrink_0(),
+        )
         .into_any_element()
 }
 
@@ -970,9 +951,10 @@ fn model_provider_button(
             Some(provider) => format!("model-provider-{provider}"),
             None => "model-provider-all".to_owned(),
         }))
-        .relative()
-        .h(px(48.0))
-        .w_full()
+        .h(px(44.0))
+        .mx(px(6.0))
+        .mb(px(2.0))
+        .rounded(px(theme::RADIUS_MD))
         .flex_shrink_0()
         .flex()
         .items_center()
@@ -994,7 +976,7 @@ fn model_provider_button(
                 .bg(if selected {
                     theme::panel_hover()
                 } else {
-                    theme::panel()
+                    theme::panel_lift()
                 })
                 .text_color(if selected {
                     theme::bone()
@@ -1003,7 +985,7 @@ fn model_provider_button(
                 })
         })
         .active(|button| button.bg(theme::panel_hover()))
-        .focus(|button| button.bg(theme::panel()).text_color(theme::focus()))
+        .focus(|button| button.bg(theme::panel_hover()).text_color(theme::focus()))
         .on_click(cx.listener(move |view, _, _, cx| {
             view.set_model_provider_filter(click_provider.clone(), cx)
         }))
@@ -1031,18 +1013,6 @@ fn model_provider_button(
                 .font_weight(FontWeight::BOLD)
                 .child(mark),
         )
-        .when(selected, |button| {
-            button.child(
-                div()
-                    .absolute()
-                    .right_0()
-                    .top(px(11.0))
-                    .bottom(px(11.0))
-                    .w(px(2.0))
-                    .rounded(px(1.0))
-                    .bg(theme::focus()),
-            )
-        })
         .into_any_element()
 }
 
@@ -1280,53 +1250,57 @@ pub(super) fn thinking_select_sheet(
         .or(projection.active_thinking)
         .or(projection.requested_thinking);
 
+    // Headerless menu: the tray select already says what is being picked.
     popup_sheet()
         .id("thinking-select-sheet")
-        .h(px(168.0))
-        .child(popup_sheet_header("Thinking", "close-thinking-select", cx))
+        .on_key_down(cx.listener(|view, event: &gpui::KeyDownEvent, window, cx| {
+            if event.keystroke.key == "escape" {
+                cx.stop_propagation();
+                view.close_model_panel(window, cx);
+            }
+        }))
         .when(!can_change, |sheet| {
             sheet.child(
                 div()
-                    .px(px(8.0))
-                    .py(px(5.0))
-                    .bg(theme::panel())
-                    .border_b_1()
-                    .border_color(theme::panel_hover())
+                    .px(px(12.0))
+                    .py(px(7.0))
+                    .flex_shrink_0()
+                    .bg(theme::canvas())
                     .font_family(theme::sans())
                     .text_size(theme::text_size(theme::T_TINY))
-                    .text_color(theme::smoke())
-                    .child("Settle stream to change"),
+                    .text_color(theme::ash())
+                    .child("Wait for the current response to finish before changing thinking."),
             )
         })
         .child(
             div()
-                .flex_1()
-                .min_h_0()
                 .relative()
                 .child(controls::scroll_wheel_capture(scroll))
                 .child(
                     div()
                         .id("thinking-select-scroll")
-                        .size_full()
-                        .bg(theme::panel())
+                        .w_full()
+                        // Rows size the sheet; only long level lists scroll.
+                        .max_h(px(232.0))
+                        .p(px(4.0))
                         .overflow_y_scroll()
                         .track_scroll(scroll)
-                        .scrollbar_width(px(6.0))
+                        .scrollbar_width(px(4.0))
                         .children(levels.into_iter().map(|level| {
                             let selected = active == Some(level);
                             div()
                                 .id(gpui::SharedString::from(format!(
                                     "thinking-select-{level:?}"
                                 )))
-                                .h(px(28.0))
+                                .h(px(30.0))
                                 .px(px(8.0))
+                                .my(px(1.0))
+                                .rounded(px(theme::RADIUS_MD))
                                 .flex()
                                 .flex_row()
                                 .items_center()
                                 .justify_between()
                                 .gap(px(8.0))
-                                .border_b_1()
-                                .border_color(theme::panel_hover())
                                 .bg(if selected {
                                     theme::panel_lift()
                                 } else {
@@ -1337,7 +1311,7 @@ pub(super) fn thinking_select_sheet(
                                 } else if selected {
                                     theme::bone()
                                 } else {
-                                    theme::ash()
+                                    theme::bone_dim()
                                 })
                                 .when(can_change && !selected, |row| {
                                     row.tab_index(0)
@@ -1346,7 +1320,9 @@ pub(super) fn thinking_select_sheet(
                                             row.bg(theme::panel_lift()).text_color(theme::bone())
                                         })
                                         .active(|row| row.bg(theme::panel_hover()))
-                                        .focus(|row| row.bg(theme::panel_lift()))
+                                        .focus(|row| {
+                                            row.bg(theme::panel_hover()).text_color(theme::focus())
+                                        })
                                         .on_click(cx.listener(move |view, _, window, cx| {
                                             view.set_thinking(level, window, cx)
                                         }))
@@ -1354,7 +1330,7 @@ pub(super) fn thinking_select_sheet(
                                 .child(
                                     div()
                                         .font_family(theme::main())
-                                        .text_size(theme::text_size(theme::T_TINY))
+                                        .text_size(theme::text_size(theme::T_LABEL))
                                         .font_weight(if selected {
                                             FontWeight::SEMIBOLD
                                         } else {
@@ -1364,11 +1340,10 @@ pub(super) fn thinking_select_sheet(
                                 )
                                 .when(selected, |row| {
                                     row.child(
-                                        div()
-                                            .w(px(5.0))
-                                            .h(px(5.0))
-                                            .rounded_full()
-                                            .bg(theme::data())
+                                        svg()
+                                            .path("icons/check.svg")
+                                            .size(px(12.0))
+                                            .text_color(theme::data())
                                             .flex_shrink_0(),
                                     )
                                 })

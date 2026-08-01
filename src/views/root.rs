@@ -2357,6 +2357,7 @@ impl RootView {
         self.command_palette_open = false;
         self.hotkey_help_open = false;
         self.model_panel = None;
+        self.sync_composer_height_hold(window, cx);
         match &dialog.request {
             DialogRequest::Input { placeholder, .. } => {
                 let placeholder = placeholder
@@ -2779,8 +2780,22 @@ impl RootView {
         cx.notify();
     }
 
+    /// While the model or thinking sheet floats above the prompt, pin the
+    /// composer at its expanded height so the blur beneath the sheet does not
+    /// collapse (and resize) the input the sheet is anchored to.
+    fn sync_composer_height_hold(&mut self, window: &Window, cx: &mut Context<Self>) {
+        let hold = matches!(
+            self.model_panel,
+            Some(ModelPanel::Switcher | ModelPanel::Thinking)
+        );
+        self.composer.update(cx, |composer, cx| {
+            composer.set_height_hold(hold, window, cx)
+        });
+    }
+
     fn show_model_panel(&mut self, panel: ModelPanel, window: &mut Window, cx: &mut Context<Self>) {
         self.model_panel = Some(panel);
+        self.sync_composer_height_hold(window, cx);
         if matches!(panel, ModelPanel::Switcher)
             || matches!(panel, ModelPanel::Settings(tab) if tab != ModelSettingsTab::App)
         {
@@ -2827,6 +2842,7 @@ impl RootView {
     fn close_model_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.model_panel = None;
         window.focus(&self.composer.read(cx).focus_handle(cx));
+        self.sync_composer_height_hold(window, cx);
         cx.notify();
     }
 
@@ -2837,6 +2853,7 @@ impl RootView {
         cx: &mut Context<Self>,
     ) {
         self.model_panel = Some(ModelPanel::Settings(tab));
+        self.sync_composer_height_hold(window, cx);
         if tab == ModelSettingsTab::Models {
             window.focus(&self.model_search_composer.read(cx).focus_handle(cx));
         } else if tab == ModelSettingsTab::Typography {
@@ -3765,6 +3782,7 @@ impl RootView {
         self.attachment_task.take();
         self.attachment_picker_pending = false;
         self.model_panel = None;
+        self.sync_composer_height_hold(window, cx);
         self.command_palette_open = false;
         self.hotkey_help_open = false;
         self.compaction_modal_open = false;

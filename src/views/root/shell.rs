@@ -299,8 +299,8 @@ pub(super) fn titlebar(params: TitlebarParams<'_>, cx: &mut Context<RootView>) -
                         .relative()
                         .flex_shrink_0()
                         .child(
-                            // Height/padding/type match `compact_select` and sit
-                            // flush with the 28px titlebar icon toggles beside it.
+                            // Height/padding/type sit flush with the 28px
+                            // titlebar icon toggles beside it.
                             div()
                                 .id("theme-switcher")
                                 .h(px(28.0))

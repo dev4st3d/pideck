@@ -219,6 +219,7 @@ impl Render for RootView {
                                         == Some(self.composer.read(cx).draft()),
                                     extension_ui: &self.extension_ui,
                                 },
+                                window,
                                 cx,
                             ))
                             .when(self.terminal_open, |column| {
