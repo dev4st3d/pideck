@@ -7,7 +7,7 @@ Companion to the root [README](../README.md). This page covers launch policy, ke
 Install the tested Pi package:
 
 ```powershell
-npm install -g @earendil-works/pi-coding-agent@0.82.1
+npm install -g @earendil-works/pi-coding-agent@0.83.0
 cargo run
 ```
 
@@ -101,7 +101,7 @@ Workers own discovery, readiness, hydration, prompts, streaming, tools, retries,
 ### History and SDK bridge
 
 - History panel focused on the active tip: stock fork-before-tip and clone-path actions with explicit same-file/new-file confirmations
-- Negotiated Pi SDK 0.82.1 stdio JSONL bridge for same-file navigation, optional branch summaries, labels, active-path JSONL export, and safe import into a new session file. Unsupported bridge actions stay hidden
+- Negotiated Pi SDK 0.83.0 stdio JSONL bridge for same-file navigation, optional branch summaries, labels, active-path JSONL export, and safe import into a new session file. Unsupported bridge actions stay hidden
 
 Details: [bridge/README.md](../bridge/README.md).
 
@@ -162,7 +162,7 @@ Main-session queue items are authoritative and read-only (stock Pi RPC has no re
 | `src/services/sdk_bridge.rs`, `bridge/` | Negotiated stdio JSONL SDK sidecar (session gaps, ModelRuntime, resources, orchestration transport) |
 | `src/orchestration.rs`, `bridge/orchestration-*.mjs` | Typed task/subagent/goal snapshots, guards, event-bus actions, bounded live subagent transcripts |
 | `src/resource_center.rs` | Secret-free resource inventory, trust/load state, package mutation policy, UI filters |
-| `src/services/rpc/` | Pi 0.82.1 wire contract, strict JSONL framing, correlated client, runtime adapter |
+| `src/services/rpc/` | Pi 0.83.0 wire contract, strict JSONL framing, correlated client, runtime adapter |
 | `src/services/pi_process/` | Executable discovery, capability probing, launch policy, process-tree supervision |
 | `src/state/runtime.rs` | Normalized owned runtime/transcript state, stamped inputs, requests, effects |
 | `src/state/reducer.rs` | Pure lifecycle, hydration, streaming reconciliation, tool, queue, and extension reducer |

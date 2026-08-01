@@ -85,7 +85,7 @@ fn fake_bridge_config(root: &Path) -> SdkBridgeConfig {
     fs::create_dir_all(sdk_root.join("dist")).expect("create fake SDK");
     fs::write(
         sdk_root.join("package.json"),
-        "{\"type\":\"module\",\"version\":\"0.82.1\"}\n",
+        "{\"type\":\"module\",\"version\":\"0.83.0\"}\n",
     )
     .expect("write fake SDK package");
     fs::write(
@@ -408,7 +408,7 @@ fn bridge_negotiates_mutates_through_sdk_exports_imports_and_restarts() {
     let session = sessions.join("source.jsonl");
     write_branched_session(&session, &workspace);
     let client = SdkBridgeClient::start(config.clone()).expect("start compatible bridge");
-    assert_eq!(client.hello().sdk_version, "0.82.1");
+    assert_eq!(client.hello().sdk_version, "0.83.0");
     assert!(client.hello().capabilities.navigate_tree);
     assert!(client.hello().capabilities.labels);
     assert!(client.hello().capabilities.resource_inventory);

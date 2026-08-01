@@ -78,15 +78,15 @@ Every installed Pi extension is hosted natively: `select`, `confirm`, `input`, a
 |---|---|
 | OS | Windows |
 | Rust | 1.85+ (stable, see `rust-toolchain.toml`) |
-| Pi | `@earendil-works/pi-coding-agent@0.82.1` |
-| Node | Required only for Pi and the SDK bridge sidecar |
+| Pi | `@earendil-works/pi-coding-agent@0.83.0` |
+| Node | 22.19+; required only for Pi and the SDK bridge sidecar |
 
 ## Install on Windows
 
 1. Install Pi if it is not already available:
 
    ```powershell
-   npm install -g @earendil-works/pi-coding-agent@0.82.1
+   npm install -g @earendil-works/pi-coding-agent@0.83.0
    ```
 
 2. Download `PiDeck-win-Setup.exe` from the [latest GitHub Release](https://github.com/dev4st3d/pideck/releases/latest) and run it.
@@ -98,7 +98,7 @@ PiDeck checks for stable updates at startup. When one is available, use the titl
 ## Quick start from source
 
 ```powershell
-npm install -g @earendil-works/pi-coding-agent@0.82.1
+npm install -g @earendil-works/pi-coding-agent@0.83.0
 cargo run
 ```
 

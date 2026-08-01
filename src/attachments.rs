@@ -1,6 +1,6 @@
 //! Local file attachment loading and prompt expansion.
 //!
-//! Pi 0.82 RPC accepts images natively. Readable files therefore remain GUI-owned
+//! Pi 0.83 RPC accepts images natively. Readable files therefore remain GUI-owned
 //! draft data and are expanded into bounded, named text blocks only at the RPC edge.
 
 use std::collections::HashSet;

@@ -1351,12 +1351,13 @@ pub(super) fn sessions_panel(
                     .size_full(),
                 )
                 .child(
+                    // This tree has no painted scrollbar; reserving a gutter would
+                    // make the right row inset wider than the left.
                     div()
                         .id("sessions-scroll")
                         .size_full()
                         .overflow_y_scroll()
                         .track_scroll(scroll)
-                        .scrollbar_width(px(theme::SCROLLBAR))
                         .w_full()
                         .px(px(4.0))
                         .pt(px(2.0))
@@ -1720,6 +1721,7 @@ fn sidebar_secondary_button(
 }
 
 /// Row metrics for the flattened workspace tree.
+const PROJECT_ROW_H: f32 = 24.0;
 const TREE_ROW_H: f32 = 32.0;
 const TREE_ROW_GAP: f32 = 2.0;
 const TREE_GROUP_GAP: f32 = 6.0;
@@ -1794,7 +1796,7 @@ fn project_row(params: ProjectRowParams, cx: &mut Context<RootView>) -> AnyEleme
 
     div()
         .id(row_id)
-        .h(px(TREE_ROW_H))
+        .h(px(PROJECT_ROW_H))
         .mt(px(top_gap))
         .pl(px(4.0))
         .pr(px(8.0))
