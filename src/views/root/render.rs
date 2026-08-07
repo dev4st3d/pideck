@@ -390,7 +390,15 @@ fn terminal_splitter(
 
     canvas(
         |bounds, window, _| window.insert_hitbox(bounds, HitboxBehavior::Normal),
-        move |bounds, _hitbox, window, _| {
+        move |bounds, hitbox, window, _| {
+            // GPUI canvas ignores Style::mouse_cursor; only Div applies it.
+            // Window-wide while dragging so the cursor survives leaving the strip.
+            if dragging {
+                window.set_window_cursor_style(CursorStyle::ResizeRow);
+            } else {
+                window.set_cursor_style(CursorStyle::ResizeRow, &hitbox);
+            }
+
             let track = Bounds::new(
                 point(bounds.left(), bounds.top() + px(3.0)),
                 size(bounds.size.width, px(if dragging { 2.0 } else { 1.0 })),
@@ -444,5 +452,4 @@ fn terminal_splitter(
     .h(px(7.0))
     .w_full()
     .flex_shrink_0()
-    .cursor(CursorStyle::ResizeRow)
 }
