@@ -169,6 +169,7 @@ test("goal snapshots retain current safety, queue, and accounting state", () => 
           automaticModelTurns: 7,
           toolFreeRepeatCount: 3,
           safetyPauseCause: "no_progress",
+          waiting: { reason: "Waiting for review", resumeAt: 1_800_000_000_000 },
         },
         queue: [{ id: "g2", text: "Follow-up", status: "queued" }],
       },
@@ -186,6 +187,10 @@ test("goal snapshots retain current safety, queue, and accounting state", () => 
   assert.equal(goal.active.automaticModelTurns, 7);
   assert.equal(goal.active.toolFreeRepeatCount, 3);
   assert.equal(goal.active.safetyPauseCause, "no_progress");
+  assert.deepEqual(goal.active.waiting, {
+    reason: "Waiting for review",
+    resumeAt: 1_800_000_000_000,
+  });
   assert.equal(goal.queue[0].objective, "Follow-up");
   assert.equal(goal.queueFrozen, false);
   assert.equal(goal.automaticTurnLimit, 12);
@@ -193,7 +198,7 @@ test("goal snapshots retain current safety, queue, and accounting state", () => 
 
   const frozen = latestGoalState(entries);
   assert.equal(frozen.queueFrozen, true);
-  assert.equal(frozen.automaticTurnLimit, undefined);
+  assert.equal(frozen.automaticTurnLimit, 25);
   assert.equal(frozen.noProgressTurnLimit, 3);
   assert.equal(goalCommand({ kind: "goal_pause" }), "/goal pause");
   assert.equal(goalCommand({ kind: "goal_resume" }), "/goal resume");

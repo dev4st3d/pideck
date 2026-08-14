@@ -26,7 +26,7 @@ fn main() {
             }
         }
         let version = fs::read_to_string(executable_directory.join("fake-version.txt"))
-            .unwrap_or_else(|_| "0.83.0".to_owned());
+            .unwrap_or_else(|_| "0.84.2".to_owned());
         println!("{}", version.trim());
         return;
     }

@@ -6,8 +6,9 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use super::{
-    Command, ConnectionGeneration, ExtensionUiResponse, IncomingRecord, JsonlCodec, OutboundRecord,
-    RequestId, ResponseResult, RpcCommand, RpcEvent, RpcResponse, SessionState, encode_record,
+    AssistantStreamAssembler, Command, ConnectionGeneration, ExtensionUiResponse, IncomingRecord,
+    JsonlCodec, OutboundRecord, RequestId, ResponseResult, RpcCommand, RpcEvent, RpcResponse,
+    SessionState, encode_record,
 };
 use crate::services::pi_process::{
     PiLaunchConfig, PiSupervisor, ProcessFailureKind, ShutdownReport, StartError, SupervisorState,
@@ -582,6 +583,7 @@ struct Connection {
     timed_out_requests: AtomicU64,
     mutation_sender: mpsc::Sender<MutationJob>,
     notification_sender: mpsc::SyncSender<TaggedIncomingRecord>,
+    assistant_stream: Mutex<AssistantStreamAssembler>,
     workers: Mutex<Vec<JoinHandle<()>>>,
 }
 
@@ -609,6 +611,7 @@ impl Connection {
             timed_out_requests: AtomicU64::new(0),
             mutation_sender,
             notification_sender,
+            assistant_stream: Mutex::new(AssistantStreamAssembler::default()),
             workers: Mutex::new(Vec::new()),
         });
 
@@ -801,7 +804,12 @@ impl Connection {
         Ok(())
     }
 
-    fn route(&self, record: IncomingRecord) {
+    fn route(&self, mut record: IncomingRecord) {
+        if let IncomingRecord::Event(event) = &mut record
+            && !self.assistant_stream.lock().recover_poison().prepare(event)
+        {
+            return;
+        }
         let replaceable_stream_update = matches!(
             &record,
             IncomingRecord::Event(event)

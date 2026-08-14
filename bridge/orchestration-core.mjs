@@ -140,7 +140,7 @@ export function latestGoalState(entries, rawSettings = {}) {
 export function normalizeGoalSettings(value) {
   const defaults = {
     experimentalGoals: false,
-    automaticTurnLimit: undefined,
+    automaticTurnLimit: 25,
     noProgressTurnLimit: 3,
   };
   if (!isRecord(value)) return defaults;
@@ -153,7 +153,7 @@ export function normalizeGoalSettings(value) {
   }
   const limits = value.continuationLimits ?? {};
   if (!isRecord(limits)) return defaults;
-  const automaticTurnLimit = continuationLimit(limits.automaticTurns, undefined);
+  const automaticTurnLimit = continuationLimit(limits.automaticTurns, 25);
   const noProgressTurnLimit = continuationLimit(limits.noProgressTurns, 3);
   if (automaticTurnLimit === null || noProgressTurnLimit === null) return defaults;
 
@@ -183,6 +183,15 @@ function normalizeGoal(goal) {
     goal.safetyPauseCause === "continuation_limit" || goal.safetyPauseCause === "no_progress"
       ? goal.safetyPauseCause
       : undefined;
+  const waiting =
+    isRecord(goal.waiting) && typeof goal.waiting.reason === "string" && goal.waiting.reason.trim()
+      ? {
+          reason: goal.waiting.reason.trim().slice(0, 1_000),
+          resumeAt: Number.isSafeInteger(goal.waiting.resumeAt)
+            ? Math.max(0, goal.waiting.resumeAt)
+            : undefined,
+        }
+      : undefined;
   return {
     id: String(goal.id ?? ""),
     objective: String(goal.text ?? ""),
@@ -197,6 +206,7 @@ function normalizeGoal(goal) {
     automaticModelTurns: safeCounter(goal.automaticModelTurns),
     toolFreeRepeatCount: safeCounter(goal.toolFreeRepeatCount),
     safetyPauseCause,
+    waiting,
   };
 }
 

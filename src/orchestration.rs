@@ -264,6 +264,14 @@ pub struct GoalItemSnapshot {
     #[serde(default)]
     pub tool_free_repeat_count: u64,
     pub safety_pause_cause: Option<GoalSafetyPauseCause>,
+    pub waiting: Option<GoalWaitSnapshot>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GoalWaitSnapshot {
+    pub reason: String,
+    pub resume_at: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -503,7 +511,11 @@ mod tests {
                 "activeStartedAt": null,
                 "automaticModelTurns": 7,
                 "toolFreeRepeatCount": 3,
-                "safetyPauseCause": "no_progress"
+                "safetyPauseCause": "no_progress",
+                "waiting": {
+                    "reason": "Waiting for review",
+                    "resumeAt": 1800000000000_u64
+                }
             },
             "queue": [],
             "pendingAction": null,
@@ -516,6 +528,11 @@ mod tests {
         let goal = snapshot.active.expect("active goal");
         assert_eq!(goal.automatic_model_turns, 7);
         assert_eq!(goal.tool_free_repeat_count, 3);
+        assert_eq!(goal.waiting.as_ref().unwrap().reason, "Waiting for review");
+        assert_eq!(
+            goal.waiting.as_ref().unwrap().resume_at,
+            Some(1_800_000_000_000)
+        );
         assert_eq!(
             goal.safety_pause_cause,
             Some(GoalSafetyPauseCause::NoProgress)

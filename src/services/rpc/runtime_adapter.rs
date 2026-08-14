@@ -435,10 +435,13 @@ fn normalize_event(event: RpcEvent) -> NormalizedEvent {
         RpcEvent::MessageStart { message } => {
             NormalizedEvent::MessageStart(runtime_message(message))
         }
-        RpcEvent::MessageUpdate { message, .. } => {
-            // Pi's message field is the accumulated partial assistant message.
-            NormalizedEvent::MessageUpdate(runtime_message(*message))
-        }
+        RpcEvent::MessageUpdate {
+            message: Some(message),
+            ..
+        } => NormalizedEvent::MessageUpdate(runtime_message(*message)),
+        RpcEvent::MessageUpdate { message: None, .. } => NormalizedEvent::Unknown {
+            record_type: "message_update_without_start".to_owned(),
+        },
         RpcEvent::MessageEnd { message } => NormalizedEvent::MessageEnd(runtime_message(message)),
         RpcEvent::BashExecutionUpdate { id, delta } => {
             NormalizedEvent::BashUpdate { request: id, delta }
@@ -702,6 +705,7 @@ fn runtime_message(message: AgentMessage) -> RuntimeMessage {
                 StopReason::ToolUse => Some(MessageStopReason::ToolUse),
                 StopReason::Error => Some(MessageStopReason::Error),
                 StopReason::Aborted => Some(MessageStopReason::Aborted),
+                StopReason::Deferred => Some(MessageStopReason::Deferred),
             };
             RuntimeMessage {
                 key: message_key("assistant", message.timestamp, identity),

@@ -333,6 +333,7 @@ pub enum MessageStopReason {
     ToolUse,
     Error,
     Aborted,
+    Deferred,
 }
 
 #[derive(Debug, Clone, PartialEq)]

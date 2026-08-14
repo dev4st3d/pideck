@@ -1308,7 +1308,10 @@ fn has_reply_text(message: &RuntimeMessage) -> bool {
 fn is_final_assistant_reply(message: &RuntimeMessage) -> bool {
     message.role == MessageRole::Assistant
         && message.terminal
-        && message.stop_reason != Some(MessageStopReason::ToolUse)
+        && !matches!(
+            message.stop_reason,
+            Some(MessageStopReason::ToolUse | MessageStopReason::Deferred)
+        )
         && has_reply_text(message)
 }
 
@@ -1696,6 +1699,7 @@ fn stop_reason_value(reason: Option<MessageStopReason>) -> Option<&'static str> 
         MessageStopReason::ToolUse => "tool_use",
         MessageStopReason::Error => "error",
         MessageStopReason::Aborted => "aborted",
+        MessageStopReason::Deferred => "deferred",
     })
 }
 
@@ -2854,6 +2858,7 @@ fn stop_label(message: &RuntimeMessage) -> Option<String> {
             Some("The provider ended this response with an error.".to_owned())
         }
         Some(MessageStopReason::Aborted) => Some("Response aborted.".to_owned()),
+        Some(MessageStopReason::Deferred) => Some("Response deferred by the provider.".to_owned()),
         Some(MessageStopReason::ToolUse | MessageStopReason::Stop) | None => None,
     }
 }
@@ -2861,7 +2866,7 @@ fn stop_label(message: &RuntimeMessage) -> Option<String> {
 fn stop_color(reason: Option<MessageStopReason>) -> gpui::Rgba {
     match reason {
         Some(MessageStopReason::Length | MessageStopReason::Error) => theme::error(),
-        Some(MessageStopReason::Aborted) => theme::data(),
+        Some(MessageStopReason::Aborted | MessageStopReason::Deferred) => theme::data(),
         Some(MessageStopReason::ToolUse | MessageStopReason::Stop) | None => theme::smoke(),
     }
 }

@@ -435,63 +435,65 @@ fn direct_bash_stream_updates_decode_with_correlation() {
 }
 
 #[test]
-fn every_assistant_streaming_variant_decodes() {
+fn every_pi_0_84_assistant_streaming_delta_decodes() {
     let assistant = json!({
         "role":"assistant","content":[],"api":"synthetic-api","provider":"synthetic-provider",
         "model":"synthetic-model","usage":{"input":0,"output":0,"cacheRead":0,
         "cacheWrite":0,"totalTokens":0,"cost":{"input":0.0,"output":0.0,
         "cacheRead":0.0,"cacheWrite":0.0,"total":0.0}},"stopReason":"pending","timestamp":1
     });
+    let usage = assistant["usage"].clone();
     let variants = [
-        json!({"type":"start","partial":assistant}),
-        json!({"type":"text_start","contentIndex":0,"partial":assistant}),
-        json!({"type":"text_delta","contentIndex":0,"delta":"x","partial":assistant}),
-        json!({"type":"text_end","contentIndex":0,"content":"x","partial":assistant}),
-        json!({"type":"thinking_start","contentIndex":0,"partial":assistant}),
-        json!({"type":"thinking_delta","contentIndex":0,"delta":"x","partial":assistant}),
-        json!({"type":"thinking_end","contentIndex":0,"content":"x","partial":assistant}),
-        json!({"type":"toolcall_start","contentIndex":0,"partial":assistant}),
-        json!({"type":"toolcall_delta","contentIndex":0,"delta":"{}","partial":assistant}),
-        json!({"type":"toolcall_end","contentIndex":0,"toolCall":{"type":"toolCall","id":"tool-1","name":"read","arguments":{}},"partial":assistant}),
+        json!({"type":"start"}),
+        json!({"type":"text_start","contentIndex":0}),
+        json!({"type":"text_delta","contentIndex":0,"delta":"x"}),
+        json!({"type":"text_end","contentIndex":0,"content":"x"}),
+        json!({"type":"thinking_start","contentIndex":0}),
+        json!({"type":"thinking_delta","contentIndex":0,"delta":"x"}),
+        json!({"type":"thinking_end","contentIndex":0,"content":"x"}),
+        json!({"type":"toolcall_start","contentIndex":0}),
+        json!({"type":"toolcall_delta","contentIndex":0,"delta":"{}"}),
+        json!({"type":"toolcall_end","contentIndex":0,"toolCall":{"type":"toolCall","id":"tool-1","name":"read","arguments":{}}}),
         json!({"type":"done","reason":"stop","message":assistant}),
         json!({"type":"error","reason":"aborted","error":assistant}),
     ];
 
     for assistant_event in variants {
         let record = IncomingRecord::from_value(json!({
-            "type":"message_update","message":assistant,
+            "type":"message_update","usage":usage,
             "assistantMessageEvent":assistant_event
         }))
         .expect("streaming variant should decode");
         assert!(matches!(
             record,
             IncomingRecord::Event(event)
-                if matches!(event.as_ref(), RpcEvent::MessageUpdate { .. })
+                if matches!(
+                    event.as_ref(),
+                    RpcEvent::MessageUpdate { message: None, .. }
+                )
         ));
     }
 }
 
 #[test]
-fn unused_assistant_stream_payload_is_not_retained() {
-    let assistant = json!({
-        "role":"assistant","content":[],"api":"synthetic-api","provider":"synthetic-provider",
-        "model":"synthetic-model","usage":{"input":0,"output":0,"cacheRead":0,
-        "cacheWrite":0,"totalTokens":0,"cost":{"input":0.0,"output":0.0,
-        "cacheRead":0.0,"cacheWrite":0.0,"total":0.0}},"stopReason":"stop","timestamp":1
-    });
+fn assistant_stream_wire_shape_keeps_deltas_and_omits_internal_accumulation() {
     let value = json!({
         "type":"message_update",
-        "message":assistant,
+        "usage":{"input":0,"output":1,"cacheRead":0,"cacheWrite":0,"totalTokens":1,
+            "cost":{"input":0.0,"output":0.0,"cacheRead":0.0,"cacheWrite":0.0,"total":0.0}},
         "assistantMessageEvent":{
             "type":"toolcall_end","contentIndex":0,
-            "toolCall":{"type":"toolCall","id":"tool-1","name":"read","arguments":{}},
-            "partial":assistant
+            "toolCall":{"type":"toolCall","id":"tool-1","name":"read","arguments":{}}
         }
     });
     let record = IncomingRecord::from_value(value.clone()).unwrap();
     let serialized = serde_json::to_value(record).unwrap();
-    assert_eq!(serialized["message"], value["message"]);
-    assert!(serialized["assistantMessageEvent"].is_null());
+    assert!(serialized.get("message").is_none());
+    assert_eq!(serialized["usage"], value["usage"]);
+    assert_eq!(
+        serialized["assistantMessageEvent"],
+        value["assistantMessageEvent"]
+    );
 }
 
 #[test]

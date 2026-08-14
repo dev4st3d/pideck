@@ -123,7 +123,7 @@ test("model bridge snapshots and validates Pi settings end to end", { timeout: 1
   const root = mkdtempSync(join(tmpdir(), "pi-gui-model-settings-"));
   const sdkRoot = join(root, "sdk");
   mkdirSync(join(sdkRoot, "dist"), { recursive: true });
-  writeFileSync(join(sdkRoot, "package.json"), '{"version":"0.83.0","type":"module"}\n');
+  writeFileSync(join(sdkRoot, "package.json"), '{"version":"0.84.2","type":"module"}\n');
   writeFileSync(join(sdkRoot, "dist", "index.js"), FAKE_SDK);
 
   const child = spawn(

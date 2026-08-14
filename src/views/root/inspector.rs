@@ -877,12 +877,15 @@ fn goal_panel(
     let resume_id = goal_id.clone();
     let clear_id = goal_id.clone();
     let resumable = !goal.queue_frozen
-        && matches!(
-            active.status.as_str(),
-            "paused" | "blocked" | "usage_limited" | "budget_limited"
-        );
+        && (active.waiting.is_some()
+            || matches!(
+                active.status.as_str(),
+                "paused" | "blocked" | "usage_limited" | "budget_limited"
+            ));
     let displayed_status = if goal.queue_frozen {
         "queue off"
+    } else if active.waiting.is_some() {
+        "waiting"
     } else {
         active.status.as_str()
     };
@@ -1015,6 +1018,11 @@ fn goal_metrics(
     let automatic = automatic_turn_limit
         .map(|limit| format!("auto {}/{}", goal.automatic_model_turns, limit))
         .unwrap_or_else(|| format!("auto {}/unlimited", goal.automatic_model_turns));
+    let waiting = goal
+        .waiting
+        .as_ref()
+        .map(|waiting| format!(" · waiting: {}", waiting.reason))
+        .unwrap_or_default();
     let safety = match goal.safety_pause_cause {
         Some(crate::orchestration::GoalSafetyPauseCause::ContinuationLimit) => {
             " · paused at automatic-response limit".to_owned()
@@ -1033,12 +1041,13 @@ fn goal_metrics(
         .text_size(theme::text_size(theme::T_TINY))
         .text_color(theme::ash())
         .child(format!(
-            "{} · {} · {} elapsed · iteration {} · {} queued{}",
+            "{} · {} · {} elapsed · iteration {} · {} queued{}{}",
             budget,
             automatic,
             format_elapsed(goal.time_used_seconds),
             goal.iteration,
             queued,
+            waiting,
             safety
         ))
 }
@@ -1090,6 +1099,7 @@ fn agent_type_color(agent_type: &str) -> gpui::Rgba {
 fn goal_status_color(status: &str) -> gpui::Rgba {
     match status {
         "active" => theme::live(),
+        "waiting" => theme::data(),
         "paused" | "usage_limited" | "budget_limited" => theme::signal(),
         "complete" | "completed" => theme::smoke(),
         "blocked" | "error" => theme::error(),

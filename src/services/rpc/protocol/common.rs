@@ -197,6 +197,8 @@ pub enum StopReason {
     Error,
     #[serde(rename = "aborted")]
     Aborted,
+    #[serde(rename = "deferred")]
+    Deferred,
 }
 
 macro_rules! message_role {

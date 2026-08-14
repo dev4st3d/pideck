@@ -61,16 +61,14 @@ Every installed Pi extension is hosted natively: `select`, `confirm`, `input`, a
 
 **First-class Inspector supervision**
 
-| Extension | What you get |
-|---|---|
-| `@tintinweb/pi-tasks` | Task lists with dependencies, blockers, and outputs; guarded execute and stop |
-| `@tintinweb/pi-subagents` | Live lifecycle, queue, concurrency, schedules, worktrees, and memory; steer, stop, and resume agents; conversation overlay with a bounded live transcript |
-| `pi-goal` | Objective, status, budget, and elapsed time; guarded pause, resume, edit, and clear |
+| Extension | Tested release | Upstream Pi range | What you get |
+|---|---:|---:|---|
+| `@tintinweb/pi-tasks` | 0.7.2 | `>=0.80.0` | Task lists with dependencies, blockers, and outputs; guarded execute and stop |
+| `@tintinweb/pi-subagents` | 0.15.2 | `>=0.80.0` | Live lifecycle, queue, concurrency, schedules, worktrees, and memory; steer, stop, and resume agents; conversation overlay with a bounded live transcript |
+| `@narumitw/pi-goal` | 0.51.0 | `>=0.80.6` | Objective, wait state, safety limits, queue, budget, and elapsed time; guarded pause, resume, edit, and clear |
+| `@juicesharp/rpiv-ask-user-question` | 2.5.1 | `*` | Multi-question flows, choices, previews, notes, and multi-select answered through native dialogs |
 
-**Tested through the runtime**
-
-- `ask-user-question` — multi-question flows, choices, previews, notes, and multi-select answered through native dialogs
-
+`pi-bar` 0.3.39 is also compatibility-tested. It stays installed for Pi's TUI but is omitted from GUI sessions because PiDeck supplies the native status shell.
 
 ## Requirements
 
@@ -78,7 +76,7 @@ Every installed Pi extension is hosted natively: `select`, `confirm`, `input`, a
 |---|---|
 | OS | Windows |
 | Rust | 1.85+ (stable, see `rust-toolchain.toml`) |
-| Pi | `@earendil-works/pi-coding-agent@0.83.0` |
+| Pi | `@earendil-works/pi-coding-agent@0.84.2` |
 | Node | 22.19+; required only for Pi and the SDK bridge sidecar |
 
 ## Install on Windows
@@ -86,7 +84,7 @@ Every installed Pi extension is hosted natively: `select`, `confirm`, `input`, a
 1. Install Pi if it is not already available:
 
    ```powershell
-   npm install -g @earendil-works/pi-coding-agent@0.83.0
+   npm install -g @earendil-works/pi-coding-agent@0.84.2
    ```
 
 2. Download `PiDeck-win-Setup.exe` from the [latest GitHub Release](https://github.com/dev4st3d/pideck/releases/latest) and run it.
@@ -98,7 +96,7 @@ PiDeck checks for stable updates at startup. When one is available, use the titl
 ## Quick start from source
 
 ```powershell
-npm install -g @earendil-works/pi-coding-agent@0.83.0
+npm install -g @earendil-works/pi-coding-agent@0.84.2
 cargo run
 ```
 
