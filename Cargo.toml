@@ -1,6 +1,6 @@
 [package]
 name = "pi-gui"
-version = "0.1.6"
+version = "0.1.7"
 edition = "2024"
 rust-version = "1.85"
 description = "Pideck — a native desktop shell for the Pi coding agent (GPUI)"
