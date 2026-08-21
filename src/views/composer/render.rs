@@ -86,7 +86,7 @@ impl Composer {
                             .px(px(10.0))
                             .py(px(field_padding_y))
                             .overflow_hidden()
-                            .rounded(px(theme::RADIUS_SM))
+                            .rounded(px(theme::RADIUS_MD))
                             .border_1()
                             .border_color(if self.disabled {
                                 theme::edge_soft()
@@ -147,10 +147,10 @@ impl Composer {
                                     "{}-submit",
                                     self.id_prefix
                                 )))
-                                .h(px(34.0))
+                                .h(px(32.0))
                                 .min_w(px(56.0))
                                 .px(px(10.0))
-                                .rounded(px(theme::RADIUS_SM))
+                                .rounded(px(theme::RADIUS_MD))
                                 .flex()
                                 .items_center()
                                 .justify_center()
@@ -204,8 +204,8 @@ impl Composer {
         // on the card surface (no inner well) and no footer renders here. Panel
         // chrome keeps a self-contained bordered field with its own status row.
         let desk = self.chrome == ComposerChrome::Full;
-        let input_padding_x = 12.0;
-        let input_padding_y = 8.0;
+        let input_padding_x = 14.0;
+        let input_padding_y = 10.0;
         let input_line_height = if panel { 21.0 } else { 20.0 };
         // Idle: one row · focused: multi-line · user enlarge: taller pinned shell.
         let height_motion = self.input_height_motion();
@@ -236,7 +236,7 @@ impl Composer {
 
         if panel {
             input = input
-                .rounded(px(theme::RADIUS_SM))
+                .rounded(px(theme::RADIUS_MD))
                 .border_1()
                 .border_color(if self.disabled {
                     theme::edge_soft()
@@ -601,7 +601,7 @@ impl Composer {
             .h(px(ATTACHMENT_CHIP))
             .pl(px(8.0))
             .pr(px(6.0))
-            .rounded(px(theme::RADIUS))
+            .rounded(px(theme::RADIUS_MD))
             .border_1()
             .border_color(theme::edge_soft())
             .bg(theme::panel())
@@ -764,7 +764,7 @@ impl Composer {
             )))
             .relative()
             .size(px(ATTACHMENT_CHIP))
-            .rounded(px(theme::RADIUS))
+            .rounded(px(theme::RADIUS_MD))
             .border_1()
             .border_color(rgba(0x0000_0000))
             .tab_index(0)
@@ -789,7 +789,7 @@ impl Composer {
             .child(
                 div()
                     .size_full()
-                    .rounded(px(theme::RADIUS))
+                    .rounded(px(theme::RADIUS_MD))
                     .border_1()
                     .border_color(theme::edge_soft())
                     .bg(theme::panel())

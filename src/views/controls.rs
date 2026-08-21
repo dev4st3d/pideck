@@ -84,16 +84,17 @@ pub struct TextTooltip {
 impl Render for TextTooltip {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         let mut tip = div()
-            .px(px(8.0))
-            .py(px(5.0))
-            .rounded(px(theme::RADIUS_SM))
+            .px(px(10.0))
+            .py(px(6.0))
+            .rounded(px(theme::RADIUS_MD))
             .bg(theme::panel_lift())
             .border_1()
-            .border_color(theme::edge_hard())
+            .border_color(theme::edge())
+            .shadow(theme::dock_shadow())
             .flex()
             .flex_row()
             .items_center()
-            .gap(px(6.0))
+            .gap(px(8.0))
             .font_family(theme::main())
             .text_size(theme::text_size(theme::T_LABEL))
             .font_weight(FontWeight::SEMIBOLD)
@@ -141,7 +142,7 @@ pub fn meta_sep() -> impl IntoElement {
 pub fn section_label(text: impl Into<SharedString>) -> impl IntoElement {
     div()
         .font_family(theme::main())
-        .text_size(theme::text_size(theme::T_LABEL))
+        .text_size(theme::text_size(theme::T_TINY))
         .font_weight(FontWeight::SEMIBOLD)
         .text_color(theme::ash())
         .child(text.into())
@@ -149,9 +150,9 @@ pub fn section_label(text: impl Into<SharedString>) -> impl IntoElement {
 
 pub fn status_pill(label: impl Into<SharedString>, color: gpui::Rgba) -> impl IntoElement {
     div()
-        .px(px(8.0))
-        .py(px(5.0))
-        .rounded(px(theme::RADIUS_SM))
+        .h(px(26.0))
+        .px(px(10.0))
+        .rounded(px(theme::RADIUS_MD))
         .flex()
         .flex_row()
         .items_center()
@@ -248,10 +249,10 @@ pub fn recovery_button(
 ) -> impl IntoElement {
     div()
         .id(id)
-        .h(px(34.0))
+        .h(px(theme::CHROME))
         .min_w(px(96.0))
         .px(px(12.0))
-        .rounded(px(theme::RADIUS_SM))
+        .rounded(px(theme::RADIUS_MD))
         .flex()
         .items_center()
         .justify_center()
@@ -314,9 +315,9 @@ pub fn quiet_button(
 ) -> impl IntoElement {
     div()
         .id(id.into())
-        .h(px(28.0))
-        .px(px(8.0))
-        .rounded(px(theme::RADIUS_SM))
+        .h(px(30.0))
+        .px(px(10.0))
+        .rounded(px(theme::RADIUS_MD))
         .border_1()
         .border_color(clear())
         .flex()
@@ -345,74 +346,92 @@ pub fn quiet_button(
         )
 }
 
-/// Dense toolbar button for inspector run actions.
-pub fn tone_button(
+/// Unboxed action: type only. Used by the inspector run column so a row of
+/// framed stamps never becomes the visual subject.
+pub fn text_action(
     id: impl Into<SharedString>,
     label: impl Into<SharedString>,
     enabled: bool,
     tone: ControlTone,
     on_click: ClickHandler,
 ) -> impl IntoElement {
-    let (idle_bg, idle_border, idle_text, hot_bg, hot_border, hot_text) = match (enabled, tone) {
-        (true, ControlTone::Danger) => (
-            theme::panel(),
-            theme::edge_hard(),
-            theme::error(),
-            theme::panel_hover(),
-            theme::error(),
-            theme::error(),
-        ),
-        (true, ControlTone::Normal) => (
-            theme::panel_lift(),
-            theme::edge_hard(),
-            theme::bone(),
-            theme::panel_hover(),
-            theme::edge(),
-            theme::bone(),
-        ),
-        (false, _) => (
-            clear(),
-            theme::edge_soft(),
-            theme::smoke(),
-            clear(),
-            theme::edge_soft(),
-            theme::smoke(),
-        ),
+    let idle = match (enabled, tone) {
+        (true, ControlTone::Danger) => theme::error(),
+        (true, ControlTone::Normal) => theme::bone_dim(),
+        (false, _) => theme::smoke(),
     };
-
+    let hot = match tone {
+        ControlTone::Danger => theme::error(),
+        ControlTone::Normal => theme::bone(),
+    };
     div()
         .id(id.into())
-        .h(px(28.0))
-        .px(px(10.0))
-        .rounded(px(theme::RADIUS_SM))
+        .h(px(26.0))
+        .px(px(2.0))
         .flex()
         .items_center()
-        .justify_center()
         .flex_1()
         .min_w_0()
-        .bg(idle_bg)
-        .border_1()
-        .border_color(idle_border)
-        .text_color(idle_text)
+        .text_color(idle)
         .when(enabled, |button| {
             button
                 .tab_index(0)
                 .cursor_pointer()
-                .hover(move |button| {
-                    button
-                        .bg(hot_bg)
-                        .border_color(hot_border)
-                        .text_color(hot_text)
-                })
-                .focus(|button| button.border_color(theme::focus()))
-                .active(|button| button.bg(theme::panel_lift()))
+                .hover(move |button| button.text_color(hot))
+                .focus(|button| button.text_color(theme::focus()))
+                .active(|button| button.opacity(0.7))
                 .on_click(move |event, window, cx| on_click(event, window, cx))
         })
         .child(
             div()
                 .font_family(theme::main())
-                .text_size(theme::text_size(theme::T_TINY))
-                .font_weight(FontWeight::SEMIBOLD)
+                .text_size(theme::text_size(theme::T_UI_SM))
+                .font_weight(FontWeight::MEDIUM)
+                .overflow_hidden()
+                .text_ellipsis()
+                .whitespace_nowrap()
+                .child(label.into()),
+        )
+}
+
+/// One of a pair of choices (delivery, on/off). Selected is weight, not a box.
+pub fn text_choice(
+    id: impl Into<SharedString>,
+    label: impl Into<SharedString>,
+    selected: bool,
+    enabled: bool,
+    on_click: ClickHandler,
+) -> impl IntoElement {
+    div()
+        .id(id.into())
+        .h(px(26.0))
+        .px(px(2.0))
+        .flex()
+        .items_center()
+        .text_color(if selected {
+            theme::bone()
+        } else if enabled {
+            theme::ash()
+        } else {
+            theme::smoke()
+        })
+        .when(enabled, |button| {
+            button
+                .tab_index(0)
+                .cursor_pointer()
+                .hover(|button| button.text_color(theme::bone()))
+                .focus(|button| button.text_color(theme::focus()))
+                .on_click(move |event, window, cx| on_click(event, window, cx))
+        })
+        .child(
+            div()
+                .font_family(theme::main())
+                .text_size(theme::text_size(theme::T_UI_SM))
+                .font_weight(if selected {
+                    FontWeight::SEMIBOLD
+                } else {
+                    FontWeight::MEDIUM
+                })
                 .child(label.into()),
         )
 }
@@ -475,7 +494,7 @@ pub fn chip_button(
         .id(id.into())
         .h(px(28.0))
         .px(px(10.0))
-        .rounded(px(theme::RADIUS_SM))
+        .rounded(px(theme::RADIUS_MD))
         .flex()
         .items_center()
         .justify_center()
@@ -485,11 +504,7 @@ pub fn chip_button(
             clear()
         })
         .border_1()
-        .border_color(if selected {
-            theme::edge_hard()
-        } else {
-            theme::edge_soft()
-        })
+        .border_color(if selected { theme::edge() } else { clear() })
         .text_color(if selected {
             theme::bone()
         } else if enabled {
@@ -533,8 +548,8 @@ pub fn chrome_action(
 ) -> impl IntoElement {
     div()
         .id(id.into())
-        .h(px(20.0))
-        .px(px(6.0))
+        .h(px(22.0))
+        .px(px(7.0))
         .rounded(px(theme::RADIUS_SM))
         .flex()
         .items_center()
@@ -565,12 +580,10 @@ pub fn tab_track() -> gpui::Div {
         .flex()
         .flex_row()
         .items_center()
-        .gap(px(2.0))
+        .gap(px(3.0))
         .p(px(3.0))
-        .rounded(px(theme::RADIUS_SM))
+        .rounded(px(theme::RADIUS_MD))
         .bg(theme::canvas())
-        .border_1()
-        .border_color(theme::edge_soft())
 }
 
 pub fn tab_button(
@@ -581,9 +594,9 @@ pub fn tab_button(
 ) -> impl IntoElement {
     div()
         .id(id.into())
-        .h(px(28.0))
+        .h(px(26.0))
         .px(px(8.0))
-        .rounded(px(2.0))
+        .rounded(px(theme::RADIUS))
         .flex()
         .flex_1()
         .min_w_0()
@@ -595,11 +608,7 @@ pub fn tab_button(
             clear()
         })
         .border_1()
-        .border_color(if selected {
-            theme::edge_hard()
-        } else {
-            clear()
-        })
+        .border_color(if selected { theme::edge() } else { clear() })
         .text_color(if selected {
             theme::bone()
         } else {
@@ -643,9 +652,9 @@ pub fn panel_note(text: impl Into<SharedString>, tone: ControlTone) -> impl Into
         ControlTone::Normal => (theme::edge_soft(), theme::bone_dim()),
     };
     div()
-        .px(px(10.0))
-        .py(px(8.0))
-        .rounded(px(theme::RADIUS_SM))
+        .px(px(11.0))
+        .py(px(9.0))
+        .rounded(px(theme::RADIUS_MD))
         .bg(theme::panel())
         .border_1()
         .border_color(border)
@@ -734,9 +743,7 @@ pub fn divider_list() -> gpui::Div {
     div()
         .flex()
         .flex_col()
-        .border_1()
-        .border_color(theme::edge_soft())
-        .rounded(px(theme::RADIUS_SM))
+        .rounded(px(theme::RADIUS_MD))
         .overflow_hidden()
         .bg(theme::canvas())
 }
@@ -799,21 +806,10 @@ pub fn session_usage(params: SessionUsageParams) -> impl IntoElement {
         .id("session-usage")
         .relative()
         .w_full()
-        .px(px(10.0))
-        .py(px(9.0))
-        .rounded(px(theme::RADIUS))
-        .bg(theme::panel())
-        .border_1()
-        .border_color(theme::edge_soft())
-        .hover(|summary| {
-            summary
-                .bg(theme::panel_lift())
-                .border_color(theme::edge_hard())
-        })
         .on_hover(move |hovered, window, cx| (summary_hover)(hovered, window, cx))
         .flex()
         .flex_col()
-        .gap(px(7.0))
+        .gap(px(6.0))
         .child(
             div()
                 .flex()
@@ -837,17 +833,15 @@ pub fn session_usage(params: SessionUsageParams) -> impl IntoElement {
         )
         .child(
             div()
-                .h(px(3.0))
+                .h(px(2.0))
                 .w_full()
-                .rounded(px(2.0))
-                .bg(theme::canvas())
+                .bg(theme::edge_soft())
                 .overflow_hidden()
                 .child(
                     div()
                         .h_full()
                         .w(relative(pct))
                         .when(pct > 0.0, |fill| fill.min_w(px(2.0)))
-                        .rounded(px(2.0))
                         .bg(fill_color),
                 ),
         )
@@ -931,10 +925,11 @@ impl SessionUsageTooltip {
         div()
             .w_full()
             .p(px(12.0))
-            .rounded(px(theme::RADIUS))
+            .rounded(px(theme::RADIUS_MD))
             .bg(theme::panel_lift())
             .border_1()
-            .border_color(theme::edge_hard())
+            .border_color(theme::edge())
+            .shadow(theme::dock_shadow())
             .flex()
             .flex_col()
             .gap(px(11.0))
@@ -1115,10 +1110,10 @@ pub fn queue_row(
 
 pub fn empty_list_note(text: impl Into<SharedString>) -> impl IntoElement {
     div()
-        .px(px(11.0))
-        .py(px(10.0))
+        .py(px(4.0))
         .font_family(theme::sans())
         .text_size(theme::text_size(theme::T_UI_SM))
+        .line_height(relative(1.4))
         .text_color(theme::smoke())
         .child(text.into())
 }

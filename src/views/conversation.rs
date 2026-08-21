@@ -50,16 +50,16 @@ const DISCLOSURE_HISTORY_MAX_PX: f32 = 420.0;
 // turn. Every section hangs on one rail column so the turn reads as a single
 // chain instead of a boxed card stack. Speaker nodes are larger than activity
 // beads so the eye reads structure at a glance.
-pub(super) const THREAD_RAIL_W: f32 = 10.0;
-const NODE_SPEAKER: f32 = 6.0;
+pub(super) const THREAD_RAIL_W: f32 = 12.0;
+const NODE_SPEAKER: f32 = 7.0;
 const NODE_STEP: f32 = 4.0;
 /// Cap-height the node centers sit on inside their rows.
 const NODE_ALIGN: f32 = 9.0;
-pub(super) const THREAD_GAP: f32 = 10.0;
+pub(super) const THREAD_GAP: f32 = 12.0;
 /// Whitespace between turns; the chain rests between links.
-const TURN_GAP: f32 = 28.0;
+const TURN_GAP: f32 = 32.0;
 /// Rhythm between sections inside one turn.
-const TURN_SECTION_GAP: f32 = 10.0;
+const TURN_SECTION_GAP: f32 = 12.0;
 
 #[derive(Debug, Clone, Copy)]
 struct DisclosureMotion {
@@ -1117,15 +1117,28 @@ fn user_prompt_section(
                 section.child(
                     div()
                         .w_full()
-                        .mt(px(7.0))
-                        .rounded(px(theme::RADIUS))
+                        .mt(px(6.0))
+                        .rounded(px(theme::RADIUS_MD))
                         .bg(theme::user_message())
-                        .px(px(13.0))
-                        .py(px(10.0))
+                        .overflow_hidden()
                         .flex()
-                        .flex_col()
-                        .gap(px(5.0))
-                        .children(body),
+                        .flex_row()
+                        .child(div().w(px(3.0)).flex_shrink_0().bg(if pending {
+                            theme::data()
+                        } else {
+                            theme::signal()
+                        }))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .px(px(13.0))
+                                .py(px(11.0))
+                                .flex()
+                                .flex_col()
+                                .gap(px(6.0))
+                                .children(body),
+                        ),
                 )
             }),
     )
@@ -1142,13 +1155,9 @@ fn user_prompt_header(meta: UserPromptMeta, pending: bool) -> impl IntoElement {
         .child(
             div()
                 .font_family(theme::sans())
-                .text_size(theme::text_size(theme::T_UI_SM))
+                .text_size(theme::text_size(theme::T_LABEL))
                 .font_weight(FontWeight::SEMIBOLD)
-                .text_color(if pending {
-                    theme::bone_dim()
-                } else {
-                    theme::bone()
-                })
+                .text_color(if pending { theme::data() } else { theme::ash() })
                 .child("You"),
         )
         .child(
@@ -2490,14 +2499,14 @@ fn assistant_reply(
                 .pb(px(2.0))
                 .flex()
                 .flex_col()
-                .gap(px(7.0))
+                .gap(px(8.0))
                 .child(
                     div().flex().flex_row().items_center().gap(px(8.0)).child(
                         div()
                             .font_family(theme::sans())
-                            .text_size(theme::text_size(theme::T_UI_SM))
+                            .text_size(theme::text_size(theme::T_LABEL))
                             .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(theme::bone())
+                            .text_color(theme::ash())
                             .child("Pi"),
                     ),
                 )
@@ -2506,7 +2515,7 @@ fn assistant_reply(
                         &fragment_key(message, block),
                         texts,
                         theme::sans(),
-                        theme::T_BODY_SM,
+                        theme::T_BODY,
                         theme::bone(),
                         FontWeight::NORMAL,
                     )),
@@ -2615,7 +2624,7 @@ fn selectable(
     weight: FontWeight,
 ) -> AnyElement {
     // Compact long-read rhythm; tighter than the shell's 1.58 chat default.
-    selectable_with_leading(key, texts, font, size, color, weight, 1.45)
+    selectable_with_leading(key, texts, font, size, color, weight, 1.52)
 }
 
 fn prompt_selectable(key: &str, texts: &HashMap<String, Entity<TranscriptText>>) -> AnyElement {
@@ -2705,9 +2714,7 @@ fn attachment_chip(icon: &'static str, label: String) -> AnyElement {
         .max_w(px(280.0))
         .h(px(26.0))
         .px(px(8.0))
-        .rounded(px(theme::RADIUS_SM))
-        .border_1()
-        .border_color(theme::edge_soft())
+        .rounded(px(theme::RADIUS_MD))
         .bg(theme::panel())
         .flex()
         .flex_row()
@@ -2809,11 +2816,12 @@ impl Render for MessageMetaTooltip {
         div()
             .min_w(px(200.0))
             .max_w(px(320.0))
-            .p(px(10.0))
-            .rounded(px(theme::RADIUS))
+            .p(px(12.0))
+            .rounded(px(theme::RADIUS_MD))
             .bg(theme::panel_lift())
             .border_1()
-            .border_color(theme::edge_hard())
+            .border_color(theme::edge())
+            .shadow(theme::dock_shadow())
             .flex()
             .flex_col()
             .gap(px(6.0))
@@ -2894,24 +2902,34 @@ fn empty_state(projection: &ConversationProjection) -> impl IntoElement {
     };
     div()
         .w_full()
-        .min_h(px(220.0))
+        .min_h(px(240.0))
         .flex()
         .flex_col()
         .items_center()
         .justify_center()
-        .gap(px(8.0))
+        .gap(px(10.0))
         .child(
             div()
-                .font_family(theme::sans())
-                .text_size(theme::text_size(theme::T_TITLE))
-                .font_weight(FontWeight::BOLD)
-                .text_color(theme::bone_dim())
-                .child(title),
+                .w(px(28.0))
+                .h(px(2.0))
+                .rounded_full()
+                .bg(theme::signal())
+                .opacity(0.7),
         )
         .child(
             div()
                 .font_family(theme::sans())
+                .text_size(theme::text_size(theme::T_TITLE))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(theme::bone())
+                .child(title),
+        )
+        .child(
+            div()
+                .max_w(px(360.0))
+                .font_family(theme::sans())
                 .text_size(theme::text_size(theme::T_UI))
+                .line_height(relative(1.45))
                 .text_color(theme::smoke())
                 .child(body),
         )

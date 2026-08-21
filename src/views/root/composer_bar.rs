@@ -1,7 +1,7 @@
-//! The prompt card: a softly rounded, elevated surface that carries the
+//! The prompt dock: a softly rounded, elevated surface that carries the
 //! composer input on top and one quiet control tray underneath (model and
 //! thinking selects left, status in the middle, tools and the submit orb at
-//! the right). It replaces the old header-plus-footer panel chrome.
+//! the right).
 
 use super::model_panels::{model_switcher_sheet, thinking_select_sheet};
 use super::overlays::{
@@ -10,10 +10,10 @@ use super::overlays::{
 use super::*;
 use crate::file_completion::FileMatch;
 use crate::views::composer::ComposerFeedback;
-use gpui::{BoxShadow, SharedString, rgba};
+use gpui::{SharedString, rgba};
 
 /// One vertical rhythm for every control in the prompt tray.
-const TRAY_CONTROL_H: f32 = 26.0;
+const TRAY_CONTROL_H: f32 = 28.0;
 
 fn clear() -> gpui::Rgba {
     rgba(0x0000_0000)
@@ -130,8 +130,8 @@ pub(super) fn composer_bar(
     div()
         .flex_shrink_0()
         .px(px(theme::STREAM_PAD_X))
-        .pt(px(8.0))
-        .pb(px(10.0))
+        .pt(px(10.0))
+        .pb(px(14.0))
         // Overlay host: popups are absolute and must not grow this bar's layout height.
         .relative()
         .child(
@@ -208,22 +208,15 @@ pub(super) fn composer_bar(
                     div()
                         .flex()
                         .flex_col()
-                        .rounded(px(theme::RADIUS_LG))
+                        .rounded(px(theme::RADIUS_XL))
                         .border_1()
                         .border_color(if card_active {
-                            theme::edge_hard()
+                            theme::focus()
                         } else {
                             theme::edge()
                         })
                         .bg(theme::panel())
-                        // One tight, low-offset shadow cast downward, in family
-                        // with the inspector sheet. Deliberate lift, no bloom.
-                        .shadow(vec![BoxShadow {
-                            color: rgba(0x0000_0047).into(),
-                            offset: point(px(0.0), px(10.0)),
-                            blur_radius: px(24.0),
-                            spread_radius: px(-10.0),
-                        }])
+                        .shadow(theme::dock_shadow())
                         .overflow_hidden()
                         .can_drop(move |value, _, _| can_attach && value.is::<ExternalPaths>())
                         .drag_over::<ExternalPaths>(|style, _, _, _| {
@@ -251,10 +244,10 @@ pub(super) fn composer_bar(
                                 .flex()
                                 .flex_row()
                                 .items_center()
-                                .gap(px(6.0))
-                                .px(px(8.0))
-                                .pb(px(8.0))
-                                .pt(px(1.0))
+                                .gap(px(8.0))
+                                .px(px(10.0))
+                                .pb(px(10.0))
+                                .pt(px(2.0))
                                 .child(
                                     div()
                                         .flex()

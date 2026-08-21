@@ -1,25 +1,9 @@
-use std::time::Duration;
-
-use gpui::{Animation, AnimationExt, BoxShadow, ease_out_quint, quadratic};
-
 use super::shared::runtime_operation_label;
 use super::shared::{plural, short_path};
 use super::*;
 use crate::views::conversation::{TranscriptText, TranscriptTextCache};
 
-/// Short pop for the sheet entrance; the overlay never drives layout, so there
-/// is nothing to reflow while it plays.
-const INSPECTOR_MOTION_MS: u64 = 180;
-/// The exit runs swifter than the entrance: a dismissed companion leaves fast.
-pub(super) const INSPECTOR_EXIT_MS: u64 = 140;
-/// Air the sheet keeps from the window edges it floats near.
-const SHEET_INSET: f32 = 10.0;
-/// Calm entrance travel: a short settle from the right, never a whoosh.
-const SHEET_SLIDE: f32 = 16.0;
-/// Card header height; slimmer than the titlebar the sheet no longer docks with.
-const SHEET_HEADER_H: f32 = 40.0;
-
-pub(super) struct InspectorParams<'a> {
+pub(super) struct SessionRailParams<'a> {
     pub(super) projection: &'a ShellProjection,
     pub(super) conversation: &'a ConversationProjection,
     pub(super) orchestration: &'a OrchestrationProjection,
@@ -30,15 +14,15 @@ pub(super) struct InspectorParams<'a> {
     pub(super) usage_tooltip_visible: bool,
     pub(super) usage_tooltip_epoch: u64,
     pub(super) inspector_focus: &'a FocusHandle,
-    pub(super) inspector_motion_key: u64,
-    pub(super) inspector_closing: bool,
+    pub(super) rail_open: bool,
 }
 
-pub(super) fn inspector(
-    params: InspectorParams<'_>,
+/// Session facts for the left rail. Not an overlay — the transcript keeps its width.
+pub(super) fn session_rail(
+    params: SessionRailParams<'_>,
     cx: &mut Context<RootView>,
 ) -> impl IntoElement {
-    let InspectorParams {
+    let SessionRailParams {
         projection,
         conversation,
         orchestration,
@@ -49,68 +33,20 @@ pub(super) fn inspector(
         usage_tooltip_visible,
         usage_tooltip_epoch,
         inspector_focus,
-        inspector_motion_key,
-        inspector_closing,
+        rail_open,
     } = params;
 
-    // Disposable companion: a floating sheet parked off the right edge. It
-    // overlays the workspace, so summoning or dismissing it costs zero layout
-    // work in the conversation and composer.
-    let sheet = div()
-        .id("inspector-panel")
-        .absolute()
-        .top(px(SHEET_INSET))
-        .right(px(SHEET_INSET))
-        .bottom(px(SHEET_INSET))
-        .w(px(theme::INSPECT_W))
-        // Occlude: without this the click-away scrim beneath stays "hovered"
-        // through the sheet, so every in-sheet press first dismisses the
-        // companion instead of reaching the task, subagent, or control under
-        // the pointer.
-        .occlude()
+    div()
+        .id("session-rail")
+        .track_focus(inspector_focus)
+        .when(rail_open, |rail| rail.tab_index(0))
+        .size_full()
         .flex()
         .flex_col()
-        .bg(theme::floor())
         .overflow_hidden()
-        .rounded(px(theme::RADIUS))
-        .border_1()
-        .border_color(theme::edge_hard())
-        // One tight, low-offset shadow cast downward. Deliberate lift, no bloom.
-        .shadow(vec![BoxShadow {
-            color: gpui::rgba(0x0000_0059).into(),
-            offset: point(px(0.0), px(6.0)),
-            blur_radius: px(14.0),
-            spread_radius: px(-2.0),
-        }])
         .child(
             div()
-                .px(px(12.0))
-                .h(px(SHEET_HEADER_H))
-                .flex()
-                .flex_row()
-                .items_center()
-                .justify_between()
-                .gap(px(8.0))
-                .border_b_1()
-                .border_color(theme::edge_soft())
-                .child(
-                    div()
-                        .font_family(theme::sans())
-                        .text_size(theme::text_size(theme::T_UI_SM))
-                        .font_weight(FontWeight::BOLD)
-                        .text_color(theme::bone_dim())
-                        .child("Inspector"),
-                )
-                .child(controls::chrome_action(
-                    "dismiss-inspector",
-                    "Esc",
-                    true,
-                    Box::new(cx.listener(|view, _, window, cx| view.toggle_inspector(window, cx))),
-                )),
-        )
-        .child(
-            div()
-                .id("inspector-scroll")
+                .id("session-rail-scroll")
                 .w_full()
                 .min_w_0()
                 .flex_1()
@@ -120,12 +56,12 @@ pub(super) fn inspector(
                 .child(
                     div()
                         .w_full()
-                        .px(px(12.0))
-                        .pt(px(12.0))
-                        .pb(px(16.0))
+                        .px(px(10.0))
+                        .pt(px(10.0))
+                        .pb(px(24.0))
                         .flex()
                         .flex_col()
-                        .gap(px(14.0))
+                        .gap(px(18.0))
                         .child(controls::session_usage(controls::SessionUsageParams {
                             context: projection.context.label().into(),
                             pct: context_pct(&projection.context.label()),
@@ -143,102 +79,16 @@ pub(super) fn inspector(
                                 view.set_usage_tooltip_hovered(*hovered, cx)
                             })),
                         }))
-                        .child(
-                            div()
-                                .w_full()
-                                .flex()
-                                .flex_col()
-                                .gap(px(14.0))
-                                .child(orchestration_panel(
-                                    orchestration,
-                                    selected_task_id,
-                                    goal_edit_composer,
-                                    cx,
-                                ))
-                                .child(run_controls(conversation, delivery_focus, cx))
-                                .child(queue_panel(conversation)),
-                        ),
+                        .child(orchestration_panel(
+                            orchestration,
+                            selected_task_id,
+                            goal_edit_composer,
+                            cx,
+                        ))
+                        .child(run_controls(conversation, delivery_focus, cx))
+                        .child(queue_panel(conversation)),
                 ),
-        );
-
-    // Click-away layer: pressing outside the sheet dismisses the companion.
-    // Half-strength tint keeps the transcript legible while peeking.
-    let scrim = div()
-        .id("inspector-scrim")
-        .absolute()
-        .top_0()
-        .right_0()
-        .bottom_0()
-        .left_0()
-        .bg(gpui::rgba(0x0b0a_0980))
-        .on_mouse_down(
-            MouseButton::Left,
-            cx.listener(|view, _, window, cx| view.toggle_inspector(window, cx)),
-        );
-
-    // Entrance: scrim washes in while the sheet settles from the right with a
-    // decelerating quint. Exit: both leave on an accelerating quadratic, the
-    // mirror image — exit slides out toward the right and fades fully away.
-    let animated_scrim = if inspector_closing {
-        scrim
-            .with_animation(
-                ("inspector-scrim", inspector_motion_key),
-                Animation::new(Duration::from_millis(INSPECTOR_EXIT_MS)).with_easing(quadratic),
-                |scrim, delta| scrim.opacity(1.0 - delta),
-            )
-            .into_any_element()
-    } else {
-        scrim
-            .with_animation(
-                ("inspector-scrim", inspector_motion_key),
-                Animation::new(Duration::from_millis(INSPECTOR_MOTION_MS))
-                    .with_easing(ease_out_quint()),
-                |scrim, delta| scrim.opacity(delta),
-            )
-            .into_any_element()
-    };
-    let animated_sheet = if inspector_closing {
-        sheet
-            .with_animation(
-                ("inspector-panel", inspector_motion_key),
-                Animation::new(Duration::from_millis(INSPECTOR_EXIT_MS)).with_easing(quadratic),
-                |sheet, delta| {
-                    sheet
-                        .right(px(SHEET_INSET + SHEET_SLIDE * delta))
-                        .opacity(1.0 - delta)
-                },
-            )
-            .into_any_element()
-    } else {
-        sheet
-            .with_animation(
-                ("inspector-panel", inspector_motion_key),
-                Animation::new(Duration::from_millis(INSPECTOR_MOTION_MS))
-                    .with_easing(ease_out_quint()),
-                |sheet, delta| {
-                    sheet
-                        .right(px(SHEET_INSET + SHEET_SLIDE * (1.0 - delta)))
-                        .opacity(delta)
-                },
-            )
-            .into_any_element()
-    };
-
-    // Parked under the titlebar so its inspector toggle stays in reach.
-    // Focus lands here while open; Escape dismissal routes through the global
-    // AbortRun cascade in RootView::on_abort_run.
-    div()
-        .absolute()
-        .top(px(theme::TITLE_H + 2.0))
-        .right_0()
-        .bottom_0()
-        .left_0()
-        .occlude()
-        .track_focus(inspector_focus)
-        .tab_index(0)
-        .child(animated_scrim)
-        .child(animated_sheet)
-        .into_any_element()
+        )
 }
 
 fn orchestration_panel(
@@ -307,7 +157,7 @@ fn orchestration_panel(
                             .flex_col()
                             .gap(px(7.0))
                             .child(controls::section_label("Schedules"))
-                            .child(controls::divider_list().children(
+                            .child(div().flex().flex_col().children(
                                 snapshot.schedules.iter().map(|schedule| {
                                     controls::queue_row(
                                         if schedule.enabled { "ON" } else { "OFF" },
@@ -358,11 +208,6 @@ fn orchestration_state_note(
     cx: &mut Context<RootView>,
 ) -> impl IntoElement {
     div()
-        .p(px(10.0))
-        .rounded(px(theme::RADIUS_SM))
-        .bg(theme::panel())
-        .border_1()
-        .border_color(theme::edge_soft())
         .flex()
         .flex_col()
         .gap(px(8.0))
@@ -375,10 +220,11 @@ fn orchestration_state_note(
                 .child(message.into()),
         )
         .when(reconnect, |note| {
-            note.child(controls::quiet_button(
+            note.child(controls::text_action(
                 "orchestration-reconnect",
                 "Reconnect",
                 true,
+                controls::ControlTone::Normal,
                 Box::new(cx.listener(|view, _, _, cx| {
                     view.controller
                         .update(cx, |controller, cx| controller.restart_bridge(cx));
@@ -419,10 +265,6 @@ fn task_list(
             div()
                 .flex()
                 .flex_col()
-                // Keep the former bordered list's footprint without boxing the tasks in.
-                .px(px(4.0))
-                .pt(px(3.0))
-                .pb(px(6.0))
                 .when(tasks.is_empty(), |list| {
                     list.child(controls::empty_list_note("No tasks in this session."))
                 })
@@ -431,7 +273,6 @@ fn task_list(
                         index,
                         task,
                         selected_task_id == Some(task.id.as_str()),
-                        index + 1 == tasks.len(),
                         task.blocked_by
                             .iter()
                             .filter(|id| !completed.contains(id.as_str()))
@@ -446,7 +287,6 @@ fn task_row(
     index: usize,
     task: &TaskSnapshot,
     selected: bool,
-    is_last: bool,
     open_blockers: usize,
     cx: &mut Context<RootView>,
 ) -> gpui::AnyElement {
@@ -456,61 +296,34 @@ fn task_row(
     let status_color = task_status_color(task.status, open_blockers);
     let can_execute = task.status == TaskStatus::Pending && open_blockers == 0;
     let can_stop = task.status == TaskStatus::InProgress;
+    let status_label = if open_blockers > 0 {
+        "Blocked"
+    } else {
+        task.status.label()
+    };
     div()
-        .relative()
-        // Reserve a two-pixel structural inset for the connector rail.
-        .border_l_2()
-        .border_color(gpui::rgba(0x0000_0000))
-        .rounded(px(theme::RADIUS_SM))
         .bg(if selected {
-            theme::panel_lift()
+            theme::panel()
         } else {
             gpui::rgba(0x0000_0000)
         })
-        .child(
-            div()
-                .absolute()
-                .left(px(1.0))
-                .top_0()
-                .when(is_last, |line| line.h(px(20.0)))
-                .when(!is_last, |line| line.bottom_0())
-                .w(px(1.0))
-                .bg(theme::smoke())
-                .opacity(0.48),
-        )
-        .child(
-            div()
-                .absolute()
-                .left(px(1.0))
-                .top(px(19.0))
-                .w(px(6.0))
-                .h(px(2.0))
-                .rounded(px(1.0))
-                .bg(theme::smoke())
-                .opacity(0.48),
-        )
-        .child(
-            div()
-                .absolute()
-                .left(px(7.0))
-                .top(px(18.0))
-                .size(px(4.0))
-                .bg(theme::ash()),
-        )
         .child(
             div()
                 .id(("task-row", index))
                 .tab_index(0)
                 .key_context(ORCHESTRATION_ROW_CONTEXT)
                 .cursor_pointer()
-                .pl(px(14.0))
-                .pr(px(12.0))
-                .py(px(11.0))
+                .h(px(28.0))
+                .px(px(6.0))
                 .flex()
-                .flex_col()
-                .gap(px(4.0))
+                .flex_row()
+                .items_center()
+                .justify_between()
+                .gap(px(8.0))
+                .border_1()
+                .border_color(gpui::rgba(0x0000_0000))
                 .hover(|row| row.bg(theme::panel_hover()))
-                .focus(|row| row.bg(theme::panel_lift()))
+                .focus(|row| row.border_color(theme::focus()).bg(theme::panel_lift()))
                 .on_click(cx.listener(move |view, _, _, cx| {
                     view.selected_task_id = if view.selected_task_id.as_deref() == Some(&id) {
                         None
@@ -530,53 +343,50 @@ fn task_row(
                 }))
                 .child(
                     div()
-                        .h(px(18.0))
-                        .flex()
-                        .items_center()
-                        .justify_between()
-                        .gap(px(8.0))
-                        .child(
-                            div()
-                                .min_w_0()
-                                .flex_1()
-                                .font_family(theme::sans())
-                                .text_size(theme::text_size(theme::T_UI_SM))
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(theme::bone())
-                                .overflow_hidden()
-                                .text_ellipsis()
-                                .whitespace_nowrap()
-                                .child(task.subject.clone()),
-                        )
-                        .child(task_status_widget(
-                            index,
-                            task.status,
-                            open_blockers,
-                            status_color,
-                        )),
+                        .min_w_0()
+                        .flex_1()
+                        .font_family(theme::sans())
+                        .text_size(theme::text_size(theme::T_UI_SM))
+                        .font_weight(if selected {
+                            FontWeight::SEMIBOLD
+                        } else {
+                            FontWeight::MEDIUM
+                        })
+                        .text_color(theme::bone())
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .whitespace_nowrap()
+                        .child(task.subject.clone()),
                 )
                 .child(
                     div()
+                        .flex_shrink_0()
                         .font_family(theme::mono())
                         .text_size(theme::text_size(theme::T_TINY))
-                        .text_color(theme::smoke())
-                        .child(format!(
-                            "{} · {}",
-                            task.id,
-                            task.owner.as_deref().unwrap_or("unassigned")
-                        )),
+                        .text_color(status_color)
+                        .child(status_label),
                 ),
         )
         .when(selected, |row| {
             let task_id = action_id.clone();
             row.child(
                 div()
-                    .pl(px(14.0))
-                    .pr(px(12.0))
-                    .pb(px(10.0))
+                    .px(px(6.0))
+                    .pb(px(8.0))
                     .flex()
                     .flex_col()
-                    .gap(px(8.0))
+                    .gap(px(6.0))
+                    .child(
+                        div()
+                            .font_family(theme::mono())
+                            .text_size(theme::text_size(theme::T_TINY))
+                            .text_color(theme::smoke())
+                            .child(format!(
+                                "{} · {}",
+                                task.id,
+                                task.owner.as_deref().unwrap_or("unassigned")
+                            )),
+                    )
                     .child(
                         div()
                             .font_family(theme::sans())
@@ -594,11 +404,9 @@ fn task_row(
                     .when_some(task.output.clone(), |detail, output| {
                         detail.child(
                             div()
-                                .p(px(8.0))
-                                .rounded(px(theme::RADIUS_SM))
-                                .bg(theme::canvas())
                                 .font_family(theme::mono())
                                 .text_size(theme::text_size(theme::T_TINY))
+                                .line_height(gpui::relative(1.4))
                                 .text_color(theme::ash())
                                 .child(output),
                         )
@@ -619,7 +427,7 @@ fn task_row(
                             )
                         },
                     )
-                    .child(controls::quiet_button(
+                    .child(controls::text_action(
                         format!("task-action-{task_id}"),
                         if can_stop {
                             "Stop task"
@@ -627,6 +435,7 @@ fn task_row(
                             "Execute task"
                         },
                         can_stop || can_execute,
+                        controls::ControlTone::Normal,
                         Box::new(cx.listener(move |view, _, _, cx| {
                             let action = if can_stop {
                                 OrchestrationAction::TaskStop {
@@ -680,7 +489,6 @@ fn subagent_list(agents: &[SubagentSnapshot], cx: &mut Context<RootView>) -> imp
             div()
                 .flex()
                 .flex_col()
-                .px(px(2.0))
                 .when(agents.is_empty(), |list| {
                     list.child(controls::empty_list_note("No subagents in this session."))
                 })
@@ -706,14 +514,17 @@ fn subagent_row(
         .tab_index(0)
         .key_context(ORCHESTRATION_ROW_CONTEXT)
         .cursor_pointer()
-        .rounded(px(theme::RADIUS_SM))
-        .px(px(10.0))
-        .py(px(10.0))
+        .h(px(28.0))
+        .px(px(6.0))
         .flex()
-        .flex_col()
-        .gap(px(4.0))
+        .flex_row()
+        .items_center()
+        .justify_between()
+        .gap(px(8.0))
+        .border_1()
+        .border_color(gpui::rgba(0x0000_0000))
         .hover(|row| row.bg(theme::panel_hover()))
-        .focus(|row| row.bg(theme::panel_lift()))
+        .focus(|row| row.border_color(theme::focus()).bg(theme::panel_lift()))
         .on_click(cx.listener(move |view, _, window, cx| {
             view.open_subagent(agent_id.clone(), window, cx);
         }))
@@ -724,91 +535,30 @@ fn subagent_row(
         )
         .child(
             div()
-                .h(px(18.0))
-                .flex()
-                .items_center()
-                .justify_between()
-                .gap(px(8.0))
-                .child(
-                    div()
-                        .min_w_0()
-                        .flex_1()
-                        .flex()
-                        .items_center()
-                        .gap(px(7.0))
-                        .child(
-                            svg()
-                                .path(subagent_icon_path(&agent.id))
-                                .size(px(13.0))
-                                .flex_shrink_0()
-                                .text_color(theme::ash()),
-                        )
-                        .child(
-                            div()
-                                .min_w_0()
-                                .font_family(theme::sans())
-                                .text_size(theme::text_size(theme::T_UI_SM))
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(agent_type_color(&agent.agent_type))
-                                .overflow_hidden()
-                                .text_ellipsis()
-                                .whitespace_nowrap()
-                                .child(display_agent_type(&agent.agent_type)),
-                        ),
-                )
-                .child(subagent_status_widget(index, agent.status, status_color)),
-        )
-        .child(
-            div()
+                .min_w_0()
+                .flex_1()
                 .font_family(theme::sans())
                 .text_size(theme::text_size(theme::T_UI_SM))
-                .line_height(gpui::relative(1.4))
+                .font_weight(FontWeight::MEDIUM)
                 .text_color(theme::bone())
-                .child(agent.description.clone()),
+                .overflow_hidden()
+                .text_ellipsis()
+                .whitespace_nowrap()
+                .child(if agent.description.trim().is_empty() {
+                    display_agent_type(&agent.agent_type)
+                } else {
+                    agent.description.clone()
+                }),
         )
         .child(
             div()
+                .flex_shrink_0()
                 .font_family(theme::mono())
                 .text_size(theme::text_size(theme::T_TINY))
-                .text_color(theme::smoke())
-                .child(subagent_meta(agent)),
+                .text_color(status_color)
+                .child(agent.status.label()),
         )
         .into_any_element()
-}
-
-fn subagent_meta(agent: &SubagentSnapshot) -> String {
-    let mut parts = Vec::with_capacity(3);
-    match agent.queue_position {
-        Some(position) => {
-            parts.push(format!("queue {position}"));
-            parts.push(format!("limit {}", agent.max_concurrent));
-        }
-        None => parts.push(format!(
-            "{} tool{}",
-            agent.tool_uses,
-            plural(agent.tool_uses)
-        )),
-    }
-    if !agent.pending_steers.is_empty() {
-        let count = agent.pending_steers.len() as u64;
-        parts.push(format!("{count} steer{}", plural(count)));
-    }
-    parts.join(" · ")
-}
-
-fn subagent_status_widget(
-    index: usize,
-    status: SubagentStatus,
-    color: gpui::Rgba,
-) -> gpui::AnyElement {
-    let animated = status.is_active();
-    let cycle = match status {
-        SubagentStatus::Queued => Duration::from_millis(1_100),
-        SubagentStatus::Running => Duration::from_millis(640),
-        _ => Duration::from_millis(720),
-    };
-    // Offset past titlebar (0) and typical task-row keys.
-    controls::square_status_indicator(500 + index, animated, cycle, color)
 }
 
 fn display_agent_type(agent_type: &str) -> String {
@@ -817,21 +567,6 @@ fn display_agent_type(agent_type: &str) -> String {
         Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
         None => String::new(),
     }
-}
-
-/// Stable pick among the agent glyph set. Hash of id only — no RNG, no type map.
-fn subagent_icon_path(agent_id: &str) -> &'static str {
-    const ICONS: [&str; 4] = [
-        "icons/agent-ring.svg",
-        "icons/agent-nodes.svg",
-        "icons/agent-diamond.svg",
-        "icons/agent-tiles.svg",
-    ];
-    let mut hash = 0u32;
-    for byte in agent_id.as_bytes() {
-        hash = hash.wrapping_mul(31).wrapping_add(u32::from(*byte));
-    }
-    ICONS[(hash as usize) % ICONS.len()]
 }
 
 fn goal_panel(
@@ -861,14 +596,15 @@ fn goal_panel(
             .child(controls::section_label("Goal queue"))
             .child(controls::empty_list_note(queue_note))
             .child(
-                controls::divider_list().children(goal.queue.iter().enumerate().map(
-                    |(index, item)| {
+                div()
+                    .flex()
+                    .flex_col()
+                    .children(goal.queue.iter().enumerate().map(|(index, item)| {
                         controls::queue_row(
                             format!("GOAL {:02}", index + 1),
                             item.objective.clone(),
                         )
-                    },
-                )),
+                    })),
             )
             .into_any_element();
     };
@@ -909,11 +645,6 @@ fn goal_panel(
         )
         .child(
             div()
-                .p(px(10.0))
-                .rounded(px(theme::RADIUS_SM))
-                .bg(theme::panel())
-                .border_1()
-                .border_color(theme::edge_soft())
                 .flex()
                 .flex_col()
                 .gap(px(7.0))
@@ -943,11 +674,11 @@ fn goal_panel(
                         .flex_row()
                         .flex_wrap()
                         .gap(px(6.0))
-                        .child(controls::chip_button(
+                        .child(controls::text_action(
                             format!("goal-pause-{goal_id}"),
                             "Pause",
-                            false,
                             active.status == "active" && !goal.queue_frozen,
+                            controls::ControlTone::Normal,
                             Box::new(cx.listener(move |view, _, _, cx| {
                                 view.dispatch_orchestration_action(
                                     OrchestrationAction::GoalPause {
@@ -957,11 +688,11 @@ fn goal_panel(
                                 );
                             })),
                         ))
-                        .child(controls::chip_button(
+                        .child(controls::text_action(
                             format!("goal-resume-{goal_id}"),
                             "Resume",
-                            false,
                             resumable,
+                            controls::ControlTone::Normal,
                             Box::new(cx.listener(move |view, _, _, cx| {
                                 view.dispatch_orchestration_action(
                                     OrchestrationAction::GoalResume {
@@ -971,11 +702,11 @@ fn goal_panel(
                                 );
                             })),
                         ))
-                        .child(controls::chip_button(
+                        .child(controls::text_action(
                             format!("goal-clear-{goal_id}"),
                             "Clear",
-                            false,
                             true,
+                            controls::ControlTone::Danger,
                             Box::new(cx.listener(move |view, _, _, cx| {
                                 view.dispatch_orchestration_action(
                                     OrchestrationAction::GoalClear {
@@ -992,14 +723,15 @@ fn goal_panel(
         })
         .when(!goal.queue.is_empty(), |panel| {
             panel.child(
-                controls::divider_list().children(goal.queue.iter().enumerate().map(
-                    |(index, item)| {
+                div()
+                    .flex()
+                    .flex_col()
+                    .children(goal.queue.iter().enumerate().map(|(index, item)| {
                         controls::queue_row(
                             format!("GOAL {:02}", index + 1),
                             item.objective.clone(),
                         )
-                    },
-                )),
+                    })),
             )
         })
         .into_any_element()
@@ -1050,21 +782,6 @@ fn goal_metrics(
             waiting,
             safety
         ))
-}
-
-fn task_status_widget(
-    index: usize,
-    status: TaskStatus,
-    blockers: usize,
-    color: gpui::Rgba,
-) -> gpui::AnyElement {
-    let animated = blockers == 0 && status != TaskStatus::Completed;
-    let cycle = match status {
-        TaskStatus::Pending => Duration::from_millis(1_100),
-        TaskStatus::InProgress | TaskStatus::Completed => Duration::from_millis(720),
-    };
-    // Key zero belongs to the titlebar status indicator.
-    controls::square_status_indicator(index + 1, animated, cycle, color)
 }
 
 fn task_status_color(status: TaskStatus, blockers: usize) -> gpui::Rgba {
@@ -1197,10 +914,11 @@ pub(super) fn subagent_dialog(
                 .max_w(px(980.0))
                 .h_full()
                 .max_h(px(780.0))
-                .rounded(px(theme::RADIUS))
+                .rounded(px(theme::RADIUS_LG))
                 .bg(theme::floor())
                 .border_1()
-                .border_color(theme::edge_hard())
+                .border_color(theme::edge())
+                .shadow(theme::sheet_shadow())
                 .flex()
                 .flex_col()
                 .overflow_hidden()
@@ -1316,7 +1034,7 @@ pub(super) fn subagent_dialog(
                                                 .gap(px(16.0))
                                                 .when(agent.is_none(), |transcript| {
                                                     transcript.child(controls::empty_list_note(
-                                                        "Close this view and open a current agent from the Inspector.",
+                                                        "Close this view and open a current agent from Session.",
                                                     ))
                                                 })
                                                 .when_some(agent, |transcript, agent| {
@@ -1734,83 +1452,88 @@ fn run_controls(
             div()
                 .flex()
                 .w_full()
-                .flex_row()
-                .gap(px(6.0))
-                .child(controls::tone_button(
-                    "abort-run",
-                    "Abort",
-                    abort_enabled,
-                    controls::ControlTone::Danger,
-                    Box::new(cx.listener(|view, _, _, cx| {
-                        view.controller.update(cx, |controller, cx| {
-                            let _ = controller.abort(cx);
-                        });
-                    })),
-                ))
-                .child(controls::tone_button(
-                    "abort-bash",
-                    "Bash",
-                    bash_running,
-                    controls::ControlTone::Danger,
-                    Box::new(cx.listener(|view, _, _, cx| {
-                        view.controller.update(cx, |controller, cx| {
-                            let _ = controller.abort_bash(cx);
-                        });
-                    })),
-                ))
-                .child(controls::tone_button(
-                    "abort-retry",
-                    "Retry",
-                    abort_retry_enabled,
-                    controls::ControlTone::Danger,
-                    Box::new(cx.listener(|view, _, _, cx| view.abort_retry(cx))),
-                ))
-                .child(controls::tone_button(
-                    "compact-now",
-                    "Compact",
-                    compact_enabled,
-                    controls::ControlTone::Normal,
-                    Box::new(cx.listener(|view, _, window, cx| {
-                        view.open_compaction_modal(window, cx);
-                    })),
-                )),
+                .flex_col()
+                .gap(px(2.0))
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(16.0))
+                        .child(controls::text_action(
+                            "abort-run",
+                            "Abort",
+                            abort_enabled,
+                            controls::ControlTone::Danger,
+                            Box::new(cx.listener(|view, _, _, cx| {
+                                view.controller.update(cx, |controller, cx| {
+                                    let _ = controller.abort(cx);
+                                });
+                            })),
+                        ))
+                        .child(controls::text_action(
+                            "abort-bash",
+                            "Abort Bash",
+                            bash_running,
+                            controls::ControlTone::Danger,
+                            Box::new(cx.listener(|view, _, _, cx| {
+                                view.controller.update(cx, |controller, cx| {
+                                    let _ = controller.abort_bash(cx);
+                                });
+                            })),
+                        )),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(16.0))
+                        .child(controls::text_action(
+                            "abort-retry",
+                            "Abort retry",
+                            abort_retry_enabled,
+                            controls::ControlTone::Danger,
+                            Box::new(cx.listener(|view, _, _, cx| view.abort_retry(cx))),
+                        ))
+                        .child(controls::text_action(
+                            "compact-now",
+                            "Compact",
+                            compact_enabled,
+                            controls::ControlTone::Normal,
+                            Box::new(cx.listener(|view, _, window, cx| {
+                                view.open_compaction_modal(window, cx);
+                            })),
+                        )),
+                ),
         )
         .child(
             div()
                 .flex()
                 .flex_col()
-                .gap(px(8.0))
+                .gap(px(6.0))
+                .child(controls::section_label("Delivery"))
                 .child(
                     div()
                         .flex()
                         .flex_row()
-                        .items_baseline()
-                        .justify_between()
-                        .gap(px(8.0))
-                        .child(controls::section_label("Delivery"))
-                        .child(
-                            div()
-                                .font_family(theme::mono())
-                                .text_size(theme::text_size(theme::T_TINY))
-                                .text_color(theme::smoke())
-                                .child("All"),
-                        ),
-                )
-                .child(
-                    controls::tab_track()
-                        .child(controls::tab_button(
+                        .items_center()
+                        .gap(px(14.0))
+                        .child(controls::text_choice(
                             "delivery-steering",
                             "Steering",
                             delivery_focus == DeliveryFocus::Steering,
+                            true,
                             Box::new(cx.listener(|view, _, _, cx| {
                                 view.delivery_focus = DeliveryFocus::Steering;
                                 cx.notify();
                             })),
                         ))
-                        .child(controls::tab_button(
+                        .child(controls::text_choice(
                             "delivery-follow-up",
                             "Follow-up",
                             delivery_focus == DeliveryFocus::FollowUp,
+                            true,
                             Box::new(cx.listener(|view, _, _, cx| {
                                 view.delivery_focus = DeliveryFocus::FollowUp;
                                 cx.notify();
@@ -1859,27 +1582,23 @@ fn toggle_setting_row(
 ) -> impl IntoElement {
     let enabled = current.unwrap_or(false);
     let known = current.is_some();
+    let next = !enabled;
     controls::setting_row(
         title,
         None::<&str>,
-        div()
-            .flex()
-            .flex_row()
-            .gap(px(4.0))
-            .child(controls::chip_button(
-                format!("{prefix}-on"),
-                "On",
-                known && enabled,
-                known && !locked && !enabled,
-                Box::new(cx.listener(move |view, _, _, cx| apply(view, true, cx))),
-            ))
-            .child(controls::chip_button(
-                format!("{prefix}-off"),
-                "Off",
-                known && !enabled,
-                known && !locked && enabled,
-                Box::new(cx.listener(move |view, _, _, cx| apply(view, false, cx))),
-            )),
+        controls::text_choice(
+            format!("{prefix}-toggle"),
+            if !known {
+                "—"
+            } else if enabled {
+                "On"
+            } else {
+                "Off"
+            },
+            known,
+            known && !locked,
+            Box::new(cx.listener(move |view, _, _, cx| apply(view, next, cx))),
+        ),
     )
 }
 
@@ -1932,38 +1651,26 @@ fn queue_panel(conversation: &ConversationProjection) -> impl IntoElement {
                 }),
         )
         .child(match conversation.queue.as_ref() {
-            QueueContents::Unknown { pending_count } => controls::divider_list()
-                .child(controls::empty_list_note(format!(
-                    "Pi reports {pending_count} queued item{}",
-                    plural(*pending_count)
-                )))
-                .into_any_element(),
+            QueueContents::Unknown { pending_count } => controls::empty_list_note(format!(
+                "Pi reports {pending_count} queued item{}",
+                plural(*pending_count)
+            ))
+            .into_any_element(),
             QueueContents::Known {
                 steering,
                 follow_up,
-            } => controls::divider_list()
+            } => div()
+                .flex()
+                .flex_col()
+                .gap(px(4.0))
                 .when(steering.is_empty() && follow_up.is_empty(), |list| {
                     list.child(controls::empty_list_note("Nothing queued."))
                 })
                 .children(steering.iter().enumerate().map(|(index, item)| {
-                    div()
-                        .when(index + 1 < steering.len() || !follow_up.is_empty(), |row| {
-                            row.border_b_1().border_color(theme::edge_soft())
-                        })
-                        .child(controls::queue_row(
-                            format!("STEER {:02}", index + 1),
-                            item.clone(),
-                        ))
+                    controls::queue_row(format!("STEER {:02}", index + 1), item.clone())
                 }))
                 .children(follow_up.iter().enumerate().map(|(index, item)| {
-                    div()
-                        .when(index + 1 < follow_up.len(), |row| {
-                            row.border_b_1().border_color(theme::edge_soft())
-                        })
-                        .child(controls::queue_row(
-                            format!("FOLLOW {:02}", index + 1),
-                            item.clone(),
-                        ))
+                    controls::queue_row(format!("FOLLOW {:02}", index + 1), item.clone())
                 }))
                 .into_any_element(),
         })

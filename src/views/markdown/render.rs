@@ -277,7 +277,7 @@ impl BlockRender<'_, '_> {
         let mut card = div()
             .w_full()
             .min_w_0()
-            .rounded(px(theme::RADIUS))
+            .rounded(px(theme::RADIUS_MD))
             .border_1()
             .border_color(theme::edge_soft())
             .bg(theme::panel())

@@ -2,8 +2,7 @@ use super::*;
 
 pub(super) fn popup_sheet() -> gpui::Div {
     // Fully opaque fill so conversation chrome cannot show through the overlay.
-    // Soft corner and a tight directional shadow keep every prompt popover in
-    // family with the card it floats above.
+    // Same corner and lift as the prompt dock it floats above.
     div()
         .w_full()
         .flex()
@@ -12,12 +11,7 @@ pub(super) fn popup_sheet() -> gpui::Div {
         .border_1()
         .border_color(theme::edge())
         .bg(theme::panel())
-        .shadow(vec![gpui::BoxShadow {
-            color: gpui::rgba(0x0000_0047).into(),
-            offset: point(px(0.0), px(10.0)),
-            blur_radius: px(24.0),
-            spread_radius: px(-10.0),
-        }])
+        .shadow(theme::dock_shadow())
         .overflow_hidden()
 }
 

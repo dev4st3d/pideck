@@ -714,8 +714,8 @@ impl Render for TerminalView {
             .bg(theme::floor())
             .child(
                 div()
-                    .h(px(32.0))
-                    .px(px(8.0))
+                    .h(px(36.0))
+                    .px(px(10.0))
                     .flex_shrink_0()
                     .flex()
                     .flex_row()
@@ -763,7 +763,7 @@ fn terminal_tab(
         .flex_row()
         .items_center()
         .gap(px(5.0))
-        .rounded(px(theme::RADIUS_SM))
+        .rounded(px(theme::RADIUS_MD))
         .bg(if selected {
             theme::panel_lift()
         } else {
@@ -771,7 +771,7 @@ fn terminal_tab(
         })
         .border_1()
         .border_color(if selected {
-            theme::edge_hard()
+            theme::edge()
         } else {
             gpui::rgba(0x0000_0000)
         })

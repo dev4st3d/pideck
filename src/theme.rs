@@ -2,7 +2,7 @@
 
 use std::sync::atomic::{AtomicU8, Ordering};
 
-use gpui::{Pixels, Rems, Rgba, SharedString, px, rems, rgba};
+use gpui::{BoxShadow, Pixels, Rems, Rgba, SharedString, point, px, rems, rgba};
 
 use crate::fonts::{self, FontRole};
 
@@ -337,21 +337,25 @@ pub fn mono() -> SharedString {
     fonts::family(FontRole::Mono)
 }
 
-// Layout
-pub const SIDE_W: f32 = 244.0;
-pub const HISTORY_W: f32 = 280.0;
-pub const INSPECT_W: f32 = 304.0;
-pub const TITLE_H: f32 = 50.0;
-pub const RADIUS: f32 = 4.0;
-pub const RADIUS_SM: f32 = 3.0;
-/// Softer step for controls nested inside the prompt card tray.
-pub const RADIUS_MD: f32 = 6.0;
-/// The prompt card itself: the hero surface of the desk, so it earns the
-/// softest corner in the system.
-pub const RADIUS_LG: f32 = 8.0;
-pub const PAD_X: f32 = 18.0;
-pub const STREAM_PAD_X: f32 = 32.0;
-pub const SCROLLBAR: f32 = 8.0;
+// Layout. 4px rhythm. Chrome recedes; the transcript and prompt dock
+// keep the widest measure and the softest corners.
+pub const SIDE_W: f32 = 252.0;
+pub const HISTORY_W: f32 = 288.0;
+pub const INSPECT_W: f32 = 312.0;
+pub const TITLE_H: f32 = 44.0;
+/// Default hit target for titlebar and rail icon buttons (Fitts).
+pub const CHROME: f32 = 32.0;
+pub const RADIUS: f32 = 6.0;
+pub const RADIUS_SM: f32 = 4.0;
+/// Nested controls inside a dock or sheet.
+pub const RADIUS_MD: f32 = 8.0;
+/// Floating sheets and the inspector companion.
+pub const RADIUS_LG: f32 = 12.0;
+/// Prompt dock — the largest surface, so it owns the softest corner.
+pub const RADIUS_XL: f32 = 16.0;
+pub const PAD_X: f32 = 16.0;
+pub const STREAM_PAD_X: f32 = 40.0;
+pub const SCROLLBAR: f32 = 6.0;
 
 // Type scale
 const DEFAULT_REM_SIZE: f32 = 16.0;
@@ -1236,6 +1240,32 @@ pub fn data_wash() -> Rgba {
     color(|palette| palette.data_wash)
 }
 
+/// Recognition swatch for the theme picker: paper + signal accent.
+pub fn preview_swatch(theme: ThemeId) -> (Rgba, Rgba) {
+    let palette = theme.palette();
+    (rgba(palette.canvas), rgba(palette.signal))
+}
+
+/// Tight downward lift for the prompt dock and its popovers.
+pub fn dock_shadow() -> Vec<BoxShadow> {
+    vec![BoxShadow {
+        color: rgba(0x0000_0040).into(),
+        offset: point(px(0.0), px(10.0)),
+        blur_radius: px(24.0),
+        spread_radius: px(-8.0),
+    }]
+}
+
+/// Heavier lift for summoned sheets that overlay the workspace.
+pub fn sheet_shadow() -> Vec<BoxShadow> {
+    vec![BoxShadow {
+        color: rgba(0x0000_0055).into(),
+        offset: point(px(0.0), px(14.0)),
+        blur_radius: px(36.0),
+        spread_radius: px(-4.0),
+    }]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1518,6 +1548,15 @@ mod tests {
         assert_eq!(LINEN_GALLERY.signal, 0x7a6850ff);
         assert_eq!(RICE_PAPER.signal, 0x37486eff);
         assert_eq!(BONE_CHINA.signal, 0x8a6c34ff);
+    }
+
+    #[test]
+    fn preview_swatch_uses_canvas_and_signal() {
+        for theme in ThemeId::ALL {
+            let (paper, accent) = preview_swatch(theme);
+            assert_eq!(paper, rgba(theme.palette().canvas));
+            assert_eq!(accent, rgba(theme.palette().signal));
+        }
     }
 
     #[test]

@@ -302,11 +302,18 @@ enum ExtensionDialogKey {
     SelectIndex(usize),
 }
 
-/// Which queue-delivery control the inspector is editing right now.
+/// Which queue-delivery control Session mode is editing right now.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DeliveryFocus {
     Steering,
     FollowUp,
+}
+
+/// Left rail content. The conversation always keeps the remaining width.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RailMode {
+    Places,
+    Session,
 }
 
 struct RenderProjections {
@@ -407,7 +414,7 @@ pub struct RootView {
     extension_dialog_timeout_task: Option<Task<()>>,
     selected_task_id: Option<String>,
     selected_subagent_id: Option<String>,
-    /// Inspector edits one queue delivery mode at a time (steering or follow-up).
+    /// Session rail edits one queue delivery mode at a time (steering or follow-up).
     delivery_focus: DeliveryFocus,
     usage_tooltip_hovered: bool,
     usage_tooltip_visible: bool,
@@ -437,10 +444,12 @@ pub struct RootView {
     history: HistoryBrowser,
     history_focus: FocusHandle,
     history_open: bool,
-    /// Workspace project sidebar visibility (animated open/close).
+    /// Left rail visibility (animated open/close). Both modes hide when closed.
     sidebar_open: bool,
-    /// Bumps on each toggle so width animation only runs after user action.
+    /// Bumps on each rail open/close so width animation only runs after user action.
     sidebar_motion_key: u64,
+    /// Places or Session. Restored when the rail reopens with Ctrl+B.
+    rail_mode: RailMode,
     /// Roving keyboard cursor inside the workspace tree (None until navigated).
     sidebar_cursor: Option<shell::SidebarNode>,
     /// Focus for the sidebar's single tree tab stop.
@@ -454,16 +463,7 @@ pub struct RootView {
     terminal_height: f32,
     /// Pointer Y and height captured when a splitter drag begins.
     terminal_drag_origin: Option<(Pixels, f32)>,
-    /// Inspector companion visibility — a floating sheet that overlays the
-    /// workspace instead of taking layout space.
-    inspector_open: bool,
-    /// Bumps on every toggle so a fresh motion pass replays per transition
-    /// and stale exit timers can detect that they were superseded.
-    inspector_motion_key: u64,
-    /// True while the sheet plays its exit motion before unmounting.
-    inspector_closing: bool,
-    /// Point of focus while the sheet floats above the workspace, so
-    /// keystrokes don't leak into the composer beneath it.
+    /// Tab stop for Session mode so Escape returns to Places before AbortRun.
     inspector_focus: FocusHandle,
     session_rename_open: bool,
     history_confirmation: Option<HistoryConfirmation>,
@@ -841,15 +841,13 @@ impl RootView {
             history_open: false,
             sidebar_open: true,
             sidebar_motion_key: 0,
+            rail_mode: RailMode::Places,
             sidebar_cursor: None,
             sidebar_tree_pointer_focus: false,
             sidebar_tree_focus: cx.focus_handle(),
             terminal_open: false,
             terminal_height: 260.0,
             terminal_drag_origin: None,
-            inspector_open: false,
-            inspector_motion_key: 0,
-            inspector_closing: false,
             inspector_focus,
             session_rename_open: false,
             history_confirmation: None,
@@ -918,12 +916,13 @@ impl RootView {
         self.sidebar_open = !self.sidebar_open;
         self.sidebar_motion_key = self.sidebar_motion_key.wrapping_add(1);
         if !self.sidebar_open {
-            // History sits beside the workspace list; hide it when the rail closes.
+            // History sits beside Places; hide it when the rail closes.
             self.history_open = false;
             self.history_confirmation = None;
             self.hovered_thread_key = None;
             // Never leave focus parked on chrome that just became invisible.
-            if self.sidebar_tree_focus.is_focused(window) {
+            if self.sidebar_tree_focus.is_focused(window) || self.inspector_focus.is_focused(window)
+            {
                 window.focus(&self.focus_handle);
             }
         }
@@ -1178,40 +1177,37 @@ impl RootView {
         if self.history_open {
             width -= theme::HISTORY_W;
         }
-        // The inspector overlays the workspace; it never shrinks the terminal.
         let rows = ((self.terminal_height - 50.0) / 18.0).floor().max(4.0) as u16;
         let cols = ((width - 24.0) / 7.4).floor().max(24.0) as u16;
         TerminalSize::new(rows, cols)
     }
 
+    fn session_rail_visible(&self) -> bool {
+        self.sidebar_open && self.rail_mode == RailMode::Session
+    }
+
+    fn show_places_rail(&mut self, window: &mut Window) {
+        self.rail_mode = RailMode::Places;
+        window.focus(&self.sidebar_tree_focus);
+    }
+
+    fn show_session_rail(&mut self, window: &mut Window) {
+        if !self.sidebar_open {
+            self.sidebar_open = true;
+            self.sidebar_motion_key = self.sidebar_motion_key.wrapping_add(1);
+        }
+        self.rail_mode = RailMode::Session;
+        // History is a Places companion; Session must not add a second chrome column.
+        self.history_open = false;
+        self.history_confirmation = None;
+        window.focus(&self.inspector_focus);
+    }
+
     fn toggle_inspector(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.inspector_motion_key = self.inspector_motion_key.wrapping_add(1);
-        if self.inspector_open && !self.inspector_closing {
-            // Soft exit: keep the sheet mounted for a beat so it can settle out
-            // instead of vanishing mid-frame. The motion key guards the unmount
-            // against a re-summon during the exit.
-            self.inspector_closing = true;
-            window.focus(&self.focus_handle);
-            let motion = self.inspector_motion_key;
-            cx.spawn(async move |view, cx| {
-                cx.background_executor()
-                    .timer(Duration::from_millis(inspector::INSPECTOR_EXIT_MS))
-                    .await;
-                let _ = view.update(cx, |view, cx| {
-                    if view.inspector_closing && view.inspector_motion_key == motion {
-                        view.inspector_open = false;
-                        view.inspector_closing = false;
-                        cx.notify();
-                    }
-                });
-            })
-            .detach();
+        if self.session_rail_visible() {
+            self.show_places_rail(window);
         } else {
-            // Summon, or cancel an in-flight exit: the entrance replays from
-            // the new motion key.
-            self.inspector_open = true;
-            self.inspector_closing = false;
-            window.focus(&self.inspector_focus);
+            self.show_session_rail(window);
         }
         cx.notify();
     }
@@ -1353,17 +1349,14 @@ impl RootView {
         if self.cancel_extension_dialog(window, cx) {
             return;
         }
-        // Dismiss the inspector's transient layers before touching the run.
+        // Dismiss Session overlays before touching the run.
         if self.selected_subagent_id.is_some() {
             self.close_subagent(window, cx);
             return;
         }
-        if self.inspector_open {
-            // Esc while the exit motion is in flight must neither reopen the
-            // sheet nor fall through to aborting the run.
-            if !self.inspector_closing {
-                self.toggle_inspector(window, cx);
-            }
+        if self.session_rail_visible() {
+            // Escape leaves Session for Places; it must not fall through to abort.
+            self.toggle_inspector(window, cx);
             return;
         }
         let _ = self.execute_native_action(NativeAction::Abort, "", window, cx);
@@ -2428,6 +2421,7 @@ impl RootView {
                 self.history_confirmation = None;
                 if self.history_open {
                     self.ensure_sidebar_open();
+                    self.rail_mode = RailMode::Places;
                     self.sync_history_selection();
                     window.focus(&self.history_focus);
                 } else {
@@ -2438,6 +2432,7 @@ impl RootView {
             }
             NativeAction::Fork => {
                 self.ensure_sidebar_open();
+                self.rail_mode = RailMode::Places;
                 self.history_open = true;
                 self.sync_history_selection();
                 self.history_confirmation = None;
@@ -2447,6 +2442,7 @@ impl RootView {
             }
             NativeAction::Clone => {
                 self.ensure_sidebar_open();
+                self.rail_mode = RailMode::Places;
                 self.history_open = true;
                 self.sync_history_selection();
                 self.history_confirmation = Some(HistoryConfirmation::Clone);

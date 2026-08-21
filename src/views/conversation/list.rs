@@ -265,31 +265,39 @@ impl ConversationListModel {
 }
 
 fn header(turn_count: usize) -> impl IntoElement {
-    stream_gutter().pb(px(16.0)).child(
+    stream_gutter().pb(px(20.0)).child(
         div()
             .w_full()
             .flex()
-            .flex_row()
-            .items_baseline()
-            .justify_between()
+            .flex_col()
+            .gap(px(10.0))
             .child(
                 div()
-                    .font_family(theme::sans())
-                    .text_size(theme::text_size(theme::T_UI_SM))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(theme::bone_dim())
-                    .child("Conversation"),
+                    .w_full()
+                    .flex()
+                    .flex_row()
+                    .items_baseline()
+                    .justify_between()
+                    .child(
+                        div()
+                            .font_family(theme::sans())
+                            .text_size(theme::text_size(theme::T_TINY))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(theme::ash())
+                            .child("Thread"),
+                    )
+                    .child(
+                        div()
+                            .font_family(theme::mono())
+                            .text_size(theme::text_size(theme::T_TINY))
+                            .text_color(theme::smoke())
+                            .child(format!(
+                                "{turn_count} turn{}",
+                                if turn_count == 1 { "" } else { "s" }
+                            )),
+                    ),
             )
-            .child(
-                div()
-                    .font_family(theme::mono())
-                    .text_size(theme::text_size(theme::T_TINY))
-                    .text_color(theme::smoke())
-                    .child(format!(
-                        "{turn_count} turn{}",
-                        if turn_count == 1 { "" } else { "s" }
-                    )),
-            ),
+            .child(div().w_full().h(px(1.0)).bg(theme::edge_soft())),
     )
 }
 

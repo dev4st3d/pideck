@@ -232,8 +232,8 @@ pub(super) fn conversation_area(params: ConversationAreaParams) -> impl IntoElem
                     })
                     .size_full()
                     .min_w_0()
-                    .pt(px(16.0))
-                    .pb(px(16.0)),
+                    .pt(px(20.0))
+                    .pb(px(20.0)),
                 )
                 .child(
                     canvas(
@@ -783,11 +783,12 @@ pub(super) fn activity_detail_overlay(
                 .h_full()
                 .max_w(px(980.0))
                 .max_h(px(760.0))
-                .rounded(px(theme::RADIUS))
+                .rounded(px(theme::RADIUS_LG))
                 .overflow_hidden()
                 .border_1()
-                .border_color(theme::edge_hard())
+                .border_color(theme::edge())
                 .bg(theme::floor())
+                .shadow(theme::sheet_shadow())
                 .flex()
                 .flex_col()
                 .child(
@@ -1215,11 +1216,12 @@ pub(super) fn extension_dialog_overlay(
                 .max_w(px(720.0))
                 .max_h(px(720.0))
                 .overflow_y_scroll()
-                .p(px(18.0))
-                .rounded(px(theme::RADIUS))
+                .p(px(20.0))
+                .rounded(px(theme::RADIUS_LG))
                 .bg(theme::panel())
                 .border_1()
-                .border_color(theme::edge_hard())
+                .border_color(theme::edge())
+                .shadow(theme::sheet_shadow())
                 .flex()
                 .flex_col()
                 .gap(px(14.0))
@@ -2430,10 +2432,11 @@ pub(super) fn command_palette_overlay(
                 .max_w(px(600.0))
                 .flex()
                 .flex_col()
-                .rounded(px(theme::RADIUS))
+                .rounded(px(theme::RADIUS_LG))
                 .border_1()
-                .border_color(theme::edge_hard())
+                .border_color(theme::edge())
                 .bg(theme::panel())
+                .shadow(theme::sheet_shadow())
                 .overflow_hidden()
                 .child(
                     div()
@@ -2557,11 +2560,11 @@ pub(super) fn hotkey_help_overlay(cx: &mut Context<RootView>) -> impl IntoElemen
     let shortcuts = [
         ("Command palette", "Ctrl+Shift+P"),
         ("Hotkey help", "Ctrl+/"),
-        ("Toggle workspace sidebar", "Ctrl+B"),
+        ("Toggle rail", "Ctrl+B"),
         ("Sidebar tree navigation", "↑ ↓ ← → Home End"),
         ("Sidebar open / delete row", "Enter · Del"),
         ("Toggle terminal", "Ctrl+`"),
-        ("Toggle inspector", "Ctrl+I"),
+        ("Places / Session", "Ctrl+I"),
         ("Increase font size", "Ctrl++"),
         ("Decrease font size", "Ctrl+-"),
         ("Send / steer", "Enter"),
