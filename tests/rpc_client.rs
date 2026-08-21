@@ -564,7 +564,9 @@ fn installed_pi_smoke_is_isolated_offline_and_closes_cleanly() {
         OsString::from("PI_CODING_AGENT_DIR"),
         agent_directory.as_os_str().to_owned(),
     ));
-    config.probe_timeout = Duration::from_secs(15);
+    // The real Pi probe launches Node against the installed bundle; first runs
+    // after an npm update can take tens of seconds under AV scanning.
+    config.probe_timeout = pi_gui::services::pi_process::DEFAULT_PROBE_TIMEOUT;
     config.shutdown_timeout = Duration::from_secs(3);
 
     let client = match RpcClient::start_with_deadlines(config, RpcDeadlines::default()) {
@@ -615,7 +617,9 @@ fn installed_pi_real_extension_demo_exercises_every_stock_dialog() {
         OsString::from("PI_CODING_AGENT_DIR"),
         agent_directory.as_os_str().to_owned(),
     ));
-    config.probe_timeout = Duration::from_secs(15);
+    // The real Pi probe launches Node against the installed bundle; first runs
+    // after an npm update can take tens of seconds under AV scanning.
+    config.probe_timeout = pi_gui::services::pi_process::DEFAULT_PROBE_TIMEOUT;
     config.shutdown_timeout = Duration::from_secs(3);
 
     let client = match RpcClient::start_with_deadlines(config, RpcDeadlines::default()) {

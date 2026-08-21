@@ -40,7 +40,12 @@ pub struct RpcDeadlines {
 impl Default for RpcDeadlines {
     fn default() -> Self {
         Self {
-            readiness: Duration::from_secs(10),
+            // Extension-heavy installs load widgets and status providers before
+            // answering the correlated get_state; measured startups reach ~6s
+            // when warm and far longer under first-run AV scans. A tight
+            // readiness window turns slow-but-healthy startups into a full
+            // process restart loop.
+            readiness: Duration::from_secs(60),
             read: Duration::from_secs(15),
             mutation: Duration::from_secs(30),
             // Compaction and session replacement can legitimately wait on a

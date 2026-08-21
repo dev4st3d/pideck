@@ -969,15 +969,16 @@ fn start_discovered_bridge(
     working_directory: &std::path::Path,
     orchestration_endpoint: &str,
 ) -> Result<SdkBridgeClient, BridgeError> {
-    let installation =
-        crate::services::pi_process::discover_and_probe(None, Duration::from_secs(5)).map_err(
-            |_| {
-                BridgeError::new(
-                    BridgeErrorKind::Unavailable,
-                    "The compatible Pi SDK bridge is unavailable.",
-                )
-            },
-        )?;
+    let installation = crate::services::pi_process::discover_and_probe(
+        None,
+        crate::services::pi_process::DEFAULT_PROBE_TIMEOUT,
+    )
+    .map_err(|_| {
+        BridgeError::new(
+            BridgeErrorKind::Unavailable,
+            "The compatible Pi SDK bridge is unavailable.",
+        )
+    })?;
     let config = SdkBridgeConfig::from_installation(
         &installation,
         working_directory.to_path_buf(),

@@ -29,7 +29,13 @@ pub use platform::ExitStatus;
 use diagnostics::{StderrRing, drain_stderr};
 use platform::{ProcessHandle, spawn_contained};
 
-const DEFAULT_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+// A cold `pi --version`/`--help` probe launches Node and parses the full CLI
+// bundle. On Windows with real-time AV scanning this measured 2.8s warm and
+// over 15-36s on the first runs after an npm install rewrites the package. A
+// tight timeout turns ordinary startup latency into failed discovery and a
+// perpetual reconnect loop, so stay generous: the probe is a one-time cost per
+// connection attempt, not a per-keystroke operation.
+pub const DEFAULT_PROBE_TIMEOUT: Duration = Duration::from_secs(60);
 const DEFAULT_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
 const DEFAULT_STDERR_CAPACITY: usize = 64 * 1024;
 const DEFAULT_STDOUT_QUEUE_CAPACITY: usize = 256;
