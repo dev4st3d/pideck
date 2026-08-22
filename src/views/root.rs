@@ -4416,8 +4416,26 @@ impl RootView {
         cx: &mut Context<Self>,
     ) -> bool {
         if event.delta.precise() {
+            // Precise (touchpad) deltas are applied here instead of falling
+            // through to the stock handler: it accumulates fractional
+            // offsets, and rows resting between pixel grids re-rasterize
+            // with shifted metrics — once the list scrolls, row text and
+            // fills visibly change size. Keep every settled offset whole.
             self.sessions_scroll_motion.cancel();
-            return false;
+            let distance = event.delta.pixel_delta(px(20.0)).y;
+            if distance == px(0.0) {
+                return false;
+            }
+            let before = self.sessions_scroll.offset();
+            let max_offset = self.sessions_scroll.max_offset().height;
+            let next_y = (before.y + distance)
+                .clamp(-max_offset, Pixels::ZERO)
+                .round();
+            if next_y != before.y {
+                self.sessions_scroll.set_offset(point(before.x, next_y));
+                cx.notify();
+            }
+            return true;
         }
 
         let distance = event.delta.pixel_delta(px(20.0)).y;
@@ -4440,7 +4458,9 @@ impl RootView {
 
         let before = self.sessions_scroll.offset();
         let max_offset = self.sessions_scroll.max_offset().height;
-        let next_y = (before.y + step).clamp(-max_offset, Pixels::ZERO);
+        // Whole pixels only: a fractional settle leaves rows between pixel
+        // grids, which reads as the list changing size after it scrolls.
+        let next_y = (before.y + step).clamp(-max_offset, Pixels::ZERO).round();
         self.sessions_scroll.set_offset(point(before.x, next_y));
         if (f32::from(next_y) - f32::from(before.y)).abs() < 0.01 {
             self.sessions_scroll_motion.cancel();

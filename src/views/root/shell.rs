@@ -1233,11 +1233,12 @@ pub(super) fn sessions_panel(
         .child(
             div()
                 .px(px(SIDE_PAD))
-                .pt(px(8.0))
-                .pb(px(6.0))
+                .pt(px(10.0))
+                .pb(px(4.0))
+                .flex_shrink_0()
                 .flex()
                 .flex_col()
-                .gap(px(2.0))
+                .gap(px(6.0))
                 .child(sidebar_new_thread_button(
                     new_thread_enabled,
                     sidebar_open,
@@ -1245,11 +1246,11 @@ pub(super) fn sessions_panel(
                 ))
                 .child(
                     div()
-                        .h(px(28.0))
+                        .h(px(24.0))
                         .flex()
                         .flex_row()
                         .items_center()
-                        .gap(px(12.0))
+                        .gap(px(2.0))
                         .child(sidebar_text_link(
                             "toggle-history-inline",
                             "History",
@@ -1340,7 +1341,7 @@ pub(super) fn sessions_panel(
                 .flex_1()
                 .min_h_0()
                 .relative()
-                .mt(px(4.0))
+                .mt(px(2.0))
                 .on_key_down(cx.listener(
                     |view: &mut RootView, event: &gpui::KeyDownEvent, window, cx| {
                         view.on_workspace_tree_key(event, window, cx);
@@ -1385,45 +1386,60 @@ pub(super) fn sessions_panel(
                         .id("sessions-scroll")
                         .size_full()
                         .overflow_y_scroll()
+                        // Same reserved gutter as every other panel, always:
+                        // Taffy deducts it unconditionally for Scroll, so row
+                        // width cannot change when the list starts overflowing.
+                        .scrollbar_width(px(theme::SCROLLBAR))
                         .track_scroll(scroll)
                         .w_full()
-                        .px(px(6.0))
-                        .pt(px(2.0))
-                        .pb(px(8.0))
+                        .px(px(8.0))
+                        .pt(px(4.0))
+                        .pb(px(10.0))
                         .flex()
                         .flex_col()
-                        .when(rows.is_empty(), |list| list.child(empty_projects_note()))
+                        .when(rows.is_empty(), |list| {
+                            list.child(empty_projects_note(sidebar_open, cx))
+                        })
                         .children(tree_children),
                 ),
         )
         .child(
+            // Bottom zone as an inset plate: the surface edge separates it
+            // from the scrolling list instead of another hairline rule.
             div()
-                .h(px(32.0))
                 .px(px(SIDE_PAD))
-                .border_t_1()
-                .border_color(theme::edge_soft())
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(10.0))
+                .pt(px(4.0))
+                .pb(px(8.0))
+                .flex_shrink_0()
                 .child(
                     div()
-                        .min_w_0()
-                        .flex_1()
-                        .font_family(theme::mono())
-                        .text_size(theme::text_size(theme::T_TINY))
-                        .text_color(theme::smoke())
-                        .overflow_hidden()
-                        .text_ellipsis()
-                        .whitespace_nowrap()
-                        .child(short_path(&active_path.to_string_lossy())),
-                )
-                .child(sidebar_remove_project_button(
-                    can_remove_active,
-                    active_path,
-                    sidebar_open,
-                    cx,
-                )),
+                        .h(px(34.0))
+                        .px(px(10.0))
+                        .rounded(px(theme::RADIUS_MD))
+                        .bg(theme::panel())
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(8.0))
+                        .child(
+                            div()
+                                .min_w_0()
+                                .flex_1()
+                                .font_family(theme::mono())
+                                .text_size(theme::text_size(theme::T_TINY))
+                                .text_color(theme::smoke())
+                                .overflow_hidden()
+                                .text_ellipsis()
+                                .whitespace_nowrap()
+                                .child(short_path(&active_path.to_string_lossy())),
+                        )
+                        .child(sidebar_remove_project_button(
+                            can_remove_active,
+                            active_path,
+                            sidebar_open,
+                            cx,
+                        )),
+                ),
         )
 }
 
@@ -1529,13 +1545,17 @@ fn sidebar_header_icon_button(
         .flex()
         .items_center()
         .justify_center()
+        .rounded_full()
+        .border_1()
+        .border_color(gpui::rgba(0x0000_0000))
         .text_color(icon_color)
         .when(enabled, |button| {
             button
                 .when(sidebar_open, |button| button.tab_index(0))
                 .cursor_pointer()
-                .hover(|button| button.text_color(theme::bone()))
-                .focus(|button| button.text_color(theme::focus()))
+                .hover(|button| button.bg(theme::panel()).text_color(theme::bone()))
+                .focus(|button| button.bg(theme::panel()).border_color(theme::focus()))
+                .active(|button| button.bg(theme::panel_lift()))
                 .tooltip(controls::text_tooltip(tooltip_label, tooltip_hint))
                 .on_click(cx.listener(move |view, _, window, cx| action(view, window, cx)))
                 .on_key_down(
@@ -1550,7 +1570,8 @@ fn sidebar_header_icon_button(
         .child(svg().path(icon_path).size(px(13.0)))
 }
 
-/// First line of the rail: an action written as type, not a filled CTA.
+/// First line of the rail: the workhorse secondary pill. Flat surface fill,
+/// hover lifts one step; the accent stays out of chrome.
 fn sidebar_new_thread_button(
     enabled: bool,
     sidebar_open: bool,
@@ -1558,12 +1579,21 @@ fn sidebar_new_thread_button(
 ) -> impl IntoElement {
     div()
         .id("new-session")
-        .h(px(28.0))
+        .h(px(30.0))
         .w_full()
         .flex()
         .flex_row()
         .items_center()
-        .gap(px(8.0))
+        .justify_center()
+        .gap(px(7.0))
+        .rounded_full()
+        .border_1()
+        .border_color(gpui::rgba(0x0000_0000))
+        .bg(if enabled {
+            theme::panel()
+        } else {
+            gpui::rgba(0x0000_0000)
+        })
         .text_color(if enabled {
             theme::bone()
         } else {
@@ -1573,8 +1603,9 @@ fn sidebar_new_thread_button(
             button
                 .when(sidebar_open, |button| button.tab_index(0))
                 .cursor_pointer()
-                .hover(|button| button.text_color(theme::signal()))
-                .focus(|button| button.text_color(theme::focus()))
+                .hover(|button| button.bg(theme::panel_lift()))
+                .focus(|button| button.border_color(theme::focus()))
+                .active(|button| button.bg(theme::panel_hover()))
                 .tooltip(controls::text_tooltip("New thread", Some("/new")))
                 .on_click(cx.listener(|view, _, window, cx| {
                     let _ = view.execute_native_action(NativeAction::NewSession, "", window, cx);
@@ -1618,9 +1649,18 @@ fn sidebar_text_link(
 ) -> impl IntoElement {
     div()
         .id(id.into())
-        .h(px(28.0))
+        .h(px(24.0))
+        .px(px(9.0))
+        .rounded_full()
+        .border_1()
+        .border_color(gpui::rgba(0x0000_0000))
         .flex()
         .items_center()
+        .bg(if selected && enabled {
+            theme::panel()
+        } else {
+            gpui::rgba(0x0000_0000)
+        })
         .text_color(if selected {
             theme::bone()
         } else if enabled {
@@ -1632,8 +1672,17 @@ fn sidebar_text_link(
             button
                 .when(sidebar_open, |button| button.tab_index(0))
                 .cursor_pointer()
-                .hover(|button| button.text_color(theme::bone()))
-                .focus(|button| button.text_color(theme::focus()))
+                .hover(move |button| {
+                    button
+                        .bg(if selected {
+                            theme::panel_lift()
+                        } else {
+                            theme::panel()
+                        })
+                        .text_color(theme::bone())
+                })
+                .focus(|button| button.border_color(theme::focus()))
+                .active(|button| button.bg(theme::panel_hover()))
                 .on_click(cx.listener(move |view, _, window, cx| action(view, window, cx)))
                 .on_key_down(
                     cx.listener(move |view, event: &gpui::KeyDownEvent, window, cx| {
@@ -1648,20 +1697,19 @@ fn sidebar_text_link(
             div()
                 .font_family(theme::sans())
                 .text_size(theme::text_size(theme::T_UI_SM))
-                .font_weight(if selected {
-                    FontWeight::SEMIBOLD
-                } else {
-                    FontWeight::MEDIUM
-                })
+                .font_weight(FontWeight::MEDIUM)
                 .child(label.into()),
         )
 }
 
-/// Row metrics for the flattened workspace tree.
-const PROJECT_ROW_H: f32 = 28.0;
-const TREE_ROW_H: f32 = 28.0;
-const TREE_ROW_GAP: f32 = 0.0;
-const TREE_GROUP_GAP: f32 = 8.0;
+/// Row metrics for the flattened workspace tree. Siblings sit 2px apart so
+/// each rounded row reads as its own surface; project groups get a wider beat.
+const PROJECT_ROW_H: f32 = 30.0;
+const TREE_ROW_H: f32 = 30.0;
+const TREE_ROW_GAP: f32 = 2.0;
+const TREE_GROUP_GAP: f32 = 12.0;
+/// Left inset where thread/child content starts, past the chevron column.
+const TREE_INDENT: f32 = 20.0;
 
 /// Keyboard-only focus edge. Selection is a fill; a pointer-parked cursor
 /// must not draw a box around every active row.
@@ -1701,7 +1749,7 @@ fn project_row(params: ProjectRowParams, cx: &mut Context<RootView>) -> AnyEleme
     } = params;
     let count = match status {
         CatalogStatus::Inaccessible => "!".to_owned(),
-        CatalogStatus::Stale => format!("{session_count}!"),
+        CatalogStatus::Stale => format!("{session_count}?"),
         CatalogStatus::Loading | CatalogStatus::Ready | CatalogStatus::Empty => {
             session_count.to_string()
         }
@@ -1709,7 +1757,6 @@ fn project_row(params: ProjectRowParams, cx: &mut Context<RootView>) -> AnyEleme
     let project_id = project_key(&path);
     let activity_key = list_animation_key(&project_id);
 
-    let row_bg = gpui::rgba(0x0000_0000);
     let hover_bg = theme::panel();
     let row_border = cursor_border(cursored, tree_focused, active);
 
@@ -1723,17 +1770,19 @@ fn project_row(params: ProjectRowParams, cx: &mut Context<RootView>) -> AnyEleme
     div()
         .id(row_id)
         .h(px(PROJECT_ROW_H))
+        .flex_shrink_0()
         .mt(px(top_gap))
-        .pl(px(2.0))
-        .pr(px(6.0))
+        .pl(px(4.0))
+        .pr(px(8.0))
+        .rounded(px(theme::RADIUS_MD))
         .border_1()
         .border_color(row_border)
-        .bg(row_bg)
+        .bg(gpui::rgba(0x0000_0000))
         .cursor_pointer()
         .flex()
         .flex_row()
         .items_center()
-        .gap(px(4.0))
+        .gap(px(6.0))
         .hover(|row| row.bg(hover_bg))
         .on_click(move |_, window, cx| {
             click_root.update(cx, |view, cx| {
@@ -1743,7 +1792,7 @@ fn project_row(params: ProjectRowParams, cx: &mut Context<RootView>) -> AnyEleme
         .child(
             div()
                 .id(toggle_id)
-                .size(px(16.0))
+                .size(px(18.0))
                 .flex_shrink_0()
                 .flex()
                 .items_center()
@@ -1781,20 +1830,25 @@ fn project_row(params: ProjectRowParams, cx: &mut Context<RootView>) -> AnyEleme
                 .whitespace_nowrap()
                 .font_family(theme::sans())
                 .text_size(theme::text_size(theme::T_UI_SM))
-                .font_weight(if active {
-                    FontWeight::SEMIBOLD
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(if active {
+                    theme::bone()
                 } else {
-                    FontWeight::MEDIUM
+                    theme::bone_dim()
                 })
-                .text_color(if active { theme::bone() } else { theme::ash() })
                 .child(name),
         )
         .child(
+            // Fixed-width trailing slot, right-aligned: the folder name's
+            // truncation point never moves when the activity dot appears or
+            // the count changes width.
             div()
+                .w(px(36.0))
                 .flex_shrink_0()
                 .flex()
                 .flex_row()
                 .items_center()
+                .justify_end()
                 .gap(px(6.0))
                 .when(
                     working_count > 0 || (status == CatalogStatus::Loading && session_count > 0),
@@ -1827,14 +1881,15 @@ fn project_row(params: ProjectRowParams, cx: &mut Context<RootView>) -> AnyEleme
 
 /// Non-interactive status line inside the flattened tree.
 fn sidebar_note_row(project: &std::path::Path, note: &SidebarNote, top_gap: f32) -> AnyElement {
-    // Reserved transparent border keeps note text aligned with thread rows,
-    // which carry the same 1px frame.
+    // Notes align with thread titles so scan position never jumps between
+    // status lines and sibling rows.
     fn frame(top_gap: f32) -> gpui::Div {
         div()
             .h(px(TREE_ROW_H))
+            .flex_shrink_0()
             .mt(px(top_gap))
-            .pl(px(22.0))
-            .pr(px(6.0))
+            .pl(px(TREE_INDENT))
+            .pr(px(8.0))
             .flex()
             .flex_row()
             .items_center()
@@ -1880,12 +1935,17 @@ fn sidebar_error_row(
     let remove_path: PathBuf = project.to_path_buf();
     div()
         .mt(px(top_gap))
-        .pl(px(22.0))
-        .pr(px(6.0))
-        .py(px(6.0))
+        .ml(px(TREE_INDENT))
+        .mr(px(4.0))
+        .mb(px(2.0))
+        .px(px(10.0))
+        .py(px(7.0))
+        .flex_shrink_0()
+        .rounded(px(theme::RADIUS_MD))
+        .bg(theme::panel())
         .flex()
         .flex_col()
-        .gap(px(4.0))
+        .gap(px(5.0))
         .child(
             div()
                 .font_family(theme::sans())
@@ -1895,30 +1955,95 @@ fn sidebar_error_row(
                 .child(message.to_owned()),
         )
         .when(show_remove, |note| {
-            note.child(controls::quiet_button(
+            note.child(sidebar_quiet_link(
                 SharedString::from(format!("remove-project-{}", project_key(&remove_path))),
                 "Remove from sidebar",
                 can_remove,
-                Box::new(cx.listener(move |view, _, window, cx| {
-                    view.remove_project(remove_path.clone(), window, cx)
-                })),
+                controls::ControlTone::Normal,
+                cx.entity(),
+                move |view, window, cx| view.remove_project(remove_path.clone(), window, cx),
             ))
         })
         .into_any_element()
 }
 
+/// Small text-only action used inside sidebar plates; hover is a tint shift,
+/// focus draws the shared ring. Never renders heavier than medium.
+fn sidebar_quiet_link(
+    id: impl Into<SharedString>,
+    label: impl Into<SharedString>,
+    enabled: bool,
+    tone: controls::ControlTone,
+    root: Entity<RootView>,
+    action: impl Fn(&mut RootView, &mut Window, &mut Context<RootView>) + 'static,
+) -> AnyElement {
+    let idle = match (enabled, tone) {
+        (true, controls::ControlTone::Danger) => theme::error(),
+        (true, controls::ControlTone::Normal) => theme::ash(),
+        (false, _) => theme::smoke(),
+    };
+    let hot = match tone {
+        controls::ControlTone::Danger => theme::error(),
+        controls::ControlTone::Normal => theme::bone(),
+    };
+    // Click and keyboard paths share one action; each handler needs its own
+    // handle to the entity and the action.
+    let action = std::rc::Rc::new(action);
+    let click_root = root.clone();
+    let click_action = std::rc::Rc::clone(&action);
+    let key_root = root;
+    let key_action = action;
+    div()
+        .id(id.into())
+        .h(px(20.0))
+        .rounded(px(theme::RADIUS_SM))
+        .border_1()
+        .border_color(gpui::rgba(0x0000_0000))
+        .px(px(2.0))
+        .flex()
+        .items_center()
+        .text_color(idle)
+        .when(enabled, |button| {
+            button
+                .tab_index(0)
+                .cursor_pointer()
+                .hover(move |button| button.text_color(hot))
+                .focus(|button| button.border_color(theme::focus()))
+                .on_click(move |_, window, cx| {
+                    click_root.update(cx, |view, cx| click_action(view, window, cx));
+                })
+                .on_key_down(move |event: &gpui::KeyDownEvent, window, cx| {
+                    if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                        cx.stop_propagation();
+                        key_root.update(cx, |view, cx| key_action(view, window, cx));
+                    }
+                })
+        })
+        .child(
+            div()
+                .font_family(theme::sans())
+                .text_size(theme::text_size(theme::T_TINY))
+                .font_weight(FontWeight::MEDIUM)
+                .child(label.into()),
+        )
+        .into_any_element()
+}
+
 /// Guidance shown instead of the tree when the sidebar has no projects.
-fn empty_projects_note() -> AnyElement {
+/// Invitation copy: claim of the state, one plain sentence, one action.
+fn empty_projects_note(sidebar_open: bool, cx: &mut Context<RootView>) -> AnyElement {
     div()
         .px(px(4.0))
-        .pt(px(8.0))
+        .pt(px(10.0))
         .flex()
         .flex_col()
+        .items_start()
         .gap(px(4.0))
         .child(
             div()
                 .font_family(theme::sans())
                 .text_size(theme::text_size(theme::T_UI_SM))
+                .font_weight(FontWeight::MEDIUM)
                 .text_color(theme::bone_dim())
                 .child("No projects yet."),
         )
@@ -1926,9 +2051,53 @@ fn empty_projects_note() -> AnyElement {
             div()
                 .font_family(theme::sans())
                 .text_size(theme::text_size(theme::T_TINY))
-                .line_height(gpui::relative(1.4))
+                .line_height(gpui::relative(1.45))
                 .text_color(theme::smoke())
-                .child("Add a folder with the folder button above."),
+                .child("Add a folder and its saved threads will show up here."),
+        )
+        .child(
+            div()
+                .id("empty-add-project")
+                .h(px(26.0))
+                .mt(px(2.0))
+                .px(px(12.0))
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(6.0))
+                .rounded_full()
+                .border_1()
+                .border_color(gpui::rgba(0x0000_0000))
+                .bg(theme::panel())
+                .when(sidebar_open, |button| {
+                    button
+                        .tab_index(0)
+                        .cursor_pointer()
+                        .hover(|button| button.bg(theme::panel_lift()).text_color(theme::bone()))
+                        .focus(|button| button.border_color(theme::focus()))
+                        .active(|button| button.bg(theme::panel_hover()))
+                        .on_click(cx.listener(|view, _, _window, cx| view.choose_projects(cx)))
+                        .on_key_down(cx.listener(|view, event: &gpui::KeyDownEvent, _, cx| {
+                            if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                                cx.stop_propagation();
+                                view.choose_projects(cx);
+                            }
+                        }))
+                })
+                .text_color(theme::ash())
+                .child(
+                    svg()
+                        .path("icons/folder.svg")
+                        .size(px(12.0))
+                        .flex_shrink_0(),
+                )
+                .child(
+                    div()
+                        .font_family(theme::sans())
+                        .text_size(theme::text_size(theme::T_UI_SM))
+                        .font_weight(FontWeight::MEDIUM)
+                        .child("Add folder"),
+                ),
         )
         .into_any_element()
 }
@@ -1945,7 +2114,11 @@ fn sidebar_remove_project_button(
     let key_path = path;
     div()
         .id("remove-active-project")
-        .h(px(28.0))
+        .h(px(22.0))
+        .px(px(9.0))
+        .rounded_full()
+        .border_1()
+        .border_color(gpui::rgba(0x0000_0000))
         .flex()
         .items_center()
         .justify_center()
@@ -1959,7 +2132,11 @@ fn sidebar_remove_project_button(
                 .when(sidebar_open, |button| button.tab_index(0))
                 .cursor_pointer()
                 .hover(|button| button.text_color(theme::error()))
-                .focus(|button| button.text_color(theme::focus()))
+                .focus(|button| {
+                    button
+                        .text_color(theme::error())
+                        .border_color(theme::focus())
+                })
                 .tooltip(controls::text_tooltip(
                     "Remove project from sidebar",
                     None::<&str>,
@@ -1979,7 +2156,7 @@ fn sidebar_remove_project_button(
         .child(
             div()
                 .font_family(theme::main())
-                .text_size(theme::text_size(theme::T_UI_SM))
+                .text_size(theme::text_size(theme::T_TINY))
                 .font_weight(FontWeight::MEDIUM)
                 .child("Remove"),
         )
@@ -2052,9 +2229,7 @@ fn project_thread_row(
         session.id
     ));
 
-    let row_bg = if selected {
-        theme::panel()
-    } else if hovered {
+    let row_bg = if selected || hovered {
         theme::panel()
     } else {
         gpui::rgba(0x0000_0000)
@@ -2064,10 +2239,12 @@ fn project_thread_row(
     div()
         .id(row_id)
         .h(px(TREE_ROW_H))
+        .flex_shrink_0()
         .mt(px(top_gap))
-        .pl(px(22.0))
-        .pr(px(6.0))
+        .pl(px(TREE_INDENT))
+        .pr(px(8.0))
         .relative()
+        .rounded(px(theme::RADIUS_MD))
         .border_1()
         .border_color(row_border)
         .bg(row_bg)
@@ -2112,11 +2289,7 @@ fn project_thread_row(
                 .whitespace_nowrap()
                 .font_family(theme::sans())
                 .text_size(theme::text_size(theme::T_UI_SM))
-                .font_weight(if selected {
-                    FontWeight::SEMIBOLD
-                } else {
-                    FontWeight::MEDIUM
-                })
+                .font_weight(FontWeight::MEDIUM)
                 .text_color(if selected {
                     theme::bone()
                 } else if enabled {
@@ -2126,24 +2299,38 @@ fn project_thread_row(
                 })
                 .child(title),
         )
-        .when(show_activity, |row| {
-            row.child(controls::square_status_indicator(
-                activity_key,
-                true,
-                Duration::from_millis(720),
-                match runtime_activity {
-                    Some(ThreadActivity::Cancelling) => theme::data(),
-                    Some(ThreadActivity::Attention) => theme::error(),
-                    _ => theme::working(),
-                },
-            ))
-        })
+        // Stable activity slot: title truncation never moves when a thread
+        // flips Working/Opening — the indicator occupies the same 8px whether
+        // it is painted or not.
+        .child(
+            div()
+                .w(px(8.0))
+                .h(px(8.0))
+                .flex_shrink_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .when(show_activity, |slot| {
+                    slot.child(controls::square_status_indicator(
+                        activity_key,
+                        true,
+                        Duration::from_millis(720),
+                        match runtime_activity {
+                            Some(ThreadActivity::Cancelling) => theme::data(),
+                            Some(ThreadActivity::Attention) => theme::error(),
+                            _ => theme::working(),
+                        },
+                    ))
+                }),
+        )
         .child(
             div()
                 .flex_shrink_0()
                 .h(px(22.0))
-                // Keep the trailing column stable so the date ↔ delete swap does not shove the title.
-                .when(can_delete, |slot| slot.min_w(px(36.0)))
+                // Fixed gutter for the trailing date/delete slot: the title
+                // ellipsis point never moves when the list starts scrolling
+                // or when a row swaps the date for the trash control.
+                .w(px(48.0))
                 .flex()
                 .items_center()
                 .justify_end()
@@ -2172,7 +2359,7 @@ fn project_thread_row(
                             .id(trash_id)
                             .group(trash_group.clone())
                             .size(px(22.0))
-                            .rounded(px(theme::RADIUS_SM))
+                            .rounded_full()
                             .flex()
                             .items_center()
                             .justify_center()
