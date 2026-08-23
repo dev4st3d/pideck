@@ -18,7 +18,8 @@ use gpui::{
 
 use crate::actions::{
     APP_UPDATE_BUTTON_CONTEXT, APP_UPDATE_NOTICE_CONTEXT, AbortRun, ActivateAppUpdate,
-    ActivateRecovery, AttachFiles, Connect, DecreaseFontSize, FocusNext, FocusPrevious,
+    ActivateRecovery, AttachFiles, Connect, DecreaseFontSize, FocusComposer, FocusNext,
+    FocusPrevious,
     HistoryActivate, HistoryFirst, HistoryFold, HistoryLast, HistoryNext, HistoryPrevious,
     HistoryUnfold, ImagePreviewClose, ImagePreviewNext, ImagePreviewPrevious, IncreaseFontSize,
     ORCHESTRATION_ROW_CONTEXT, OpenAppUpdates, OpenCommandPalette, OrchestrationActivate, Retry,
@@ -48,7 +49,7 @@ use crate::resource_center::{
     ResourceLoadState, ResourcePhase, ResourceScopeFilter, ResourceStateFilter,
 };
 use crate::services::app_update::{self, CheckOutcome, InstallOutcome};
-use crate::services::git_diff::{WorkspaceDiff, load_workspace_diff};
+use crate::services::git_diff::WorkspaceDiff;
 use crate::services::projects::{
     AddProjectOutcome, ProjectRegistry, ProjectRegistryError, project_key,
 };
@@ -70,17 +71,24 @@ use crate::views::controls;
 use crate::views::conversation::{
     ActivityDetail, ActivityDisclosureState, ConversationDiffSummary, ConversationListModel,
     ConversationScrollMotion, ConversationStreamEntities, StreamBandCache, TranscriptTextCache,
-    latest_completed_response_key,
 };
+use live_diff::LiveDiffCoordinator;
 use crate::views::terminal::{TerminalPanelEvent, TerminalView};
 
+mod activity_detail;
 mod composer_bar;
+mod conversation_panel;
 mod inspector;
+mod inspector_drawer;
+mod live_diff;
 mod model_panels;
 mod overlays;
 mod render;
 mod shared;
 mod shell;
+mod sidebar;
+mod terminal_dock;
+mod workspace_diff;
 
 use overlays::{annotate_prompt_image, extension_dialog_key, single_line_title, wrapped_index};
 
@@ -309,13 +317,6 @@ enum DeliveryFocus {
     FollowUp,
 }
 
-/// Left rail content. The conversation always keeps the remaining width.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RailMode {
-    Places,
-    Session,
-}
-
 struct RenderProjections {
     shell: ShellProjection,
     catalog: CatalogProjection,
@@ -444,12 +445,13 @@ pub struct RootView {
     history: HistoryBrowser,
     history_focus: FocusHandle,
     history_open: bool,
-    /// Left rail visibility (animated open/close). Both modes hide when closed.
+    /// Workspace navigation rail visibility.
     sidebar_open: bool,
+    /// Keeps the heavy project tree mounted only through its exit animation.
+    sidebar_mounted: bool,
+    sidebar_unmount_task: Option<Task<()>>,
     /// Bumps on each rail open/close so width animation only runs after user action.
     sidebar_motion_key: u64,
-    /// Places or Session. Restored when the rail reopens with Ctrl+B.
-    rail_mode: RailMode,
     /// Roving keyboard cursor inside the workspace tree (None until navigated).
     sidebar_cursor: Option<shell::SidebarNode>,
     /// Focus for the sidebar's single tree tab stop.
@@ -463,7 +465,13 @@ pub struct RootView {
     terminal_height: f32,
     /// Pointer Y and height captured when a splitter drag begins.
     terminal_drag_origin: Option<(Pixels, f32)>,
-    /// Tab stop for Session mode so Escape returns to Places before AbortRun.
+    /// Independent right-side session inspector.
+    inspector_open: bool,
+    /// Avoid rendering orchestration, usage, and queue trees while the drawer is closed.
+    inspector_mounted: bool,
+    inspector_unmount_task: Option<Task<()>>,
+    inspector_motion_key: u64,
+    inspector_restore_focus: Option<FocusHandle>,
     inspector_focus: FocusHandle,
     session_rename_open: bool,
     history_confirmation: Option<HistoryConfirmation>,
@@ -482,8 +490,10 @@ pub struct RootView {
     activity_detail_restore_focus: Option<FocusHandle>,
     activity_detail_scroll: ScrollHandle,
     workspace_diff: Option<Arc<WorkspaceDiff>>,
-    workspace_diff_identity: Option<(u64, String)>,
-    workspace_diff_generation: u64,
+    workspace_diff_refresh: LiveDiffCoordinator,
+    workspace_diff_task: Option<Task<()>>,
+    workspace_diff_loading: bool,
+    workspace_diff_error: Option<String>,
     workspace_diff_files_expanded: bool,
     workspace_diff_open: bool,
     workspace_diff_selected: usize,
@@ -840,14 +850,20 @@ impl RootView {
             history_focus,
             history_open: false,
             sidebar_open: true,
+            sidebar_mounted: true,
+            sidebar_unmount_task: None,
             sidebar_motion_key: 0,
-            rail_mode: RailMode::Places,
             sidebar_cursor: None,
             sidebar_tree_pointer_focus: false,
             sidebar_tree_focus: cx.focus_handle(),
             terminal_open: false,
             terminal_height: 260.0,
             terminal_drag_origin: None,
+            inspector_open: false,
+            inspector_mounted: false,
+            inspector_unmount_task: None,
+            inspector_motion_key: 0,
+            inspector_restore_focus: None,
             inspector_focus,
             session_rename_open: false,
             history_confirmation: None,
@@ -866,8 +882,10 @@ impl RootView {
             activity_detail_restore_focus: None,
             activity_detail_scroll: ScrollHandle::new(),
             workspace_diff: None,
-            workspace_diff_identity: None,
-            workspace_diff_generation: 0,
+            workspace_diff_refresh: LiveDiffCoordinator::default(),
+            workspace_diff_task: None,
+            workspace_diff_loading: false,
+            workspace_diff_error: None,
             workspace_diff_files_expanded: false,
             workspace_diff_open: false,
             workspace_diff_selected: 0,
@@ -910,315 +928,6 @@ impl RootView {
     fn toggle_theme_menu(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         self.theme_menu_open = !self.theme_menu_open;
         cx.notify();
-    }
-
-    fn toggle_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.sidebar_open = !self.sidebar_open;
-        self.sidebar_motion_key = self.sidebar_motion_key.wrapping_add(1);
-        if !self.sidebar_open {
-            // History sits beside Places; hide it when the rail closes.
-            self.history_open = false;
-            self.history_confirmation = None;
-            self.hovered_thread_key = None;
-            // Never leave focus parked on chrome that just became invisible.
-            if self.sidebar_tree_focus.is_focused(window) || self.inspector_focus.is_focused(window)
-            {
-                window.focus(&self.focus_handle);
-            }
-        }
-        cx.notify();
-    }
-
-    fn on_toggle_sidebar(
-        &mut self,
-        _: &ToggleSidebar,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.toggle_sidebar(window, cx);
-    }
-
-    fn ensure_sidebar_open(&mut self) {
-        if self.sidebar_open {
-            return;
-        }
-        self.sidebar_open = true;
-        self.sidebar_motion_key = self.sidebar_motion_key.wrapping_add(1);
-    }
-
-    /// Painted workspace rows in scroll order; shared with the sidebar render
-    /// pass so the keyboard cursor can never address a row that is not visible.
-    fn sidebar_rows(&self) -> Vec<shell::SidebarRow> {
-        let thread_statuses = self.thread_statuses();
-        let slices = shell::sidebar_project_slices(
-            &self.projects,
-            &self.render_projections.catalog,
-            &self.project_catalogs,
-            &thread_statuses,
-        );
-        shell::sidebar_rows(&slices)
-    }
-
-    /// The tree's single tab stop routes all of its keys here.
-    fn on_workspace_tree_key(
-        &mut self,
-        event: &gpui::KeyDownEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        // Any key dismisses pointer modality; the ring returns to the
-        // keyboard-driven focus color.
-        self.sidebar_tree_pointer_focus = false;
-        match event.keystroke.key.as_str() {
-            "down" => self.move_sidebar_cursor(shell::SidebarCursorMove::Next, cx),
-            "up" => self.move_sidebar_cursor(shell::SidebarCursorMove::Previous, cx),
-            "home" => self.move_sidebar_cursor(shell::SidebarCursorMove::First, cx),
-            "end" => self.move_sidebar_cursor(shell::SidebarCursorMove::Last, cx),
-            "left" => self.collapse_sidebar_cursor(cx),
-            "right" => self.expand_sidebar_cursor(cx),
-            "enter" | "space" => self.activate_sidebar_cursor(window, cx),
-            "delete" | "backspace" => self.trash_sidebar_cursor(cx),
-            _ => return,
-        }
-        cx.stop_propagation();
-    }
-
-    fn move_sidebar_cursor(&mut self, movement: shell::SidebarCursorMove, cx: &mut Context<Self>) {
-        let rows = self.sidebar_rows();
-        let Some((node, slot)) =
-            shell::sidebar_moved_cursor(&rows, self.sidebar_cursor.as_ref(), movement)
-        else {
-            return;
-        };
-        if self.sidebar_cursor.as_ref() != Some(&node) {
-            self.sidebar_cursor = Some(node);
-            cx.notify();
-        }
-        self.sessions_scroll.scroll_to_item(slot);
-    }
-
-    fn expand_sidebar_cursor(&mut self, cx: &mut Context<Self>) {
-        let Some(shell::SidebarNode::Project(path)) = self.sidebar_cursor.clone() else {
-            return;
-        };
-        let expanded = self
-            .projects
-            .projects()
-            .iter()
-            .find(|project| project_key(&project.path) == project_key(&path))
-            .is_some_and(|project| project.expanded);
-        if expanded {
-            // Already open: step down into the first child (or the next node).
-            self.move_sidebar_cursor(shell::SidebarCursorMove::Next, cx);
-        } else {
-            self.set_project_expanded(path, true, cx);
-        }
-    }
-
-    fn collapse_sidebar_cursor(&mut self, cx: &mut Context<Self>) {
-        let Some(node) = self.sidebar_cursor.clone() else {
-            return;
-        };
-        match node {
-            shell::SidebarNode::Project(path) => {
-                let expanded = self
-                    .projects
-                    .projects()
-                    .iter()
-                    .find(|project| project_key(&project.path) == project_key(&path))
-                    .is_some_and(|project| project.expanded);
-                if expanded {
-                    self.set_project_expanded(path, false, cx);
-                }
-            }
-            shell::SidebarNode::Thread { project, .. } => {
-                self.sidebar_cursor = Some(shell::SidebarNode::Project(project));
-                cx.notify();
-            }
-        }
-    }
-
-    fn activate_sidebar_cursor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(node) = self.sidebar_cursor.clone() else {
-            return;
-        };
-        match node {
-            shell::SidebarNode::Project(path) => self.activate_project(path, None, window, cx),
-            shell::SidebarNode::Thread { project, session } => {
-                if self.projects.is_active(&project) {
-                    self.switch_session(session, window, cx);
-                } else {
-                    self.activate_project(project, Some(session), window, cx);
-                }
-            }
-        }
-    }
-
-    /// Delete in the tree uses the same guard rails as hover-only trash chrome.
-    fn trash_sidebar_cursor(&mut self, cx: &mut Context<Self>) {
-        let Some(shell::SidebarNode::Thread { project, session }) = self.sidebar_cursor.clone()
-        else {
-            return;
-        };
-        if !self.sidebar_thread_deletable(&project, &session) {
-            return;
-        }
-        self.trash_thread(project, session, cx);
-    }
-
-    fn sidebar_thread_deletable(
-        &self,
-        project: &std::path::Path,
-        session: &std::path::Path,
-    ) -> bool {
-        if !crate::services::session_catalog::reversible_trash_available() {
-            return false;
-        }
-        let catalog = &self.render_projections.catalog;
-        let selected = self.projects.is_active(project)
-            && catalog
-                .pending_session_file
-                .as_ref()
-                .or(catalog.current_session_file.as_ref())
-                .is_some_and(|path| project_key(path) == project_key(session));
-        if selected {
-            return false;
-        }
-        match self.thread_statuses().get(&project_key(session)) {
-            Some(status) if status.active => false,
-            Some(status) => !matches!(
-                status.activity,
-                ThreadActivity::Opening
-                    | ThreadActivity::Working
-                    | ThreadActivity::Cancelling
-                    | ThreadActivity::Attention
-            ),
-            None => true,
-        }
-    }
-
-    fn set_terminal_open(&mut self, open: bool, window: &mut Window, cx: &mut Context<Self>) {
-        if self.terminal_open == open {
-            return;
-        }
-        self.terminal_open = open;
-        self.terminal_drag_origin = None;
-        if open {
-            self.terminal
-                .update(cx, |terminal, cx| terminal.activate(cx));
-            window.focus(&self.terminal.read(cx).focus_handle(cx));
-        } else {
-            window.focus(&self.composer.read(cx).focus_handle(cx));
-        }
-        cx.notify();
-    }
-
-    fn toggle_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.set_terminal_open(!self.terminal_open, window, cx);
-    }
-
-    fn on_toggle_terminal(
-        &mut self,
-        _: &ToggleTerminal,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.toggle_terminal(window, cx);
-    }
-
-    fn on_terminal_panel_event(
-        &mut self,
-        event: &TerminalPanelEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        match event {
-            TerminalPanelEvent::CloseRequested => self.set_terminal_open(false, window, cx),
-        }
-    }
-
-    fn begin_terminal_resize(&mut self, pointer_y: Pixels, cx: &mut Context<Self>) {
-        self.terminal_drag_origin = Some((pointer_y, self.terminal_height));
-        cx.notify();
-    }
-
-    fn update_terminal_resize(
-        &mut self,
-        pointer_y: Pixels,
-        viewport_height: Pixels,
-        cx: &mut Context<Self>,
-    ) -> bool {
-        let Some((start_y, start_height)) = self.terminal_drag_origin else {
-            return false;
-        };
-        let delta = f32::from(start_y - pointer_y);
-        let max_height = (f32::from(viewport_height) - theme::TITLE_H - 210.0).max(180.0);
-        let next = (start_height + delta).clamp(180.0, max_height);
-        if (next - self.terminal_height).abs() >= 0.5 {
-            self.terminal_height = next;
-            cx.notify();
-        }
-        true
-    }
-
-    fn end_terminal_resize(&mut self, cx: &mut Context<Self>) -> bool {
-        if self.terminal_drag_origin.take().is_none() {
-            return false;
-        }
-        cx.notify();
-        true
-    }
-
-    fn terminal_size(&self, window: &Window) -> TerminalSize {
-        let mut width = f32::from(window.viewport_size().width);
-        if self.sidebar_open {
-            width -= theme::SIDE_W;
-        }
-        if self.history_open {
-            width -= theme::HISTORY_W;
-        }
-        let rows = ((self.terminal_height - 50.0) / 18.0).floor().max(4.0) as u16;
-        let cols = ((width - 24.0) / 7.4).floor().max(24.0) as u16;
-        TerminalSize::new(rows, cols)
-    }
-
-    fn session_rail_visible(&self) -> bool {
-        self.sidebar_open && self.rail_mode == RailMode::Session
-    }
-
-    fn show_places_rail(&mut self, window: &mut Window) {
-        self.rail_mode = RailMode::Places;
-        window.focus(&self.sidebar_tree_focus);
-    }
-
-    fn show_session_rail(&mut self, window: &mut Window) {
-        if !self.sidebar_open {
-            self.sidebar_open = true;
-            self.sidebar_motion_key = self.sidebar_motion_key.wrapping_add(1);
-        }
-        self.rail_mode = RailMode::Session;
-        // History is a Places companion; Session must not add a second chrome column.
-        self.history_open = false;
-        self.history_confirmation = None;
-        window.focus(&self.inspector_focus);
-    }
-
-    fn toggle_inspector(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.session_rail_visible() {
-            self.show_places_rail(window);
-        } else {
-            self.show_session_rail(window);
-        }
-        cx.notify();
-    }
-
-    fn on_toggle_inspector(
-        &mut self,
-        _: &ToggleInspector,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.toggle_inspector(window, cx);
     }
 
     fn close_theme_menu(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
@@ -1354,9 +1063,8 @@ impl RootView {
             self.close_subagent(window, cx);
             return;
         }
-        if self.session_rail_visible() {
-            // Escape leaves Session for Places; it must not fall through to abort.
-            self.toggle_inspector(window, cx);
+        if self.inspector_open {
+            self.close_inspector(window, cx);
             return;
         }
         let _ = self.execute_native_action(NativeAction::Abort, "", window, cx);
@@ -2421,7 +2129,6 @@ impl RootView {
                 self.history_confirmation = None;
                 if self.history_open {
                     self.ensure_sidebar_open();
-                    self.rail_mode = RailMode::Places;
                     self.sync_history_selection();
                     window.focus(&self.history_focus);
                 } else {
@@ -2432,7 +2139,6 @@ impl RootView {
             }
             NativeAction::Fork => {
                 self.ensure_sidebar_open();
-                self.rail_mode = RailMode::Places;
                 self.history_open = true;
                 self.sync_history_selection();
                 self.history_confirmation = None;
@@ -2442,7 +2148,6 @@ impl RootView {
             }
             NativeAction::Clone => {
                 self.ensure_sidebar_open();
-                self.rail_mode = RailMode::Places;
                 self.history_open = true;
                 self.sync_history_selection();
                 self.history_confirmation = Some(HistoryConfirmation::Clone);
@@ -3803,9 +3508,16 @@ impl RootView {
         self.runtime_notifications.clear();
         self.selected_task_id = None;
         self.selected_subagent_id = None;
+        self.inspector_open = false;
+        self.inspector_mounted = false;
+        self.inspector_unmount_task.take();
+        self.inspector_motion_key = self.inspector_motion_key.wrapping_add(1);
+        self.inspector_restore_focus = None;
         self.workspace_diff = None;
-        self.workspace_diff_identity = None;
-        self.workspace_diff_generation = self.workspace_diff_generation.wrapping_add(1);
+        self.workspace_diff_refresh.clear();
+        self.workspace_diff_task.take();
+        self.workspace_diff_loading = false;
+        self.workspace_diff_error = None;
         self.workspace_diff_files_expanded = false;
         self.workspace_diff_open = false;
         self.workspace_diff_selected = 0;
@@ -4402,463 +4114,6 @@ impl RootView {
         cx.notify();
     }
 
-    fn refresh_sessions(&mut self, cx: &mut Context<Self>) {
-        self.controller.update(cx, |controller, cx| {
-            controller.refresh_sessions(cx);
-        });
-        self.refresh_project_catalogs(cx);
-    }
-
-    fn on_sessions_scroll_wheel(
-        &mut self,
-        event: &ScrollWheelEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> bool {
-        if event.delta.precise() {
-            // Precise (touchpad) deltas are applied here instead of falling
-            // through to the stock handler: it accumulates fractional
-            // offsets, and rows resting between pixel grids re-rasterize
-            // with shifted metrics — once the list scrolls, row text and
-            // fills visibly change size. Keep every settled offset whole.
-            self.sessions_scroll_motion.cancel();
-            let distance = event.delta.pixel_delta(px(20.0)).y;
-            if distance == px(0.0) {
-                return false;
-            }
-            let before = self.sessions_scroll.offset();
-            let max_offset = self.sessions_scroll.max_offset().height;
-            let next_y = (before.y + distance)
-                .clamp(-max_offset, Pixels::ZERO)
-                .round();
-            if next_y != before.y {
-                self.sessions_scroll.set_offset(point(before.x, next_y));
-                cx.notify();
-            }
-            return true;
-        }
-
-        let distance = event.delta.pixel_delta(px(20.0)).y;
-        if distance == px(0.0) {
-            return false;
-        }
-
-        let now = Instant::now();
-        if self.sessions_scroll_motion.push(distance, now) {
-            self.advance_sessions_scroll(now, cx);
-            self.schedule_sessions_scroll_frame(window, cx);
-        }
-        true
-    }
-
-    fn advance_sessions_scroll(&mut self, now: Instant, cx: &mut Context<Self>) {
-        let Some(step) = self.sessions_scroll_motion.advance(now) else {
-            return;
-        };
-
-        let before = self.sessions_scroll.offset();
-        let max_offset = self.sessions_scroll.max_offset().height;
-        // Whole pixels only: a fractional settle leaves rows between pixel
-        // grids, which reads as the list changing size after it scrolls.
-        let next_y = (before.y + step).clamp(-max_offset, Pixels::ZERO).round();
-        self.sessions_scroll.set_offset(point(before.x, next_y));
-        if (f32::from(next_y) - f32::from(before.y)).abs() < 0.01 {
-            self.sessions_scroll_motion.cancel();
-        }
-        cx.notify();
-    }
-
-    fn schedule_sessions_scroll_frame(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.sessions_scroll_motion.schedule_frame() {
-            return;
-        }
-        cx.on_next_frame(window, |view, window, cx| {
-            view.sessions_scroll_motion.begin_frame();
-            view.advance_sessions_scroll(Instant::now(), cx);
-            view.schedule_sessions_scroll_frame(window, cx);
-        });
-    }
-
-    fn on_conversation_scroll_wheel(
-        &mut self,
-        event: &ScrollWheelEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> bool {
-        if event.delta.precise() {
-            // Pixel deltas already carry the platform's touchpad precision and
-            // momentum. Never layer synthetic motion on top of them.
-            self.conversation_scroll_motion.cancel();
-            return false;
-        }
-
-        let distance = -event.delta.pixel_delta(px(20.0)).y;
-        if distance == px(0.0) {
-            return false;
-        }
-        if distance > px(0.0) && self.conversation_follow.get() {
-            self.conversation_scroll_motion.cancel();
-            self.conversation_list_state.scroll_to(ListOffset {
-                item_ix: self.conversation_list.item_count(),
-                offset_in_item: px(0.0),
-            });
-            return true;
-        }
-
-        self.conversation_follow.set(false);
-        let now = Instant::now();
-        if self.conversation_scroll_motion.push(distance, now) {
-            self.advance_conversation_scroll(now, cx);
-            self.schedule_conversation_scroll_frame(window, cx);
-        }
-        true
-    }
-
-    fn advance_conversation_scroll(&mut self, now: Instant, cx: &mut Context<Self>) {
-        let Some(step) = self.conversation_scroll_motion.advance(now) else {
-            return;
-        };
-        let before = self.conversation_list_state.logical_scroll_top();
-        self.conversation_list_state.scroll_by(step);
-        let after = self.conversation_list_state.logical_scroll_top();
-        let stalled = before.item_ix == after.item_ix
-            && (f32::from(before.offset_in_item) - f32::from(after.offset_in_item)).abs() < 0.01;
-        let at_top =
-            step < px(0.0) && after.item_ix == 0 && f32::from(after.offset_in_item) <= 0.01;
-        let at_bottom =
-            step > px(0.0) && (after.item_ix >= self.conversation_list.item_count() || stalled);
-
-        if at_bottom {
-            self.conversation_list_state.scroll_to(ListOffset {
-                item_ix: self.conversation_list.item_count(),
-                offset_in_item: px(0.0),
-            });
-            self.conversation_follow.set(true);
-            self.conversation_scroll_motion.cancel();
-        } else if at_top || stalled {
-            self.conversation_scroll_motion.cancel();
-        }
-        cx.notify();
-    }
-
-    fn schedule_conversation_scroll_frame(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.conversation_scroll_motion.schedule_frame() {
-            return;
-        }
-        cx.on_next_frame(window, |view, window, cx| {
-            view.conversation_scroll_motion.begin_frame();
-            view.advance_conversation_scroll(Instant::now(), cx);
-            view.schedule_conversation_scroll_frame(window, cx);
-        });
-    }
-
-    fn sync_workspace_diff(
-        &mut self,
-        conversation: &ConversationProjection,
-        workspace: &str,
-        cx: &mut Context<Self>,
-    ) {
-        let identity = latest_completed_response_key(conversation)
-            .map(|key| (conversation.epoch.value(), key));
-        if identity == self.workspace_diff_identity {
-            return;
-        }
-
-        self.workspace_diff_identity = identity.clone();
-        self.workspace_diff = None;
-        self.workspace_diff_files_expanded = false;
-        self.workspace_diff_open = false;
-        self.workspace_diff_selected = 0;
-        self.workspace_diff_collapsed_folders.clear();
-        self.workspace_diff_files_scroll = ScrollHandle::new();
-        self.workspace_diff_scroll = ScrollHandle::new();
-        self.workspace_diff_generation = self.workspace_diff_generation.wrapping_add(1);
-        self.conversation_list
-            .refresh_trailing(&self.conversation_list_state);
-        let generation = self.workspace_diff_generation;
-        let Some(_) = identity else {
-            cx.notify();
-            return;
-        };
-
-        let workspace = PathBuf::from(workspace);
-        let scan = cx
-            .background_executor()
-            .spawn(async move { load_workspace_diff(&workspace) });
-        cx.spawn(async move |view, cx| {
-            let result = scan.await;
-            let _ = view.update(cx, |view, cx| {
-                if view.workspace_diff_generation != generation {
-                    return;
-                }
-                view.workspace_diff = result
-                    .ok()
-                    .filter(|snapshot| !snapshot.is_empty())
-                    .map(Arc::new);
-                view.conversation_list
-                    .refresh_trailing(&view.conversation_list_state);
-                cx.notify();
-            });
-        })
-        .detach();
-    }
-
-    pub(in crate::views) fn toggle_workspace_diff_files(&mut self, cx: &mut Context<Self>) {
-        if self.workspace_diff.is_none() {
-            return;
-        }
-        self.workspace_diff_files_expanded = !self.workspace_diff_files_expanded;
-        self.conversation_list
-            .refresh_trailing(&self.conversation_list_state);
-        cx.notify();
-    }
-
-    pub(in crate::views) fn open_workspace_diff(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.workspace_diff.is_none() {
-            return;
-        }
-        self.workspace_diff_selected = self.workspace_diff_selected.min(
-            self.workspace_diff
-                .as_ref()
-                .map_or(0, |diff| diff.files.len().saturating_sub(1)),
-        );
-        self.workspace_diff_scroll = ScrollHandle::new();
-        self.workspace_diff_open = true;
-        window.focus(&self.workspace_diff_focus);
-        cx.notify();
-    }
-
-    pub(in crate::views) fn select_workspace_diff_file(
-        &mut self,
-        index: usize,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(snapshot) = self.workspace_diff.clone() else {
-            return;
-        };
-        let Some(file) = snapshot.files.get(index) else {
-            return;
-        };
-
-        let selection_changed = index != self.workspace_diff_selected;
-        let mut folder_path = String::new();
-        let mut expanded = false;
-        let target_path = file.path.rsplit(" → ").next().unwrap_or(&file.path);
-        let mut parts = target_path.split('/').collect::<Vec<_>>();
-        parts.pop();
-        for folder in parts {
-            if !folder_path.is_empty() {
-                folder_path.push('/');
-            }
-            folder_path.push_str(folder);
-            expanded |= self.workspace_diff_collapsed_folders.remove(&folder_path);
-        }
-
-        if !selection_changed && !expanded {
-            return;
-        }
-        self.workspace_diff_selected = index;
-        if let Some(row) = crate::views::diff_summary::file_tree_row_index(
-            &snapshot,
-            &self.workspace_diff_collapsed_folders,
-            index,
-        ) {
-            self.workspace_diff_files_scroll.scroll_to_item(row);
-        }
-        if selection_changed {
-            self.workspace_diff_scroll = ScrollHandle::new();
-        }
-        cx.notify();
-    }
-
-    pub(in crate::views) fn toggle_workspace_diff_folder(
-        &mut self,
-        path: &str,
-        cx: &mut Context<Self>,
-    ) {
-        if !self.workspace_diff_collapsed_folders.remove(path) {
-            self.workspace_diff_collapsed_folders
-                .insert(path.to_owned());
-        }
-        cx.notify();
-    }
-
-    fn set_selected_workspace_diff_folder_collapsed(
-        &mut self,
-        collapsed: bool,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(file) = self
-            .workspace_diff
-            .as_ref()
-            .and_then(|snapshot| snapshot.files.get(self.workspace_diff_selected))
-        else {
-            return;
-        };
-        let target_path = file.path.rsplit(" → ").next().unwrap_or(&file.path);
-        let mut parts = target_path.split('/').collect::<Vec<_>>();
-        parts.pop();
-        let mut folder_path = String::new();
-        let mut folders = Vec::new();
-        for folder in parts {
-            if !folder_path.is_empty() {
-                folder_path.push('/');
-            }
-            folder_path.push_str(folder);
-            folders.push(folder_path.clone());
-        }
-
-        let changed = if collapsed {
-            folders
-                .last()
-                .is_some_and(|folder| self.workspace_diff_collapsed_folders.insert(folder.clone()))
-        } else {
-            folders
-                .iter()
-                .find(|folder| self.workspace_diff_collapsed_folders.contains(*folder))
-                .cloned()
-                .is_some_and(|folder| self.workspace_diff_collapsed_folders.remove(&folder))
-        };
-        if changed {
-            cx.notify();
-        }
-    }
-
-    fn move_workspace_diff_file(&mut self, delta: isize, cx: &mut Context<Self>) {
-        let Some(snapshot) = self.workspace_diff.as_ref() else {
-            return;
-        };
-        let Some(next) = crate::views::diff_summary::adjacent_file_tree_index(
-            snapshot,
-            &self.workspace_diff_collapsed_folders,
-            self.workspace_diff_selected,
-            delta,
-        ) else {
-            return;
-        };
-        self.select_workspace_diff_file(next, cx);
-    }
-
-    pub(in crate::views) fn open_activity_detail(
-        &mut self,
-        detail: Arc<ActivityDetail>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.activity_detail_restore_focus = window.focused(cx);
-        self.activity_detail = Some(detail);
-        self.activity_detail_scroll
-            .set_offset(point(px(0.0), px(0.0)));
-        window.focus(&self.activity_detail_focus);
-        cx.notify();
-    }
-
-    fn close_activity_detail(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.activity_detail.take().is_none() {
-            return;
-        }
-        if let Some(focus) = self.activity_detail_restore_focus.take() {
-            window.focus(&focus);
-        } else {
-            window.focus(&self.composer.read(cx).focus_handle(cx));
-        }
-        cx.notify();
-    }
-
-    pub(in crate::views) fn on_activity_detail_key_down(
-        &mut self,
-        event: &gpui::KeyDownEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        match event.keystroke.key.as_str() {
-            "escape" => {
-                cx.stop_propagation();
-                self.close_activity_detail(window, cx);
-            }
-            "tab" => {
-                cx.stop_propagation();
-                window.focus(&self.activity_detail_focus);
-            }
-            _ => {}
-        }
-    }
-
-    pub(in crate::views) fn on_workspace_diff_key_down(
-        &mut self,
-        event: &gpui::KeyDownEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        match event.keystroke.key.as_str() {
-            "escape" => {
-                cx.stop_propagation();
-                self.close_workspace_diff(window, cx);
-            }
-            "up" | "k" => {
-                cx.stop_propagation();
-                self.move_workspace_diff_file(-1, cx);
-            }
-            "down" | "j" => {
-                cx.stop_propagation();
-                self.move_workspace_diff_file(1, cx);
-            }
-            "left" => {
-                cx.stop_propagation();
-                self.set_selected_workspace_diff_folder_collapsed(true, cx);
-            }
-            "right" => {
-                cx.stop_propagation();
-                self.set_selected_workspace_diff_folder_collapsed(false, cx);
-            }
-            "home" | "end" => {
-                cx.stop_propagation();
-                let last = event.keystroke.key == "end";
-                let index = self.workspace_diff.as_ref().and_then(|snapshot| {
-                    crate::views::diff_summary::edge_file_tree_index(
-                        snapshot,
-                        &self.workspace_diff_collapsed_folders,
-                        last,
-                    )
-                });
-                if let Some(index) = index {
-                    self.select_workspace_diff_file(index, cx);
-                }
-            }
-            "tab" => cx.stop_propagation(),
-            _ => {}
-        }
-    }
-
-    pub(in crate::views) fn close_workspace_diff(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if !self.workspace_diff_open {
-            return;
-        }
-        self.workspace_diff_open = false;
-        window.focus(&self.composer.read(cx).focus_handle(cx));
-        cx.notify();
-    }
-
-    pub(in crate::views) fn toggle_workspace_diff_overlay(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.workspace_diff_open {
-            self.close_workspace_diff(window, cx);
-        } else {
-            self.open_workspace_diff(window, cx);
-        }
-    }
-
     fn sync_runtime_state(
         &mut self,
         force_epoch_reset: bool,
@@ -4885,13 +4140,6 @@ impl RootView {
         self.try_auto_refresh_models(cx);
         self.sync_extension_ui(extension_ui, window, cx);
         self.sync_workspace_diff(&conversation, &render_projections.shell.workspace, cx);
-        if !matches!(
-            conversation.lifecycle,
-            RuntimeLifecycle::Ready | RuntimeLifecycle::Settled
-        ) && self.workspace_diff_open
-        {
-            self.close_workspace_diff(window, cx);
-        }
         let epoch_changed = force_epoch_reset || conversation.epoch != self.conversation.epoch;
         if epoch_changed {
             self.conversation_scroll_motion.cancel();
@@ -5241,6 +4489,35 @@ impl RootView {
         }
     }
 
+    fn on_focus_composer(
+        &mut self,
+        _: &FocusComposer,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // Ctrl+L is the reliable escape hatch back to the primary task input.
+        // Dismiss non-blocking sheets and drawers; input dialogs remain modal.
+        if self.render_projections.models.auth.is_some()
+            || self.activity_detail.is_some()
+            || self.pasted_image_preview.is_some()
+            || self.extension_ui.active_dialog.is_some()
+            || self.compaction_modal_open
+        {
+            return;
+        }
+        if self.workspace_diff_open {
+            self.close_workspace_diff(window, cx);
+        }
+        if self.inspector_open {
+            self.close_inspector(window, cx);
+        }
+        self.close_model_panel(window, cx);
+        self.command_palette_open = false;
+        self.hotkey_help_open = false;
+        window.focus(&self.composer.read(cx).focus_handle(cx));
+        cx.notify();
+    }
+
     fn on_focus_next(&mut self, _: &FocusNext, window: &mut Window, cx: &mut Context<Self>) {
         // Tab traversal counts as keyboard intent for the sidebar tree ring.
         self.sidebar_tree_pointer_focus = false;
@@ -5263,6 +4540,14 @@ impl RootView {
         }
         if self.compaction_modal_open {
             window.focus(&self.compaction_composer.read(cx).focus_handle(cx));
+            return;
+        }
+        if self.workspace_diff_open {
+            self.cycle_focus_within(&self.workspace_diff_focus, true, window, cx);
+            return;
+        }
+        if self.inspector_open {
+            self.cycle_focus_within(&self.inspector_focus, true, window, cx);
             return;
         }
         window.focus_next();
@@ -5294,8 +4579,44 @@ impl RootView {
             window.focus(&self.compaction_composer.read(cx).focus_handle(cx));
             return;
         }
+        if self.workspace_diff_open {
+            self.cycle_focus_within(&self.workspace_diff_focus, false, window, cx);
+            return;
+        }
+        if self.inspector_open {
+            self.cycle_focus_within(&self.inspector_focus, false, window, cx);
+            return;
+        }
         self.sidebar_tree_pointer_focus = false;
         window.focus_prev();
+    }
+
+    /// Move through the window's tab order while keeping focus inside a modal surface.
+    ///
+    /// GPUI's tab order wraps at the window boundary. Once traversal leaves the modal,
+    /// continue in the same direction until it enters the tracked modal subtree again.
+    /// The bounded fallback protects against a stale render tree during mount/unmount.
+    fn cycle_focus_within(
+        &self,
+        focus: &FocusHandle,
+        forward: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        const MAX_FOCUS_STOPS: usize = 512;
+
+        for _ in 0..MAX_FOCUS_STOPS {
+            if forward {
+                window.focus_next();
+            } else {
+                window.focus_prev();
+            }
+            if focus.contains_focused(window, cx) {
+                return;
+            }
+        }
+
+        window.focus(focus);
     }
 
     fn on_open_command_palette(

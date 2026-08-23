@@ -13,11 +13,9 @@ pub(super) struct SessionRailParams<'a> {
     pub(super) usage_tooltip_hovered: bool,
     pub(super) usage_tooltip_visible: bool,
     pub(super) usage_tooltip_epoch: u64,
-    pub(super) inspector_focus: &'a FocusHandle,
-    pub(super) rail_open: bool,
 }
 
-/// Session facts for the left rail. Not an overlay — the transcript keeps its width.
+/// Scrollable content hosted inside the independent session inspector drawer.
 pub(super) fn session_rail(
     params: SessionRailParams<'_>,
     cx: &mut Context<RootView>,
@@ -32,14 +30,10 @@ pub(super) fn session_rail(
         usage_tooltip_hovered,
         usage_tooltip_visible,
         usage_tooltip_epoch,
-        inspector_focus,
-        rail_open,
     } = params;
 
     div()
         .id("session-rail")
-        .track_focus(inspector_focus)
-        .when(rail_open, |rail| rail.tab_index(0))
         .size_full()
         .flex()
         .flex_col()
@@ -56,12 +50,12 @@ pub(super) fn session_rail(
                 .child(
                     div()
                         .w_full()
-                        .px(px(10.0))
-                        .pt(px(10.0))
-                        .pb(px(24.0))
+                        .px(px(8.0))
+                        .pt(px(8.0))
+                        .pb(px(16.0))
                         .flex()
                         .flex_col()
-                        .gap(px(18.0))
+                        .gap(px(12.0))
                         .child(controls::session_usage(controls::SessionUsageParams {
                             context: projection.context.label().into(),
                             pct: context_pct(&projection.context.label()),
@@ -130,7 +124,7 @@ fn orchestration_panel(
             div()
                 .flex()
                 .flex_col()
-                .gap(px(16.0))
+                .gap(px(12.0))
                 .when(
                     matches!(
                         orchestration.phase,

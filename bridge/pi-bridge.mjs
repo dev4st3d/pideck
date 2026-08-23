@@ -5,7 +5,7 @@ import { pathToFileURL } from "node:url";
 import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 
-import { attachJsonlLineReader, serializeJsonLine } from "./jsonl.mjs";
+import { attachJsonlLineReader, createJsonlWriter, serializeJsonLine } from "./jsonl.mjs";
 import { piSettingsSnapshot, setPiSetting } from "./pi-settings.mjs";
 
 const PROTOCOL_VERSION = 1;
@@ -92,11 +92,20 @@ let orchestrationSnapshot;
 let orchestrationRequestId = 0;
 let orchestrationDisconnectTimer;
 const orchestrationPending = new Map();
+let bridgeOutputOverflowed = false;
+const bridgeOutput = createJsonlWriter(process.stdout, {
+  maxBufferedBytes: 8 * MAX_LINE_BYTES,
+  onOverflow: () => {
+    if (bridgeOutputOverflowed) return;
+    bridgeOutputOverflowed = true;
+    process.stderr.write("pi-gui bridge output exceeded its safety buffer\n");
+    process.exitCode = 1;
+    shutdownBridge();
+  },
+});
 
 function emit(event, value) {
-  process.stdout.write(
-    serializeJsonLine({ version: PROTOCOL_VERSION, type: "event", event, ...value }),
-  );
+  bridgeOutput.write({ version: PROTOCOL_VERSION, type: "event", event, ...value });
 }
 
 function orchestrationError(message = "The orchestration adapter is unavailable.") {
@@ -939,7 +948,7 @@ function respond(id, ok, value) {
   const record = ok
     ? { version: PROTOCOL_VERSION, type: "response", id, ok: true, result: value }
     : { version: PROTOCOL_VERSION, type: "response", id, ok: false, error: value };
-  process.stdout.write(serializeJsonLine(record));
+  bridgeOutput.write(record);
 }
 
 function requireString(params, name) {
@@ -1349,6 +1358,7 @@ function shutdownBridge() {
   if (bridgeShuttingDown) return;
   bridgeShuttingDown = true;
   detachInput();
+  bridgeOutput.close();
   for (const operation of active.values()) {
     operation.abortController.abort();
     operation.session?.abortBranchSummary();

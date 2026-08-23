@@ -1,141 +1,80 @@
-<div align="center">
+# PiDeck
 
-# Pideck
+PiDeck is a native desktop shell for the Pi coding agent. It uses Rust and GPUI for the application surface, keeps the runtime state in deterministic reducers, and uses a bounded Node sidecar only for Pi SDK capabilities that are not available through the stock RPC runtime.
 
-**The desktop home for [Pi](https://github.com/earendil-works/pi)** — a native shell that turns the coding agent you already run from the terminal into a focused, keyboard-first workspace.
+## What the app provides
 
-![Rust 1.85+](https://img.shields.io/badge/rust-1.85%2B-informational)
-![GPUI 0.2.2](https://img.shields.io/badge/GPUI-0.2.2-blueviolet)
-
-<br />
-
-![Pideck workspace](assets/screenshots/intro-2.png)
-
-</div>
-
----
-
-Pideck is written in **Rust** on **GPUI 0.2.2**. Pi remains the agent runtime and credential owner; Pideck discovers it, supervises it, and gives its full capability set — sessions, tools, extensions, orchestration — a polished interface.
-
-## Screenshots
-
-<table>
-  <tr>
-    <td align="center" width="50%">
-      <img src="assets/screenshots/intro.png" alt="Session workspace" /><br />
-      <b>Session & sidebar</b>
-    </td>
-    <td align="center" width="50%">
-      <img src="assets/screenshots/themes.png" alt="Theme picker" /><br />
-      <b>Themes</b>
-    </td>
-  </tr>
-  <tr>
-    <td align="center" width="50%">
-      <img src="assets/screenshots/diff-viewer.png" alt="Diff viewer" /><br />
-      <b>Diff viewer</b>
-    </td>
-    <td align="center" width="50%">
-      <img src="assets/screenshots/terminal.png" alt="Embedded terminal" /><br />
-      <b>Terminal</b>
-    </td>
-  </tr>
-</table>
-
-## Features
-
-- Collapsible project sidebar with multi-thread catalogs, live background-work status, and session switch / rename / export
-- Multiline composer with drag-and-drop attachments, `@` file completion, `/` command completion, and direct Bash (`!` / `!!`)
-- Steer mid-run with `Enter`, queue follow-ups with `Alt+Enter`, delivery state always visible
-- Streaming Markdown transcript with tool cards, expandable args, diff and image previews, copy, and elapsed time
-- Read-only Git change summary with a bounded per-file diff viewer after each response
-- Provider authentication, searchable model switcher, and thinking controls — Pideck never stores credentials
-- Command palette (`Ctrl+Shift+P`) merging native actions with discovered extension, skill, and prompt-template commands
-- Embedded PTY terminal, keyboard-first recovery (connect / retry / stop), and hotkey help (`Ctrl+/`)
-- Resource Center inventory for extensions, tools, skills, prompt templates, themes, and packages
-- No telemetry, no analytics, no remote reporting
-
-## Supported extensions
-
-Every installed Pi extension is hosted natively: `select`, `confirm`, `input`, and `editor` dialogs become native windows, status lines and widgets render in place, window titles update the title bar, and extension commands join the palette.
-
-**First-class Inspector supervision**
-
-| Extension | Tested release | Upstream Pi range | What you get |
-|---|---:|---:|---|
-| `@tintinweb/pi-tasks` | 0.7.2 | `>=0.80.0` | Task lists with dependencies, blockers, and outputs; guarded execute and stop |
-| `@tintinweb/pi-subagents` | 0.15.2 | `>=0.80.0` | Live lifecycle, queue, concurrency, schedules, worktrees, and memory; steer, stop, and resume agents; conversation overlay with a bounded live transcript |
-| `@narumitw/pi-goal` | 0.51.0 | `>=0.80.6` | Objective, wait state, safety limits, queue, budget, and elapsed time; guarded pause, resume, edit, and clear |
-| `@juicesharp/rpiv-ask-user-question` | 2.5.1 | `*` | Multi-question flows, choices, previews, notes, and multi-select answered through native dialogs |
-
-`pi-bar` 0.3.39 is also compatibility-tested. It stays installed for Pi's TUI but is omitted from GUI sessions because PiDeck supplies the native status shell.
-
-## Requirements
-
-| | |
-|---|---|
-| OS | Windows |
-| Rust | 1.85+ (stable, see `rust-toolchain.toml`) |
-| Pi | `@earendil-works/pi-coding-agent@0.84.2` |
-| Node | 22.19+; required only for Pi and the SDK bridge sidecar |
-
-## Install on Windows
-
-1. Install Pi if it is not already available:
-
-   ```powershell
-   npm install -g @earendil-works/pi-coding-agent@0.84.2
-   ```
-
-2. Download `PiDeck-win-Setup.exe` from the [latest GitHub Release](https://github.com/dev4st3d/pideck/releases/latest) and run it.
-
-PiDeck Setup installs per user, keeps future versions in the same application location, and creates Desktop and Start menu shortcuts. To keep PiDeck on the taskbar, launch it, right-click its taskbar icon, and choose **Pin to taskbar**. Windows requires this final pinning choice from the user.
-
-PiDeck checks for stable updates at startup. When one is available, use the titlebar update notice or **Settings → App → Update and restart**. The package is downloaded and verified off the UI thread, then PiDeck closes, updates in place, and reopens.
-
-## Quick start from source
-
-```powershell
-npm install -g @earendil-works/pi-coding-agent@0.84.2
-cargo run
-```
-
-If Cargo is not on `PATH`:
-
-```powershell
-& "$env:USERPROFILE\.cargo\bin\cargo.exe" run
-```
-
-On first launch, pick or open a project — it joins the sidebar and reopens next time. Existing Pi credentials are reused; you can also authenticate from **Settings → Providers**.
-
-## Keyboard essentials
-
-| Action | Keys |
-|---|---|
-| Command palette | `Ctrl+Shift+P` |
-| Connect · Retry · Stop | `Ctrl+Alt+C` · `Ctrl+Alt+R` · `Ctrl+Alt+S` |
-| Workspace terminal | `` Ctrl+` `` |
-| Attach files | `Ctrl+O` or drag onto the composer |
-| Send / steer · newline · queue follow-up | `Enter` · `Shift+Enter` · `Alt+Enter` |
-| Direct Bash · Bash excluded from context | `!cmd` · `!!cmd` |
-| Abort the active run | `Escape` |
-| Hotkey help | `Ctrl+/` |
-
-The full map lives in [info/README.md](info/README.md).
-
-## Documentation
-
-| Doc | Contents |
-|---|---|
-| [info/README.md](info/README.md) | Launch policy, keyboard map, architecture map |
-| [AGENTS.md](AGENTS.md) | Conventions for contributors and coding agents |
+- A virtualized, turn-grouped conversation with live tool activity and selectable output.
+- A workspace sidebar for projects and threads, with keyboard navigation and reversible thread deletion.
+- A compact, transcript-aligned message editor with model, thinking, attachment, queue, Bash, and command controls.
+- A right-side session-details sheet for usage, orchestration, queue, and run controls.
+- A live Git diff surface that refreshes while the agent is working and preserves the last valid snapshot.
+- An embedded terminal, history browser, model/provider settings, resource inventory, and update flow.
 
 ## Development
 
-```powershell
+### Requirements
+
+- Rust stable 1.85 or newer.
+- A supported desktop environment for GPUI. The current application setup is Windows-first.
+- Node.js for the Pi SDK sidecar tests and for running the materialized bridge during development.
+- A compatible Pi coding-agent installation for end-to-end runtime use.
+
+### Run
+
+```sh
+cargo run
+```
+
+The development profile intentionally optimizes the renderer-facing dependencies so `cargo run` is representative enough for UI work while preserving useful debug information.
+
+### Validate
+
+With the Rust toolchain available:
+
+```sh
 cargo fmt --all -- --check
 cargo check --all-targets
 cargo test --all-targets
+node --test bridge/*.test.mjs
 ```
 
-Dev builds use `opt-level = 1` so GPUI rendering stays fluid without a full release profile; the hot rendering crates compile at `opt-level = 3`.
+For a toolchain-independent repository audit:
+
+```sh
+python scripts/verify_static.py
+find bridge -name '*.mjs' -print0 | xargs -0 -n1 node --check
+```
+
+## Keyboard paths
+
+| Action | Shortcut |
+| --- | --- |
+| Focus prompt | `Ctrl+L` |
+| Toggle workspace sidebar | `Ctrl+B` |
+| Toggle session inspector | `Ctrl+I` |
+| Toggle terminal | <kbd>Ctrl</kbd>+<kbd>`</kbd> |
+| Command palette | `Ctrl+Shift+P` |
+| Hotkey help | `Ctrl+/` |
+| Attach files | `Ctrl+O` |
+| Send or steer | `Enter` |
+| Queue follow-up | `Alt+Enter` |
+| Insert newline | `Shift+Enter` |
+| Abort or dismiss the active overlay | `Esc` |
+
+## Architecture
+
+The application keeps domain state outside rendering and makes stale-result rejection explicit:
+
+- `src/controller.rs` owns GPUI-facing runtime orchestration.
+- `src/controller/runtime_flow.rs` batches replaceable stream updates within one display frame without reordering lifecycle records.
+- `src/state/` contains the UI-independent runtime model and reducer.
+- `src/services/` owns filesystem, process, terminal, Git, RPC, and sidecar boundaries.
+- `src/views/root/` composes the shell from independent sidebar, conversation, composer, terminal, inspector, diff, and overlay modules.
+- `bridge/` contains the bounded JSONL SDK sidecar and orchestration adapter.
+
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), [docs/UI_SYSTEM.md](docs/UI_SYSTEM.md), [docs/ZED_UI_REWORK.md](docs/ZED_UI_REWORK.md), and [STATIC_VERIFICATION.md](STATIC_VERIFICATION.md) for the detailed boundaries, design rationale, and validation record.
+
+## Privacy
+
+PiDeck does not add telemetry, analytics, tracking, or remote reporting. Runtime and project data remain inside the user-selected workspace and the local Pi process boundary unless a configured model provider necessarily receives a prompt.

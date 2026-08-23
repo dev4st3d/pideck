@@ -10,7 +10,7 @@ use gpui::{
     Animation, AnimationExt, AnyElement, App, ClipboardItem, Context, CursorStyle, Entity,
     FocusHandle, Focusable, FontWeight, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent,
     MouseUpEvent, Pixels, Render, SharedString, StyledText, TextLayout, Window, div,
-    ease_out_quint, prelude::*, pulsating_between, px, relative, svg,
+    ease_out_quint, prelude::*, px, relative, svg,
 };
 
 use crate::actions::{TranscriptCopy, TranscriptSelectAll};
@@ -46,20 +46,13 @@ const DISCLOSURE_STEP_ESTIMATE_PX: f32 = 52.0;
 const DISCLOSURE_HISTORY_PAD_PX: f32 = 16.0;
 const DISCLOSURE_HISTORY_MAX_PX: f32 = 420.0;
 
-// Thread geometry shared by the prompt, activity, and reply sections of a
-// turn. Every section hangs on one rail column so the turn reads as a single
-// chain instead of a boxed card stack. Speaker nodes are larger than activity
-// beads so the eye reads structure at a glance.
-pub(super) const THREAD_RAIL_W: f32 = 12.0;
-const NODE_SPEAKER: f32 = 7.0;
-const NODE_STEP: f32 = 4.0;
-/// Cap-height the node centers sit on inside their rows.
-const NODE_ALIGN: f32 = 9.0;
-pub(super) const THREAD_GAP: f32 = 12.0;
-/// Whitespace between turns; the chain rests between links.
-const TURN_GAP: f32 = 32.0;
+// Compact editorial rhythm shared by prompts, activity, and replies.
+// The old full-height timeline rail was removed: it consumed horizontal space
+// and made every turn look like a process graph rather than a conversation.
+/// Whitespace between turns.
+const TURN_GAP: f32 = 24.0;
 /// Rhythm between sections inside one turn.
-const TURN_SECTION_GAP: f32 = 12.0;
+const TURN_SECTION_GAP: f32 = 8.0;
 
 #[derive(Debug, Clone, Copy)]
 struct DisclosureMotion {
@@ -291,7 +284,6 @@ struct ToolGroupModel {
     detail: Arc<ActivityDetail>,
     trigger_id: SharedString,
     marker: gpui::Rgba,
-    live: bool,
 }
 
 struct StreamBandEntry {
@@ -733,6 +725,7 @@ impl Render for TranscriptText {
             .key_context("TranscriptText")
             .tab_index(0)
             .w_full()
+            .min_w_0()
             .overflow_x_scroll()
             .scrollbar_width(px(4.0))
             .cursor(if selectable {
@@ -849,25 +842,18 @@ fn turn_card(
     user: &RuntimeMessage,
     model: &StreamBandModel,
     render: &ConversationRenderContext<'_>,
-    links_above: bool,
     links_below: bool,
     cx: &mut App,
 ) -> impl IntoElement {
     let has_activity = model.latest.is_some() || !model.rows.is_empty();
-    let continues = has_activity || model.reply.is_some();
     div()
         .id(SharedString::from(format!("turn-{}", user.key.0)))
         .w_full()
+        .min_w_0()
         .flex()
         .flex_col()
         .when(!links_below, |turn| turn.pb(px(TURN_GAP)))
-        .child(user_prompt(
-            number,
-            user,
-            render.texts,
-            links_above,
-            continues,
-        ))
+        .child(user_prompt(number, user, render.texts))
         .when(has_activity, |turn| {
             turn.child(activity_band(
                 &format!("turn:{}", user.key.0),
@@ -878,10 +864,9 @@ fn turn_card(
             ))
         })
         .when_some(model.reply.as_deref(), |turn, message| {
-            turn.child(assistant_reply(message, render.texts, true, links_below))
+            turn.child(assistant_reply(message, render.texts))
         })
-        // The chain crosses the turn break: the rail spans the resting
-        // whitespace so a follow-up grows straight out of the reply.
+        // Preserve a consistent reading beat between adjacent turns.
         .when(links_below, |turn| turn.child(turn_bridge()))
 }
 
@@ -889,8 +874,6 @@ fn optimistic_turn(
     index: usize,
     input: &AcceptedUserInput,
     texts: &HashMap<String, Entity<TranscriptText>>,
-    links_above: bool,
-    continues: bool,
 ) -> impl IntoElement {
     let key = format!("optimistic:{}:text", input.request.as_str());
     let mut body = Vec::new();
@@ -913,6 +896,7 @@ fn optimistic_turn(
     }
     let meta = UserPromptMeta {
         id: SharedString::from(format!("optimistic-meta-{}", input.request.as_str())),
+        turn_label: format!("#{index:02}"),
         rows: vec![
             ("Turn".to_owned(), format!("{index:02}")),
             (
@@ -929,21 +913,13 @@ fn optimistic_turn(
             input.request.as_str()
         )))
         .w_full()
-        .child(user_prompt_section(
-            meta,
-            true,
-            links_above,
-            continues,
-            body,
-        ))
+        .child(user_prompt_section(meta, true, body))
 }
 
 fn user_prompt(
     index: usize,
     message: &RuntimeMessage,
     texts: &HashMap<String, Entity<TranscriptText>>,
-    links_above: bool,
-    continues: bool,
 ) -> impl IntoElement {
     let mut body = Vec::new();
     let mut chips = Vec::new();
@@ -969,6 +945,7 @@ fn user_prompt(
     }
     let meta = UserPromptMeta {
         id: SharedString::from(format!("user-meta-{}", message.key.0)),
+        turn_label: format!("#{index:02}"),
         rows: vec![
             ("Turn".to_owned(), format!("{index:02}")),
             ("Timestamp".to_owned(), format_timestamp(message.timestamp)),
@@ -976,112 +953,22 @@ fn user_prompt(
         time_label: Some(format_timestamp(message.timestamp)),
         status_label: None,
     };
-    user_prompt_section(meta, false, links_above, continues, body)
+    user_prompt_section(meta, false, body)
 }
 
-/// One node on a turn's thread: a centered dot plus, unless the turn ends
-/// here, the hairline hanging down to the next section. A live node breathes
-/// so in-flight work reads from the rail alone.
-fn thread_rail(
-    marker: gpui::Rgba,
-    dot: f32,
-    links_above: bool,
-    continues: bool,
-    pulse: Option<SharedString>,
-) -> impl IntoElement {
-    let node = div()
-        .w(px(dot))
-        .h(px(dot))
-        .rounded_full()
-        .bg(marker)
-        .flex_shrink_0();
-    // When the chain reaches in from an earlier row, the node hangs off the
-    // incoming hairline instead of floating at the top of its own row.
-    let node = if links_above {
-        node
-    } else {
-        node.mt(px(NODE_ALIGN - dot / 2.0))
-    };
-    let node = match pulse {
-        Some(id) => node
-            .with_animation(
-                id,
-                Animation::new(Duration::from_millis(1600))
-                    .repeat()
-                    .with_easing(pulsating_between(0.45, 1.0)),
-                |node, delta| node.opacity(delta),
-            )
-            .into_any_element(),
-        None => node.into_any_element(),
-    };
-    div()
-        .w(px(THREAD_RAIL_W))
-        .flex_shrink_0()
-        .flex()
-        .flex_col()
-        .items_center()
-        .when(links_above, |rail| {
-            rail.child(
-                div()
-                    .w(px(1.0))
-                    .h(px(NODE_ALIGN - dot / 2.0))
-                    .bg(theme::edge()),
-            )
-        })
-        .child(node)
-        .when(continues, |rail| {
-            rail.child(
-                div()
-                    .flex_1()
-                    .w(px(1.0))
-                    .min_h(px(8.0))
-                    .mt(px(3.0))
-                    .rounded_full()
-                    .bg(theme::edge()),
-            )
-        })
-}
-
-/// A section of a turn hung on the shared thread: rail on the left, content
-/// using the full stream width so the turn reads as one composed chain.
-fn thread_section(
-    marker: gpui::Rgba,
-    dot: f32,
-    links_above: bool,
-    continues: bool,
-    pulse: Option<SharedString>,
-    body: impl IntoElement,
-) -> impl IntoElement {
-    div()
-        .w_full()
-        .flex()
-        .flex_row()
-        .gap(px(THREAD_GAP))
-        .child(thread_rail(marker, dot, links_above, continues, pulse))
-        .child(div().flex_1().min_w_0().w_full().child(body))
-}
-
-/// The rail continuing through the resting whitespace between turns, so one
-/// turn's last section chains straight into the next prompt.
+/// A quiet spacer between turns. The previous bridge painted a continuous
+/// timeline through the transcript and visually competed with the messages.
 fn turn_bridge() -> impl IntoElement {
-    div().w_full().h(px(TURN_GAP)).flex().flex_row().child(
-        div()
-            .w(px(THREAD_RAIL_W))
-            .flex_shrink_0()
-            .h_full()
-            .flex()
-            .flex_col()
-            .items_center()
-            .child(div().w(px(1.0)).flex_1().bg(theme::edge())),
-    )
+    div().w_full().h(px(TURN_GAP))
 }
 
-/// Editorial prompt section: a quiet warm card for what was asked, hanging on
-/// the thread instead of banding a boxed turn.
+/// Editorial prompt section: a restrained card for what was asked, followed
+/// by local activity disclosure and an unboxed assistant response.
 /// Header meta parked behind the (i) control: identity popup rows plus the
 /// inline status/time labels.
 struct UserPromptMeta {
     id: SharedString,
+    turn_label: String,
     rows: Vec<(String, String)>,
     time_label: Option<String>,
     status_label: Option<&'static str>,
@@ -1090,75 +977,75 @@ struct UserPromptMeta {
 fn user_prompt_section(
     meta: UserPromptMeta,
     pending: bool,
-    links_above: bool,
-    continues: bool,
     body: Vec<AnyElement>,
 ) -> impl IntoElement {
-    let mark = if pending {
-        theme::data()
-    } else {
-        theme::signal()
-    };
-    // Pending turns keep breathing on the thread until the transcript answers.
-    let pulse = pending.then(|| SharedString::from(format!("thread-pulse:{}", meta.id)));
-    thread_section(
-        mark,
-        NODE_SPEAKER,
-        links_above,
-        continues,
-        pulse,
-        div()
-            .w_full()
-            .flex()
-            .flex_col()
-            .pb(px(TURN_SECTION_GAP))
-            .child(user_prompt_header(meta, pending))
-            .when(!body.is_empty(), |section| {
-                section.child(
-                    div()
-                        .w_full()
-                        .mt(px(6.0))
-                        .rounded(px(theme::RADIUS_MD))
-                        .bg(theme::user_message())
-                        .overflow_hidden()
-                        .flex()
-                        .flex_row()
-                        .child(div().w(px(3.0)).flex_shrink_0().bg(if pending {
-                            theme::data()
-                        } else {
-                            theme::signal()
-                        }))
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .px(px(13.0))
-                                .py(px(11.0))
-                                .flex()
-                                .flex_col()
-                                .gap(px(6.0))
-                                .children(body),
-                        ),
-                )
-            }),
-    )
+    div()
+        .w_full()
+        .min_w_0()
+        .flex()
+        .flex_col()
+        .gap(px(6.0))
+        .pb(px(TURN_SECTION_GAP))
+        .child(user_prompt_header(meta, pending))
+        .when(!body.is_empty(), |section| {
+            section.child(
+                div()
+                    .w_full()
+                    .min_w_0()
+                    .rounded(px(theme::RADIUS_LG))
+                    .border_1()
+                    .border_color(if pending {
+                        theme::data()
+                    } else {
+                        theme::edge()
+                    })
+                    .bg(theme::user_message())
+                    .px(px(12.0))
+                    .py(px(10.0))
+                    .flex()
+                    .flex_col()
+                    .gap(px(6.0))
+                    .children(body),
+            )
+        })
 }
 
 fn user_prompt_header(meta: UserPromptMeta, pending: bool) -> impl IntoElement {
     div()
         .w_full()
+        .min_h(px(20.0))
         .flex()
         .flex_row()
         .items_center()
         .justify_between()
-        .gap(px(12.0))
+        .gap(px(10.0))
         .child(
             div()
-                .font_family(theme::sans())
-                .text_size(theme::text_size(theme::T_LABEL))
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(if pending { theme::data() } else { theme::ash() })
-                .child("You"),
+                .min_w_0()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(6.0))
+                .child(div().size(px(6.0)).rounded_full().bg(if pending {
+                    theme::data()
+                } else {
+                    theme::signal()
+                }))
+                .child(
+                    div()
+                        .font_family(theme::sans())
+                        .text_size(theme::text_size(theme::T_UI_SM))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(theme::bone_dim())
+                        .child("You"),
+                )
+                .child(
+                    div()
+                        .font_family(theme::mono())
+                        .text_size(theme::text_size(theme::T_TINY))
+                        .text_color(theme::smoke())
+                        .child(meta.turn_label.clone()),
+                ),
         )
         .child(
             div()
@@ -1166,7 +1053,7 @@ fn user_prompt_header(meta: UserPromptMeta, pending: bool) -> impl IntoElement {
                 .flex()
                 .flex_row()
                 .items_center()
-                .gap(px(10.0))
+                .gap(px(8.0))
                 .when_some(meta.status_label, |row, label| {
                     row.child(
                         div()
@@ -1771,7 +1658,7 @@ impl ToolGroupModel {
             .iter()
             .map(|item| status_color(item.status))
             .reduce(|left, right| {
-                // Prefer error/running over success for the rail marker.
+                // Prefer error/running over success for the local step marker.
                 if left == theme::error() || right == theme::error() {
                     theme::error()
                 } else if left == theme::data() || right == theme::data() {
@@ -1795,18 +1682,11 @@ impl ToolGroupModel {
                     .join("\n"),
             )
         ));
-        let live = presentations.iter().any(|item| {
-            matches!(
-                item.status,
-                CardStatus::Pending | CardStatus::Running | CardStatus::Cancelling
-            )
-        });
         Self {
             presentations,
             detail,
             trigger_id,
             marker,
-            live,
         }
     }
 }
@@ -2070,20 +1950,22 @@ fn activity_disclosure(
         format!("{history_count} earlier steps")
     };
 
-    // Quiet link-style control. The bare chevron sits on the rail column so
-    // the thread reads unbroken; feedback is a color shift, not another box.
     div()
         .id(SharedString::from(format!("activity-disclosure:{key}")))
         .tab_index(0)
         .cursor_pointer()
         .w_full()
-        .pb(px(6.0))
+        .min_h(px(26.0))
+        .px(px(4.0))
+        .py(px(3.0))
+        .rounded(px(theme::RADIUS_SM))
         .flex()
         .flex_row()
-        .gap(px(THREAD_GAP))
+        .items_center()
+        .gap(px(7.0))
         .text_color(theme::ash())
-        .hover(|row| row.text_color(theme::bone_dim()))
-        .focus(|row| row.text_color(theme::focus()))
+        .hover(|row| row.bg(theme::panel()).text_color(theme::bone_dim()))
+        .focus(|row| row.bg(theme::panel()).text_color(theme::focus()))
         .on_click(move |_, _, cx| {
             click_state.update(cx, |state, cx| state.toggle(&click_key, cx));
         })
@@ -2094,32 +1976,15 @@ fn activity_disclosure(
             }
         })
         .child(
-            div()
-                .w(px(THREAD_RAIL_W))
-                .flex_shrink_0()
-                .flex()
-                .flex_col()
-                .items_center()
-                .child(
-                    svg()
-                        .path(if expanded {
-                            "icons/chevron-down.svg"
-                        } else {
-                            "icons/chevron-right.svg"
-                        })
-                        .size(px(9.0))
-                        .mt(px(4.5))
-                        .text_color(theme::smoke()),
-                )
-                .child(
-                    div()
-                        .flex_1()
-                        .w(px(1.0))
-                        .min_h(px(6.0))
-                        .mt(px(3.0))
-                        .rounded_full()
-                        .bg(theme::edge()),
-                ),
+            svg()
+                .path(if expanded {
+                    "icons/chevron-down.svg"
+                } else {
+                    "icons/chevron-right.svg"
+                })
+                .size(px(9.0))
+                .text_color(theme::smoke())
+                .flex_shrink_0(),
         )
         .child(
             div()
@@ -2130,13 +1995,10 @@ fn activity_disclosure(
                 .flex()
                 .flex_row()
                 .items_baseline()
-                .gap(px(10.0))
+                .gap(px(9.0))
                 .child(
                     div()
                         .flex_shrink_0()
-                        .overflow_hidden()
-                        .text_ellipsis()
-                        .whitespace_nowrap()
                         .font_family(theme::sans())
                         .text_size(theme::text_size(theme::T_UI_SM))
                         .font_weight(FontWeight::MEDIUM)
@@ -2164,13 +2026,9 @@ fn render_tool_group(
     continues: bool,
     root: &Entity<crate::views::RootView>,
 ) -> AnyElement {
-    let pulse = group
-        .live
-        .then(|| SharedString::from(format!("thread-pulse:{}", group.trigger_id)));
     step_shell(
         continues,
         group.marker,
-        pulse,
         tool_detail_trigger(
             &group.trigger_id,
             render_tool_presentation(&group.presentations, None, false, None),
@@ -2195,7 +2053,6 @@ fn render_activity_step(
         } => step_shell(
             continues,
             theme::smoke(),
-            None,
             div()
                 .flex()
                 .flex_col()
@@ -2218,7 +2075,6 @@ fn render_activity_step(
         } => step_shell(
             continues,
             theme::smoke(),
-            None,
             div()
                 .flex()
                 .flex_col()
@@ -2227,17 +2083,12 @@ fn render_activity_step(
                 .child(activity_selectable(key, texts)),
         )
         .into_any_element(),
-        ActivityStep::Text { key } => step_shell(
-            continues,
-            theme::ash(),
-            None,
-            activity_selectable(key, texts),
-        )
-        .into_any_element(),
+        ActivityStep::Text { key } => {
+            step_shell(continues, theme::ash(), activity_selectable(key, texts)).into_any_element()
+        }
         ActivityStep::Image { mime_type } => step_shell(
             continues,
             theme::ash(),
-            None,
             compact_label(format!("Image · {mime_type}")),
         )
         .into_any_element(),
@@ -2250,15 +2101,9 @@ fn render_activity_step(
                 .first()
                 .map(|record| record.id.as_str())
                 .unwrap_or("tool");
-            let live = matches!(
-                presentation.status,
-                CardStatus::Pending | CardStatus::Running | CardStatus::Cancelling
-            );
-            let pulse = live.then(|| SharedString::from(format!("thread-pulse:{detail_id}")));
             step_shell(
                 continues,
                 status_color(presentation.status),
-                pulse,
                 tool_detail_trigger(
                     detail_id,
                     render_tool_presentation(
@@ -2276,7 +2121,6 @@ fn render_activity_step(
         ActivityStep::Summary { label, key } => step_shell(
             continues,
             theme::data(),
-            None,
             div()
                 .flex()
                 .flex_col()
@@ -2295,7 +2139,6 @@ fn render_activity_step(
         ActivityStep::Custom { kind, key } => step_shell(
             continues,
             theme::smoke(),
-            None,
             div()
                 .flex()
                 .flex_col()
@@ -2307,7 +2150,6 @@ fn render_activity_step(
         ActivityStep::Unsupported { kind } => step_shell(
             continues,
             theme::smoke(),
-            None,
             compact_label(format!("Unsupported · {kind}")),
         )
         .into_any_element(),
@@ -2318,7 +2160,6 @@ fn render_activity_step(
             } else {
                 theme::smoke()
             },
-            None,
             div()
                 .font_family(theme::sans())
                 .text_size(theme::text_size(theme::T_UI_SM))
@@ -2455,60 +2296,80 @@ fn tool_detail_trigger(
         .into_any_element()
 }
 
-/// One spine step inside a turn's activity band, hanging on the shared thread.
-fn step_shell(
-    continues: bool,
-    marker: gpui::Rgba,
-    pulse: Option<SharedString>,
-    body: impl IntoElement,
-) -> impl IntoElement {
-    thread_section(
-        marker,
-        NODE_STEP,
-        false,
-        continues,
-        pulse,
-        div()
-            .pb(if continues {
-                px(TURN_SECTION_GAP)
-            } else {
-                px(4.0)
-            })
-            .child(body),
-    )
+/// One compact step inside a turn's local activity gutter.
+fn step_shell(continues: bool, marker: gpui::Rgba, body: impl IntoElement) -> impl IntoElement {
+    div()
+        .w_full()
+        .relative()
+        .ml(px(5.0))
+        .pl(px(11.0))
+        .border_l_1()
+        .border_color(theme::edge_soft())
+        .pb(if continues {
+            px(TURN_SECTION_GAP)
+        } else {
+            px(4.0)
+        })
+        .child(
+            div()
+                .absolute()
+                .left(px(-2.5))
+                .top(px(9.0))
+                .size(px(4.0))
+                .rounded_full()
+                .bg(marker),
+        )
+        .child(body)
 }
 
 fn assistant_reply(
     message: &RuntimeMessage,
     texts: &HashMap<String, Entity<TranscriptText>>,
-    links_above: bool,
-    continues: bool,
 ) -> impl IntoElement {
     div()
         .id(SharedString::from(format!("message-{}", message.key.0)))
         .w_full()
-        .child(thread_section(
-            // Quiet cool dot — pairs with the warm user node.
-            theme::working(),
-            NODE_SPEAKER,
-            links_above,
-            continues,
-            None,
+        .min_w_0()
+        .child(
             div()
                 .w_full()
+                .min_w_0()
                 .pb(px(2.0))
                 .flex()
                 .flex_col()
-                .gap(px(8.0))
+                .gap(px(7.0))
                 .child(
-                    div().flex().flex_row().items_center().gap(px(8.0)).child(
-                        div()
-                            .font_family(theme::sans())
-                            .text_size(theme::text_size(theme::T_LABEL))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(theme::ash())
-                            .child("Pi"),
-                    ),
+                    div()
+                        .w_full()
+                        .min_h(px(20.0))
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .justify_between()
+                        .gap(px(10.0))
+                        .child(
+                            div()
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .gap(px(6.0))
+                                .child(div().size(px(6.0)).rounded_full().bg(theme::working()))
+                                .child(
+                                    div()
+                                        .font_family(theme::sans())
+                                        .text_size(theme::text_size(theme::T_UI_SM))
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(theme::bone_dim())
+                                        .child("Pi"),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .font_family(theme::mono())
+                                .text_size(theme::text_size(theme::T_TINY))
+                                .text_color(theme::smoke())
+                                .child(format_timestamp(message.timestamp)),
+                        ),
                 )
                 .children(message.content.iter().filter_map(|block| match block {
                     MessageBlock::Text { .. } => Some(selectable(
@@ -2537,7 +2398,7 @@ fn assistant_reply(
                             .child(stop),
                     )
                 }),
-        ))
+        )
 }
 
 fn preamble(
@@ -2550,7 +2411,7 @@ fn preamble(
     match message.role {
         MessageRole::Assistant if model.reply.is_some() => {
             if !has_activity {
-                assistant_reply(message, render.texts, false, false).into_any_element()
+                assistant_reply(message, render.texts).into_any_element()
             } else {
                 div()
                     .w_full()
@@ -2563,7 +2424,7 @@ fn preamble(
                         render,
                         cx,
                     ))
-                    .child(assistant_reply(message, render.texts, true, false))
+                    .child(assistant_reply(message, render.texts))
                     .into_any_element()
             }
         }
@@ -2889,36 +2750,55 @@ fn error_text(error: String) -> impl IntoElement {
 }
 
 fn empty_state(projection: &ConversationProjection) -> impl IntoElement {
-    let (title, body) = if projection.lifecycle == RuntimeLifecycle::Disconnected {
+    let disconnected = projection.lifecycle == RuntimeLifecycle::Disconnected;
+    let (title, body) = if disconnected {
         (
-            "No connected conversation",
-            "Reconnect Pi to hydrate the current transcript.",
+            "Conversation unavailable",
+            "Reconnect Pi to restore the active transcript. Your draft remains local.",
         )
     } else {
         (
-            "No messages yet",
-            "Send a prompt to begin the conversation.",
+            "Start with the work",
+            "Describe the outcome, attach the relevant files, or invoke a command. Pi keeps tools and progress in this thread.",
         )
     };
     div()
         .w_full()
-        .min_h(px(240.0))
+        .min_h(px(280.0))
         .flex()
         .flex_col()
         .items_center()
         .justify_center()
-        .gap(px(10.0))
+        .gap(px(11.0))
         .child(
             div()
-                .w(px(28.0))
-                .h(px(2.0))
-                .rounded_full()
-                .bg(theme::signal())
-                .opacity(0.7),
+                .size(px(42.0))
+                .rounded(px(theme::RADIUS_LG))
+                .border_1()
+                .border_color(if disconnected {
+                    theme::error()
+                } else {
+                    theme::edge()
+                })
+                .bg(theme::panel_lift())
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(
+                    svg()
+                        .path("icons/agent-diamond.svg")
+                        .size(px(17.0))
+                        .text_color(if disconnected {
+                            theme::error()
+                        } else {
+                            theme::signal()
+                        }),
+                ),
         )
         .child(
             div()
-                .font_family(theme::sans())
+                .mt(px(3.0))
+                .font_family(theme::main())
                 .text_size(theme::text_size(theme::T_TITLE))
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(theme::bone())
@@ -2926,12 +2806,57 @@ fn empty_state(projection: &ConversationProjection) -> impl IntoElement {
         )
         .child(
             div()
-                .max_w(px(360.0))
+                .max_w(px(460.0))
                 .font_family(theme::sans())
                 .text_size(theme::text_size(theme::T_UI))
-                .line_height(relative(1.45))
+                .line_height(relative(1.5))
                 .text_color(theme::smoke())
                 .child(body),
+        )
+        .when(!disconnected, |state| {
+            state.child(
+                div()
+                    .mt(px(8.0))
+                    .flex()
+                    .flex_row()
+                    .flex_wrap()
+                    .items_center()
+                    .justify_center()
+                    .gap(px(7.0))
+                    .child(empty_hint("Ctrl+L", "focus"))
+                    .child(empty_hint("Enter", "send"))
+                    .child(empty_hint("@", "file"))
+                    .child(empty_hint("/", "command")),
+            )
+        })
+}
+
+fn empty_hint(key: &'static str, label: &'static str) -> impl IntoElement {
+    div()
+        .h(px(26.0))
+        .px(px(8.0))
+        .rounded(px(theme::RADIUS_SM))
+        .border_1()
+        .border_color(theme::edge_soft())
+        .bg(theme::floor())
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(5.0))
+        .child(
+            div()
+                .font_family(theme::mono())
+                .text_size(theme::text_size(theme::T_TINY))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(theme::bone_dim())
+                .child(key),
+        )
+        .child(
+            div()
+                .font_family(theme::sans())
+                .text_size(theme::text_size(theme::T_TINY))
+                .text_color(theme::smoke())
+                .child(label),
         )
 }
 

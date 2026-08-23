@@ -33,7 +33,7 @@ use crate::state::runtime::{PromptImage, SubmissionKind};
 /// Pixel edge length for cached square attachment thumbs (display is smaller).
 const ATTACHMENT_THUMB_PX: u32 = 96;
 /// Expand/collapse the multiline input between single-line and multi-line heights.
-pub(super) const INPUT_HEIGHT_MOTION_MS: u64 = 200;
+pub(super) const INPUT_HEIGHT_MOTION_MS: u64 = super::motion::COMPOSER_MS;
 
 fn decoded_image_len(data: &str) -> usize {
     let padding = data
@@ -196,7 +196,7 @@ impl Composer {
             attach_seq: 0,
             strip_motion_key: 0,
             image_bytes: 0,
-            placeholder: "Message Pi…  @ file  / command  ! shell".into(),
+            placeholder: "Ask Pi to build, inspect, or explain…  @ file  / command  ! shell".into(),
             masked: false,
             field_height: None,
             allow_empty_submit: false,
@@ -370,12 +370,12 @@ impl Composer {
             return self.field_height();
         }
         let panel = self.chrome == ComposerChrome::Panel;
-        let padding_y = 8.0;
-        let line_height = if panel { 21.0 } else { 20.0 };
+        let padding_y = 9.0;
+        let line_height = 21.0;
         let collapsed = line_height + padding_y * 2.0;
-        let normal = if panel { 64.0 } else { 56.0 };
-        // ~6 text rows: room for longer prompts without eating the whole stream.
-        let enlarged = if panel { 128.0 } else { 152.0 };
+        let normal = if panel { 68.0 } else { 72.0 };
+        // A generous writing surface without turning the composer into a modal.
+        let enlarged = if panel { 132.0 } else { 156.0 };
         if self.input_enlarged {
             enlarged
         } else if self.input_expanded {

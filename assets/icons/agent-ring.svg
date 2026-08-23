@@ -1,10 +1,1 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="none">
-  <!-- Soft outer disc -->
-  <circle cx="8" cy="8" r="5.5" fill="currentColor" opacity="0.12"/>
-  <!-- Soft core -->
-  <rect x="5.9" y="5.9" width="4.2" height="4.2" rx="0.7" fill="currentColor" opacity="0.2"/>
-  <!-- Crisp ring -->
-  <circle cx="8" cy="8" r="5.5" stroke="currentColor" stroke-width="1.2"/>
-  <!-- Crisp core -->
-  <rect x="5.9" y="5.9" width="4.2" height="4.2" rx="0.7" stroke="currentColor" stroke-width="1.15"/>
-</svg>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="2.5"/><path d="M12 4v3M20 12h-3M12 20v-3M4 12h3"/></svg>

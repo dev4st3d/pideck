@@ -6,6 +6,99 @@ export function serializeJsonLine(value) {
 }
 
 /**
+ * Create an ordered JSONL writer that honors Node stream backpressure.
+ *
+ * A blocked stdout/socket must not be written repeatedly: doing so moves the
+ * queue into Node's internal buffer with no application-level bound. This
+ * writer keeps one bounded FIFO until `drain`, preserving event/response order
+ * across independent producers while failing closed on pathological output.
+ */
+export function createJsonlWriter(
+  stream,
+  {
+    maxBufferedBytes = 4 * 1024 * 1024,
+    onOverflow,
+  } = {},
+) {
+  let queue = [];
+  let queueHead = 0;
+  let bufferedBytes = 0;
+  let blocked = false;
+  let closed = false;
+  let overflowed = false;
+
+  const compactQueue = () => {
+    if (queueHead === 0) return;
+    if (queueHead >= queue.length) {
+      queue = [];
+      queueHead = 0;
+      return;
+    }
+    if (queueHead >= 64 && queueHead * 2 >= queue.length) {
+      queue = queue.slice(queueHead);
+      queueHead = 0;
+    }
+  };
+
+  const overflow = (nextBytes) => {
+    if (!overflowed) {
+      overflowed = true;
+      onOverflow?.({ bufferedBytes, nextBytes, maxBufferedBytes });
+    }
+    return false;
+  };
+
+  const flush = () => {
+    if (closed) return;
+    blocked = false;
+    while (queueHead < queue.length) {
+      const entry = queue[queueHead++];
+      bufferedBytes -= entry.bytes;
+      if (!stream.write(entry.line)) {
+        blocked = true;
+        stream.once("drain", flush);
+        compactQueue();
+        return;
+      }
+    }
+    compactQueue();
+  };
+
+  const writeLine = (line) => {
+    if (closed || overflowed) return false;
+    const bytes = Buffer.byteLength(line, "utf8");
+    if (bytes > maxBufferedBytes) return overflow(bytes);
+
+    if (blocked) {
+      if (bufferedBytes + bytes > maxBufferedBytes) return overflow(bytes);
+      queue.push({ line, bytes });
+      bufferedBytes += bytes;
+      return true;
+    }
+
+    if (!stream.write(line)) {
+      blocked = true;
+      stream.once("drain", flush);
+    }
+    return true;
+  };
+
+  return {
+    write(value) {
+      return writeLine(serializeJsonLine(value));
+    },
+    close() {
+      if (closed) return;
+      closed = true;
+      stream.off?.("drain", flush);
+      queue = [];
+      queueHead = 0;
+      bufferedBytes = 0;
+    },
+  };
+}
+
+/**
  * Attach a strict LF-only JSONL reader.
  *
  * Node's readline also treats U+2028/U+2029 as record separators. Those

@@ -247,16 +247,15 @@ pub fn recovery_button(
     enabled: bool,
     on_click: ClickHandler,
 ) -> impl IntoElement {
+    let tooltip_label = label.clone();
     div()
         .id(id)
         .h(px(theme::CHROME))
-        .min_w(px(96.0))
-        .px(px(12.0))
-        .rounded(px(theme::RADIUS_MD))
+        .px(px(8.0))
+        .rounded(px(theme::RADIUS_SM))
         .flex()
         .items_center()
         .justify_center()
-        .gap(px(8.0))
         .bg(if enabled {
             theme::signal()
         } else {
@@ -290,20 +289,13 @@ pub fn recovery_button(
                 })
                 .on_click(move |event, window, cx| on_click(event, window, cx))
         })
+        .tooltip(text_tooltip(tooltip_label, Some(shortcut)))
         .child(
             div()
                 .font_family(theme::main())
                 .text_size(theme::text_size(theme::T_UI_SM))
-                .font_weight(FontWeight::BOLD)
+                .font_weight(FontWeight::SEMIBOLD)
                 .child(label),
-        )
-        .child(
-            div()
-                .font_family(theme::mono())
-                .text_size(theme::text_size(theme::T_TINY))
-                .font_weight(FontWeight::MEDIUM)
-                .opacity(if enabled { 0.72 } else { 0.5 })
-                .child(shortcut),
         )
 }
 

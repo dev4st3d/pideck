@@ -490,9 +490,9 @@ fn height_hold_keeps_input_expanded_while_a_prompt_sheet_owns_focus(cx: &mut Tes
     });
     assert!(!composer.read_with(cx, |composer, _| composer.input_expanded));
     let motion = composer.read_with(cx, |composer, _| composer.input_height_motion());
-    let collapsed = 20.0 + 8.0 * 2.0; // one line + desk padding
+    let collapsed = 21.0 + 9.0 * 2.0; // one line + compact desk padding
     let motion = motion.expect("release should animate the collapse");
-    assert!((motion.from - 56.0).abs() < 0.5, "from={:?}", motion.from);
+    assert!((motion.from - 72.0).abs() < 0.5, "from={:?}", motion.from);
     assert!((motion.to - collapsed).abs() < 0.5, "to={:?}", motion.to);
 }
 
@@ -508,7 +508,7 @@ fn minimize_enlarged_input_animates_to_normal_not_collapsed(cx: &mut TestAppCont
     });
     let enlarged_h = composer.read_with(cx, |composer, _| composer.input_target_height());
     assert!(composer.read_with(cx, |composer, _| composer.input_enlarged()));
-    assert!((enlarged_h - 152.0).abs() < 0.5);
+    assert!((enlarged_h - 156.0).abs() < 0.5);
 
     // Clicking the chrome control blurs the field before the toggle runs.
     composer.update(cx, |composer, cx| {
@@ -524,19 +524,19 @@ fn minimize_enlarged_input_animates_to_normal_not_collapsed(cx: &mut TestAppCont
         )
     });
     assert!(!enlarged);
-    // Must settle on multi-line (56), not idle single-line (~36).
+    // Must settle on the normal multiline shell, not the idle single-line shell.
     assert!(
-        (target - 56.0).abs() < 0.5,
+        (target - 72.0).abs() < 0.5,
         "minimize target should be normal multi-line, got {target}"
     );
     let motion = motion.expect("minimize should animate height");
     assert!(
-        (motion.from - 152.0).abs() < 0.5,
+        (motion.from - 156.0).abs() < 0.5,
         "minimize from={:?}",
         motion.from
     );
     assert!(
-        (motion.to - 56.0).abs() < 0.5,
+        (motion.to - 72.0).abs() < 0.5,
         "minimize to={:?}",
         motion.to
     );
@@ -548,5 +548,5 @@ fn minimize_enlarged_input_animates_to_normal_not_collapsed(cx: &mut TestAppCont
     let motion_after_focus = composer.read_with(cx, |composer, _| composer.input_height_motion());
     let motion_after_focus = motion_after_focus.expect("re-focus should keep minimize motion");
     assert_eq!(motion_after_focus.generation, motion.generation);
-    assert!((motion_after_focus.to - 56.0).abs() < 0.5);
+    assert!((motion_after_focus.to - 72.0).abs() < 0.5);
 }

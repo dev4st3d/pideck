@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use gpui::{Context, Task};
 
@@ -32,11 +32,11 @@ use crate::services::session_catalog::{
 use crate::state::reducer::reduce;
 use crate::state::runtime::{
     BashExecution, BashStatus, CommandSource, CompactionState, DialogAnswer, ExtensionDialog,
-    ExtensionFailure, ExtensionStatus, ExtensionWidget, FacetStatus, ModelSummary, NormalizedEvent,
-    PromptDelivery, PromptImage, QueueContents, QueueDeliveryMode, RetryState, RuntimeCommand,
-    RuntimeForkMessage, RuntimeInput, RuntimeIntent, RuntimeLifecycle, RuntimeMessage,
-    RuntimeNotification, RuntimeOperation, RuntimeState, RuntimeThinkingLevel, RuntimeTreeNode,
-    SafeError, StampedInput, SubmissionKind, ToolExecution,
+    ExtensionFailure, ExtensionStatus, ExtensionWidget, FacetStatus, ModelSummary, PromptDelivery,
+    PromptImage, QueueContents, QueueDeliveryMode, RetryState, RuntimeCommand, RuntimeForkMessage,
+    RuntimeInput, RuntimeIntent, RuntimeLifecycle, RuntimeMessage, RuntimeNotification,
+    RuntimeOperation, RuntimeState, RuntimeThinkingLevel, RuntimeTreeNode, SafeError, StampedInput,
+    SubmissionKind, ToolExecution,
 };
 use crate::state::{ControllerStatus, ShellProjection};
 
@@ -53,158 +53,13 @@ fn session_paths_equal(left: &Path, right: &Path) -> bool {
     }
 }
 
-// Dispatch streaming updates at the display cadence instead of invalidating the
-// whole GPUI shell multiple times inside one frame.
-const RUNTIME_FRAME_BUDGET: Duration = Duration::from_millis(16);
-const MAX_RUNTIME_BATCH: usize = 512;
-const RUNTIME_RECONNECT_BASE_DELAY: Duration = Duration::from_millis(300);
-const RUNTIME_RECONNECT_MAX_DELAY: Duration = Duration::from_secs(8);
+mod runtime_flow;
 
-fn runtime_reconnect_delay(failure_count: u32) -> Duration {
-    let shift = failure_count.min(5);
-    RUNTIME_RECONNECT_BASE_DELAY
-        .checked_mul(1_u32 << shift)
-        .unwrap_or(RUNTIME_RECONNECT_MAX_DELAY)
-        .min(RUNTIME_RECONNECT_MAX_DELAY)
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RuntimeConnectionTransition {
-    None,
-    Connected,
-    Disconnected,
-    RetryableFailure,
-    TerminalFailure,
-}
-
-fn runtime_connection_transition(
-    result: &WorkerResult,
-    current_attempt: AttemptGeneration,
-    current_generation: ConnectionGeneration,
-) -> RuntimeConnectionTransition {
-    match result {
-        WorkerResult::Connected {
-            attempt,
-            generation,
-        } if *attempt == current_attempt && *generation == current_generation => {
-            RuntimeConnectionTransition::Connected
-        }
-        WorkerResult::Input { attempt, input }
-            if *attempt == current_attempt
-                && input.generation == current_generation
-                && matches!(&input.input, RuntimeInput::Disconnected { .. }) =>
-        {
-            RuntimeConnectionTransition::Disconnected
-        }
-        WorkerResult::ConnectionFailed {
-            attempt,
-            generation,
-            failure,
-        } if *attempt == current_attempt && *generation == current_generation => match failure.kind
-        {
-            crate::services::runtime_worker::RuntimeStartFailureKind::Readiness
-            | crate::services::runtime_worker::RuntimeStartFailureKind::Launch => {
-                RuntimeConnectionTransition::RetryableFailure
-            }
-            crate::services::runtime_worker::RuntimeStartFailureKind::MissingPi
-            | crate::services::runtime_worker::RuntimeStartFailureKind::IncompatiblePi => {
-                RuntimeConnectionTransition::TerminalFailure
-            }
-        },
-        _ => RuntimeConnectionTransition::None,
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-enum ReplaceableRuntimeUpdate {
-    Message(String),
-    Tool(String),
-}
-
-fn replaceable_runtime_update(result: &WorkerResult) -> Option<ReplaceableRuntimeUpdate> {
-    let WorkerResult::Input { input, .. } = result else {
-        return None;
-    };
-    match &input.input {
-        RuntimeInput::Event(NormalizedEvent::MessageUpdate(message)) => {
-            Some(ReplaceableRuntimeUpdate::Message(message.key.0.clone()))
-        }
-        RuntimeInput::Event(NormalizedEvent::ToolUpdate { id, .. }) => {
-            Some(ReplaceableRuntimeUpdate::Tool(id.as_str().to_owned()))
-        }
-        _ => None,
-    }
-}
-
-fn flush_replaceable_runtime_results(
-    pending: &mut HashMap<ReplaceableRuntimeUpdate, (usize, WorkerResult)>,
-    coalesced: &mut Vec<WorkerResult>,
-) {
-    let mut latest = std::mem::take(pending).into_values().collect::<Vec<_>>();
-    latest.sort_unstable_by_key(|(sequence, _)| *sequence);
-    coalesced.extend(latest.into_iter().map(|(_, result)| result));
-}
-
-fn coalesce_runtime_results(results: Vec<WorkerResult>) -> Vec<WorkerResult> {
-    let mut coalesced = Vec::with_capacity(results.len());
-    let mut pending = HashMap::new();
-    for (sequence, result) in results.into_iter().enumerate() {
-        if let Some(key) = replaceable_runtime_update(&result) {
-            pending.insert(key, (sequence, result));
-        } else {
-            // Do not move a stream update across a lifecycle/control record.
-            flush_replaceable_runtime_results(&mut pending, &mut coalesced);
-            coalesced.push(result);
-        }
-    }
-    flush_replaceable_runtime_results(&mut pending, &mut coalesced);
-    coalesced
-}
-
-fn runtime_batch_delay(elapsed: Duration, replaceable: bool) -> Option<Duration> {
-    if !replaceable || elapsed >= RUNTIME_FRAME_BUDGET {
-        None
-    } else {
-        Some(RUNTIME_FRAME_BUDGET - elapsed)
-    }
-}
-
-fn spawn_runtime_event_task(
-    results: async_channel::Receiver<WorkerResult>,
-    cx: &mut Context<RuntimeController>,
-) -> Task<()> {
-    cx.spawn(async move |controller, cx| {
-        let mut last_dispatch = Instant::now()
-            .checked_sub(RUNTIME_FRAME_BUDGET)
-            .unwrap_or_else(Instant::now);
-        while let Ok(first) = results.recv().await {
-            if let Some(delay) = runtime_batch_delay(
-                last_dispatch.elapsed(),
-                replaceable_runtime_update(&first).is_some(),
-            ) {
-                cx.background_executor().timer(delay).await;
-            }
-            let mut batch = vec![first];
-            while batch.len() < MAX_RUNTIME_BATCH {
-                let Ok(result) = results.try_recv() else {
-                    break;
-                };
-                batch.push(result);
-            }
-            let batch = coalesce_runtime_results(batch);
-            let updated = controller.update(cx, |controller, cx| {
-                for result in batch {
-                    controller.receive(result, cx);
-                }
-                cx.notify();
-            });
-            if updated.is_err() {
-                break;
-            }
-            last_dispatch = Instant::now();
-        }
-    })
-}
+use runtime_flow::{
+    ConnectionTransition as RuntimeConnectionTransition,
+    connection_transition as runtime_connection_transition,
+    reconnect_delay as runtime_reconnect_delay, spawn as spawn_runtime_event_task,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SubmissionPreference {
@@ -2858,80 +2713,7 @@ impl Drop for RuntimeController {
 mod tests {
     use super::*;
     use crate::services::runtime_worker::{RuntimeStartFailure, RuntimeStartFailureKind};
-
-    fn runtime_event(event: NormalizedEvent) -> WorkerResult {
-        WorkerResult::Input {
-            attempt: AttemptGeneration::new(1),
-            input: Box::new(StampedInput {
-                generation: ConnectionGeneration::new(1),
-                epoch: SessionEpoch::new(1),
-                observed_at: Instant::now(),
-                input: RuntimeInput::Event(event),
-            }),
-        }
-    }
-
-    fn message_update(key: &str, timestamp: u64) -> WorkerResult {
-        runtime_event(NormalizedEvent::MessageUpdate(RuntimeMessage {
-            key: crate::state::runtime::MessageKey(key.to_owned()),
-            role: crate::state::runtime::MessageRole::Assistant,
-            timestamp,
-            content: Vec::new(),
-            visible: true,
-            terminal: false,
-            stop_reason: None,
-            error: None,
-            assistant: None,
-        }))
-    }
-
-    #[test]
-    fn runtime_batching_does_not_delay_first_or_control_events() {
-        assert_eq!(runtime_batch_delay(RUNTIME_FRAME_BUDGET, true), None);
-        assert_eq!(runtime_batch_delay(Duration::ZERO, false), None);
-    }
-
-    #[test]
-    fn runtime_batching_waits_only_for_the_remaining_frame_budget() {
-        assert_eq!(
-            runtime_batch_delay(Duration::from_millis(3), true),
-            Some(Duration::from_millis(13))
-        );
-    }
-
-    #[test]
-    fn runtime_batching_keeps_only_the_latest_stream_update_per_key() {
-        let coalesced = coalesce_runtime_results(vec![
-            message_update("a", 1),
-            message_update("b", 2),
-            message_update("a", 3),
-        ]);
-        assert_eq!(coalesced.len(), 2);
-        let messages = coalesced
-            .iter()
-            .map(|result| {
-                let WorkerResult::Input { input, .. } = result else {
-                    panic!("expected a runtime input");
-                };
-                let RuntimeInput::Event(NormalizedEvent::MessageUpdate(message)) = &input.input
-                else {
-                    panic!("expected a message update");
-                };
-                (message.key.0.as_str(), message.timestamp)
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(messages, vec![("b", 2), ("a", 3)]);
-    }
-
-    #[test]
-    fn runtime_batching_never_moves_stream_updates_across_control_events() {
-        let coalesced = coalesce_runtime_results(vec![
-            message_update("a", 1),
-            runtime_event(NormalizedEvent::AgentStart),
-            message_update("a", 2),
-        ]);
-        assert_eq!(coalesced.len(), 3);
-    }
+    use std::time::Duration;
 
     #[test]
     fn runtime_reconnect_backoff_is_bounded() {

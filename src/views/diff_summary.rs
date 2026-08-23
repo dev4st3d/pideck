@@ -26,217 +26,176 @@ pub(in crate::views) fn summary_card(
     let file_count = snapshot.files.len();
     let additions = snapshot.additions();
     let deletions = snapshot.deletions();
-    let rail_click_root = root.clone();
-    let rail_key_root = root.clone();
     let toggle_root = root.clone();
     let toggle_key_root = root.clone();
     let rows_root = root.clone();
     let open_root = root.clone();
     let open_key_root = root;
 
-    // Hangs on the conversation thread like a turn section: the chevron rides
-    // the rail, stats stay quiet, and the file list grows out of the header
-    // instead of living in a boxed banner.
-    div()
-        .w_full()
-        .flex()
-        .flex_row()
-        .gap(px(super::conversation::THREAD_GAP))
-        .child(
-            div()
-                .id("workspace-diff-rail-toggle")
-                .tab_index(0)
-                .cursor_pointer()
-                .w(px(super::conversation::THREAD_RAIL_W))
-                .flex_shrink_0()
-                .flex()
-                .flex_col()
-                .items_center()
-                .on_click(move |_, _, cx| {
-                    rail_click_root.update(cx, |view, cx| view.toggle_workspace_diff_files(cx));
-                })
-                .on_key_down(move |event: &gpui::KeyDownEvent, _, cx| {
-                    if matches!(event.keystroke.key.as_str(), "enter" | "space") {
-                        cx.stop_propagation();
-                        rail_key_root.update(cx, |view, cx| view.toggle_workspace_diff_files(cx));
-                    }
-                })
-                .child(
-                    svg()
-                        .path(if expanded {
-                            "icons/chevron-down.svg"
-                        } else {
-                            "icons/chevron-right.svg"
-                        })
-                        .size(px(9.0))
-                        .mt(px(4.5))
-                        .text_color(theme::smoke()),
-                )
-                .when(expanded, |rail| {
-                    rail.child(
+    // Hangs at the end of the conversation thread like a turn section: one
+    // quiet disclosure row whose chevron expands the per-file list in place,
+    // with stats staying inline instead of living in a boxed banner.
+    div().w_full().flex().flex_col().child(
+        div()
+            .min_w_0()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .w_full()
+                    .min_h(px(26.0))
+                    .pb(px(4.0))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(12.0))
+                    .child(
                         div()
-                            .flex_1()
-                            .w(px(1.0))
-                            .min_h(px(8.0))
-                            .mt(px(3.0))
-                            .rounded_full()
-                            .bg(theme::edge()),
-                    )
-                }),
-        )
-        .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .flex()
-                .flex_col()
-                .child(
-                    div()
-                        .w_full()
-                        .min_h(px(26.0))
-                        .pb(px(4.0))
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .justify_between()
-                        .gap(px(12.0))
-                        .child(
-                            div()
-                                .id("workspace-diff-files-toggle")
-                                .tab_index(0)
-                                .cursor_pointer()
-                                .min_w_0()
-                                .flex()
-                                .flex_row()
-                                .items_center()
-                                .gap(px(8.0))
-                                .text_color(theme::ash())
-                                .hover(|row| row.text_color(theme::bone_dim()))
-                                .focus(|row| row.text_color(theme::focus()))
-                                .on_click(move |_, _, cx| {
-                                    toggle_root.update(cx, |view, cx| {
+                            .id("workspace-diff-files-toggle")
+                            .tab_index(0)
+                            .cursor_pointer()
+                            .min_w_0()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(8.0))
+                            .text_color(theme::ash())
+                            .hover(|row| row.text_color(theme::bone_dim()))
+                            .focus(|row| row.text_color(theme::focus()))
+                            .on_click(move |_, _, cx| {
+                                toggle_root
+                                    .update(cx, |view, cx| view.toggle_workspace_diff_files(cx));
+                            })
+                            .on_key_down(move |event: &gpui::KeyDownEvent, _, cx| {
+                                if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                                    cx.stop_propagation();
+                                    toggle_key_root.update(cx, |view, cx| {
                                         view.toggle_workspace_diff_files(cx)
                                     });
-                                })
-                                .on_key_down(move |event: &gpui::KeyDownEvent, _, cx| {
-                                    if matches!(event.keystroke.key.as_str(), "enter" | "space") {
-                                        cx.stop_propagation();
-                                        toggle_key_root.update(cx, |view, cx| {
-                                            view.toggle_workspace_diff_files(cx)
-                                        });
-                                    }
-                                })
-                                .child(
-                                    div()
-                                        .flex_shrink_0()
-                                        .font_family(theme::sans())
-                                        .text_size(theme::text_size(theme::T_UI_SM))
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .text_color(theme::bone_dim())
-                                        .child("Workspace changes"),
-                                )
-                                .child(
-                                    div()
-                                        .flex_shrink_0()
-                                        .font_family(theme::mono())
-                                        .text_size(theme::text_size(theme::T_TINY))
-                                        .text_color(theme::smoke())
-                                        .child(format!(
-                                            "{file_count} file{}",
-                                            if file_count == 1 { "" } else { "s" }
-                                        )),
-                                )
-                                .child(stat_text(format!("+{additions}"), theme::live()))
-                                .child(stat_text(format!("-{deletions}"), theme::error()))
-                                .when(snapshot.counts_partial, |row| {
-                                    row.child(
-                                        div()
-                                            .flex_shrink_0()
-                                            .font_family(theme::sans())
-                                            .text_size(theme::text_size(theme::T_TINY))
-                                            .text_color(theme::smoke())
-                                            .child("partial counts"),
-                                    )
-                                }),
-                        )
-                        .child(
-                            div()
-                                .id("workspace-diff-open")
-                                .tab_index(0)
-                                .cursor_pointer()
-                                .h(px(24.0))
-                                .px(px(6.0))
-                                .rounded(px(theme::RADIUS_SM))
-                                .border_1()
-                                .border_color(gpui::rgba(0x0000_0000))
-                                .flex()
-                                .flex_row()
-                                .items_center()
-                                .gap(px(5.0))
-                                .text_color(theme::ash())
-                                .hover(|button| button.bg(theme::panel()).text_color(theme::bone()))
-                                .active(|button| button.bg(theme::panel_lift()))
-                                .focus(|button| button.border_color(theme::focus()))
-                                .on_click(move |_, window, cx| {
-                                    open_root.update(cx, |view, cx| {
-                                        view.open_workspace_diff(window, cx)
-                                    });
-                                })
-                                .on_key_down(move |event: &gpui::KeyDownEvent, window, cx| {
-                                    if matches!(event.keystroke.key.as_str(), "enter" | "space") {
-                                        cx.stop_propagation();
-                                        open_key_root.update(cx, |view, cx| {
-                                            view.open_workspace_diff(window, cx)
-                                        });
-                                    }
-                                })
-                                .child(
-                                    svg()
-                                        .path("icons/diff.svg")
-                                        .size(px(12.0))
-                                        .text_color(theme::smoke()),
-                                )
-                                .child(
-                                    div()
-                                        .font_family(theme::sans())
-                                        .text_size(theme::text_size(theme::T_UI_SM))
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .child("Open diff"),
-                                ),
-                        ),
-                )
-                .when(expanded, |card| {
-                    card.child(
-                        div()
-                            .w_full()
-                            .pt(px(2.0))
-                            .flex()
-                            .flex_col()
-                            .children(
-                                snapshot
-                                    .files
-                                    .iter()
-                                    .take(MAX_EXPANDED_FILES)
-                                    .enumerate()
-                                    .map(|(index, file)| file_row(index, file, rows_root.clone())),
+                                }
+                            })
+                            .child(
+                                svg()
+                                    .path(if expanded {
+                                        "icons/chevron-down.svg"
+                                    } else {
+                                        "icons/chevron-right.svg"
+                                    })
+                                    .size(px(9.0))
+                                    .flex_shrink_0()
+                                    .text_color(theme::smoke()),
                             )
-                            .when(snapshot.files.len() > MAX_EXPANDED_FILES, |list| {
-                                list.child(
+                            .child(
+                                div()
+                                    .flex_shrink_0()
+                                    .font_family(theme::sans())
+                                    .text_size(theme::text_size(theme::T_UI_SM))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(theme::bone_dim())
+                                    .child("Workspace changes"),
+                            )
+                            .child(
+                                div()
+                                    .flex_shrink_0()
+                                    .font_family(theme::mono())
+                                    .text_size(theme::text_size(theme::T_TINY))
+                                    .text_color(theme::smoke())
+                                    .child(format!(
+                                        "{file_count} file{}",
+                                        if file_count == 1 { "" } else { "s" }
+                                    )),
+                            )
+                            .child(stat_text(format!("+{additions}"), theme::live()))
+                            .child(stat_text(format!("-{deletions}"), theme::error()))
+                            .when(snapshot.counts_partial, |row| {
+                                row.child(
                                     div()
-                                        .px(px(4.0))
-                                        .py(px(6.0))
+                                        .flex_shrink_0()
                                         .font_family(theme::sans())
                                         .text_size(theme::text_size(theme::T_TINY))
                                         .text_color(theme::smoke())
-                                        .child(format!(
-                                            "{} more files are available in the full diff.",
-                                            snapshot.files.len() - MAX_EXPANDED_FILES
-                                        )),
+                                        .child("partial counts"),
                                 )
                             }),
                     )
-                }),
-        )
+                    .child(
+                        div()
+                            .id("workspace-diff-open")
+                            .tab_index(0)
+                            .cursor_pointer()
+                            .h(px(24.0))
+                            .px(px(6.0))
+                            .rounded(px(theme::RADIUS_SM))
+                            .border_1()
+                            .border_color(gpui::rgba(0x0000_0000))
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(5.0))
+                            .text_color(theme::ash())
+                            .hover(|button| button.bg(theme::panel()).text_color(theme::bone()))
+                            .active(|button| button.bg(theme::panel_lift()))
+                            .focus(|button| button.border_color(theme::focus()))
+                            .on_click(move |_, window, cx| {
+                                open_root
+                                    .update(cx, |view, cx| view.open_workspace_diff(window, cx));
+                            })
+                            .on_key_down(move |event: &gpui::KeyDownEvent, window, cx| {
+                                if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                                    cx.stop_propagation();
+                                    open_key_root.update(cx, |view, cx| {
+                                        view.open_workspace_diff(window, cx)
+                                    });
+                                }
+                            })
+                            .child(
+                                svg()
+                                    .path("icons/diff.svg")
+                                    .size(px(12.0))
+                                    .text_color(theme::smoke()),
+                            )
+                            .child(
+                                div()
+                                    .font_family(theme::sans())
+                                    .text_size(theme::text_size(theme::T_UI_SM))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child("Open diff"),
+                            ),
+                    ),
+            )
+            .when(expanded, |card| {
+                card.child(
+                    div()
+                        .w_full()
+                        .pt(px(2.0))
+                        .flex()
+                        .flex_col()
+                        .children(
+                            snapshot
+                                .files
+                                .iter()
+                                .take(MAX_EXPANDED_FILES)
+                                .enumerate()
+                                .map(|(index, file)| file_row(index, file, rows_root.clone())),
+                        )
+                        .when(snapshot.files.len() > MAX_EXPANDED_FILES, |list| {
+                            list.child(
+                                div()
+                                    .px(px(4.0))
+                                    .py(px(6.0))
+                                    .font_family(theme::sans())
+                                    .text_size(theme::text_size(theme::T_TINY))
+                                    .text_color(theme::smoke())
+                                    .child(format!(
+                                        "{} more files are available in the full diff.",
+                                        snapshot.files.len() - MAX_EXPANDED_FILES
+                                    )),
+                            )
+                        }),
+                )
+            }),
+    )
 }
 
 fn stat_text(text: String, color: gpui::Rgba) -> impl IntoElement {

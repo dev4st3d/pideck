@@ -204,9 +204,9 @@ impl Composer {
         // on the card surface (no inner well) and no footer renders here. Panel
         // chrome keeps a self-contained bordered field with its own status row.
         let desk = self.chrome == ComposerChrome::Full;
-        let input_padding_x = 14.0;
-        let input_padding_y = 10.0;
-        let input_line_height = if panel { 21.0 } else { 20.0 };
+        let input_padding_x = 13.0;
+        let input_padding_y = 9.0;
+        let input_line_height = 21.0;
         // Idle: one row · focused: multi-line · user enlarge: taller pinned shell.
         let height_motion = self.input_height_motion();
         let settled_height = self.input_target_height();
@@ -226,7 +226,7 @@ impl Composer {
             .px(px(input_padding_x))
             .py(px(input_padding_y))
             .overflow_hidden()
-            .text_size(theme::text_size(theme::T_BODY_SM))
+            .text_size(theme::text_size(if panel { theme::T_BODY_SM } else { theme::T_BODY }))
             .line_height(theme::text_size(input_line_height))
             .text_color(if self.disabled {
                 theme::smoke()
@@ -313,10 +313,10 @@ impl Composer {
             .flex()
             .flex_col()
             .gap(px(if panel { 6.0 } else { 0.0 }))
-            .child(input)
             .when_some(attachments, |composer, attachments| {
                 composer.child(attachments)
-            });
+            })
+            .child(input);
 
         if desk {
             // Status, hints, and actions for the desk chrome live in the prompt
@@ -550,9 +550,9 @@ impl Composer {
             .id(SharedString::from(format!("{id_prefix}-attachments")))
             .w_full()
             // Extra top/side padding keeps image remove controls clear of the clipped panel edge.
-            .px(px(12.0))
+            .px(px(16.0))
             .pt(px(12.0))
-            .pb(px(4.0))
+            .pb(px(2.0))
             .flex()
             .flex_row()
             .flex_wrap()

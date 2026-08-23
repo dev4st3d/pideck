@@ -1,17 +1,23 @@
 use super::composer_bar::{ComposerBarParams, composer_bar};
-use super::inspector::{SessionRailParams, session_rail, subagent_dialog};
+use super::conversation_panel::{ConversationAreaParams, conversation_area};
+use super::inspector::subagent_dialog;
+use super::inspector_drawer::{
+    SessionInspectorDrawerParams, session_inspector_drawer,
+};
 use super::model_panels::{
     ModelSettingsPanelParams, ProviderAuthModalParams, model_settings_panel, provider_auth_modal,
 };
 use super::overlays::{
-    ConversationAreaParams, PastedImageOverlayParams, activity_detail_overlay,
-    command_palette_overlay, compaction_dialog, conversation_area, extension_dialog_overlay,
+    PastedImageOverlayParams, activity_detail_overlay, command_palette_overlay, compaction_dialog,
+    extension_dialog_overlay,
     hotkey_help_overlay, pasted_image_overlay, runtime_notification_stack,
 };
 use super::shell::{
     HistoryPanelParams, SessionsPanelParams, TitlebarParams, history_panel, sessions_panel,
-    titlebar, workspace_rail,
+    titlebar,
 };
+use super::sidebar::workspace_rail;
+use super::terminal_dock::terminal_splitter;
 use super::*;
 use crate::views::diff_summary::diff_overlay;
 
@@ -55,6 +61,7 @@ impl Render for RootView {
             .on_action(cx.listener(Self::on_abort_run))
             .on_action(cx.listener(Self::on_attach_files))
             .on_action(cx.listener(Self::on_activate_recovery))
+            .on_action(cx.listener(Self::on_focus_composer))
             .on_action(cx.listener(Self::on_focus_next))
             .on_action(cx.listener(Self::on_focus_previous))
             .on_action(cx.listener(Self::on_open_command_palette))
@@ -85,7 +92,7 @@ impl Render for RootView {
             .flex_col()
             .bg(theme::canvas())
             .font_family(theme::sans())
-            .text_size(theme::text_size(16.0))
+            .text_size(theme::text_size(theme::T_BODY))
             .text_color(theme::bone())
             .child(titlebar(
                 TitlebarParams {
@@ -105,6 +112,8 @@ impl Render for RootView {
                     terminal_open: self.terminal_open,
                     inspector_open: self.session_rail_visible(),
                     workspace_diff_available: self.workspace_diff.is_some(),
+                    workspace_diff_loading: self.workspace_diff_loading,
+                    workspace_diff_error: self.workspace_diff_error.is_some(),
                     workspace_diff_open: self.workspace_diff_open,
                     app_update: &self.app_update,
                 },
@@ -116,11 +125,11 @@ impl Render for RootView {
                     .min_h_0()
                     .flex()
                     .flex_row()
-                    .child(workspace_rail(
-                        self.sidebar_open,
-                        self.sidebar_motion_key,
-                        match self.rail_mode {
-                            RailMode::Places => sessions_panel(
+                    .when(self.sidebar_mounted, |layout| {
+                        layout.child(workspace_rail(
+                            self.sidebar_open,
+                            self.sidebar_motion_key,
+                            sessions_panel(
                                 SessionsPanelParams {
                                     catalog,
                                     projects: &self.projects,
@@ -134,7 +143,6 @@ impl Render for RootView {
                                     history_open: self.history_open,
                                     sidebar_open: self.sidebar_open,
                                     cursor: self.sidebar_cursor.as_ref(),
-                                    // Strong cursor ring is keyboard-only (:focus-visible).
                                     tree_focused: self.sidebar_tree_focus.is_focused(window)
                                         && !self.sidebar_tree_pointer_focus,
                                     tree_focus: &self.sidebar_tree_focus,
@@ -143,27 +151,10 @@ impl Render for RootView {
                                 cx,
                             )
                             .into_any_element(),
-                            RailMode::Session => session_rail(
-                                SessionRailParams {
-                                    projection,
-                                    conversation: &self.conversation,
-                                    orchestration,
-                                    selected_task_id: self.selected_task_id.as_deref(),
-                                    goal_edit_composer: &self.goal_edit_composer,
-                                    delivery_focus: self.delivery_focus,
-                                    usage_tooltip_hovered: self.usage_tooltip_hovered,
-                                    usage_tooltip_visible: self.usage_tooltip_visible,
-                                    usage_tooltip_epoch: self.usage_tooltip_epoch,
-                                    inspector_focus: &self.inspector_focus,
-                                    rail_open: self.sidebar_open,
-                                },
-                                cx,
-                            )
-                            .into_any_element(),
-                        },
-                    ))
+                        ))
+                    })
                     .when(
-                        self.history_open && self.rail_mode == RailMode::Places,
+                        self.history_open,
                         |layout| {
                             layout.child(history_panel(
                                 HistoryPanelParams {
@@ -212,13 +203,9 @@ impl Render for RootView {
                                 transcript_cache: self.transcript_cache.clone(),
                                 stream_bands: self.stream_bands.clone(),
                                 activity_disclosures: self.activity_disclosures.clone(),
-                                workspace_diff: matches!(
-                                    self.conversation.lifecycle,
-                                    RuntimeLifecycle::Ready | RuntimeLifecycle::Settled
-                                )
-                                .then(|| self.workspace_diff.clone())
-                                .flatten(),
+                                workspace_diff: self.workspace_diff.clone(),
                                 workspace_diff_files_expanded: self.workspace_diff_files_expanded,
+                                follow: self.conversation_follow.get(),
                                 root: cx.entity(),
                             }))
                             .child(composer_bar(
@@ -264,6 +251,25 @@ impl Render for RootView {
                             .into_any_element(),
                     }),
             )
+            .when(self.inspector_mounted, |shell| {
+                shell.child(session_inspector_drawer(
+                    SessionInspectorDrawerParams {
+                        open: self.inspector_open,
+                        motion_key: self.inspector_motion_key,
+                        projection,
+                        conversation: &self.conversation,
+                        orchestration,
+                        selected_task_id: self.selected_task_id.as_deref(),
+                        goal_edit_composer: &self.goal_edit_composer,
+                        delivery_focus: self.delivery_focus,
+                        usage_tooltip_hovered: self.usage_tooltip_hovered,
+                        usage_tooltip_visible: self.usage_tooltip_visible,
+                        usage_tooltip_epoch: self.usage_tooltip_epoch,
+                        inspector_focus: &self.inspector_focus,
+                    },
+                    cx,
+                ))
+            })
             .when_some(self.activity_detail.clone(), |shell, detail| {
                 shell.child(activity_detail_overlay(
                     &detail,
@@ -380,79 +386,4 @@ impl Render for RootView {
                 ))
             })
     }
-}
-
-fn terminal_splitter(
-    root: Entity<RootView>,
-    dragging: bool,
-    viewport_height: Pixels,
-) -> impl IntoElement {
-    let mouse_down_root = root.clone();
-    let mouse_move_root = root.clone();
-    let mouse_up_root = root;
-
-    canvas(
-        |bounds, window, _| window.insert_hitbox(bounds, HitboxBehavior::Normal),
-        move |bounds, hitbox, window, _| {
-            // GPUI canvas ignores Style::mouse_cursor; only Div applies it.
-            // Window-wide while dragging so the cursor survives leaving the strip.
-            if dragging {
-                window.set_window_cursor_style(CursorStyle::ResizeRow);
-            } else {
-                window.set_cursor_style(CursorStyle::ResizeRow, &hitbox);
-            }
-
-            let track = Bounds::new(
-                point(bounds.left(), bounds.top() + px(3.0)),
-                size(bounds.size.width, px(if dragging { 2.0 } else { 1.0 })),
-            );
-            window.paint_quad(fill(
-                track,
-                if dragging {
-                    theme::focus()
-                } else {
-                    theme::edge_hard()
-                },
-            ));
-
-            let mouse_down_bounds = bounds;
-            window.on_mouse_event(move |event: &MouseDownEvent, phase, _, cx| {
-                if phase != DispatchPhase::Capture
-                    || event.button != MouseButton::Left
-                    || !mouse_down_bounds.contains(&event.position)
-                {
-                    return;
-                }
-                mouse_down_root.update(cx, |view, cx| {
-                    view.begin_terminal_resize(event.position.y, cx)
-                });
-                cx.stop_propagation();
-            });
-
-            window.on_mouse_event(move |event: &MouseMoveEvent, phase, _, cx| {
-                if phase != DispatchPhase::Capture {
-                    return;
-                }
-                let handled = mouse_move_root.update(cx, |view, cx| {
-                    view.update_terminal_resize(event.position.y, viewport_height, cx)
-                });
-                if handled {
-                    cx.stop_propagation();
-                }
-            });
-
-            window.on_mouse_event(move |event: &MouseUpEvent, phase, _, cx| {
-                if phase != DispatchPhase::Capture || event.button != MouseButton::Left {
-                    return;
-                }
-                let handled = mouse_up_root.update(cx, |view, cx| view.end_terminal_resize(cx));
-                if handled {
-                    cx.stop_propagation();
-                }
-            });
-        },
-    )
-    .h(px(7.0))
-    .w_full()
-    .flex_shrink_0()
 }

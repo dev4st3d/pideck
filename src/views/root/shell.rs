@@ -1,63 +1,9 @@
 use std::time::Duration;
 
-use gpui::{
-    Animation, AnimationExt, AnyElement, SharedString, deferred, ease_out_quint, relative, svg,
-};
+use gpui::{AnyElement, SharedString, deferred, relative, svg};
 
 use super::shared::{action_id, runtime_operation_label, short_path};
 use super::*;
-
-/// Subtle open/close duration; keep under 300ms per GPUI motion guidance.
-const SIDEBAR_MOTION_MS: u64 = 220;
-
-/// One left rail. Width is shared by Places and Session so the transcript
-/// never reflows when the mode flips.
-pub(super) fn workspace_rail(open: bool, motion_key: u64, body: impl IntoElement) -> AnyElement {
-    let expanded_w = theme::SIDE_W;
-    let target_w = if open { expanded_w } else { 0.0 };
-    let shell = div()
-        .id("workspace-rail")
-        .h_full()
-        .flex_shrink_0()
-        .overflow_hidden()
-        .child(
-            div()
-                .id("workspace-rail-body")
-                .w(px(expanded_w))
-                .h_full()
-                .flex()
-                .flex_col()
-                .bg(theme::canvas())
-                .border_r_1()
-                .border_color(theme::edge_soft())
-                .child(body),
-        );
-
-    if motion_key == 0 {
-        shell.w(px(target_w)).into_any_element()
-    } else {
-        shell
-            .with_animation(
-                ("workspace-rail", motion_key),
-                Animation::new(Duration::from_millis(SIDEBAR_MOTION_MS))
-                    .with_easing(ease_out_quint()),
-                move |panel, delta| {
-                    let (from, to) = if open {
-                        (0.0, expanded_w)
-                    } else {
-                        (expanded_w, 0.0)
-                    };
-                    let fade = if open {
-                        0.55 + 0.45 * delta
-                    } else {
-                        1.0 - 0.45 * delta
-                    };
-                    panel.w(px(from + (to - from) * delta)).opacity(fade)
-                },
-            )
-            .into_any_element()
-    }
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TitlebarStatusTone {
@@ -107,6 +53,8 @@ pub(super) struct TitlebarParams<'a> {
     pub(super) terminal_open: bool,
     pub(super) inspector_open: bool,
     pub(super) workspace_diff_available: bool,
+    pub(super) workspace_diff_loading: bool,
+    pub(super) workspace_diff_error: bool,
     pub(super) workspace_diff_open: bool,
     pub(super) app_update: &'a PiDeckUpdateState,
 }
@@ -124,6 +72,8 @@ pub(super) fn titlebar(params: TitlebarParams<'_>, cx: &mut Context<RootView>) -
         terminal_open,
         inspector_open,
         workspace_diff_available,
+        workspace_diff_loading,
+        workspace_diff_error,
         workspace_diff_open,
         app_update,
     } = params;
@@ -139,7 +89,7 @@ pub(super) fn titlebar(params: TitlebarParams<'_>, cx: &mut Context<RootView>) -
         .flex_row()
         .items_center()
         .justify_between()
-        .gap(px(12.0))
+        .gap(px(8.0))
         .bg(theme::floor())
         .border_b_1()
         .border_color(theme::edge())
@@ -148,7 +98,7 @@ pub(super) fn titlebar(params: TitlebarParams<'_>, cx: &mut Context<RootView>) -
                 .flex()
                 .flex_row()
                 .items_center()
-                .gap(px(12.0))
+                .gap(px(8.0))
                 .min_w_0()
                 .flex_1()
                 .child(titlebar_icon_toggle(
@@ -179,7 +129,7 @@ pub(super) fn titlebar(params: TitlebarParams<'_>, cx: &mut Context<RootView>) -
                         .mt(px(-1.0))
                         .child(
                             div()
-                                .text_size(theme::text_size(18.0))
+                                .text_size(theme::text_size(16.0))
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .text_color(theme::signal())
                                 .line_height(relative(1.0))
@@ -238,16 +188,16 @@ pub(super) fn titlebar(params: TitlebarParams<'_>, cx: &mut Context<RootView>) -
                                 div()
                                     .id("rename-session-popup")
                                     .absolute()
-                                    .top(px(32.0))
+                                    .top(px(30.0))
                                     .left_0()
-                                    .w(px(theme::SIDE_W))
-                                    .p(px(12.0))
+                                    .w(px(240.0))
+                                    .p(px(10.0))
                                     .occlude()
                                     .rounded(px(theme::RADIUS_LG))
                                     .border_1()
                                     .border_color(theme::edge())
-                                    .bg(theme::panel_lift())
-                                    .shadow(theme::dock_shadow())
+                                    .bg(theme::panel())
+                                    .shadow(theme::sheet_shadow())
                                     .child(controls::section_label("Rename current session"))
                                     .child(div().mt(px(7.0)).child(name_composer.clone())),
                             ))
@@ -267,7 +217,7 @@ pub(super) fn titlebar(params: TitlebarParams<'_>, cx: &mut Context<RootView>) -
         )
         .child(
             div()
-                .min_w(px(290.0))
+                .min_w_0()
                 .flex()
                 .flex_row()
                 .items_center()
@@ -290,23 +240,53 @@ pub(super) fn titlebar(params: TitlebarParams<'_>, cx: &mut Context<RootView>) -
                     },
                     cx,
                 ))
-                .child(titlebar_icon_toggle(
-                    ChromeIconSpec {
-                        id: "toggle-workspace-diff",
-                        icon_path: "icons/diff.svg",
-                        tooltip_label: "Workspace changes",
-                        tooltip_hint: None,
-                        on: workspace_diff_open && workspace_diff_available,
-                        enabled: workspace_diff_available,
-                        action: |view, window, cx| view.toggle_workspace_diff_overlay(window, cx),
-                    },
-                    cx,
-                ))
+                .child(
+                    div()
+                        .relative()
+                        .flex_shrink_0()
+                        .child(titlebar_icon_toggle(
+                            ChromeIconSpec {
+                                id: "toggle-workspace-diff",
+                                icon_path: "icons/diff.svg",
+                                tooltip_label: if workspace_diff_error {
+                                    "Workspace changes unavailable"
+                                } else if workspace_diff_loading {
+                                    "Scanning workspace changes"
+                                } else {
+                                    "Workspace changes"
+                                },
+                                tooltip_hint: None,
+                                on: workspace_diff_open && workspace_diff_available,
+                                enabled: workspace_diff_available,
+                                action: |view, window, cx| {
+                                    view.toggle_workspace_diff_overlay(window, cx)
+                                },
+                            },
+                            cx,
+                        ))
+                        .when(workspace_diff_loading || workspace_diff_error, |button| {
+                            button.child(
+                                div()
+                                    .absolute()
+                                    .right(px(3.0))
+                                    .bottom(px(3.0))
+                                    .size(px(6.0))
+                                    .rounded_full()
+                                    .border_1()
+                                    .border_color(theme::floor())
+                                    .bg(if workspace_diff_error {
+                                        theme::error()
+                                    } else {
+                                        theme::data()
+                                    }),
+                            )
+                        }),
+                )
                 .child(titlebar_icon_toggle(
                     ChromeIconSpec {
                         id: "toggle-inspector",
                         icon_path: "icons/inspector.svg",
-                        tooltip_label: "Session",
+                        tooltip_label: "Session details",
                         tooltip_hint: Some("Ctrl+I"),
                         on: inspector_open,
                         enabled: true,
@@ -323,13 +303,11 @@ pub(super) fn titlebar(params: TitlebarParams<'_>, cx: &mut Context<RootView>) -
                             // titlebar icon toggles beside it.
                             div()
                                 .id("theme-switcher")
-                                .h(px(theme::CHROME))
-                                .px(px(10.0))
-                                .rounded(px(theme::RADIUS_MD))
+                                .size(px(theme::CHROME))
+                                .rounded(px(theme::RADIUS_SM))
                                 .flex()
                                 .flex_row()
                                 .items_center()
-                                .gap(px(6.0))
                                 .bg(if theme_menu_open {
                                     theme::panel_lift()
                                 } else {
@@ -385,22 +363,10 @@ pub(super) fn titlebar(params: TitlebarParams<'_>, cx: &mut Context<RootView>) -
                                             },
                                         ),
                                 )
-                                .child(active_theme.label())
-                                .child(
-                                    svg()
-                                        .path(if theme_menu_open {
-                                            "icons/chevron-up.svg"
-                                        } else {
-                                            "icons/chevron-down.svg"
-                                        })
-                                        .size(px(12.0))
-                                        .text_color(if theme_menu_open {
-                                            theme::data()
-                                        } else {
-                                            theme::smoke()
-                                        })
-                                        .flex_shrink_0(),
-                                ),
+                                .tooltip(controls::text_tooltip(
+                                    active_theme.label(),
+                                    Some("Theme"),
+                                )),
                         )
                         .when(theme_menu_open, |host| {
                             host.child(deferred(
@@ -432,22 +398,15 @@ pub(super) fn titlebar(params: TitlebarParams<'_>, cx: &mut Context<RootView>) -
 }
 
 fn titlebar_status_chip(status: &TitlebarStatus, color: gpui::Rgba) -> impl IntoElement {
-    let wash = match status.tone {
-        TitlebarStatusTone::Idle => gpui::rgba(0x0000_0000),
-        TitlebarStatusTone::Working | TitlebarStatusTone::Attention => theme::data_wash(),
-        TitlebarStatusTone::Complete => theme::live_wash(),
-        TitlebarStatusTone::Error => theme::error_wash(),
-    };
     div()
         .h(px(theme::CHROME))
-        .px(px(10.0))
-        .rounded(px(theme::RADIUS_MD))
+        .px(px(6.0))
+        .rounded(px(theme::RADIUS_SM))
         .flex()
         .flex_row()
         .items_center()
-        .gap(px(8.0))
+        .gap(px(6.0))
         .flex_shrink_0()
-        .bg(wash)
         .child(controls::square_status_indicator(
             0,
             status.animated,
@@ -458,8 +417,8 @@ fn titlebar_status_chip(status: &TitlebarStatus, color: gpui::Rgba) -> impl Into
             div()
                 .font_family(theme::main())
                 .text_size(theme::text_size(theme::T_UI_SM))
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(color)
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(theme::bone_dim())
                 .whitespace_nowrap()
                 .child(status.label.clone()),
         )
@@ -469,15 +428,15 @@ fn update_notice_button(version: String, cx: &mut Context<RootView>) -> impl Int
     div()
         .id("app-update-notice")
         .h(px(theme::CHROME))
-        .px(px(10.0))
-        .rounded(px(theme::RADIUS_MD))
+        .px(px(7.0))
+        .rounded(px(theme::RADIUS_SM))
         .flex()
         .items_center()
         .justify_center()
         .flex_shrink_0()
-        .bg(theme::panel_lift())
+        .bg(gpui::rgba(0x0000_0000))
         .border_1()
-        .border_color(theme::edge_hard())
+        .border_color(theme::edge())
         .font_family(theme::main())
         .text_size(theme::text_size(theme::T_UI_SM))
         .font_weight(FontWeight::SEMIBOLD)
@@ -1104,7 +1063,7 @@ pub(super) fn sessions_panel(
     let active_path = projects.active_path().to_path_buf();
     let can_remove_active = project_count > 1 && project_switch_enabled;
     let export_enabled = session_actions_enabled && catalog.current_session_file.is_some();
-    const SIDE_PAD: f32 = 10.0;
+    const SIDE_PAD: f32 = 8.0;
 
     // Painted rows and keyboard navigation share this flattened order.
     let slices = sidebar_project_slices(projects, catalog, project_catalogs, thread_statuses);
@@ -1233,45 +1192,34 @@ pub(super) fn sessions_panel(
         .child(
             div()
                 .px(px(SIDE_PAD))
-                .pt(px(10.0))
+                .pt(px(8.0))
                 .pb(px(4.0))
                 .flex_shrink_0()
                 .flex()
                 .flex_col()
                 .gap(px(6.0))
-                .child(sidebar_new_thread_button(
-                    new_thread_enabled,
-                    sidebar_open,
-                    cx,
-                ))
                 .child(
                     div()
-                        .h(px(24.0))
+                        .h(px(26.0))
                         .flex()
                         .flex_row()
                         .items_center()
-                        .gap(px(2.0))
-                        .child(sidebar_text_link(
-                            "toggle-history-inline",
-                            "History",
-                            history_open,
-                            true,
-                            sidebar_open,
-                            |view, window, cx| {
-                                let _ =
-                                    view.execute_native_action(NativeAction::Tree, "", window, cx);
-                            },
-                            cx,
-                        ))
-                        .child(sidebar_text_link(
-                            "export-session",
-                            "Export",
-                            false,
-                            export_enabled,
-                            sidebar_open,
-                            |view, window, cx| view.export_session(window, cx),
-                            cx,
-                        ))
+                        .gap(px(7.0))
+                        .child(
+                            div()
+                                .font_family(theme::main())
+                                .text_size(theme::text_size(theme::T_LABEL))
+                                .font_weight(FontWeight::BOLD)
+                                .text_color(theme::bone())
+                                .child("Threads"),
+                        )
+                        .child(
+                            div()
+                                .font_family(theme::mono())
+                                .text_size(theme::text_size(theme::T_TINY))
+                                .text_color(theme::smoke())
+                                .child(project_count.to_string()),
+                        )
                         .child(div().flex_1())
                         .child(sidebar_header_icon_button(
                             ChromeIconSpec {
@@ -1312,6 +1260,40 @@ pub(super) fn sessions_panel(
                             sidebar_open,
                             cx,
                         )),
+                )
+                .child(sidebar_new_thread_button(
+                    new_thread_enabled,
+                    sidebar_open,
+                    cx,
+                ))
+                .child(
+                    div()
+                        .h(px(26.0))
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(3.0))
+                        .child(sidebar_text_link(
+                            "toggle-history-inline",
+                            "History",
+                            history_open,
+                            true,
+                            sidebar_open,
+                            |view, window, cx| {
+                                let _ =
+                                    view.execute_native_action(NativeAction::Tree, "", window, cx);
+                            },
+                            cx,
+                        ))
+                        .child(sidebar_text_link(
+                            "export-session",
+                            "Export",
+                            false,
+                            export_enabled,
+                            sidebar_open,
+                            |view, window, cx| view.export_session(window, cx),
+                            cx,
+                        )),
                 ),
         )
         .when_some(
@@ -1341,7 +1323,7 @@ pub(super) fn sessions_panel(
                 .flex_1()
                 .min_h_0()
                 .relative()
-                .mt(px(2.0))
+                .mt(px(1.0))
                 .on_key_down(cx.listener(
                     |view: &mut RootView, event: &gpui::KeyDownEvent, window, cx| {
                         view.on_workspace_tree_key(event, window, cx);
@@ -1392,9 +1374,9 @@ pub(super) fn sessions_panel(
                         .scrollbar_width(px(theme::SCROLLBAR))
                         .track_scroll(scroll)
                         .w_full()
-                        .px(px(8.0))
-                        .pt(px(4.0))
-                        .pb(px(10.0))
+                        .px(px(6.0))
+                        .pt(px(2.0))
+                        .pb(px(6.0))
                         .flex()
                         .flex_col()
                         .when(rows.is_empty(), |list| {
@@ -1404,42 +1386,34 @@ pub(super) fn sessions_panel(
                 ),
         )
         .child(
-            // Bottom zone as an inset plate: the surface edge separates it
-            // from the scrolling list instead of another hairline rule.
             div()
+                .h(px(34.0))
                 .px(px(SIDE_PAD))
-                .pt(px(4.0))
-                .pb(px(8.0))
                 .flex_shrink_0()
+                .border_t_1()
+                .border_color(theme::edge_soft())
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(7.0))
                 .child(
                     div()
-                        .h(px(34.0))
-                        .px(px(10.0))
-                        .rounded(px(theme::RADIUS_MD))
-                        .bg(theme::panel())
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(8.0))
-                        .child(
-                            div()
-                                .min_w_0()
-                                .flex_1()
-                                .font_family(theme::mono())
-                                .text_size(theme::text_size(theme::T_TINY))
-                                .text_color(theme::smoke())
-                                .overflow_hidden()
-                                .text_ellipsis()
-                                .whitespace_nowrap()
-                                .child(short_path(&active_path.to_string_lossy())),
-                        )
-                        .child(sidebar_remove_project_button(
-                            can_remove_active,
-                            active_path,
-                            sidebar_open,
-                            cx,
-                        )),
-                ),
+                        .min_w_0()
+                        .flex_1()
+                        .font_family(theme::mono())
+                        .text_size(theme::text_size(theme::T_TINY))
+                        .text_color(theme::smoke())
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .whitespace_nowrap()
+                        .child(short_path(&active_path.to_string_lossy())),
+                )
+                .child(sidebar_remove_project_button(
+                    can_remove_active,
+                    active_path,
+                    sidebar_open,
+                    cx,
+                )),
         )
 }
 
@@ -1545,7 +1519,7 @@ fn sidebar_header_icon_button(
         .flex()
         .items_center()
         .justify_center()
-        .rounded_full()
+        .rounded(px(theme::RADIUS_SM))
         .border_1()
         .border_color(gpui::rgba(0x0000_0000))
         .text_color(icon_color)
@@ -1570,8 +1544,8 @@ fn sidebar_header_icon_button(
         .child(svg().path(icon_path).size(px(13.0)))
 }
 
-/// First line of the rail: the workhorse secondary pill. Flat surface fill,
-/// hover lifts one step; the accent stays out of chrome.
+/// Primary workspace action. It spans the rail for a reliable hit target,
+/// while the subdued surface keeps project rows visually dominant.
 fn sidebar_new_thread_button(
     enabled: bool,
     sidebar_open: bool,
@@ -1579,14 +1553,14 @@ fn sidebar_new_thread_button(
 ) -> impl IntoElement {
     div()
         .id("new-session")
-        .h(px(30.0))
+        .h(px(32.0))
         .w_full()
+        .px(px(10.0))
         .flex()
         .flex_row()
         .items_center()
-        .justify_center()
-        .gap(px(7.0))
-        .rounded_full()
+        .gap(px(8.0))
+        .rounded(px(theme::RADIUS_SM))
         .border_1()
         .border_color(gpui::rgba(0x0000_0000))
         .bg(if enabled {
@@ -1605,7 +1579,7 @@ fn sidebar_new_thread_button(
                 .cursor_pointer()
                 .hover(|button| button.bg(theme::panel_lift()))
                 .focus(|button| button.border_color(theme::focus()))
-                .active(|button| button.bg(theme::panel_hover()))
+                .active(|button| button.bg(theme::panel()))
                 .tooltip(controls::text_tooltip("New thread", Some("/new")))
                 .on_click(cx.listener(|view, _, window, cx| {
                     let _ = view.execute_native_action(NativeAction::NewSession, "", window, cx);
@@ -1633,8 +1607,16 @@ fn sidebar_new_thread_button(
             div()
                 .font_family(theme::sans())
                 .text_size(theme::text_size(theme::T_UI_SM))
-                .font_weight(FontWeight::MEDIUM)
+                .font_weight(FontWeight::SEMIBOLD)
                 .child("New thread"),
+        )
+        .child(div().flex_1())
+        .child(
+            div()
+                .font_family(theme::mono())
+                .text_size(theme::text_size(theme::T_TINY))
+                .text_color(theme::smoke())
+                .child("/new"),
         )
 }
 
@@ -1649,9 +1631,9 @@ fn sidebar_text_link(
 ) -> impl IntoElement {
     div()
         .id(id.into())
-        .h(px(24.0))
+        .h(px(26.0))
         .px(px(9.0))
-        .rounded_full()
+        .rounded(px(theme::RADIUS_SM))
         .border_1()
         .border_color(gpui::rgba(0x0000_0000))
         .flex()
@@ -1704,12 +1686,12 @@ fn sidebar_text_link(
 
 /// Row metrics for the flattened workspace tree. Siblings sit 2px apart so
 /// each rounded row reads as its own surface; project groups get a wider beat.
-const PROJECT_ROW_H: f32 = 30.0;
-const TREE_ROW_H: f32 = 30.0;
-const TREE_ROW_GAP: f32 = 2.0;
-const TREE_GROUP_GAP: f32 = 12.0;
+const PROJECT_ROW_H: f32 = 28.0;
+const TREE_ROW_H: f32 = 28.0;
+const TREE_ROW_GAP: f32 = 1.0;
+const TREE_GROUP_GAP: f32 = 8.0;
 /// Left inset where thread/child content starts, past the chevron column.
-const TREE_INDENT: f32 = 20.0;
+const TREE_INDENT: f32 = 18.0;
 
 /// Keyboard-only focus edge. Selection is a fill; a pointer-parked cursor
 /// must not draw a box around every active row.
@@ -1774,10 +1756,10 @@ fn project_row(params: ProjectRowParams, cx: &mut Context<RootView>) -> AnyEleme
         .mt(px(top_gap))
         .pl(px(4.0))
         .pr(px(8.0))
-        .rounded(px(theme::RADIUS_MD))
+        .rounded(px(theme::RADIUS_SM))
         .border_1()
         .border_color(row_border)
-        .bg(gpui::rgba(0x0000_0000))
+        .bg(if active { theme::panel() } else { gpui::rgba(0x0000_0000) })
         .cursor_pointer()
         .flex()
         .flex_row()
@@ -2229,7 +2211,9 @@ fn project_thread_row(
         session.id
     ));
 
-    let row_bg = if selected || hovered {
+    let row_bg = if selected {
+        theme::panel_lift()
+    } else if hovered {
         theme::panel()
     } else {
         gpui::rgba(0x0000_0000)
@@ -2244,7 +2228,7 @@ fn project_thread_row(
         .pl(px(TREE_INDENT))
         .pr(px(8.0))
         .relative()
-        .rounded(px(theme::RADIUS_MD))
+        .rounded(px(theme::RADIUS_SM))
         .border_1()
         .border_color(row_border)
         .bg(row_bg)

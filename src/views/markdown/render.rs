@@ -71,6 +71,7 @@ pub(in crate::views) fn render_document(
     let element =
         div()
             .w_full()
+            .min_w_0()
             .flex()
             .flex_col()
             .gap(px(BLOCK_GAP))

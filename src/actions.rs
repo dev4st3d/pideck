@@ -16,6 +16,7 @@ actions!(
         ActivateRecovery,
         FocusNext,
         FocusPrevious,
+        FocusComposer,
         ComposerBackspace,
         ComposerDeleteWordBackward,
         ComposerDelete,

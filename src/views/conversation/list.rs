@@ -11,7 +11,7 @@ use super::{
 };
 use crate::controller::ConversationProjection;
 use crate::services::git_diff::WorkspaceDiff;
-use crate::state::runtime::{FacetStatus, MessageRole};
+use crate::state::runtime::{FacetStatus, MessageRole, RuntimeLifecycle};
 use crate::theme;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -167,9 +167,11 @@ impl ConversationListModel {
             return div().into_any_element();
         };
         match item {
-            ConversationItem::Header => {
-                header(self.turn_count + projection.accepted_user_inputs.len()).into_any_element()
-            }
+            ConversationItem::Header => header(
+                self.turn_count + projection.accepted_user_inputs.len(),
+                projection,
+            )
+            .into_any_element(),
             ConversationItem::Preamble { message_index, key } => {
                 let fingerprint = BandFingerprint::capture(
                     projection,
@@ -225,8 +227,6 @@ impl ConversationListModel {
                     disclosures: &stream.disclosures,
                     root: &stream.diff_summary.root,
                 };
-                let links_above = item_index > 0
-                    && matches!(self.items[item_index - 1], ConversationItem::Turn { .. });
                 let links_below = match self.items.get(item_index + 1) {
                     Some(ConversationItem::Turn { .. }) => true,
                     Some(ConversationItem::Trailing) => !projection.accepted_user_inputs.is_empty(),
@@ -238,7 +238,6 @@ impl ConversationListModel {
                         &projection.messages[*user_index],
                         &model,
                         &render,
-                        links_above,
                         links_below,
                         cx,
                     )
@@ -248,44 +247,62 @@ impl ConversationListModel {
             ConversationItem::Trailing => {
                 let texts =
                     super::cached_optimistic_texts(projection, &stream.transcript_cache, cx);
-                let connects_above = item_index > 0
-                    && matches!(self.items[item_index - 1], ConversationItem::Turn { .. });
-                trailing(
-                    projection,
-                    self.turn_count,
-                    connects_above,
-                    &texts,
-                    stream,
-                    cx,
-                )
-                .into_any_element()
+                trailing(projection, self.turn_count, &texts, stream, cx).into_any_element()
             }
         }
     }
 }
 
-fn header(turn_count: usize) -> impl IntoElement {
-    stream_gutter().pb(px(20.0)).child(
+fn header(turn_count: usize, projection: &ConversationProjection) -> impl IntoElement {
+    let (status, status_color) = conversation_status(projection);
+    let pending = projection.accepted_user_inputs.len();
+    stream_gutter().pt(px(2.0)).pb(px(14.0)).child(
         div()
             .w_full()
+            .h(px(28.0))
             .flex()
-            .flex_col()
-            .gap(px(10.0))
+            .flex_row()
+            .items_center()
+            .justify_between()
+            .gap(px(12.0))
             .child(
                 div()
-                    .w_full()
+                    .min_w_0()
                     .flex()
                     .flex_row()
-                    .items_baseline()
-                    .justify_between()
+                    .items_center()
+                    .gap(px(7.0))
+                    .child(div().size(px(5.0)).rounded_full().bg(status_color))
                     .child(
                         div()
+                            .min_w_0()
                             .font_family(theme::sans())
-                            .text_size(theme::text_size(theme::T_TINY))
-                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_size(theme::text_size(theme::T_UI_SM))
+                            .font_weight(FontWeight::MEDIUM)
                             .text_color(theme::ash())
-                            .child("Thread"),
-                    )
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .whitespace_nowrap()
+                            .child(status),
+                    ),
+            )
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(10.0))
+                    .when(pending > 0, |meta| {
+                        meta.child(
+                            div()
+                                .font_family(theme::mono())
+                                .text_size(theme::text_size(theme::T_TINY))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(theme::data())
+                                .child(format!("{pending} queued")),
+                        )
+                    })
                     .child(
                         div()
                             .font_family(theme::mono())
@@ -296,9 +313,23 @@ fn header(turn_count: usize) -> impl IntoElement {
                                 if turn_count == 1 { "" } else { "s" }
                             )),
                     ),
-            )
-            .child(div().w_full().h(px(1.0)).bg(theme::edge_soft())),
+            ),
     )
+}
+
+fn conversation_status(projection: &ConversationProjection) -> (&'static str, gpui::Rgba) {
+    if projection.pending_operation.is_some() {
+        return ("Applying action", theme::data());
+    }
+    match projection.lifecycle {
+        RuntimeLifecycle::Loading => ("Loading session", theme::data()),
+        RuntimeLifecycle::Ready => ("Ready", theme::live()),
+        RuntimeLifecycle::Running => ("Agent working", theme::working()),
+        RuntimeLifecycle::Cancelling => ("Stopping", theme::data()),
+        RuntimeLifecycle::Settled => ("Up to date", theme::live()),
+        RuntimeLifecycle::Disconnected => ("Disconnected", theme::error()),
+        RuntimeLifecycle::Failed => ("Needs attention", theme::error()),
+    }
 }
 
 fn row(content: AnyElement) -> AnyElement {
@@ -316,14 +347,15 @@ fn turn_row(content: AnyElement) -> AnyElement {
 
 /// Keep stream chrome clear of the side rails. Padding lives on each list item
 /// because GPUI `List` does not reliably inset item widths from container `px`.
+/// `min_w_0` lets the item shrink to the list width so unbreakable runs scroll
+/// inside the transcript instead of pushing the column off the left edge.
 fn stream_gutter() -> gpui::Div {
-    div().w_full().px(px(theme::STREAM_PAD_X))
+    div().w_full().min_w_0().px(px(theme::STREAM_PAD_X))
 }
 
 fn trailing(
     projection: &ConversationProjection,
     completed_turns: usize,
-    connects_above: bool,
     texts: &HashMap<String, Entity<TranscriptText>>,
     stream: &ConversationStreamEntities,
     cx: &mut App,
@@ -337,8 +369,8 @@ fn trailing(
     let tail = super::tail_activity(&render, &stream.band_cache, cx);
     let has_tail = tail.is_some();
     let input_count = projection.accepted_user_inputs.len();
-    // Pending prompts and the live tail form one chain on the rail: a queued
-    // or steering prompt keeps the thread alive while work streams below it.
+    // Pending prompts stay in the same reading flow as live activity so queued
+    // and steering inputs never disappear behind the composer.
     let has_chain = input_count > 0 || has_tail;
     stream_gutter()
         .flex()
@@ -352,14 +384,7 @@ fn trailing(
                     .flex_col()
                     .children(projection.accepted_user_inputs.iter().enumerate().map(
                         |(index, input)| {
-                            let continues = index + 1 < input_count || has_tail;
-                            super::optimistic_turn(
-                                completed_turns + index + 1,
-                                input,
-                                texts,
-                                connects_above || index > 0,
-                                continues,
-                            )
+                            super::optimistic_turn(completed_turns + index + 1, input, texts)
                         },
                     ))
                     .when_some(tail, |chain, activity| chain.child(activity)),

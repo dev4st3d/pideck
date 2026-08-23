@@ -1,7 +1,6 @@
-//! The prompt dock: a softly rounded, elevated surface that carries the
-//! composer input on top and one quiet control tray underneath (model and
-//! thinking selects left, status in the middle, tools and the submit orb at
-//! the right).
+//! Compact message editor dock inspired by Zed's flat agent composer: the
+//! editor and its context controls form one restrained surface, with popovers
+//! layered above instead of inflating workspace layout.
 
 use super::model_panels::{model_switcher_sheet, thinking_select_sheet};
 use super::overlays::{
@@ -13,7 +12,8 @@ use crate::views::composer::ComposerFeedback;
 use gpui::{SharedString, rgba};
 
 /// One vertical rhythm for every control in the prompt tray.
-const TRAY_CONTROL_H: f32 = 28.0;
+const TRAY_CONTROL_H: f32 = 26.0;
+const SUBMIT_CONTROL_H: f32 = 30.0;
 
 fn clear() -> gpui::Rgba {
     rgba(0x0000_0000)
@@ -128,15 +128,20 @@ pub(super) fn composer_bar(
     let follow_composer = composer.clone();
 
     div()
+        .w_full()
         .flex_shrink_0()
         .px(px(theme::STREAM_PAD_X))
-        .pt(px(10.0))
-        .pb(px(14.0))
+        .pt(px(5.0))
+        .pb(px(6.0))
+        .bg(theme::floor())
+        .border_t_1()
+        .border_color(theme::edge_soft())
         // Overlay host: popups are absolute and must not grow this bar's layout height.
         .relative()
         .child(
             div()
                 .w_full()
+                .min_w_0()
                 .relative()
                 .when_some(slash_completion, |host, completion| {
                     host.child(
@@ -145,7 +150,7 @@ pub(super) fn composer_bar(
                             .left_0()
                             .right_0()
                             .bottom_full()
-                            .pb(px(10.0))
+                            .pb(px(6.0))
                             .occlude()
                             .flex()
                             .justify_center()
@@ -164,7 +169,7 @@ pub(super) fn composer_bar(
                             .left_0()
                             .right_0()
                             .bottom_full()
-                            .pb(px(10.0))
+                            .pb(px(6.0))
                             .occlude()
                             .flex()
                             .justify_center()
@@ -184,7 +189,7 @@ pub(super) fn composer_bar(
                             .left_0()
                             .right_0()
                             .bottom_full()
-                            .pb(px(10.0))
+                            .pb(px(6.0))
                             .occlude()
                             .flex()
                             .justify_center()
@@ -208,15 +213,14 @@ pub(super) fn composer_bar(
                     div()
                         .flex()
                         .flex_col()
-                        .rounded(px(theme::RADIUS_XL))
+                        .rounded(px(theme::RADIUS_LG))
                         .border_1()
                         .border_color(if card_active {
-                            theme::focus()
+                            theme::edge_hard()
                         } else {
                             theme::edge()
                         })
                         .bg(theme::panel())
-                        .shadow(theme::dock_shadow())
                         .overflow_hidden()
                         .can_drop(move |value, _, _| can_attach && value.is::<ExternalPaths>())
                         .drag_over::<ExternalPaths>(|style, _, _, _| {
@@ -225,18 +229,25 @@ pub(super) fn composer_bar(
                         .on_drop(cx.listener(|view, paths: &ExternalPaths, _, cx| {
                             view.attach_dropped_paths(paths.paths(), cx);
                         }))
-                        .when(
-                            extension_ui.widgets.iter().any(|(_, widget)| {
-                                widget.placement == WidgetPlacement::AboveEditor
-                            }),
-                            |panel| {
-                                panel.child(extension_widgets(
-                                    extension_ui,
-                                    WidgetPlacement::AboveEditor,
-                                ))
-                            },
+                        .child(
+                            div()
+                                .w_full()
+                                .flex()
+                                .flex_col()
+                                .bg(theme::panel())
+                                .when(
+                                    extension_ui.widgets.iter().any(|(_, widget)| {
+                                        widget.placement == WidgetPlacement::AboveEditor
+                                    }),
+                                    |editor| {
+                                        editor.child(extension_widgets(
+                                            extension_ui,
+                                            WidgetPlacement::AboveEditor,
+                                        ))
+                                    },
+                                )
+                                .child(composer.clone()),
                         )
-                        .child(composer.clone())
                         // Bottom tray: context selects left, one status line in
                         // the middle, tools and the submit orb at the right.
                         .child(
@@ -244,23 +255,26 @@ pub(super) fn composer_bar(
                                 .flex()
                                 .flex_row()
                                 .items_center()
-                                .gap(px(8.0))
-                                .px(px(10.0))
-                                .pb(px(10.0))
-                                .pt(px(2.0))
+                                .min_h(px(38.0))
+                                .gap(px(6.0))
+                                .px(px(8.0))
+                                .py(px(5.0))
+                                .border_t_1()
+                                .border_color(theme::edge_soft())
+                                .bg(theme::panel())
                                 .child(
                                     div()
                                         .flex()
                                         .flex_row()
                                         .items_center()
-                                        .gap(px(4.0))
+                                        .gap(px(2.0))
                                         .flex_shrink_0()
                                         .child(tray_select(
                                             "prompt-model-picker",
                                             model_label,
                                             model_open,
                                             can_pick_model,
-                                            148.0,
+                                            136.0,
                                             "Switch model",
                                             Box::new(cx.listener(|view, _, window, cx| {
                                                 view.toggle_model_panel(
@@ -275,7 +289,7 @@ pub(super) fn composer_bar(
                                             thinking_label,
                                             thinking_open,
                                             can_pick_thinking,
-                                            108.0,
+                                            94.0,
                                             "Thinking effort",
                                             Box::new(cx.listener(|view, _, window, cx| {
                                                 view.toggle_model_panel(
@@ -397,7 +411,7 @@ pub(super) fn composer_bar(
                                                 }),
                                             ))
                                         })
-                                        .child(div().w(px(4.0)))
+                                        .child(div().w(px(2.0)))
                                         .child(submit_orb(
                                             "prompt-submit",
                                             running,
@@ -443,16 +457,16 @@ fn tray_select(
         .id(id.into())
         .h(px(TRAY_CONTROL_H))
         .max_w(px(max_width))
-        .px(px(9.0))
-        .rounded(px(theme::RADIUS_MD))
+        .px(px(7.0))
+        .rounded(px(theme::RADIUS_SM))
         .flex()
         .flex_row()
         .items_center()
         .gap(px(5.0))
         .flex_shrink_0()
-        .bg(if open { theme::panel_lift() } else { clear() })
+        .bg(if open { theme::panel_hover() } else { clear() })
         .border_1()
-        .border_color(if open { theme::edge() } else { clear() })
+        .border_color(if open { theme::edge_hard() } else { clear() })
         .text_color(if !enabled {
             theme::smoke()
         } else if open {
@@ -464,8 +478,8 @@ fn tray_select(
             button
                 .tab_index(0)
                 .cursor_pointer()
-                .hover(|button| button.bg(theme::panel_lift()).text_color(theme::bone()))
-                .focus(|button| button.border_color(theme::focus()))
+                .hover(|button| button.bg(theme::panel_hover()).text_color(theme::bone()))
+                .focus(|button| button.bg(theme::panel_hover()).border_color(theme::focus()))
                 .active(|button| button.bg(theme::panel_hover()))
                 .on_click(move |event, window, cx| on_click(event, window, cx))
         })
@@ -509,13 +523,19 @@ fn tray_icon(
     div()
         .id(id.into())
         .size(px(TRAY_CONTROL_H))
-        .rounded(px(theme::RADIUS_MD))
+        .rounded(px(theme::RADIUS_SM))
         .flex()
         .items_center()
         .justify_center()
         .flex_shrink_0()
         .bg(if selected {
-            theme::panel_lift()
+            theme::panel_hover()
+        } else {
+            clear()
+        })
+        .border_1()
+        .border_color(if selected {
+            theme::edge_hard()
         } else {
             clear()
         })
@@ -529,7 +549,7 @@ fn tray_icon(
                 .tab_index(0)
                 .cursor_pointer()
                 .hover(|button| button.bg(theme::panel_lift()).text_color(theme::bone_dim()))
-                .focus(|button| button.text_color(theme::focus()))
+                .focus(|button| button.bg(theme::panel_hover()).text_color(theme::focus()))
                 .active(|button| button.bg(theme::panel_hover()))
                 .on_click(move |event, window, cx| on_click(event, window, cx))
         })
@@ -558,8 +578,8 @@ fn tray_quiet_action(
     div()
         .id(id.into())
         .h(px(TRAY_CONTROL_H))
-        .px(px(9.0))
-        .rounded(px(theme::RADIUS_MD))
+        .px(px(7.0))
+        .rounded(px(theme::RADIUS_SM))
         .flex()
         .items_center()
         .flex_shrink_0()
@@ -593,12 +613,18 @@ fn submit_orb(
 ) -> impl IntoElement {
     div()
         .id(id.into())
-        .size(px(TRAY_CONTROL_H))
-        .rounded_full()
+        .size(px(SUBMIT_CONTROL_H))
+        .rounded(px(theme::RADIUS_MD))
         .flex()
         .items_center()
         .justify_center()
         .flex_shrink_0()
+        .border_1()
+        .border_color(if can_submit {
+            theme::signal_hot()
+        } else {
+            theme::edge()
+        })
         .bg(if can_submit {
             theme::signal()
         } else {
@@ -624,7 +650,7 @@ fn submit_orb(
         .child(
             svg()
                 .path("icons/arrow-up.svg")
-                .size(px(13.0))
+                .size(px(15.0))
                 .text_color(if can_submit {
                     theme::canvas()
                 } else {

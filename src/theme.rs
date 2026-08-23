@@ -337,24 +337,24 @@ pub fn mono() -> SharedString {
     fonts::family(FontRole::Mono)
 }
 
-// Layout. 4px rhythm. Chrome recedes; the transcript and prompt dock
-// keep the widest measure and the softest corners.
+// Layout follows the same density principles as Zed's editor panels: narrow
+// chrome, a full-bleed reading column, and small radii reserved for real surfaces.
 pub const SIDE_W: f32 = 252.0;
-pub const HISTORY_W: f32 = 288.0;
-pub const INSPECT_W: f32 = 312.0;
-pub const TITLE_H: f32 = 44.0;
-/// Default hit target for titlebar and rail icon buttons (Fitts).
-pub const CHROME: f32 = 32.0;
-pub const RADIUS: f32 = 6.0;
-pub const RADIUS_SM: f32 = 4.0;
-/// Nested controls inside a dock or sheet.
-pub const RADIUS_MD: f32 = 8.0;
-/// Floating sheets and the inspector companion.
-pub const RADIUS_LG: f32 = 12.0;
-/// Prompt dock — the largest surface, so it owns the softest corner.
-pub const RADIUS_XL: f32 = 16.0;
-pub const PAD_X: f32 = 16.0;
-pub const STREAM_PAD_X: f32 = 40.0;
+pub const HISTORY_W: f32 = 276.0;
+pub const INSPECT_W: f32 = 360.0;
+pub const TITLE_H: f32 = 40.0;
+/// Compact titlebar and panel hit target. The visual glyph stays 13–14px.
+pub const CHROME: f32 = 28.0;
+pub const RADIUS: f32 = 5.0;
+pub const RADIUS_SM: f32 = 3.0;
+/// Nested controls inside a panel.
+pub const RADIUS_MD: f32 = 5.0;
+/// Popovers and detached sheets.
+pub const RADIUS_LG: f32 = 7.0;
+/// Largest surface radius; intentionally restrained.
+pub const RADIUS_XL: f32 = 9.0;
+pub const PAD_X: f32 = 10.0;
+pub const STREAM_PAD_X: f32 = 24.0;
 pub const SCROLLBAR: f32 = 6.0;
 
 // Type scale
@@ -407,16 +407,16 @@ pub fn text_size(base_pixels: f32) -> Rems {
     rems(base_pixels / DEFAULT_REM_SIZE)
 }
 
-pub const T_WORDMARK: f32 = 17.0;
-pub const T_TITLE: f32 = 15.0;
-pub const T_BODY: f32 = 15.5;
-pub const T_BODY_SM: f32 = 14.5;
-pub const T_UI: f32 = 14.0;
-pub const T_UI_SM: f32 = 13.0;
-pub const T_LABEL: f32 = 12.0;
-pub const T_MONO: f32 = 12.0;
-pub const T_MONO_SM: f32 = 11.5;
-pub const T_TINY: f32 = 11.0;
+pub const T_WORDMARK: f32 = 15.0;
+pub const T_TITLE: f32 = 14.0;
+pub const T_BODY: f32 = 14.5;
+pub const T_BODY_SM: f32 = 13.5;
+pub const T_UI: f32 = 13.0;
+pub const T_UI_SM: f32 = 12.5;
+pub const T_LABEL: f32 = 11.5;
+pub const T_MONO: f32 = 11.5;
+pub const T_MONO_SM: f32 = 11.0;
+pub const T_TINY: f32 = 10.5;
 
 struct Palette {
     canvas: u32,
@@ -448,31 +448,31 @@ struct Palette {
 
 // The original application palette, now named PiDeck Dark.
 const PIDECK_DARK: Palette = Palette {
-    canvas: 0x0b0a09ff,
-    floor: 0x12100eff,
-    panel: 0x1a1714ff,
-    panel_lift: 0x221e1aff,
-    panel_hover: 0x2a241fff,
-    user_message: 0x2c241eff,
-    user_message_edge: 0xc75a3866,
-    edge: 0xebe4d618,
-    edge_hard: 0xebe4d62c,
-    edge_soft: 0xebe4d612,
-    bone: 0xefe7d8ff,
-    bone_dim: 0xbbb2a2ff,
-    ash: 0x9a9082ff,
-    smoke: 0x847b70ff,
-    signal: 0xc75a38ff,
-    signal_deep: 0x8a3f28ff,
-    signal_hot: 0xd46a48ff,
-    focus: 0xffd39aff,
-    error: 0xe18263ff,
-    error_wash: 0xe1826314,
-    live: 0xc5d2a8ff,
-    live_wash: 0xc5d2a812,
-    working: 0x78a9d1ff,
-    data: 0xe0b07aff,
-    data_wash: 0xe0b07a16,
+    canvas: 0x0c0c0fff,
+    floor: 0x101013ff,
+    panel: 0x151519ff,
+    panel_lift: 0x1b1b20ff,
+    panel_hover: 0x202026ff,
+    user_message: 0x1a1b20ff,
+    user_message_edge: 0x7183a14a,
+    edge: 0xf2f2f316,
+    edge_hard: 0xf2f2f32b,
+    edge_soft: 0xf2f2f30f,
+    bone: 0xeeeeefff,
+    bone_dim: 0xb9bac1ff,
+    ash: 0x92939cff,
+    smoke: 0x686973ff,
+    signal: 0x7183a1ff,
+    signal_deep: 0x586985ff,
+    signal_hot: 0x8496b5ff,
+    focus: 0x91a2c0ff,
+    error: 0xe66b7dff,
+    error_wash: 0xe66b7d18,
+    live: 0x70b78aff,
+    live_wash: 0x70b78a16,
+    working: 0x78a2c8ff,
+    data: 0xc7a96dff,
+    data_wash: 0xc7a96d16,
 };
 
 // Cursor Dark by Nexmoe, adapted onto a deeper PiDeck-like neutral base with
@@ -569,31 +569,33 @@ const INK_HARBOR: Palette = Palette {
 // Graphite garage under a sodium lamp. Warm grey type and one dim amber
 // signal; industrial night kept tonal instead of electric.
 const VOLT_WORKSHOP: Palette = Palette {
-    canvas: 0x0a0908ff,
-    floor: 0x100f0eff,
-    panel: 0x181716ff,
-    panel_lift: 0x21201eff,
-    panel_hover: 0x2a2927ff,
-    user_message: 0x2e2c29ff,
-    user_message_edge: 0xc4a06a66,
-    edge: 0xe8e6de1e,
-    edge_hard: 0xe8e6de30,
-    edge_soft: 0xe8e6de14,
-    bone: 0xefeee9ff,
-    bone_dim: 0xbebdb5ff,
-    ash: 0x9a998fff,
-    smoke: 0x74736bff,
-    signal: 0xc4a06aff,
-    signal_deep: 0xa07e50ff,
-    signal_hot: 0xd2b180ff,
-    focus: 0xe0cba4ff,
-    error: 0xd47a6aff,
-    error_wash: 0xd47a6a14,
-    live: 0x8cae7fff,
-    live_wash: 0x8cae7f14,
-    working: 0x7c93a4ff,
-    data: 0xa89268ff,
-    data_wash: 0xa8926816,
+    // Kept under the legacy settings key, but rebuilt as a neutral graphite
+    // workspace. Amber survives only as an accent; it no longer tints panels.
+    canvas: 0x0c0c0eff,
+    floor: 0x101012ff,
+    panel: 0x161618ff,
+    panel_lift: 0x1c1c20ff,
+    panel_hover: 0x222226ff,
+    user_message: 0x1b1b1fff,
+    user_message_edge: 0xa88e6252,
+    edge: 0xf0f0ed17,
+    edge_hard: 0xf0f0ed2c,
+    edge_soft: 0xf0f0ed10,
+    bone: 0xefefecff,
+    bone_dim: 0xbdbdb7ff,
+    ash: 0x94948eff,
+    smoke: 0x6f6f69ff,
+    signal: 0xa88e62ff,
+    signal_deep: 0x846e4cff,
+    signal_hot: 0xbba274ff,
+    focus: 0xc4ae83ff,
+    error: 0xdf7068ff,
+    error_wash: 0xdf706818,
+    live: 0x78ae82ff,
+    live_wash: 0x78ae8216,
+    working: 0x7796b2ff,
+    data: 0xb99a65ff,
+    data_wash: 0xb99a6516,
 };
 
 // Aubergine-black archive. Mauve-grey paper, a dusty mauve signal and
@@ -1383,12 +1385,12 @@ mod tests {
     }
 
     #[test]
-    fn pideck_dark_preserves_the_original_palette() {
-        assert_eq!(PIDECK_DARK.canvas, 0x0b0a09ff);
-        assert_eq!(PIDECK_DARK.floor, 0x12100eff);
-        assert_eq!(PIDECK_DARK.user_message, 0x2c241eff);
-        assert_eq!(PIDECK_DARK.bone, 0xefe7d8ff);
-        assert_eq!(PIDECK_DARK.signal, 0xc75a38ff);
+    fn pideck_dark_uses_the_graphite_workspace_palette() {
+        assert_eq!(PIDECK_DARK.canvas, 0x0c0c0fff);
+        assert_eq!(PIDECK_DARK.floor, 0x101013ff);
+        assert_eq!(PIDECK_DARK.user_message, 0x1a1b20ff);
+        assert_eq!(PIDECK_DARK.bone, 0xeeeeefff);
+        assert_eq!(PIDECK_DARK.signal, 0x7183a1ff);
     }
 
     #[test]
@@ -1521,7 +1523,7 @@ mod tests {
     fn unique_dark_themes_keep_distinct_accent_families() {
         assert_eq!(MOSS_FOUNDRY.signal, 0x8ba07aff);
         assert_eq!(INK_HARBOR.signal, 0x78a49eff);
-        assert_eq!(VOLT_WORKSHOP.signal, 0xc4a06aff);
+        assert_eq!(VOLT_WORKSHOP.signal, 0xa88e62ff);
         assert_eq!(PLUM_ARCHIVE.signal, 0xa98eb0ff);
         assert_eq!(SALT_FLAT.signal, 0x8fbcc2ff);
         assert_eq!(SAFFRON_LOOM.signal, 0xc08a4aff);
