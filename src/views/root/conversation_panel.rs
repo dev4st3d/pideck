@@ -291,17 +291,19 @@ pub(super) fn conversation_area(params: ConversationAreaParams) -> impl IntoElem
                 )
                 .when(!follow, |viewport| {
                     viewport.child(
+                        // Borderless translucent lift over the stream: the dock
+                        // shadow separates it from scrolling content, so no
+                        // outline or heavy label weight is needed.
                         div()
                             .id("conversation-jump-latest")
                             .absolute()
                             .right(px(12.0))
                             .bottom(px(10.0))
                             .h(px(28.0))
-                            .px(px(9.0))
-                            .rounded(px(theme::RADIUS_SM))
-                            .border_1()
-                            .border_color(theme::edge())
+                            .px(px(12.0))
+                            .rounded_full()
                             .bg(theme::panel_lift())
+                            .shadow(theme::dock_shadow())
                             .flex()
                             .flex_row()
                             .items_center()
@@ -310,12 +312,13 @@ pub(super) fn conversation_area(params: ConversationAreaParams) -> impl IntoElem
                             .tab_index(0)
                             .font_family(theme::main())
                             .text_size(theme::text_size(theme::T_UI_SM))
-                            .font_weight(FontWeight::SEMIBOLD)
                             .text_color(theme::bone_dim())
                             .hover(|button| {
                                 button.bg(theme::panel_hover()).text_color(theme::bone())
                             })
-                            .focus(|button| button.border_color(theme::focus()))
+                            .focus(|button| {
+                                button.bg(theme::panel_hover()).text_color(theme::bone())
+                            })
                             .active(|button| button.bg(theme::canvas()))
                             .on_click(move |_, _, cx| {
                                 jump_root.update(cx, |view, cx| view.jump_to_latest(cx));
@@ -324,9 +327,9 @@ pub(super) fn conversation_area(params: ConversationAreaParams) -> impl IntoElem
                                 svg()
                                     .path("icons/chevron-down.svg")
                                     .size(px(10.0))
-                                    .text_color(theme::data()),
+                                    .text_color(theme::ash()),
                             )
-                            .child("Jump to latest"),
+                            .child("Latest"),
                     )
                 }),
         )
@@ -405,7 +408,11 @@ impl RootView {
         cx.notify();
     }
 
-    pub(super) fn schedule_conversation_scroll_frame(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn schedule_conversation_scroll_frame(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if !self.conversation_scroll_motion.schedule_frame() {
             return;
         }
@@ -415,5 +422,4 @@ impl RootView {
             view.schedule_conversation_scroll_frame(window, cx);
         });
     }
-
 }

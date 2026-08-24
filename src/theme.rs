@@ -319,8 +319,6 @@ pub const TITLE_H: f32 = 40.0;
 pub const CHROME: f32 = 28.0;
 pub const RADIUS: f32 = 5.0;
 pub const RADIUS_SM: f32 = 3.0;
-/// Nested controls inside a panel.
-pub const RADIUS_MD: f32 = 5.0;
 /// Popovers and detached sheets.
 pub const RADIUS_LG: f32 = 7.0;
 pub const PAD_X: f32 = 10.0;

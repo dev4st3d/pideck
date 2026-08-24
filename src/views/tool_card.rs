@@ -43,10 +43,9 @@ pub(super) fn render_tool_presentation(items: &[ToolPresentation]) -> impl IntoE
     };
     let title = first.title(items.len());
     let status = group_status(items);
-    let marker = status_color(status);
-    // Elapsed and context-exclusion ride on each presentation; surface them
-    // while work is still in flight. Settled cards keep the quiet status
-    // label, with exact figures in the detail panel's metadata rows.
+    // Elapsed time rides only on work still in flight; settled durations live
+    // in the detail panel's metadata rows. Context exclusion stays visible on
+    // every card it applies to.
     let elapsed_ms = items
         .iter()
         .filter_map(|item| item.elapsed_ms)
@@ -98,26 +97,27 @@ pub(super) fn render_tool_presentation(items: &[ToolPresentation]) -> impl IntoE
                         .when(context_excluded, |row| {
                             row.child(meta_text("not in context".to_owned()))
                         })
-                        .child(
-                            div()
-                                .flex_shrink_0()
-                                .whitespace_nowrap()
-                                .font_family(theme::mono())
-                                .text_size(theme::text_size(theme::T_TINY))
-                                .text_color(marker)
-                                .child(status_label(status)),
-                        )
-                        .child(detail_hint()),
+                        // Settled successes carry no word: silence is the
+                        // success signal, echoed by the caller's neutral dot.
+                        .when_some(status_label(status), |row, label| {
+                            row.child(
+                                div()
+                                    .flex_shrink_0()
+                                    .whitespace_nowrap()
+                                    .font_family(theme::mono())
+                                    .text_size(theme::text_size(theme::T_TINY))
+                                    .text_color(status_color(status))
+                                    .child(label),
+                            )
+                        }),
                 ),
         )
-        .children(rows.iter().enumerate().map(|(index, row)| {
-            let branch = if index + 1 == rows.len() {
-                "└ "
-            } else {
-                "├ "
-            };
+        // Detail lines hang under the title; indentation alone carries the
+        // hierarchy, so no tree glyphs are drawn.
+        .children(rows.into_iter().map(|row| {
             div()
                 .w_full()
+                .pl(px(theme::PAD_X))
                 .flex()
                 .flex_row()
                 .items_baseline()
@@ -132,9 +132,9 @@ pub(super) fn render_tool_presentation(items: &[ToolPresentation]) -> impl IntoE
                         .text_size(theme::text_size(theme::T_MONO_SM))
                         .line_height(relative(1.4))
                         .text_color(theme::ash())
-                        .child(format!("{branch}{}", row.label)),
+                        .child(row.label),
                 )
-                .when_some(row.detail.clone(), |line, detail| {
+                .when_some(row.detail, |line, detail| {
                     line.child(
                         div()
                             .flex_shrink_0()
@@ -180,27 +180,17 @@ fn meta_text(text: String) -> impl IntoElement {
         .child(text)
 }
 
-/// Quiet text-only affordance; the wrapping step already signals clickability.
-fn detail_hint() -> impl IntoElement {
-    div()
-        .flex_shrink_0()
-        .whitespace_nowrap()
-        .font_family(theme::mono())
-        .text_size(theme::text_size(theme::T_TINY))
-        .font_weight(FontWeight::MEDIUM)
-        .text_color(theme::smoke())
-        .child("details ↗")
-}
-
-fn status_label(status: CardStatus) -> &'static str {
+/// Status words appear only where attention is needed; a settled success
+/// stays silent, so a missing word is itself the success signal.
+fn status_label(status: CardStatus) -> Option<&'static str> {
     match status {
-        CardStatus::Pending => "pending",
-        CardStatus::Running => "running",
-        CardStatus::Success => "done",
-        CardStatus::Error => "error",
-        CardStatus::Cancelled => "cancelled",
-        CardStatus::Cancelling => "cancelling",
-        CardStatus::Uncertain => "unknown",
+        CardStatus::Pending => Some("pending"),
+        CardStatus::Running => Some("running"),
+        CardStatus::Success => None,
+        CardStatus::Error => Some("error"),
+        CardStatus::Cancelled => Some("cancelled"),
+        CardStatus::Cancelling => Some("cancelling"),
+        CardStatus::Uncertain => Some("unknown"),
     }
 }
 

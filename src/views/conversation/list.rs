@@ -3,8 +3,7 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use gpui::{
-    AnyElement, App, Entity, FontWeight, IntoElement, ListState, SharedString, div, prelude::*,
-    px, relative,
+    AnyElement, App, Entity, IntoElement, ListState, SharedString, div, prelude::*, px, relative,
 };
 
 use super::{
@@ -12,18 +11,16 @@ use super::{
 };
 use crate::controller::ConversationProjection;
 use crate::services::git_diff::WorkspaceDiff;
-use crate::state::runtime::{FacetStatus, MessageRole, RuntimeLifecycle};
+use crate::state::runtime::{FacetStatus, MessageRole};
 use crate::theme;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ConversationItem {
-    Header,
     Preamble {
         message_index: usize,
         key: String,
     },
     Turn {
-        number: usize,
         user_index: usize,
         body: Range<usize>,
         key: String,
@@ -50,16 +47,14 @@ pub(in crate::views) struct ConversationStreamEntities {
 #[derive(Debug, Clone)]
 pub(in crate::views) struct ConversationListModel {
     items: Arc<Vec<ConversationItem>>,
-    turn_count: usize,
     revision: u64,
     message_structure_revision: u64,
 }
 
 impl ConversationListModel {
     pub(in crate::views) fn new(projection: &ConversationProjection) -> Self {
-        let mut items = vec![ConversationItem::Header];
+        let mut items = Vec::new();
         let mut message_index = 0;
-        let mut turn = 0;
         while message_index < projection.messages.len() {
             let message = &projection.messages[message_index];
             if message.role != MessageRole::User {
@@ -71,7 +66,6 @@ impl ConversationListModel {
                 continue;
             }
 
-            turn += 1;
             let user_index = message_index;
             message_index += 1;
             let body_start = message_index;
@@ -81,7 +75,6 @@ impl ConversationListModel {
                 message_index += 1;
             }
             items.push(ConversationItem::Turn {
-                number: turn,
                 user_index,
                 body: body_start..message_index,
                 key: projection.messages[user_index].key.0.clone(),
@@ -90,7 +83,6 @@ impl ConversationListModel {
         items.push(ConversationItem::Trailing);
         Self {
             items: Arc::new(items),
-            turn_count: turn,
             revision: projection.revision,
             message_structure_revision: projection.message_structure_revision,
         }
@@ -168,11 +160,6 @@ impl ConversationListModel {
             return div().into_any_element();
         };
         match item {
-            ConversationItem::Header => header(
-                self.turn_count + projection.accepted_user_inputs.len(),
-                projection,
-            )
-            .into_any_element(),
             ConversationItem::Preamble { message_index, key } => {
                 let fingerprint = BandFingerprint::capture(
                     projection,
@@ -202,7 +189,6 @@ impl ConversationListModel {
                 ))
             }
             ConversationItem::Turn {
-                number,
                 user_index,
                 body,
                 key,
@@ -235,7 +221,6 @@ impl ConversationListModel {
                 };
                 turn_row(
                     super::turn_card(
-                        *number,
                         &projection.messages[*user_index],
                         &model,
                         &render,
@@ -248,88 +233,9 @@ impl ConversationListModel {
             ConversationItem::Trailing => {
                 let texts =
                     super::cached_optimistic_texts(projection, &stream.transcript_cache, cx);
-                trailing(projection, self.turn_count, &texts, stream, cx).into_any_element()
+                trailing(projection, &texts, stream, cx).into_any_element()
             }
         }
-    }
-}
-
-fn header(turn_count: usize, projection: &ConversationProjection) -> impl IntoElement {
-    let (status, status_color) = conversation_status(projection);
-    let pending = projection.accepted_user_inputs.len();
-    stream_gutter().pt(px(2.0)).pb(px(14.0)).child(
-        div()
-            .w_full()
-            .h(px(28.0))
-            .flex()
-            .flex_row()
-            .items_center()
-            .justify_between()
-            .gap(px(12.0))
-            .child(
-                div()
-                    .min_w_0()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(7.0))
-                    .child(div().size(px(5.0)).rounded_full().bg(status_color))
-                    .child(
-                        div()
-                            .min_w_0()
-                            .font_family(theme::sans())
-                            .text_size(theme::text_size(theme::T_UI_SM))
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(theme::ash())
-                            .overflow_hidden()
-                            .text_ellipsis()
-                            .whitespace_nowrap()
-                            .child(status),
-                    ),
-            )
-            .child(
-                div()
-                    .flex_shrink_0()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(10.0))
-                    .when(pending > 0, |meta| {
-                        meta.child(
-                            div()
-                                .font_family(theme::mono())
-                                .text_size(theme::text_size(theme::T_TINY))
-                                .font_weight(FontWeight::MEDIUM)
-                                .text_color(theme::data())
-                                .child(format!("{pending} queued")),
-                        )
-                    })
-                    .child(
-                        div()
-                            .font_family(theme::mono())
-                            .text_size(theme::text_size(theme::T_TINY))
-                            .text_color(theme::smoke())
-                            .child(format!(
-                                "{turn_count} turn{}",
-                                if turn_count == 1 { "" } else { "s" }
-                            )),
-                    ),
-            ),
-    )
-}
-
-fn conversation_status(projection: &ConversationProjection) -> (&'static str, gpui::Rgba) {
-    if projection.pending_operation.is_some() {
-        return ("Applying action", theme::data());
-    }
-    match projection.lifecycle {
-        RuntimeLifecycle::Loading => ("Loading session", theme::data()),
-        RuntimeLifecycle::Ready => ("Ready", theme::live()),
-        RuntimeLifecycle::Running => ("Agent working", theme::working()),
-        RuntimeLifecycle::Cancelling => ("Stopping", theme::data()),
-        RuntimeLifecycle::Settled => ("Up to date", theme::live()),
-        RuntimeLifecycle::Disconnected => ("Disconnected", theme::error()),
-        RuntimeLifecycle::Failed => ("Needs attention", theme::error()),
     }
 }
 
@@ -356,7 +262,6 @@ fn stream_gutter() -> gpui::Div {
 
 fn trailing(
     projection: &ConversationProjection,
-    completed_turns: usize,
     texts: &HashMap<String, Entity<TranscriptText>>,
     stream: &ConversationStreamEntities,
     cx: &mut App,
@@ -383,11 +288,14 @@ fn trailing(
                     .w_full()
                     .flex()
                     .flex_col()
-                    .children(projection.accepted_user_inputs.iter().enumerate().map(
-                        |(index, input)| {
-                            super::optimistic_turn(completed_turns + index + 1, input, texts)
-                        },
-                    ))
+                    // Each pending input carries its own status caption, so a
+                    // queued count strip is unnecessary.
+                    .children(
+                        projection
+                            .accepted_user_inputs
+                            .iter()
+                            .map(|input| super::optimistic_turn(input, texts)),
+                    )
                     .when_some(tail, |chain, activity| chain.child(activity)),
             )
         })
@@ -442,9 +350,7 @@ mod tests {
     #[test]
     fn content_updates_preserve_an_anchor_inside_the_streaming_turn() {
         let items = Arc::new(vec![
-            ConversationItem::Header,
             ConversationItem::Turn {
-                number: 1,
                 user_index: 0,
                 body: 1..2,
                 key: "user:1".to_owned(),
@@ -453,26 +359,26 @@ mod tests {
         ]);
         let previous = ConversationListModel {
             items: Arc::clone(&items),
-            turn_count: 1,
             revision: 1,
             message_structure_revision: 1,
         };
         let current = ConversationListModel {
             items,
-            turn_count: 1,
             revision: 2,
             message_structure_revision: 1,
         };
-        let state = ListState::new(3, ListAlignment::Top, px(800.0));
+        // Two items: the streaming turn and trailing. The anchor sits mid-turn
+        // and must survive a same-structure revision splice untouched.
+        let state = ListState::new(2, ListAlignment::Top, px(800.0));
         state.scroll_to(ListOffset {
-            item_ix: 1,
+            item_ix: 0,
             offset_in_item: px(500.0),
         });
 
         current.reconcile(&previous, &state, false);
 
         let anchor = state.logical_scroll_top();
-        assert_eq!(anchor.item_ix, 1);
+        assert_eq!(anchor.item_ix, 0);
         assert_eq!(anchor.offset_in_item, px(500.0));
     }
 }

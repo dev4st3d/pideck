@@ -86,6 +86,10 @@ pub(super) enum MarkdownBlock {
     },
     Code {
         language: Option<String>,
+        /// Path-like token from the fence info line, when present: the fence
+        /// ```rust src/main.rs parses language "rust" and filename
+        /// "src/main.rs"; plain-language fences leave this empty.
+        filename: Option<String>,
         code: String,
     },
     Quote(Vec<MarkdownBlock>),
@@ -237,6 +241,7 @@ enum Frame {
 
 struct CodeSink {
     language: Option<String>,
+    filename: Option<String>,
     code: String,
 }
 
@@ -344,6 +349,7 @@ impl DocumentBuilder {
                 self.flush_prose();
                 self.push_block(MarkdownBlock::Code {
                     language: Some("math".to_owned()),
+                    filename: None,
                     code: text.trim().to_owned(),
                 });
             }
@@ -369,15 +375,13 @@ impl DocumentBuilder {
             }
             Tag::CodeBlock(kind) => {
                 self.flush_prose();
-                let language = match kind {
-                    CodeBlockKind::Fenced(language) => {
-                        let language = language.trim();
-                        (!language.is_empty()).then(|| language.to_owned())
-                    }
-                    CodeBlockKind::Indented => None,
+                let (language, filename) = match kind {
+                    CodeBlockKind::Fenced(info) => parse_fence_info(&info),
+                    CodeBlockKind::Indented => (None, None),
                 };
                 self.code = Some(CodeSink {
                     language,
+                    filename,
                     code: String::new(),
                 });
             }
@@ -444,6 +448,7 @@ impl DocumentBuilder {
                 if let Some(sink) = self.code.take() {
                     self.push_block(MarkdownBlock::Code {
                         language: sink.language,
+                        filename: sink.filename,
                         code: sink.code.trim_end_matches('\n').to_owned(),
                     });
                 }
@@ -622,6 +627,7 @@ impl DocumentBuilder {
             if !code.is_empty() {
                 self.current_blocks().push(MarkdownBlock::Code {
                     language: sink.language,
+                    filename: sink.filename,
                     code,
                 });
             }
@@ -674,6 +680,34 @@ fn trim_prose_end(prose: &mut ProseBlock) {
     for span in &mut prose.spans {
         span.range.end = span.range.end.min(prose.text.len());
     }
+}
+
+/// Fence-info grammar: the first token names the language and any later
+/// token shaped like a file path names the displayed file; remaining tokens
+/// (metadata flags, braces) are ignored. A leading path token means the
+/// fence named a file without a language.
+fn parse_fence_info(info: &str) -> (Option<String>, Option<String>) {
+    let mut tokens = info.split_whitespace();
+    let Some(first) = tokens.next() else {
+        return (None, None);
+    };
+    if looks_like_path(first) {
+        return (None, Some(first.to_owned()));
+    }
+    let filename = tokens
+        .find(|token| looks_like_path(token))
+        .map(str::to_owned);
+    (Some(first.to_owned()), filename)
+}
+
+/// Paths carry a segment separator or a `name.extension` shape; metadata
+/// like `{3}` or `title="x"` does not qualify.
+fn looks_like_path(token: &str) -> bool {
+    token.contains('/')
+        || matches!(
+            token.split_once('.'),
+            Some((stem, extension)) if !stem.is_empty() && !extension.is_empty()
+        )
 }
 
 fn normalize_cell(cell: &str) -> String {
@@ -751,9 +785,42 @@ mod tests {
 
         assert_eq!(document.blocks.len(), 3);
         match &document.blocks[1] {
-            MarkdownBlock::Code { language, code } => {
+            MarkdownBlock::Code {
+                language,
+                filename,
+                code,
+            } => {
                 assert_eq!(language.as_deref(), Some("rust"));
+                assert_eq!(filename.as_deref(), None);
                 assert_eq!(code, "fn main() {\n    println!(\"ok\");\n}");
+            }
+            block => panic!("expected code block, got {block:?}"),
+        }
+    }
+
+    #[test]
+    fn fence_info_extracts_language_and_filename() {
+        let document = MarkdownDocument::parse("```rust src/main.rs --release\nfn main() {}\n```");
+
+        match &document.blocks[0] {
+            MarkdownBlock::Code {
+                language, filename, ..
+            } => {
+                assert_eq!(language.as_deref(), Some("rust"));
+                assert_eq!(filename.as_deref(), Some("src/main.rs"));
+            }
+            block => panic!("expected code block, got {block:?}"),
+        }
+
+        // A leading path token means the fence named a file, not a language.
+        let document = MarkdownDocument::parse("```src/main.rs\nfn main() {}\n```");
+
+        match &document.blocks[0] {
+            MarkdownBlock::Code {
+                language, filename, ..
+            } => {
+                assert_eq!(language.as_deref(), None);
+                assert_eq!(filename.as_deref(), Some("src/main.rs"));
             }
             block => panic!("expected code block, got {block:?}"),
         }
@@ -765,8 +832,13 @@ mod tests {
 
         assert!(matches!(
             &document.blocks[1],
-            MarkdownBlock::Code { language, code }
-                if language.as_deref() == Some("ts") && code == "const answer = 42;"
+            MarkdownBlock::Code {
+                language,
+                filename,
+                code
+            } if language.as_deref() == Some("ts")
+                && filename.is_none()
+                && code == "const answer = 42;"
         ));
     }
 

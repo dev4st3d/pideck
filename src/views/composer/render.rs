@@ -86,7 +86,7 @@ impl Composer {
                             .px(px(10.0))
                             .py(px(field_padding_y))
                             .overflow_hidden()
-                            .rounded(px(theme::RADIUS_MD))
+                            .rounded(px(theme::RADIUS))
                             .border_1()
                             .border_color(if self.disabled {
                                 theme::edge_soft()
@@ -150,7 +150,7 @@ impl Composer {
                                 .h(px(32.0))
                                 .min_w(px(56.0))
                                 .px(px(10.0))
-                                .rounded(px(theme::RADIUS_MD))
+                                .rounded(px(theme::RADIUS))
                                 .flex()
                                 .items_center()
                                 .justify_center()
@@ -226,7 +226,11 @@ impl Composer {
             .px(px(input_padding_x))
             .py(px(input_padding_y))
             .overflow_hidden()
-            .text_size(theme::text_size(if panel { theme::T_BODY_SM } else { theme::T_BODY }))
+            .text_size(theme::text_size(if panel {
+                theme::T_BODY_SM
+            } else {
+                theme::T_BODY
+            }))
             .line_height(theme::text_size(input_line_height))
             .text_color(if self.disabled {
                 theme::smoke()
@@ -236,7 +240,7 @@ impl Composer {
 
         if panel {
             input = input
-                .rounded(px(theme::RADIUS_MD))
+                .rounded(px(theme::RADIUS))
                 .border_1()
                 .border_color(if self.disabled {
                     theme::edge_soft()
@@ -601,7 +605,7 @@ impl Composer {
             .h(px(ATTACHMENT_CHIP))
             .pl(px(8.0))
             .pr(px(6.0))
-            .rounded(px(theme::RADIUS_MD))
+            .rounded(px(theme::RADIUS))
             .border_1()
             .border_color(theme::edge_soft())
             .bg(theme::panel())
@@ -764,7 +768,7 @@ impl Composer {
             )))
             .relative()
             .size(px(ATTACHMENT_CHIP))
-            .rounded(px(theme::RADIUS_MD))
+            .rounded(px(theme::RADIUS))
             .border_1()
             .border_color(rgba(0x0000_0000))
             .tab_index(0)
@@ -789,7 +793,7 @@ impl Composer {
             .child(
                 div()
                     .size_full()
-                    .rounded(px(theme::RADIUS_MD))
+                    .rounded(px(theme::RADIUS))
                     .border_1()
                     .border_color(theme::edge_soft())
                     .bg(theme::panel())

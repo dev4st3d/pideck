@@ -838,7 +838,6 @@ struct ConversationRenderContext<'a> {
 }
 
 fn turn_card(
-    number: usize,
     user: &RuntimeMessage,
     model: &StreamBandModel,
     render: &ConversationRenderContext<'_>,
@@ -853,7 +852,7 @@ fn turn_card(
         .flex()
         .flex_col()
         .when(!links_below, |turn| turn.pb(px(TURN_GAP)))
-        .child(user_prompt(number, user, render.texts))
+        .child(user_prompt(user, render.texts))
         .when(has_activity, |turn| {
             turn.child(activity_band(
                 &format!("turn:{}", user.key.0),
@@ -871,7 +870,6 @@ fn turn_card(
 }
 
 fn optimistic_turn(
-    index: usize,
     input: &AcceptedUserInput,
     texts: &HashMap<String, Entity<TranscriptText>>,
 ) -> impl IntoElement {
@@ -894,30 +892,20 @@ fn optimistic_turn(
     if !chips.is_empty() {
         body.push(attachment_chip_row(chips));
     }
-    let meta = UserPromptMeta {
-        id: SharedString::from(format!("optimistic-meta-{}", input.request.as_str())),
-        turn_label: format!("#{index:02}"),
-        rows: vec![
-            ("Turn".to_owned(), format!("{index:02}")),
-            (
-                "Status".to_owned(),
-                optimistic_status(input.kind).to_owned(),
-            ),
-        ],
-        time_label: None,
-        status_label: Some(optimistic_status(input.kind)),
-    };
+    // Pending submissions carry their delivery state as the inset's one
+    // caption; once the transcript catches up the whole optimistic turn goes
+    // away, so no separate lifecycle chrome is needed.
+    let caption = optimistic_status(input.kind).to_owned();
     div()
         .id(SharedString::from(format!(
             "optimistic-turn-{}",
             input.request.as_str()
         )))
         .w_full()
-        .child(user_prompt_section(meta, true, body))
+        .child(user_prompt_section(Some(caption), body))
 }
 
 fn user_prompt(
-    index: usize,
     message: &RuntimeMessage,
     texts: &HashMap<String, Entity<TranscriptText>>,
 ) -> impl IntoElement {
@@ -943,17 +931,11 @@ fn user_prompt(
     if !chips.is_empty() {
         body.push(attachment_chip_row(chips));
     }
-    let meta = UserPromptMeta {
-        id: SharedString::from(format!("user-meta-{}", message.key.0)),
-        turn_label: format!("#{index:02}"),
-        rows: vec![
-            ("Turn".to_owned(), format!("{index:02}")),
-            ("Timestamp".to_owned(), format_timestamp(message.timestamp)),
-        ],
-        time_label: Some(format_timestamp(message.timestamp)),
-        status_label: None,
-    };
-    user_prompt_section(meta, false, body)
+    // One muted meta caption per turn: the compact placement timestamp. It is
+    // the only place the prompt's time stays reachable on the transcript
+    // surface now that per-message header rows are gone.
+    let caption = format_timestamp(message.timestamp);
+    user_prompt_section(Some(caption), body)
 }
 
 /// A quiet spacer between turns. The previous bridge painted a continuous
@@ -962,23 +944,12 @@ fn turn_bridge() -> impl IntoElement {
     div().w_full().h(px(TURN_GAP))
 }
 
-/// Editorial prompt section: a restrained card for what was asked, followed
-/// by local activity disclosure and an unboxed assistant response.
-/// Header meta parked behind the (i) control: identity popup rows plus the
-/// inline status/time labels.
-struct UserPromptMeta {
-    id: SharedString,
-    turn_label: String,
-    rows: Vec<(String, String)>,
-    time_label: Option<String>,
-    status_label: Option<&'static str>,
-}
-
-fn user_prompt_section(
-    meta: UserPromptMeta,
-    pending: bool,
-    body: Vec<AnyElement>,
-) -> impl IntoElement {
+/// Editorial prompt section: a quiet tinted inset for what was asked, followed
+/// by local activity disclosure and an unboxed assistant response. The inset
+/// carries no border — role stays legible through position and tint contrast
+/// against the borderless reply prose. At most one muted caption sits inside
+/// the top edge (delivery status while pending, placement timestamp after).
+fn user_prompt_section(caption: Option<String>, body: Vec<AnyElement>) -> impl IntoElement {
     div()
         .w_full()
         .min_w_0()
@@ -986,95 +957,33 @@ fn user_prompt_section(
         .flex_col()
         .gap(px(6.0))
         .pb(px(TURN_SECTION_GAP))
-        .child(user_prompt_header(meta, pending))
         .when(!body.is_empty(), |section| {
             section.child(
                 div()
                     .w_full()
                     .min_w_0()
                     .rounded(px(theme::RADIUS_LG))
-                    .border_1()
-                    .border_color(if pending {
-                        theme::data()
-                    } else {
-                        theme::edge()
-                    })
                     .bg(theme::user_message())
                     .px(px(12.0))
                     .py(px(10.0))
                     .flex()
                     .flex_col()
                     .gap(px(6.0))
+                    .children(caption.map(prompt_caption))
                     .children(body),
             )
         })
 }
 
-fn user_prompt_header(meta: UserPromptMeta, pending: bool) -> impl IntoElement {
+/// The single meta line a turn may show. Tiny, smoke-colored, regular weight:
+/// metadata whispers here and never competes with the document voice.
+fn prompt_caption(label: String) -> AnyElement {
     div()
-        .w_full()
-        .min_h(px(20.0))
-        .flex()
-        .flex_row()
-        .items_center()
-        .justify_between()
-        .gap(px(10.0))
-        .child(
-            div()
-                .min_w_0()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(6.0))
-                .child(div().size(px(6.0)).rounded_full().bg(if pending {
-                    theme::data()
-                } else {
-                    theme::signal()
-                }))
-                .child(
-                    div()
-                        .font_family(theme::sans())
-                        .text_size(theme::text_size(theme::T_UI_SM))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(theme::bone_dim())
-                        .child("You"),
-                )
-                .child(
-                    div()
-                        .font_family(theme::mono())
-                        .text_size(theme::text_size(theme::T_TINY))
-                        .text_color(theme::smoke())
-                        .child(meta.turn_label.clone()),
-                ),
-        )
-        .child(
-            div()
-                .flex_shrink_0()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(8.0))
-                .when_some(meta.status_label, |row, label| {
-                    row.child(
-                        div()
-                            .font_family(theme::mono())
-                            .text_size(theme::text_size(theme::T_TINY))
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(theme::data())
-                            .child(label),
-                    )
-                })
-                .when_some(meta.time_label, |row, time| {
-                    row.child(
-                        div()
-                            .font_family(theme::mono())
-                            .text_size(theme::text_size(theme::T_TINY))
-                            .text_color(theme::smoke())
-                            .child(time),
-                    )
-                })
-                .child(message_meta_info(meta.id, meta.rows)),
-        )
+        .font_family(theme::mono())
+        .text_size(theme::text_size(theme::T_TINY))
+        .text_color(theme::smoke())
+        .child(label)
+        .into_any_element()
 }
 
 /// One spine step inside a turn's activity band. Owned so a band model can
@@ -2073,7 +1982,26 @@ fn render_activity_step(
         )
         .into_any_element(),
         ActivityStep::Text { key } => {
-            step_shell(continues, theme::ash(), activity_selectable(key, texts)).into_any_element()
+            // Live prose renders with exactly the finished reply's typography
+            // (same font, size, color, leading) and, while it is still
+            // streaming (`continues == false`), at the reply's flush document
+            // position instead of on the activity rail — so completion swaps
+            // ownership without moving, resizing, or recoloring anything. A
+            // whisper of opacity is the only live signal. Historical
+            // narration stays on the rail like the rest of the spine.
+            let prose = selectable(
+                key,
+                texts,
+                theme::sans(),
+                theme::T_BODY,
+                theme::bone(),
+                FontWeight::NORMAL,
+            );
+            if continues {
+                step_shell(continues, theme::ash(), div().w_full().child(prose)).into_any_element()
+            } else {
+                div().w_full().opacity(0.85).child(prose).into_any_element()
+            }
         }
         ActivityStep::Image { mime_type } => step_shell(
             continues,
@@ -2147,7 +2075,7 @@ fn render_activity_step(
             div()
                 .font_family(theme::sans())
                 .text_size(theme::text_size(theme::T_UI_SM))
-                .font_weight(FontWeight::MEDIUM)
+                .font_weight(FontWeight::NORMAL)
                 .text_color(if *error {
                     theme::error()
                 } else {
@@ -2159,58 +2087,38 @@ fn render_activity_step(
     }
 }
 
+/// The quiet thinking caption doubles as the detail trigger: the whole row
+/// opens the overlay, so no separate hint text rides along. Thinking bodies
+/// below stay selectable and untouched by the click target.
 fn thinking_detail_header(
     detail: &Arc<ActivityDetail>,
     root: &Entity<crate::views::RootView>,
 ) -> impl IntoElement {
-    div()
-        .w_full()
-        .flex()
-        .flex_row()
-        .items_center()
-        .justify_between()
-        .gap(px(12.0))
-        .child(
-            div()
-                .font_family(theme::mono())
-                .text_size(theme::text_size(theme::T_TINY))
-                .font_weight(FontWeight::MEDIUM)
-                .text_color(theme::smoke())
-                .child("thinking"),
-        )
-        .child(activity_detail_link(detail, root))
-}
-
-fn activity_detail_link(
-    detail: &Arc<ActivityDetail>,
-    root: &Entity<crate::views::RootView>,
-) -> AnyElement {
     let id = detail
         .records
         .first()
         .map(|record| record.id.clone())
-        .unwrap_or_else(|| "activity".to_owned());
+        .unwrap_or_else(|| "thinking".to_owned());
     let click_detail = detail.clone();
     let click_root = root.clone();
     let keyboard_detail = detail.clone();
     let keyboard_root = root.clone();
     div()
-        .id(SharedString::from(format!("activity-detail-link:{id}")))
+        .id(SharedString::from(format!("thinking-detail:{id}")))
         .tab_index(0)
         .cursor_pointer()
+        .w_full()
         .h(px(20.0))
         .px(px(2.0))
-        .flex_shrink_0()
+        .rounded(px(theme::RADIUS_SM))
         .flex()
         .items_center()
-        .overflow_hidden()
-        .whitespace_nowrap()
         .font_family(theme::mono())
         .text_size(theme::text_size(theme::T_TINY))
         .font_weight(FontWeight::MEDIUM)
         .text_color(theme::smoke())
-        .hover(|link| link.text_color(theme::bone_dim()))
-        .focus(|link| link.text_color(theme::bone_dim()))
+        .hover(|row| row.bg(theme::panel()).text_color(theme::bone_dim()))
+        .focus(|row| row.bg(theme::panel()).text_color(theme::bone_dim()))
         // Skip GPUI's mouse-down focus + active refresh on this chip. Click still
         // fires; keyboard focus via Tab is unchanged. Prevents a one-frame pop
         // before the detail overlay steals focus.
@@ -2232,8 +2140,7 @@ fn activity_detail_link(
                 });
             }
         })
-        .child("details ↗")
-        .into_any_element()
+        .child("thinking")
 }
 
 fn tool_detail_trigger(
@@ -2310,79 +2217,44 @@ fn assistant_reply(
     message: &RuntimeMessage,
     texts: &HashMap<String, Entity<TranscriptText>>,
 ) -> impl IntoElement {
+    // No role header: the borderless reply sits directly under its turn's
+    // tinted prompt inset, so position and tint carry the speaker identity.
     div()
         .id(SharedString::from(format!("message-{}", message.key.0)))
         .w_full()
         .min_w_0()
-        .child(
-            div()
-                .w_full()
-                .min_w_0()
-                .pb(px(2.0))
-                .flex()
-                .flex_col()
-                .gap(px(7.0))
-                .child(
-                    div()
-                        .w_full()
-                        .min_h(px(20.0))
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .justify_between()
-                        .gap(px(10.0))
-                        .child(
-                            div()
-                                .flex()
-                                .flex_row()
-                                .items_center()
-                                .gap(px(6.0))
-                                .child(div().size(px(6.0)).rounded_full().bg(theme::working()))
-                                .child(
-                                    div()
-                                        .font_family(theme::sans())
-                                        .text_size(theme::text_size(theme::T_UI_SM))
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .text_color(theme::bone_dim())
-                                        .child("Pi"),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .font_family(theme::mono())
-                                .text_size(theme::text_size(theme::T_TINY))
-                                .text_color(theme::smoke())
-                                .child(format_timestamp(message.timestamp)),
-                        ),
-                )
-                .children(message.content.iter().filter_map(|block| match block {
-                    MessageBlock::Text { .. } => Some(selectable(
-                        &fragment_key(message, block),
-                        texts,
-                        theme::sans(),
-                        theme::T_BODY,
-                        theme::bone(),
-                        FontWeight::NORMAL,
-                    )),
-                    MessageBlock::Image { mime_type, .. } => {
-                        Some(compact_label(format!("Image · {mime_type}")))
-                    }
-                    _ => None,
-                }))
-                .when_some(message.error.clone(), |reply, error| {
-                    reply.child(error_text(error))
-                })
-                .when_some(stop_label(message), |reply, stop| {
-                    reply.child(
-                        div()
-                            .font_family(theme::sans())
-                            .text_size(theme::text_size(theme::T_UI_SM))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(stop_color(message.stop_reason))
-                            .child(stop),
-                    )
-                }),
-        )
+        .pb(px(2.0))
+        .flex()
+        .flex_col()
+        .gap(px(7.0))
+        .children(message.content.iter().filter_map(|block| match block {
+            MessageBlock::Text { .. } => Some(selectable(
+                &fragment_key(message, block),
+                texts,
+                theme::sans(),
+                theme::T_BODY,
+                theme::bone(),
+                FontWeight::NORMAL,
+            )),
+            MessageBlock::Image { mime_type, .. } => {
+                Some(compact_label(format!("Image · {mime_type}")))
+            }
+            _ => None,
+        }))
+        .when_some(message.error.clone(), |reply, error| {
+            reply.child(error_text(error))
+        })
+        .when_some(stop_label(message), |reply, stop| {
+            // Stop reasons read as plain sentences, not alarms; hue and weight
+            // stay at document rest.
+            reply.child(
+                div()
+                    .font_family(theme::sans())
+                    .text_size(theme::text_size(theme::T_UI_SM))
+                    .text_color(theme::ash())
+                    .child(stop),
+            )
+        })
 }
 
 fn preamble(
@@ -2555,12 +2427,15 @@ fn attachment_chip_row(chips: Vec<AnyElement>) -> AnyElement {
 }
 
 fn attachment_chip(icon: &'static str, label: String) -> AnyElement {
+    // Ghost chip: transparent fill with a hairline edge, so attachments never
+    // stack a second surface inside the tinted prompt inset.
     div()
         .max_w(px(280.0))
-        .h(px(26.0))
+        .h(px(24.0))
         .px(px(8.0))
-        .rounded(px(theme::RADIUS_MD))
-        .bg(theme::panel())
+        .rounded(px(theme::RADIUS))
+        .border_1()
+        .border_color(theme::edge_soft())
         .flex()
         .flex_row()
         .items_center()
@@ -2577,7 +2452,6 @@ fn attachment_chip(icon: &'static str, label: String) -> AnyElement {
                 .min_w_0()
                 .font_family(theme::mono())
                 .text_size(theme::text_size(theme::T_TINY))
-                .font_weight(FontWeight::MEDIUM)
                 .text_color(theme::smoke())
                 .overflow_hidden()
                 .text_ellipsis()
@@ -2623,84 +2497,6 @@ fn fragment_key(message: &RuntimeMessage, block: &MessageBlock) -> String {
     format!("{}:{}", message.key.0, block.key().0)
 }
 
-/// Compact (i) control that parks user turn/time meta in a hover popup.
-fn message_meta_info(id: SharedString, rows: Vec<(String, String)>) -> impl IntoElement {
-    let tooltip_rows = rows.clone();
-    div()
-        .id(id)
-        .size(px(20.0))
-        .flex_shrink_0()
-        .rounded_full()
-        .flex()
-        .items_center()
-        .justify_center()
-        .cursor(CursorStyle::PointingHand)
-        .hover(|icon| icon.bg(theme::panel_hover()))
-        .tooltip(move |_, cx| {
-            cx.new(|_| MessageMetaTooltip {
-                rows: tooltip_rows.clone(),
-            })
-            .into()
-        })
-        // GPUI SVGs resolve `currentColor` from the svg element's own text_color,
-        // not from a parent container — omit it and the glyph is invisible.
-        .child(
-            svg()
-                .path("icons/info.svg")
-                .size(px(15.0))
-                .text_color(theme::ash()),
-        )
-}
-
-struct MessageMetaTooltip {
-    rows: Vec<(String, String)>,
-}
-
-impl Render for MessageMetaTooltip {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .min_w(px(200.0))
-            .max_w(px(320.0))
-            .p(px(12.0))
-            .rounded(px(theme::RADIUS_MD))
-            .bg(theme::panel_lift())
-            .border_1()
-            .border_color(theme::edge())
-            .shadow(theme::dock_shadow())
-            .flex()
-            .flex_col()
-            .gap(px(6.0))
-            .children(self.rows.iter().map(|(label, value)| {
-                div()
-                    .w_full()
-                    .flex()
-                    .flex_row()
-                    .items_start()
-                    .justify_between()
-                    .gap(px(14.0))
-                    .child(
-                        div()
-                            .flex_shrink_0()
-                            .font_family(theme::sans())
-                            .text_size(theme::text_size(theme::T_TINY))
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(theme::ash())
-                            .child(label.clone()),
-                    )
-                    .child(
-                        div()
-                            .min_w_0()
-                            .text_right()
-                            .font_family(theme::mono())
-                            .text_size(theme::text_size(theme::T_TINY))
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(theme::bone())
-                            .child(value.clone()),
-                    )
-            }))
-    }
-}
-
 fn stop_label(message: &RuntimeMessage) -> Option<String> {
     if !message.terminal {
         return None;
@@ -2716,19 +2512,18 @@ fn stop_label(message: &RuntimeMessage) -> Option<String> {
     }
 }
 
-fn stop_color(reason: Option<MessageStopReason>) -> gpui::Rgba {
-    match reason {
-        Some(MessageStopReason::Length | MessageStopReason::Error) => theme::error(),
-        Some(MessageStopReason::Aborted | MessageStopReason::Deferred) => theme::data(),
-        Some(MessageStopReason::ToolUse | MessageStopReason::Stop) | None => theme::smoke(),
-    }
-}
-
 fn error_text(error: String) -> impl IntoElement {
+    // Errors keep their hue but lose the shout: regular weight on a subtle
+    // wash, so the alarm channel stays legible without dominating the page.
     div()
+        .w_full()
+        .rounded(px(theme::RADIUS_SM))
+        .bg(theme::error_wash())
+        .px(px(8.0))
+        .py(px(6.0))
         .font_family(theme::sans())
         .text_size(theme::text_size(theme::T_UI_SM))
-        .font_weight(FontWeight::SEMIBOLD)
+        .font_weight(FontWeight::NORMAL)
         .text_color(theme::error())
         .child(error)
 }
@@ -2746,51 +2541,32 @@ fn empty_state(projection: &ConversationProjection) -> impl IntoElement {
             "Describe the outcome, attach the relevant files, or invoke a command. Pi keeps tools and progress in this thread.",
         )
     };
+    // A modest centered note instead of a ceremonial panel: title, one
+    // sentence of guidance, and compact keycaps.
     div()
         .w_full()
-        .min_h(px(280.0))
+        .py(px(48.0))
         .flex()
         .flex_col()
         .items_center()
         .justify_center()
-        .gap(px(11.0))
+        .gap(px(8.0))
         .child(
             div()
-                .size(px(42.0))
-                .rounded(px(theme::RADIUS_LG))
-                .border_1()
-                .border_color(if disconnected {
-                    theme::error()
-                } else {
-                    theme::edge()
-                })
-                .bg(theme::panel_lift())
-                .flex()
-                .items_center()
-                .justify_center()
-                .child(
-                    svg()
-                        .path("icons/agent-diamond.svg")
-                        .size(px(17.0))
-                        .text_color(if disconnected {
-                            theme::error()
-                        } else {
-                            theme::signal()
-                        }),
-                ),
-        )
-        .child(
-            div()
-                .mt(px(3.0))
                 .font_family(theme::main())
                 .text_size(theme::text_size(theme::T_TITLE))
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(theme::bone())
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(if disconnected {
+                    theme::error()
+                } else {
+                    theme::bone()
+                })
                 .child(title),
         )
         .child(
             div()
-                .max_w(px(460.0))
+                .max_w(px(420.0))
+                .text_center()
                 .font_family(theme::sans())
                 .text_size(theme::text_size(theme::T_UI))
                 .line_height(relative(1.5))
@@ -2800,13 +2576,13 @@ fn empty_state(projection: &ConversationProjection) -> impl IntoElement {
         .when(!disconnected, |state| {
             state.child(
                 div()
-                    .mt(px(8.0))
+                    .mt(px(4.0))
                     .flex()
                     .flex_row()
                     .flex_wrap()
                     .items_center()
                     .justify_center()
-                    .gap(px(7.0))
+                    .gap(px(6.0))
                     .child(empty_hint("Ctrl+L", "focus"))
                     .child(empty_hint("Enter", "send"))
                     .child(empty_hint("@", "file"))
@@ -2817,8 +2593,8 @@ fn empty_state(projection: &ConversationProjection) -> impl IntoElement {
 
 fn empty_hint(key: &'static str, label: &'static str) -> impl IntoElement {
     div()
-        .h(px(26.0))
-        .px(px(8.0))
+        .h(px(20.0))
+        .px(px(6.0))
         .rounded(px(theme::RADIUS_SM))
         .border_1()
         .border_color(theme::edge_soft())
@@ -2826,7 +2602,7 @@ fn empty_hint(key: &'static str, label: &'static str) -> impl IntoElement {
         .flex()
         .flex_row()
         .items_center()
-        .gap(px(5.0))
+        .gap(px(4.0))
         .child(
             div()
                 .font_family(theme::mono())

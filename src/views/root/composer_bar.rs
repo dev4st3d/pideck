@@ -614,7 +614,7 @@ fn submit_orb(
     div()
         .id(id.into())
         .size(px(SUBMIT_CONTROL_H))
-        .rounded(px(theme::RADIUS_MD))
+        .rounded(px(theme::RADIUS))
         .flex()
         .items_center()
         .justify_center()

@@ -107,7 +107,11 @@ impl BlockRender<'_, '_> {
             MarkdownBlock::Heading { level, prose } => {
                 self.render_heading(*level, prose, style, top_of_flow)
             }
-            MarkdownBlock::Code { language, code } => self.render_code(language, code),
+            MarkdownBlock::Code {
+                language,
+                filename,
+                code,
+            } => self.render_code(language, filename, code),
             MarkdownBlock::Quote(blocks) => self.render_quote(blocks, style),
             MarkdownBlock::Rule => div()
                 .w_full()
@@ -217,7 +221,12 @@ impl BlockRender<'_, '_> {
             .into_any_element()
     }
 
-    fn render_code(&mut self, language: &Option<String>, code: &str) -> AnyElement {
+    fn render_code(
+        &mut self,
+        language: &Option<String>,
+        filename: &Option<String>,
+        code: &str,
+    ) -> AnyElement {
         let key = self.next_key();
 
         let label = match language.as_deref() {
@@ -227,29 +236,50 @@ impl BlockRender<'_, '_> {
         };
         let copied = self.options.copied == Some(key);
         let copy = (self.options.copy_code)(key, code.to_owned());
-        let header = div()
-            .w_full()
+        // Unique per card: group styles resolve by name through a global
+        // stack, so a shared name would leak hover reveals across cards.
+        let group = SharedString::from(format!("{}-code-{key}", self.options.id_prefix));
+
+        let captions = div()
+            .min_w_0()
             .flex()
             .flex_row()
             .items_center()
-            .justify_between()
             .gap(px(8.0))
-            .px(px(12.0))
-            .py(px(4.0))
-            .bg(theme::panel_lift())
-            .border_b_1()
-            .border_color(theme::edge_soft())
-            .when_some(label, |header, label| {
-                header.child(
+            .when_some(label, |captions, label| {
+                captions.child(
                     div()
                         .flex_shrink_0()
                         .font_family(theme::mono())
                         .text_size(theme::text_size(theme::T_TINY))
-                        .font_weight(FontWeight::SEMIBOLD)
                         .text_color(theme::smoke())
                         .child(label),
                 )
             })
+            .when_some(filename.as_deref(), |captions, filename| {
+                captions.child(
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .font_family(theme::mono())
+                        .text_size(theme::text_size(theme::T_TINY))
+                        .text_color(theme::bone_dim())
+                        .child(filename.to_owned()),
+                )
+            });
+
+        let caption_row = div()
+            .w_full()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(8.0))
+            .px(px(12.0))
+            .pt(px(8.0))
+            // Without body code the caption closes the card and carries the
+            // full bottom padding itself.
+            .pb(px(if code.is_empty() { 8.0 } else { 2.0 }))
+            .child(captions)
             .child(
                 div()
                     .id(SharedString::from(format!(
@@ -257,14 +287,25 @@ impl BlockRender<'_, '_> {
                         self.options.id_prefix
                     )))
                     .ml_auto()
+                    .flex_shrink_0()
                     .px(px(6.0))
                     .py(px(1.0))
                     .rounded(px(theme::RADIUS_SM))
                     .cursor_pointer()
                     .tab_index(0)
+                    // Quiet by default: revealed while the card is hovered or
+                    // the button keyboard-focused; a fresh copied
+                    // acknowledgement stays visible on its own.
+                    .opacity(if copied { 1.0 } else { 0.0 })
+                    .group_hover(group.clone(), |style| style.opacity(1.0))
                     .text_color(if copied { theme::live() } else { theme::ash() })
                     .hover(|button| button.bg(theme::panel_hover()).text_color(theme::bone()))
-                    .focus(|button| button.bg(theme::panel_hover()).text_color(theme::focus()))
+                    .focus(|button| {
+                        button
+                            .bg(theme::panel_hover())
+                            .text_color(theme::focus())
+                            .opacity(1.0)
+                    })
                     // Keep the press from collapsing transcript selection.
                     .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .on_click(copy)
@@ -280,12 +321,13 @@ impl BlockRender<'_, '_> {
         let mut card = div()
             .w_full()
             .min_w_0()
-            .rounded(px(theme::RADIUS_MD))
+            .group(group)
+            .rounded(px(theme::RADIUS))
             .border_1()
             .border_color(theme::edge_soft())
             .bg(theme::panel())
             .overflow_hidden()
-            .child(header);
+            .child(caption_row);
 
         if !code.is_empty() {
             let mut style = self.options.default_style.clone();
@@ -542,8 +584,8 @@ fn highlight_style(markdown: MarkdownStyle, selected: bool) -> HighlightStyle {
 }
 
 // -- Tables ------------------------------------------------------------------
-// The reference treatment: bordered card, lifted header strip, zebra rows,
-// alignment, mono identifiers, and status chips.
+// The reference treatment: bordered card, lifted header strip, hairline-
+// separated rows, alignment, mono paths, and status chips.
 
 fn render_table(table: &MarkdownTable) -> AnyElement {
     let columns = table.column_count();
@@ -582,13 +624,11 @@ fn render_table(table: &MarkdownTable) -> AnyElement {
 
     let body_rows = table.rows.iter().enumerate().map(|(row_index, row)| {
         let last = row_index + 1 == table.rows.len();
-        let zebra = row_index % 2 == 1;
         div()
             .w_full()
             .flex()
             .flex_row()
             .items_center()
-            .when(zebra, |row| row.bg(theme::floor()))
             .when(!last, |row| {
                 row.border_b_1().border_color(theme::edge_soft())
             })
@@ -641,6 +681,16 @@ fn table_status_tone(value: &str) -> Option<TableStatusTone> {
     }
 }
 
+/// Column-zero cells earn mono only when they read as a path: a slash with a
+/// non-space character after it. Shallow by design — the table just needs to
+/// tell paths apart from prose labels.
+fn reads_as_path(value: &str) -> bool {
+    value
+        .trim()
+        .split_once('/')
+        .is_some_and(|(_, rest)| rest.chars().next().is_some_and(|ch| !ch.is_whitespace()))
+}
+
 fn table_cell(
     value: &str,
     align: TableAlign,
@@ -650,8 +700,8 @@ fn table_cell(
     prefer_mono: bool,
 ) -> AnyElement {
     let last = column + 1 == columns;
-    let mono =
-        prefer_mono && !header && value.chars().any(|ch| matches!(ch, '/' | '_' | '.' | ':'));
+    // Mono only for values that actually read as paths; plain labels stay sans.
+    let mono = prefer_mono && !header && reads_as_path(value);
     let status = (!header).then(|| table_status_tone(value)).flatten();
     // Last column of wider tables stays compact (status chips); body columns share space.
     let compact = columns >= 3 && last;
@@ -674,10 +724,6 @@ fn table_cell(
         TableAlign::Right => cell.justify_end(),
         TableAlign::None | TableAlign::Left => cell.justify_start(),
     };
-
-    if !last {
-        cell = cell.border_r_1().border_color(theme::edge_soft());
-    }
 
     if let Some(tone) = status {
         cell.child(status_chip(value, tone)).into_any_element()

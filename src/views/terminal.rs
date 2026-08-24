@@ -763,7 +763,7 @@ fn terminal_tab(
         .flex_row()
         .items_center()
         .gap(px(5.0))
-        .rounded(px(theme::RADIUS_MD))
+        .rounded(px(theme::RADIUS))
         .bg(if selected {
             theme::panel_lift()
         } else {
