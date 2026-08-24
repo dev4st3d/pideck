@@ -101,6 +101,7 @@ pub(super) struct ConversationAreaParams {
     pub(super) activity_disclosures: Entity<ActivityDisclosureState>,
     pub(super) workspace_diff: Option<Arc<WorkspaceDiff>>,
     pub(super) workspace_diff_files_expanded: bool,
+    pub(super) thread_open: bool,
     pub(super) follow: bool,
     pub(super) root: Entity<RootView>,
 }
@@ -115,6 +116,7 @@ pub(super) fn conversation_area(params: ConversationAreaParams) -> impl IntoElem
         activity_disclosures,
         workspace_diff,
         workspace_diff_files_expanded,
+        thread_open,
         follow,
         root,
     } = params;
@@ -128,6 +130,7 @@ pub(super) fn conversation_area(params: ConversationAreaParams) -> impl IntoElem
         diff_summary: ConversationDiffSummary {
             snapshot: workspace_diff,
             files_expanded: workspace_diff_files_expanded,
+            thread_open,
             root: root.clone(),
         },
     };

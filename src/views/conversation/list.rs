@@ -32,6 +32,7 @@ enum ConversationItem {
 pub(in crate::views) struct ConversationDiffSummary {
     pub(in crate::views) snapshot: Option<Arc<WorkspaceDiff>>,
     pub(in crate::views) files_expanded: bool,
+    pub(in crate::views) thread_open: bool,
     pub(in crate::views) root: Entity<crate::views::RootView>,
 }
 
@@ -299,36 +300,41 @@ fn trailing(
                     .when_some(tail, |chain, activity| chain.child(activity)),
             )
         })
-        .when_some(stream.diff_summary.snapshot.clone(), |tail, snapshot| {
-            tail.child(crate::views::diff_summary::summary_card(
-                &snapshot,
-                stream.diff_summary.files_expanded,
-                stream.diff_summary.root.clone(),
-            ))
+        .when(stream.diff_summary.thread_open, |tail| {
+            // Workspace changes belong to an open thread, not the landing
+            // column: hide both the summary card and its scan-error note
+            // until a session is current, opening, or already has content.
+            tail.when_some(stream.diff_summary.snapshot.clone(), |tail, snapshot| {
+                tail.child(crate::views::diff_summary::summary_card(
+                    &snapshot,
+                    stream.diff_summary.files_expanded,
+                    stream.diff_summary.root.clone(),
+                ))
+            })
+            .when_some(
+                stream
+                    .diff_summary
+                    .root
+                    .read(cx)
+                    .workspace_diff_error()
+                    .map(str::to_owned),
+                |tail, message| {
+                    // A failed scan leaves nothing (or something stale) to
+                    // summarize; keep the recovery copy where the summary card
+                    // would otherwise appear.
+                    tail.child(
+                        div()
+                            .px(px(4.0))
+                            .py(px(6.0))
+                            .font_family(theme::sans())
+                            .text_size(theme::text_size(theme::T_TINY))
+                            .line_height(relative(1.4))
+                            .text_color(theme::error())
+                            .child(message),
+                    )
+                },
+            )
         })
-        .when_some(
-            stream
-                .diff_summary
-                .root
-                .read(cx)
-                .workspace_diff_error()
-                .map(str::to_owned),
-            |tail, message| {
-                // A failed scan leaves nothing (or something stale) to
-                // summarize; keep the recovery copy where the summary card
-                // would otherwise appear.
-                tail.child(
-                    div()
-                        .px(px(4.0))
-                        .py(px(6.0))
-                        .font_family(theme::sans())
-                        .text_size(theme::text_size(theme::T_TINY))
-                        .line_height(relative(1.4))
-                        .text_color(theme::error())
-                        .child(message),
-                )
-            },
-        )
         .when(
             projection.messages.is_empty()
                 && projection.accepted_user_inputs.is_empty()

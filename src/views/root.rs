@@ -3576,6 +3576,16 @@ impl RootView {
         self.workspace_diff_error.as_deref()
     }
 
+    /// A thread is open once a session is current or still opening, or the
+    /// transcript already has content. The landing column is none of those.
+    pub(in crate::views) fn thread_is_open(&self) -> bool {
+        let catalog = &self.render_projections.catalog;
+        catalog.current_session_file.is_some()
+            || catalog.pending_session_file.is_some()
+            || !self.conversation.messages.is_empty()
+            || !self.conversation.accepted_user_inputs.is_empty()
+    }
+
     fn save_active_thread_ui(&mut self, cx: &mut Context<Self>) {
         let ui = ThreadUiState {
             draft: self.composer.read(cx).draft().to_owned(),

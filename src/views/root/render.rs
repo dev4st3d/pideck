@@ -203,6 +203,7 @@ impl Render for RootView {
                                 activity_disclosures: self.activity_disclosures.clone(),
                                 workspace_diff: self.workspace_diff.clone(),
                                 workspace_diff_files_expanded: self.workspace_diff_files_expanded,
+                                thread_open: self.thread_is_open(),
                                 follow: self.conversation_follow.get(),
                                 root: cx.entity(),
                             }))
