@@ -334,7 +334,7 @@ fn timed_out_mutation_is_unknown_outcome_and_poisons_connection() {
     );
 
     let later = client
-        .request(Command::SetAutoRetry { enabled: false })
+        .request(Command::SetAutoCompaction { enabled: true })
         .wait()
         .expect_err("poisoned connection rejects later mutation");
     assert!(matches!(
@@ -384,7 +384,7 @@ fn writer_failure_rejects_already_pending_requests() {
         notification.record,
         IncomingRecord::UnknownEvent(event) if event.event_type == "writer_closed"
     ));
-    let trigger = client.request(Command::GetTree);
+    let trigger = client.request(Command::GetAvailableModels);
 
     assert_eq!(
         first.wait().expect_err("first pending request").kind,

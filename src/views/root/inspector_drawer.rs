@@ -55,6 +55,11 @@ pub(super) fn session_inspector_drawer(
                 .id("session-inspector-drawer")
                 .track_focus(inspector_focus)
                 .when(open, |drawer| drawer.tab_index(0))
+                // Escape resolves to AbortRun; capture it so composers hosted
+                // in the drawer (e.g. the goal editor) cannot swallow it.
+                .capture_action(cx.listener(|view, _: &AbortRun, window, cx| {
+                    view.close_inspector(window, cx)
+                }))
                 .w(px(theme::INSPECT_W))
                 .h_full()
                 .min_h_0()

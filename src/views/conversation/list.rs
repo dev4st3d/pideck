@@ -3,7 +3,8 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use gpui::{
-    AnyElement, App, Entity, FontWeight, IntoElement, ListState, SharedString, div, prelude::*, px,
+    AnyElement, App, Entity, FontWeight, IntoElement, ListState, SharedString, div, prelude::*,
+    px, relative,
 };
 
 use super::{
@@ -397,6 +398,29 @@ fn trailing(
                 stream.diff_summary.root.clone(),
             ))
         })
+        .when_some(
+            stream
+                .diff_summary
+                .root
+                .read(cx)
+                .workspace_diff_error()
+                .map(str::to_owned),
+            |tail, message| {
+                // A failed scan leaves nothing (or something stale) to
+                // summarize; keep the recovery copy where the summary card
+                // would otherwise appear.
+                tail.child(
+                    div()
+                        .px(px(4.0))
+                        .py(px(6.0))
+                        .font_family(theme::sans())
+                        .text_size(theme::text_size(theme::T_TINY))
+                        .line_height(relative(1.4))
+                        .text_color(theme::error())
+                        .child(message),
+                )
+            },
+        )
         .when(
             projection.messages.is_empty()
                 && projection.accepted_user_inputs.is_empty()

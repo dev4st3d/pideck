@@ -141,7 +141,6 @@ pub struct ConversationProjection {
     pub steering_mode: Option<QueueDeliveryMode>,
     pub follow_up_mode: Option<QueueDeliveryMode>,
     pub auto_compaction_enabled: Option<bool>,
-    pub auto_retry_enabled: Option<bool>,
     pub pending_operation: Option<RuntimeOperation>,
     pub context_awaiting_fresh_usage: bool,
     pub retry: RetryState,
@@ -298,7 +297,6 @@ pub struct ControllerCore {
     runtime: RuntimeState,
     workspace: String,
     connection_error: Option<String>,
-    stale_attempts_ignored: u64,
     next_submission: u64,
 }
 
@@ -311,7 +309,6 @@ impl ControllerCore {
             runtime: RuntimeState::default(),
             workspace: workspace.into(),
             connection_error: None,
-            stale_attempts_ignored: 0,
             next_submission: 1,
         }
     }
@@ -330,10 +327,6 @@ impl ControllerCore {
 
     pub fn runtime(&self) -> &RuntimeState {
         &self.runtime
-    }
-
-    pub fn stale_attempts_ignored(&self) -> u64 {
-        self.stale_attempts_ignored
     }
 
     pub fn begin_connect(&mut self) -> (AttemptGeneration, ConnectionGeneration) {
@@ -370,7 +363,6 @@ impl ControllerCore {
             | WorkerResult::Stopped { attempt } => *attempt,
         };
         if result_attempt != self.attempt {
-            self.stale_attempts_ignored = self.stale_attempts_ignored.saturating_add(1);
             return Vec::new();
         }
 
@@ -383,7 +375,6 @@ impl ControllerCore {
             }
             WorkerResult::Connected { generation, .. } => {
                 if generation != self.generation || self.status == ControllerStatus::Stopping {
-                    self.stale_attempts_ignored = self.stale_attempts_ignored.saturating_add(1);
                     return Vec::new();
                 }
                 self.status = ControllerStatus::Active;
@@ -402,7 +393,6 @@ impl ControllerCore {
             }
             WorkerResult::Input { input, .. } => {
                 if self.status != ControllerStatus::Active {
-                    self.stale_attempts_ignored = self.stale_attempts_ignored.saturating_add(1);
                     return Vec::new();
                 }
                 reduce(&mut self.runtime, *input)
@@ -426,12 +416,7 @@ impl ControllerCore {
     }
 
     pub fn projection(&self) -> ShellProjection {
-        ShellProjection::from_runtime(
-            self.status,
-            self.workspace.clone(),
-            &self.runtime,
-            self.connection_error.as_deref(),
-        )
+        ShellProjection::from_runtime(self.status, self.workspace.clone(), &self.runtime)
     }
 
     fn take_runtime_notifications(&mut self) -> Vec<RuntimeNotification> {
@@ -551,7 +536,6 @@ impl ControllerCore {
                 .data
                 .as_ref()
                 .map(|session| session.auto_compaction_enabled),
-            auto_retry_enabled: self.runtime.auto_retry_enabled,
             pending_operation: self.runtime.pending_operation.clone(),
             context_awaiting_fresh_usage: self.runtime.context_awaiting_fresh_usage,
             retry: self.runtime.retry.clone(),
@@ -854,10 +838,6 @@ impl ControllerCore {
         enabled: bool,
     ) -> Vec<crate::state::runtime::RuntimeEffect> {
         self.intent(RuntimeIntent::SetAutoCompaction { enabled })
-    }
-
-    pub fn set_auto_retry(&mut self, enabled: bool) -> Vec<crate::state::runtime::RuntimeEffect> {
-        self.intent(RuntimeIntent::SetAutoRetry { enabled })
     }
 
     pub fn new_session(&mut self) -> Vec<crate::state::runtime::RuntimeEffect> {
@@ -1575,28 +1555,6 @@ impl RuntimeController {
         accepted
     }
 
-    pub fn submit(
-        &mut self,
-        text: String,
-        preference: SubmissionPreference,
-        cx: &mut Context<Self>,
-    ) -> Result<AcceptedSubmission, SubmissionRejection> {
-        let (submission, effects) = self.core.submit(text, preference)?;
-        self.send_effects(effects);
-        cx.notify();
-        Ok(submission)
-    }
-
-    pub fn submit_with_images(
-        &mut self,
-        text: String,
-        images: Vec<PromptImage>,
-        preference: SubmissionPreference,
-        cx: &mut Context<Self>,
-    ) -> Result<AcceptedSubmission, SubmissionRejection> {
-        self.submit_with_attachments(text, images, Vec::new(), preference, cx)
-    }
-
     pub fn submit_with_attachments(
         &mut self,
         text: String,
@@ -1682,10 +1640,6 @@ impl RuntimeController {
 
     pub fn set_auto_compaction(&mut self, enabled: bool, cx: &mut Context<Self>) -> bool {
         self.send_core_effects(|core| core.set_auto_compaction(enabled), cx)
-    }
-
-    pub fn set_auto_retry(&mut self, enabled: bool, cx: &mut Context<Self>) -> bool {
-        self.send_core_effects(|core| core.set_auto_retry(enabled), cx)
     }
 
     pub fn new_session(&mut self, cx: &mut Context<Self>) -> bool {
@@ -2792,7 +2746,6 @@ mod tests {
         });
         assert_eq!(core.status(), ControllerStatus::Connecting);
         assert_eq!(core.runtime().generation, ConnectionGeneration::default());
-        assert_eq!(core.stale_attempts_ignored(), 1);
 
         core.apply_worker_result(WorkerResult::Connected {
             attempt: second_attempt,
@@ -2900,7 +2853,6 @@ mod tests {
             steering_mode: QueueDeliveryMode::All,
             follow_up_mode: QueueDeliveryMode::All,
             auto_compaction_enabled: true,
-            message_count: 0,
         });
         core
     }

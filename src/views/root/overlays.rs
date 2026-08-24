@@ -492,9 +492,15 @@ pub(super) fn activity_detail_overlay(
         .justify_center()
         .key_context("ActivityDetail")
         .on_key_down(cx.listener(RootView::on_activity_detail_key_down))
+        // Clicking the scrim dismisses; clicks on the dialog stop below it.
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|view, _, window, cx| view.close_activity_detail(window, cx)),
+        )
         .child(
             div()
                 .id("activity-detail-dialog")
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .w_full()
                 .h_full()
                 .max_w(px(980.0))
@@ -1762,9 +1768,15 @@ pub(super) fn pasted_image_overlay(
         .flex()
         .items_center()
         .justify_center()
+        // Clicking the scrim dismisses; clicks on the viewer stop below it.
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|view, _, window, cx| view.close_pasted_image(window, cx)),
+        )
         .child(
             div()
                 .id("pasted-image-viewer")
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .w_full()
                 .h_full()
                 .max_w(px(1040.0))
@@ -2043,6 +2055,12 @@ pub(super) fn compaction_dialog(
         .flex()
         .items_center()
         .justify_center()
+        // Escape resolves to the global AbortRun binding, whose bubble listener
+        // inside this sheet's composer would swallow the keystroke silently.
+        // Capturing AbortRun here dismisses the sheet before that can happen.
+        .capture_action(cx.listener(|view, _: &AbortRun, window, cx| {
+            view.close_compaction_modal(window, cx)
+        }))
         .child(
             popup_sheet()
                 .w(px(560.0))
@@ -2094,6 +2112,7 @@ pub(super) fn command_palette_overlay(
     search: &Entity<Composer>,
     selected: usize,
     scroll: &ScrollHandle,
+    focus: &FocusHandle,
     cx: &mut Context<RootView>,
 ) -> impl IntoElement {
     let visible = matches.iter().take(60).count();
@@ -2141,9 +2160,21 @@ pub(super) fn command_palette_overlay(
         .items_center()
         .justify_center()
         .p(px(24.0))
+        // Same Esc interception as the compaction sheet: the palette's search
+        // composer must not swallow Escape.
+        .capture_action(cx.listener(|view, _: &AbortRun, window, cx| {
+            view.close_command_palette(window, cx)
+        }))
+        // Clicking the scrim dismisses; clicks on the card stop below it.
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|view, _, window, cx| view.close_command_palette(window, cx)),
+        )
         .child(
             div()
                 .id("command-palette-card")
+                .track_focus(focus)
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .w_full()
                 .max_w(px(600.0))
                 .flex()
@@ -2272,7 +2303,10 @@ pub(super) fn command_palette_overlay(
         )
 }
 
-pub(super) fn hotkey_help_overlay(cx: &mut Context<RootView>) -> impl IntoElement {
+pub(super) fn hotkey_help_overlay(
+    focus: &FocusHandle,
+    cx: &mut Context<RootView>,
+) -> impl IntoElement {
     let shortcuts = [
         ("Command palette", "Ctrl+Shift+P"),
         ("Hotkey help", "Ctrl+/"),
@@ -2304,9 +2338,20 @@ pub(super) fn hotkey_help_overlay(cx: &mut Context<RootView>) -> impl IntoElemen
         .bg(theme::canvas())
         .pt(px(96.0))
         .items_center()
+        // Same Esc interception as the other sheets.
+        .capture_action(cx.listener(|view, _: &AbortRun, window, cx| {
+            view.close_hotkey_help(window, cx)
+        }))
+        // Clicking the scrim dismisses; clicks on the sheet stop below it.
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|view, _, window, cx| view.close_hotkey_help(window, cx)),
+        )
         .child(
             popup_sheet()
                 .w(px(560.0))
+                .track_focus(focus)
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .child(
                     div()
                         .px(px(12.0))
@@ -2326,9 +2371,7 @@ pub(super) fn hotkey_help_overlay(cx: &mut Context<RootView>) -> impl IntoElemen
                             "Close",
                             true,
                             Box::new(cx.listener(|view, _, window, cx| {
-                                view.hotkey_help_open = false;
-                                window.focus(&view.composer.read(cx).focus_handle(cx));
-                                cx.notify();
+                                view.close_hotkey_help(window, cx)
                             })),
                         )),
                 )

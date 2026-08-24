@@ -1,4 +1,3 @@
-use std::sync::Arc;
 use std::time::Instant;
 
 use serde_json::Value;
@@ -8,7 +7,7 @@ use super::{
     ExtensionUiMethod, ExtensionUiResponse, ExtensionUiResponseBody, ImageContent, IncomingRecord,
     KnownExtensionUiMethod, KnownSessionEntry, Model, ModelInput, NotificationType, QueueMode,
     ResponseResult, RpcClientError, RpcClientErrorKind, RpcEvent, RpcResponse, SessionEntry,
-    SessionEpoch, SessionTreeNode, SlashCommand, SlashCommandSource, StopReason, StreamingBehavior,
+    SessionEpoch, SlashCommand, SlashCommandSource, StopReason, StreamingBehavior,
     TaggedIncomingRecord, ThinkingLevel, UserContent, UserContentBlock,
 };
 use crate::attachments::{expand_prompt, parse_expanded_prompt};
@@ -19,9 +18,9 @@ use crate::state::runtime::{
     MessageUsage, ModelSummary, NormalizedEvent, NormalizedResponse, NormalizedSessionState,
     NotificationKind, PromptImage, QueueDeliveryMode, RequestFailure, RequestFailureKind,
     RuntimeCommand, RuntimeEffect, RuntimeEntry, RuntimeForkMessage, RuntimeInput, RuntimeMessage,
-    RuntimeNotification, RuntimeRequest, RuntimeStats, RuntimeThinkingLevel, RuntimeTreeNode,
-    SafeError, SessionMutation, SessionSnapshot, StampedInput, SubmissionKind, ToolImage,
-    WidgetPlacement, sanitize_untrusted_text,
+    RuntimeNotification, RuntimeRequest, RuntimeStats, RuntimeThinkingLevel, SafeError,
+    SessionMutation, SessionSnapshot, StampedInput, SubmissionKind, ToolImage, WidgetPlacement,
+    sanitize_untrusted_text,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -123,7 +122,6 @@ fn command_for_request(request: &RuntimeRequest) -> Command {
         RuntimeRequest::GetStats => Command::GetSessionStats,
         RuntimeRequest::GetCommands => Command::GetCommands,
         RuntimeRequest::GetModels => Command::GetAvailableModels,
-        RuntimeRequest::GetTree { .. } => Command::GetTree,
         RuntimeRequest::GetForkMessages => Command::GetForkMessages,
         RuntimeRequest::Submit {
             text,
@@ -187,7 +185,6 @@ fn command_for_request(request: &RuntimeRequest) -> Command {
         RuntimeRequest::SetAutoCompaction { enabled } => {
             Command::SetAutoCompaction { enabled: *enabled }
         }
-        RuntimeRequest::SetAutoRetry { enabled } => Command::SetAutoRetry { enabled: *enabled },
         RuntimeRequest::SetSessionName { name } => Command::SetSessionName { name: name.clone() },
         RuntimeRequest::ExportHtml { output_path } => Command::ExportHtml {
             output_path: output_path.clone(),
@@ -235,7 +232,6 @@ fn normalize_response(
                     steering_mode: queue_mode(state.steering_mode),
                     follow_up_mode: queue_mode(state.follow_up_mode),
                     auto_compaction_enabled: state.auto_compaction_enabled,
-                    message_count: state.message_count,
                 },
                 is_streaming: state.is_streaming,
                 is_compacting: state.is_compacting,
@@ -291,12 +287,6 @@ fn normalize_response(
                 model: model_summary(model),
             }
         }
-        (RuntimeRequest::GetTree { .. }, ResponseResult::GetTree(data)) => {
-            NormalizedResponse::Tree {
-                tree: data.tree.into_iter().map(runtime_tree).collect(),
-                leaf_id: data.leaf_id,
-            }
-        }
         (RuntimeRequest::GetForkMessages, ResponseResult::GetForkMessages(data)) => {
             NormalizedResponse::ForkMessages(
                 data.messages
@@ -337,7 +327,6 @@ fn normalize_response(
         | (RuntimeRequest::SetSteeringMode { .. }, ResponseResult::SetSteeringMode)
         | (RuntimeRequest::SetFollowUpMode { .. }, ResponseResult::SetFollowUpMode)
         | (RuntimeRequest::SetAutoCompaction { .. }, ResponseResult::SetAutoCompaction)
-        | (RuntimeRequest::SetAutoRetry { .. }, ResponseResult::SetAutoRetry)
         | (RuntimeRequest::SetSessionName { .. }, ResponseResult::SetSessionName) => {
             NormalizedResponse::Accepted
         }
@@ -1098,14 +1087,6 @@ fn runtime_entry(entry: SessionEntry) -> RuntimeEntry {
     }
 }
 
-fn runtime_tree(node: SessionTreeNode) -> RuntimeTreeNode {
-    RuntimeTreeNode {
-        entry: Arc::new(runtime_entry(node.entry)),
-        children: node.children.into_iter().map(runtime_tree).collect(),
-        label: node.label,
-    }
-}
-
 fn model_summary(model: Model) -> ModelSummary {
     let supported_thinking = supported_thinking_levels(&model);
     ModelSummary {
@@ -1251,7 +1232,6 @@ fn operation_name(request: &RuntimeRequest) -> &'static str {
         RuntimeRequest::GetStats => "statistics hydration",
         RuntimeRequest::GetCommands => "command hydration",
         RuntimeRequest::GetModels => "model hydration",
-        RuntimeRequest::GetTree { .. } => "tree hydration",
         RuntimeRequest::GetForkMessages => "fork-message hydration",
         RuntimeRequest::Submit { kind, .. } => match kind {
             SubmissionKind::Prompt => "prompt delivery",
@@ -1269,7 +1249,6 @@ fn operation_name(request: &RuntimeRequest) -> &'static str {
         RuntimeRequest::SetFollowUpMode { .. } => "follow-up mode update",
         RuntimeRequest::Compact { .. } => "manual compaction",
         RuntimeRequest::SetAutoCompaction { .. } => "auto-compaction update",
-        RuntimeRequest::SetAutoRetry { .. } => "auto-retry update",
         RuntimeRequest::SetSessionName { .. } => "session rename",
         RuntimeRequest::ExportHtml { .. } => "session export",
         RuntimeRequest::SessionMutation(_) => "session replacement",

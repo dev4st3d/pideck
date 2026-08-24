@@ -8,9 +8,6 @@ impl AssetSource for Assets {
     fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
         let bytes = match path {
             "icons/agent-diamond.svg" => &include_bytes!("../assets/icons/agent-diamond.svg")[..],
-            "icons/agent-nodes.svg" => &include_bytes!("../assets/icons/agent-nodes.svg")[..],
-            "icons/agent-ring.svg" => &include_bytes!("../assets/icons/agent-ring.svg")[..],
-            "icons/agent-tiles.svg" => &include_bytes!("../assets/icons/agent-tiles.svg")[..],
             "icons/arrow-up.svg" => &include_bytes!("../assets/icons/arrow-up.svg")[..],
             "icons/chevron-down.svg" => &include_bytes!("../assets/icons/chevron-down.svg")[..],
             "icons/chevron-left.svg" => &include_bytes!("../assets/icons/chevron-left.svg")[..],
@@ -47,9 +44,6 @@ impl AssetSource for Assets {
         Ok(match path {
             "icons" => vec![
                 "agent-diamond.svg".into(),
-                "agent-nodes.svg".into(),
-                "agent-ring.svg".into(),
-                "agent-tiles.svg".into(),
                 "arrow-up.svg".into(),
                 "chevron-down.svg".into(),
                 "chevron-left.svg".into(),

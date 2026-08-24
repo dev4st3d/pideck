@@ -43,7 +43,6 @@ impl Render for RootView {
         let models = &self.render_projections.models;
         let resources = &self.render_projections.resources;
         let orchestration = &self.render_projections.orchestration;
-        let project_switch_enabled = self.project_switch_enabled();
         let pasted_image_preview = self.pasted_image_preview.and_then(|index| {
             let images = self.composer.read(cx).images();
             images
@@ -138,7 +137,6 @@ impl Render for RootView {
                                     hovered_thread_key: self.hovered_thread_key.as_deref(),
                                     project_feedback: self.project_feedback.as_deref(),
                                     project_picker_pending: self.project_picker_pending,
-                                    project_switch_enabled,
                                     conversation: &self.conversation,
                                     history_open: self.history_open,
                                     sidebar_open: self.sidebar_open,
@@ -303,11 +301,12 @@ impl Render for RootView {
                     &self.command_search_composer,
                     self.command_selection,
                     &self.command_palette_scroll,
+                    &self.command_palette_focus,
                     cx,
                 ))
             })
             .when(self.hotkey_help_open, |shell| {
-                shell.child(hotkey_help_overlay(cx))
+                shell.child(hotkey_help_overlay(&self.hotkey_help_focus, cx))
             })
             .when(!self.runtime_notifications.is_empty(), |shell| {
                 shell.child(runtime_notification_stack(&self.runtime_notifications, cx))

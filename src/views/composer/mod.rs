@@ -280,10 +280,6 @@ impl Composer {
         composer
     }
 
-    pub fn chrome(&self) -> ComposerChrome {
-        self.chrome
-    }
-
     fn sanitize_input(&self, text: &str) -> String {
         if self.chrome == ComposerChrome::Field {
             text.replace(['\r', '\n'], " ")
@@ -744,10 +740,6 @@ impl Composer {
             self.command_completion_active = active;
             cx.notify();
         }
-    }
-
-    pub fn command_completion_active(&self) -> bool {
-        self.command_completion_active
     }
 
     pub fn clear_bash_accepted(
@@ -1325,20 +1317,10 @@ impl Composer {
         }
     }
 
+    /// Tray hint for the idle-and-ready desk composer; other availability and
+    /// feedback states surface `status_text()` instead of these hints.
     pub(crate) fn hint_text(&self) -> &'static str {
-        match self.availability {
-            ComposerAvailability::Running => {
-                "Enter steer · Alt+Enter follow up · Shift+Enter newline · Ctrl+O files · Esc abort"
-            }
-            ComposerAvailability::Idle => {
-                "Enter send · Shift+Enter newline · Ctrl+O files · Ctrl+V image"
-            }
-            ComposerAvailability::BashRunning => "Esc aborts Bash only",
-            ComposerAvailability::BashCancelling => "Waiting for Bash to stop",
-            ComposerAvailability::Unavailable | ComposerAvailability::Cancelling => {
-                "Draft stays on this device"
-            }
-        }
+        "Enter send · Shift+Enter newline · Ctrl+O files · Ctrl+V image"
     }
 }
 

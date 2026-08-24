@@ -152,16 +152,6 @@ impl<'de> Deserialize<'de> for SessionEntry {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct SessionTreeNode {
-    pub entry: SessionEntry,
-    pub children: Vec<SessionTreeNode>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub label: Option<String>,
-    #[serde(rename = "labelTimestamp", skip_serializing_if = "Option::is_none")]
-    pub label_timestamp: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CompactionResult {
     pub summary: String,
     #[serde(rename = "firstKeptEntryId")]
@@ -251,8 +241,6 @@ pub struct SessionState {
     pub session_name: Option<String>,
     #[serde(rename = "autoCompactionEnabled")]
     pub auto_compaction_enabled: bool,
-    #[serde(rename = "messageCount")]
-    pub message_count: u64,
     #[serde(rename = "pendingMessageCount")]
     pub pending_message_count: u64,
 }

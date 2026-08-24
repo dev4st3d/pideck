@@ -202,34 +202,6 @@ impl ThemeId {
         }
     }
 
-    pub const fn next(self) -> Self {
-        match self {
-            Self::PiDeckDark => Self::CursorDark,
-            Self::CursorDark => Self::MossFoundry,
-            Self::MossFoundry => Self::InkHarbor,
-            Self::InkHarbor => Self::VoltWorkshop,
-            Self::VoltWorkshop => Self::PlumArchive,
-            Self::PlumArchive => Self::SaltFlat,
-            Self::SaltFlat => Self::SaffronLoom,
-            Self::SaffronLoom => Self::JuniperCoil,
-            Self::JuniperCoil => Self::SmokeLibrary,
-            Self::SmokeLibrary => Self::PewterHall,
-            Self::PewterHall => Self::OliveStudy,
-            Self::OliveStudy => Self::ParchmentDesk,
-            Self::ParchmentDesk => Self::MistOrchard,
-            Self::MistOrchard => Self::CoralLedger,
-            Self::CoralLedger => Self::ChalkBlueprint,
-            Self::ChalkBlueprint => Self::HoneyComb,
-            Self::HoneyComb => Self::PorcelainLab,
-            Self::PorcelainLab => Self::CitrusGrove,
-            Self::CitrusGrove => Self::Letterpress,
-            Self::Letterpress => Self::LinenGallery,
-            Self::LinenGallery => Self::RicePaper,
-            Self::RicePaper => Self::BoneChina,
-            Self::BoneChina => Self::PiDeckDark,
-        }
-    }
-
     const fn index(self) -> u8 {
         match self {
             Self::PiDeckDark => 0,
@@ -351,8 +323,6 @@ pub const RADIUS_SM: f32 = 3.0;
 pub const RADIUS_MD: f32 = 5.0;
 /// Popovers and detached sheets.
 pub const RADIUS_LG: f32 = 7.0;
-/// Largest surface radius; intentionally restrained.
-pub const RADIUS_XL: f32 = 9.0;
 pub const PAD_X: f32 = 10.0;
 pub const STREAM_PAD_X: f32 = 24.0;
 pub const SCROLLBAR: f32 = 6.0;
@@ -1367,21 +1337,6 @@ mod tests {
         assert_eq!(ThemeId::LinenGallery.label(), "Linen Gallery");
         assert_eq!(ThemeId::RicePaper.label(), "Rice Paper");
         assert_eq!(ThemeId::BoneChina.label(), "Bone China");
-    }
-
-    #[test]
-    fn theme_cycle_walks_the_full_catalog() {
-        let mut theme = ThemeId::PiDeckDark;
-        let mut seen = Vec::new();
-        for _ in 0..ThemeId::ALL.len() {
-            seen.push(theme);
-            theme = theme.next();
-        }
-        assert_eq!(theme, ThemeId::PiDeckDark);
-        assert_eq!(seen.len(), ThemeId::ALL.len());
-        for expected in ThemeId::ALL {
-            assert!(seen.contains(&expected), "missing {expected:?}");
-        }
     }
 
     #[test]

@@ -87,15 +87,6 @@ pub struct ModelPricing {
 }
 
 impl ModelPricing {
-    pub fn rates_for_input_tokens(&self, input_tokens: u64) -> &PricingRates {
-        self.tiers
-            .iter()
-            .filter(|tier| input_tokens > tier.input_tokens_above)
-            .max_by_key(|tier| tier.input_tokens_above)
-            .map(|tier| &tier.rates)
-            .unwrap_or(&self.rates)
-    }
-
     pub fn label(&self) -> String {
         if self.rates.is_zero() && self.tiers.iter().all(|tier| tier.rates.is_zero()) {
             return "Pricing not published".to_owned();
@@ -660,41 +651,6 @@ mod tests {
             model(vec![ThinkingLevel::Off]).pricing.label(),
             "Pricing not published"
         );
-    }
-
-    #[test]
-    fn pricing_uses_the_highest_strictly_exceeded_input_tier() {
-        let pricing = ModelPricing {
-            rates: PricingRates {
-                input: 1.0,
-                output: 2.0,
-                cache_read: 0.1,
-                cache_write: 1.25,
-            },
-            tiers: vec![
-                PricingTier {
-                    input_tokens_above: 100,
-                    rates: PricingRates {
-                        input: 3.0,
-                        output: 4.0,
-                        cache_read: 0.2,
-                        cache_write: 2.0,
-                    },
-                },
-                PricingTier {
-                    input_tokens_above: 200,
-                    rates: PricingRates {
-                        input: 5.0,
-                        output: 6.0,
-                        cache_read: 0.3,
-                        cache_write: 3.0,
-                    },
-                },
-            ],
-        };
-        assert_eq!(pricing.rates_for_input_tokens(100).input, 1.0);
-        assert_eq!(pricing.rates_for_input_tokens(101).input, 3.0);
-        assert_eq!(pricing.rates_for_input_tokens(201).input, 5.0);
     }
 
     #[test]

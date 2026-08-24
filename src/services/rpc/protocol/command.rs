@@ -74,9 +74,6 @@ pub enum Command {
     SetAutoCompaction {
         enabled: bool,
     },
-    SetAutoRetry {
-        enabled: bool,
-    },
     AbortRetry,
     Bash {
         command: String,
@@ -103,7 +100,6 @@ pub enum Command {
         #[serde(skip_serializing_if = "Option::is_none")]
         since: Option<EntryId>,
     },
-    GetTree,
     GetLastAssistantText,
     SetSessionName {
         name: String,

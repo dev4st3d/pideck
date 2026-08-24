@@ -190,7 +190,7 @@ impl TerminalSession {
     fn apply_events(&mut self, events: Vec<TerminalEvent>, cx: &mut Context<Self>) {
         for event in events {
             match event {
-                TerminalEvent::Started { .. } => self.status = TerminalStatus::Running,
+                TerminalEvent::Started => self.status = TerminalStatus::Running,
                 TerminalEvent::Output(bytes) => self.parser.process(&bytes),
                 TerminalEvent::Exited { code } => self.status = TerminalStatus::Exited(code),
                 TerminalEvent::Error { summary } => self.status = TerminalStatus::Failed(summary),

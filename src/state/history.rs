@@ -1,45 +1,26 @@
 //! UI-independent session tree browsing and keyboard selection.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use crate::services::rpc::EntryId;
 
 use super::runtime::{EntryKind, MessageBlock, MessageRole, RuntimeEntry, RuntimeTreeNode};
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum HistoryFilter {
-    #[default]
-    All,
-    Messages,
-    Summaries,
-    Labels,
-}
-
+/// One visible row of the flattened session tree; carries only what keyboard
+/// navigation and the selection need.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HistoryRow {
     pub id: EntryId,
-    pub depth: usize,
-    pub title: String,
-    pub detail: String,
-    pub label: Option<String>,
-    pub has_children: bool,
-    pub folded: bool,
-    pub active_path: bool,
     pub active_leaf: bool,
-    pub contextual: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HistoryEntryDetails {
-    pub id: EntryId,
-    pub parent_id: Option<EntryId>,
-    pub timestamp: String,
     pub kind: String,
     pub title: String,
     pub body: String,
     pub label: Option<String>,
     pub child_count: usize,
-    pub active_path: bool,
     pub active_leaf: bool,
 }
 
@@ -47,37 +28,11 @@ pub struct HistoryEntryDetails {
 pub struct HistoryBrowser {
     selected: Option<EntryId>,
     collapsed: HashSet<EntryId>,
-    filter: HistoryFilter,
-    query: String,
 }
 
 impl HistoryBrowser {
     pub fn selected(&self) -> Option<&EntryId> {
         self.selected.as_ref()
-    }
-
-    pub fn filter(&self) -> HistoryFilter {
-        self.filter
-    }
-
-    pub fn query(&self) -> &str {
-        &self.query
-    }
-
-    pub fn set_filter(&mut self, filter: HistoryFilter) {
-        self.filter = filter;
-    }
-
-    pub fn set_query(&mut self, query: impl Into<String>) {
-        self.query = query.into().trim().to_lowercase();
-    }
-
-    pub fn select(&mut self, id: EntryId, tree: &[RuntimeTreeNode]) -> bool {
-        if find_node(tree, &id).is_none() {
-            return false;
-        }
-        self.selected = Some(id);
-        true
     }
 
     pub fn synchronize(&mut self, tree: &[RuntimeTreeNode], leaf: Option<&EntryId>) {
@@ -95,57 +50,19 @@ impl HistoryBrowser {
     }
 
     pub fn rows(&self, tree: &[RuntimeTreeNode], leaf: Option<&EntryId>) -> Vec<HistoryRow> {
-        let active_path = leaf
-            .and_then(|leaf| path_to(tree, leaf))
-            .unwrap_or_default()
-            .into_iter()
-            .collect::<HashSet<_>>();
         let mut flattened = Vec::new();
-        flatten(tree, 0, None, &mut flattened);
-        let by_id = flattened
-            .iter()
-            .map(|node| (node.node.entry.id.clone(), node))
-            .collect::<HashMap<_, _>>();
-        let matching = flattened
-            .iter()
-            .filter(|node| self.matches(node.node))
-            .map(|node| node.node.entry.id.clone())
-            .collect::<HashSet<_>>();
-        let mut included = matching.clone();
-        for id in &matching {
-            let mut parent = by_id.get(id).and_then(|node| node.parent.clone());
-            while let Some(parent_id) = parent {
-                included.insert(parent_id.clone());
-                parent = by_id.get(&parent_id).and_then(|node| node.parent.clone());
-            }
-        }
-
-        let searching = !self.query.is_empty() || self.filter != HistoryFilter::All;
+        flatten(tree, &mut Vec::new(), &mut flattened);
         flattened
             .into_iter()
-            .filter(|node| included.contains(&node.node.entry.id))
             .filter(|node| {
-                searching
-                    || !node
-                        .ancestors
-                        .iter()
-                        .any(|ancestor| self.collapsed.contains(ancestor))
+                !node
+                    .ancestors
+                    .iter()
+                    .any(|ancestor| self.collapsed.contains(ancestor))
             })
-            .map(|node| {
-                let id = node.node.entry.id.clone();
-                let (title, detail, _) = entry_copy(&node.node.entry);
-                HistoryRow {
-                    id: id.clone(),
-                    depth: node.depth,
-                    title,
-                    detail,
-                    label: node.node.label.clone(),
-                    has_children: !node.node.children.is_empty(),
-                    folded: self.collapsed.contains(&id),
-                    active_path: active_path.contains(&id),
-                    active_leaf: leaf == Some(&id),
-                    contextual: !matching.contains(&id),
-                }
+            .map(|node| HistoryRow {
+                id: node.node.entry.id.clone(),
+                active_leaf: leaf == Some(&node.node.entry.id),
             })
             .collect()
     }
@@ -157,20 +74,13 @@ impl HistoryBrowser {
     ) -> Option<HistoryEntryDetails> {
         let selected = self.selected.as_ref()?;
         let node = find_node(tree, selected)?;
-        let active_path = leaf
-            .and_then(|leaf| path_to(tree, leaf))
-            .unwrap_or_default();
         let (title, _, body) = entry_copy(&node.entry);
         Some(HistoryEntryDetails {
-            id: node.entry.id.clone(),
-            parent_id: node.entry.parent_id.clone(),
-            timestamp: node.entry.timestamp.clone(),
             kind: entry_kind_name(&node.entry.kind).to_owned(),
             title,
             body,
             label: node.label.clone(),
             child_count: node.children.len(),
-            active_path: active_path.contains(&node.entry.id),
             active_leaf: leaf == Some(&node.entry.id),
         })
     }
@@ -225,38 +135,6 @@ impl HistoryBrowser {
         true
     }
 
-    fn matches(&self, node: &RuntimeTreeNode) -> bool {
-        let filter_match = match self.filter {
-            HistoryFilter::All => true,
-            HistoryFilter::Messages => matches!(node.entry.kind, EntryKind::Message(_)),
-            HistoryFilter::Summaries => matches!(
-                node.entry.kind,
-                EntryKind::Compaction { .. } | EntryKind::BranchSummary { .. }
-            ),
-            HistoryFilter::Labels => node.label.is_some(),
-        };
-        if !filter_match {
-            return false;
-        }
-        if self.query.is_empty() {
-            return true;
-        }
-        let (title, detail, body) = entry_copy(&node.entry);
-        title.to_lowercase().contains(&self.query)
-            || detail.to_lowercase().contains(&self.query)
-            || body.to_lowercase().contains(&self.query)
-            || node
-                .label
-                .as_deref()
-                .is_some_and(|label| label.to_lowercase().contains(&self.query))
-            || node
-                .entry
-                .id
-                .to_string()
-                .to_lowercase()
-                .contains(&self.query)
-    }
-
     fn move_by(&mut self, rows: &[HistoryRow], delta: isize) -> bool {
         if rows.is_empty() {
             return false;
@@ -290,43 +168,22 @@ impl HistoryBrowser {
 
 struct FlatNode<'a> {
     node: &'a RuntimeTreeNode,
-    depth: usize,
-    parent: Option<EntryId>,
     ancestors: Vec<EntryId>,
 }
 
 fn flatten<'a>(
     nodes: &'a [RuntimeTreeNode],
-    depth: usize,
-    parent: Option<EntryId>,
+    ancestors: &mut Vec<EntryId>,
     output: &mut Vec<FlatNode<'a>>,
 ) {
     for node in nodes {
-        let ancestors = parent
-            .as_ref()
-            .and_then(|parent| {
-                output
-                    .iter()
-                    .find(|item| &item.node.entry.id == parent)
-                    .map(|item| {
-                        let mut ancestors = item.ancestors.clone();
-                        ancestors.push(parent.clone());
-                        ancestors
-                    })
-            })
-            .unwrap_or_default();
         output.push(FlatNode {
             node,
-            depth,
-            parent: parent.clone(),
-            ancestors,
+            ancestors: ancestors.clone(),
         });
-        flatten(
-            &node.children,
-            depth.saturating_add(1),
-            Some(node.entry.id.clone()),
-            output,
-        );
+        ancestors.push(node.entry.id.clone());
+        flatten(&node.children, ancestors, output);
+        ancestors.pop();
     }
 }
 
@@ -337,19 +194,6 @@ fn find_node<'a>(nodes: &'a [RuntimeTreeNode], id: &EntryId) -> Option<&'a Runti
         }
         if let Some(found) = find_node(&node.children, id) {
             return Some(found);
-        }
-    }
-    None
-}
-
-fn path_to(nodes: &[RuntimeTreeNode], id: &EntryId) -> Option<Vec<EntryId>> {
-    for node in nodes {
-        if &node.entry.id == id {
-            return Some(vec![node.entry.id.clone()]);
-        }
-        if let Some(mut path) = path_to(&node.children, id) {
-            path.insert(0, node.entry.id.clone());
-            return Some(path);
         }
     }
     None
@@ -549,7 +393,7 @@ mod tests {
     }
 
     #[test]
-    fn tree_shapes_orphans_active_path_folding_and_keyboard_are_stable() {
+    fn tree_shapes_orphans_folding_and_keyboard_are_stable() {
         let tree = synthetic_tree();
         let leaf = EntryId::from("compact");
         let mut browser = HistoryBrowser::default();
@@ -567,22 +411,5 @@ mod tests {
         assert_eq!(browser.rows(&tree, Some(&leaf)).len(), 5);
         assert!(browser.move_last(&rows));
         assert_eq!(browser.selected(), Some(&EntryId::from("summary-root")));
-    }
-
-    #[test]
-    fn filters_search_compaction_and_labels_keep_context_ancestors() {
-        let tree = synthetic_tree();
-        let mut browser = HistoryBrowser::default();
-        browser.set_filter(HistoryFilter::Summaries);
-        let rows = browser.rows(&tree, Some(&EntryId::from("compact")));
-        assert_eq!(rows.len(), 4);
-        assert!(rows.iter().any(|row| row.title == "Compaction"));
-        assert!(rows.iter().any(|row| row.title == "Branch summary"));
-
-        browser.set_filter(HistoryFilter::Labels);
-        browser.set_query("review");
-        let rows = browser.rows(&tree, None);
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].id, EntryId::from("summary-root"));
     }
 }

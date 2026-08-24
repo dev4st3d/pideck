@@ -50,7 +50,6 @@ pub(super) fn runtime_operation_label(operation: &RuntimeOperation) -> &'static 
         RuntimeOperation::SetFollowUpMode(_) => "Changing follow-up mode",
         RuntimeOperation::Compact => "Compacting",
         RuntimeOperation::SetAutoCompaction(_) => "Changing auto compaction",
-        RuntimeOperation::SetAutoRetry(_) => "Changing auto retry",
         RuntimeOperation::SetSessionName(_) => "Renaming session",
         RuntimeOperation::ExportHtml => "Exporting session",
     }

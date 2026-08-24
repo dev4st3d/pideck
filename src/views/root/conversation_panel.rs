@@ -307,6 +307,7 @@ pub(super) fn conversation_area(params: ConversationAreaParams) -> impl IntoElem
                             .items_center()
                             .gap(px(5.0))
                             .cursor_pointer()
+                            .tab_index(0)
                             .font_family(theme::main())
                             .text_size(theme::text_size(theme::T_UI_SM))
                             .font_weight(FontWeight::SEMIBOLD)
@@ -314,6 +315,7 @@ pub(super) fn conversation_area(params: ConversationAreaParams) -> impl IntoElem
                             .hover(|button| {
                                 button.bg(theme::panel_hover()).text_color(theme::bone())
                             })
+                            .focus(|button| button.border_color(theme::focus()))
                             .active(|button| button.bg(theme::canvas()))
                             .on_click(move |_, _, cx| {
                                 jump_root.update(cx, |view, cx| view.jump_to_latest(cx));

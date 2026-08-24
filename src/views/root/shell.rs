@@ -1019,7 +1019,6 @@ pub(super) struct SessionsPanelParams<'a> {
     pub(super) hovered_thread_key: Option<&'a str>,
     pub(super) project_feedback: Option<&'a str>,
     pub(super) project_picker_pending: bool,
-    pub(super) project_switch_enabled: bool,
     pub(super) conversation: &'a ConversationProjection,
     pub(super) history_open: bool,
     pub(super) sidebar_open: bool,
@@ -1041,7 +1040,6 @@ pub(super) fn sessions_panel(
         hovered_thread_key,
         project_feedback,
         project_picker_pending,
-        project_switch_enabled,
         conversation,
         history_open,
         sidebar_open,
@@ -1061,7 +1059,7 @@ pub(super) fn sessions_panel(
     let pending_path = catalog.pending_session_file.as_ref();
     let project_count = projects.projects().len();
     let active_path = projects.active_path().to_path_buf();
-    let can_remove_active = project_count > 1 && project_switch_enabled;
+    let can_remove_active = project_count > 1;
     let export_enabled = session_actions_enabled && catalog.current_session_file.is_some();
     const SIDE_PAD: f32 = 8.0;
 
@@ -1152,7 +1150,6 @@ pub(super) fn sessions_panel(
                         switching: active_project
                             && pending_path
                                 .is_some_and(|path| sidebar_paths_match(path, &summary.path)),
-                        enabled: project_switch_enabled,
                         runtime_status: thread_statuses.get(&project_key(&summary.path)),
                         hovered: hovered_thread_key == Some(thread_key.as_str()),
                         cursored: cursor
@@ -1214,11 +1211,13 @@ pub(super) fn sessions_panel(
                                 .child("Threads"),
                         )
                         .child(
+                            // Counts project folders in the registry; labeled so
+                            // the number is never misread as a thread total.
                             div()
                                 .font_family(theme::mono())
                                 .text_size(theme::text_size(theme::T_TINY))
                                 .text_color(theme::smoke())
-                                .child(project_count.to_string()),
+                                .child(format!("{project_count} Folders")),
                         )
                         .child(div().flex_1())
                         .child(sidebar_header_icon_button(
@@ -1379,9 +1378,6 @@ pub(super) fn sessions_panel(
                         .pb(px(6.0))
                         .flex()
                         .flex_col()
-                        .when(rows.is_empty(), |list| {
-                            list.child(empty_projects_note(sidebar_open, cx))
-                        })
                         .children(tree_children),
                 ),
         )
@@ -1695,7 +1691,7 @@ const TREE_INDENT: f32 = 18.0;
 
 /// Keyboard-only focus edge. Selection is a fill; a pointer-parked cursor
 /// must not draw a box around every active row.
-fn cursor_border(cursored: bool, tree_keyboard_focused: bool, _emphasized: bool) -> gpui::Rgba {
+fn cursor_border(cursored: bool, tree_keyboard_focused: bool) -> gpui::Rgba {
     if cursored && tree_keyboard_focused {
         theme::focus()
     } else {
@@ -1740,7 +1736,7 @@ fn project_row(params: ProjectRowParams, cx: &mut Context<RootView>) -> AnyEleme
     let activity_key = list_animation_key(&project_id);
 
     let hover_bg = theme::panel();
-    let row_border = cursor_border(cursored, tree_focused, active);
+    let row_border = cursor_border(cursored, tree_focused);
 
     let row_id = SharedString::from(format!("project-{project_id}"));
     let toggle_id = SharedString::from(format!("toggle-project-{project_id}"));
@@ -1941,7 +1937,6 @@ fn sidebar_error_row(
                 SharedString::from(format!("remove-project-{}", project_key(&remove_path))),
                 "Remove from sidebar",
                 can_remove,
-                controls::ControlTone::Normal,
                 cx.entity(),
                 move |view, window, cx| view.remove_project(remove_path.clone(), window, cx),
             ))
@@ -1955,19 +1950,15 @@ fn sidebar_quiet_link(
     id: impl Into<SharedString>,
     label: impl Into<SharedString>,
     enabled: bool,
-    tone: controls::ControlTone,
     root: Entity<RootView>,
     action: impl Fn(&mut RootView, &mut Window, &mut Context<RootView>) + 'static,
 ) -> AnyElement {
-    let idle = match (enabled, tone) {
-        (true, controls::ControlTone::Danger) => theme::error(),
-        (true, controls::ControlTone::Normal) => theme::ash(),
-        (false, _) => theme::smoke(),
+    let idle = if enabled {
+        theme::ash()
+    } else {
+        theme::smoke()
     };
-    let hot = match tone {
-        controls::ControlTone::Danger => theme::error(),
-        controls::ControlTone::Normal => theme::bone(),
-    };
+    let hot = theme::bone();
     // Click and keyboard paths share one action; each handler needs its own
     // handle to the entity and the action.
     let action = std::rc::Rc::new(action);
@@ -2007,79 +1998,6 @@ fn sidebar_quiet_link(
                 .text_size(theme::text_size(theme::T_TINY))
                 .font_weight(FontWeight::MEDIUM)
                 .child(label.into()),
-        )
-        .into_any_element()
-}
-
-/// Guidance shown instead of the tree when the sidebar has no projects.
-/// Invitation copy: claim of the state, one plain sentence, one action.
-fn empty_projects_note(sidebar_open: bool, cx: &mut Context<RootView>) -> AnyElement {
-    div()
-        .px(px(4.0))
-        .pt(px(10.0))
-        .flex()
-        .flex_col()
-        .items_start()
-        .gap(px(4.0))
-        .child(
-            div()
-                .font_family(theme::sans())
-                .text_size(theme::text_size(theme::T_UI_SM))
-                .font_weight(FontWeight::MEDIUM)
-                .text_color(theme::bone_dim())
-                .child("No projects yet."),
-        )
-        .child(
-            div()
-                .font_family(theme::sans())
-                .text_size(theme::text_size(theme::T_TINY))
-                .line_height(gpui::relative(1.45))
-                .text_color(theme::smoke())
-                .child("Add a folder and its saved threads will show up here."),
-        )
-        .child(
-            div()
-                .id("empty-add-project")
-                .h(px(26.0))
-                .mt(px(2.0))
-                .px(px(12.0))
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(6.0))
-                .rounded_full()
-                .border_1()
-                .border_color(gpui::rgba(0x0000_0000))
-                .bg(theme::panel())
-                .when(sidebar_open, |button| {
-                    button
-                        .tab_index(0)
-                        .cursor_pointer()
-                        .hover(|button| button.bg(theme::panel_lift()).text_color(theme::bone()))
-                        .focus(|button| button.border_color(theme::focus()))
-                        .active(|button| button.bg(theme::panel_hover()))
-                        .on_click(cx.listener(|view, _, _window, cx| view.choose_projects(cx)))
-                        .on_key_down(cx.listener(|view, event: &gpui::KeyDownEvent, _, cx| {
-                            if matches!(event.keystroke.key.as_str(), "enter" | "space") {
-                                cx.stop_propagation();
-                                view.choose_projects(cx);
-                            }
-                        }))
-                })
-                .text_color(theme::ash())
-                .child(
-                    svg()
-                        .path("icons/folder.svg")
-                        .size(px(12.0))
-                        .flex_shrink_0(),
-                )
-                .child(
-                    div()
-                        .font_family(theme::sans())
-                        .text_size(theme::text_size(theme::T_UI_SM))
-                        .font_weight(FontWeight::MEDIUM)
-                        .child("Add folder"),
-                ),
         )
         .into_any_element()
 }
@@ -2150,7 +2068,6 @@ struct ProjectThreadRowParams<'a> {
     active_project: bool,
     selected: bool,
     switching: bool,
-    enabled: bool,
     runtime_status: Option<&'a ThreadRuntimeStatus>,
     hovered: bool,
     cursored: bool,
@@ -2169,7 +2086,6 @@ fn project_thread_row(
         active_project,
         selected,
         switching,
-        enabled,
         runtime_status,
         hovered,
         cursored,
@@ -2199,12 +2115,14 @@ fn project_thread_row(
             runtime_activity,
             Some(ThreadActivity::Working | ThreadActivity::Cancelling | ThreadActivity::Attention)
         );
-    // Active/busy rows keep the date; only idle non-active threads expose delete on hover.
+    // Active/busy rows keep the date; only idle non-active threads expose
+    // delete chrome. Hover or the tree's roving cursor holds it mounted so
+    // the trash tab stop survives moving the pointer away mid-focus.
     let can_delete = crate::services::session_catalog::reversible_trash_available()
         && !selected
         && !switching
         && !show_activity;
-    let show_delete = can_delete && hovered;
+    let show_delete = can_delete && (hovered || cursored);
     let row_id = SharedString::from(format!(
         "project-thread-{}-{}",
         project_key(&click_project),
@@ -2218,7 +2136,7 @@ fn project_thread_row(
     } else {
         gpui::rgba(0x0000_0000)
     };
-    let row_border = cursor_border(cursored, tree_focused, selected);
+    let row_border = cursor_border(cursored, tree_focused);
 
     div()
         .id(row_id)
@@ -2246,7 +2164,7 @@ fn project_thread_row(
                 }
             });
         })
-        .when(enabled && !selected, |row| {
+        .when(!selected, |row| {
             row.cursor_pointer()
                 .active(|row| row.bg(theme::panel_hover()))
                 .on_click(move |_, window, cx| {
@@ -2276,10 +2194,8 @@ fn project_thread_row(
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(if selected {
                     theme::bone()
-                } else if enabled {
-                    theme::bone_dim()
                 } else {
-                    theme::ash()
+                    theme::bone_dim()
                 })
                 .child(title),
         )
@@ -2482,7 +2398,7 @@ fn compact_session_day(timestamp: &str) -> String {
     let bytes = timestamp.as_bytes();
     let iso_shape = bytes.len() >= 10 && bytes.get(4) == Some(&b'-') && bytes.get(7) == Some(&b'-');
     if !iso_shape {
-        return compact_session_timestamp(timestamp);
+        return timestamp.to_owned();
     }
 
     let Some(month_digits) = timestamp.get(5..7) else {
@@ -2511,27 +2427,6 @@ fn compact_session_day(timestamp: &str) -> String {
         return timestamp.to_owned();
     }
     format!("{month} {day}")
-}
-
-fn compact_session_timestamp(timestamp: &str) -> String {
-    let bytes = timestamp.as_bytes();
-    let iso_shape = bytes.len() >= 16
-        && bytes.get(4) == Some(&b'-')
-        && bytes.get(7) == Some(&b'-')
-        && matches!(bytes.get(10), Some(b'T' | b' '))
-        && bytes.get(13) == Some(&b':');
-    if !iso_shape {
-        return timestamp.to_owned();
-    }
-
-    let day = compact_session_day(timestamp);
-    let Some(time) = timestamp.get(11..16) else {
-        return day;
-    };
-    if day == timestamp {
-        return timestamp.to_owned();
-    }
-    format!("{day}, {time}")
 }
 
 pub(super) struct HistoryPanelParams<'a> {
@@ -3164,12 +3059,11 @@ mod tests {
 
     #[test]
     fn session_timestamp_is_compact_without_losing_unknown_formats() {
-        assert_eq!(
-            compact_session_timestamp("2026-07-26T14:08:51.000Z"),
-            "Jul 26, 14:08"
-        );
         assert_eq!(compact_session_day("2026-07-26T14:08:51.000Z"), "Jul 26");
-        assert_eq!(compact_session_timestamp("recently"), "recently");
+        assert_eq!(compact_session_day("2026-07-26"), "Jul 26");
+        assert_eq!(compact_session_day("recently"), "recently");
+        assert_eq!(compact_session_day("2026-13-26"), "2026-13-26");
+        assert_eq!(compact_session_day("2026-00-26"), "2026-00-26");
     }
 
     #[test]

@@ -901,9 +901,19 @@ pub(super) fn subagent_dialog(
         .track_focus(focus)
         .tab_index(0)
         .on_key_down(cx.listener(RootView::on_subagent_dialog_key_down))
+        // Capture Escape here so the steer composer's AbortRun bubble listener
+        // cannot swallow it; clicking the scrim dismisses, card clicks stop.
+        .capture_action(cx.listener(|view, _: &AbortRun, window, cx| {
+            view.close_subagent(window, cx)
+        }))
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|view, _, window, cx| view.close_subagent(window, cx)),
+        )
         .child(
             div()
                 .id("subagent-conversation-dialog")
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .w_full()
                 .max_w(px(980.0))
                 .h_full()

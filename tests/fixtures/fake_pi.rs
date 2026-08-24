@@ -289,7 +289,6 @@ fn response_for(command: &str, id: &str) -> String {
             "{\"sessionId\":\"fake-session\",\"userMessages\":0,\"assistantMessages\":0,\"toolCalls\":0,\"toolResults\":0,\"totalMessages\":0,\"tokens\":{\"input\":0,\"output\":0,\"cacheRead\":0,\"cacheWrite\":0,\"total\":0},\"cost\":0.0,\"contextUsage\":{\"tokens\":0,\"contextWindow\":100000,\"percent\":0.0}}",
         ),
         "get_entries" => Some("{\"entries\":[],\"leafId\":null}"),
-        "get_tree" => Some("{\"tree\":[],\"leafId\":null}"),
         "get_last_assistant_text" => Some("{\"text\":null}"),
         "get_fork_messages" => Some("{\"messages\":[]}"),
         "new_session" | "switch_session" | "clone" => Some("{\"cancelled\":false}"),
@@ -318,7 +317,6 @@ fn is_read_command(command: &str) -> bool {
             | "get_commands"
             | "get_available_models"
             | "get_entries"
-            | "get_tree"
             | "get_last_assistant_text"
             | "get_fork_messages"
     )

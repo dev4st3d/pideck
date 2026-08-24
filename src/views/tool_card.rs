@@ -7,7 +7,6 @@ pub(super) use self::data::{
     ToolPresentation, presentation_for_bash_block, presentation_for_standalone_result,
     presentation_for_tool_call, tail_presentations,
 };
-use crate::state::runtime::sanitize_untrusted_text;
 use crate::theme;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -38,18 +37,22 @@ pub struct ToolPayload {
     pub full_output_path: Option<String>,
 }
 
-pub(super) fn render_tool_presentation(
-    items: &[ToolPresentation],
-    elapsed_ms: Option<u128>,
-    context_excluded: bool,
-    error: Option<&str>,
-) -> impl IntoElement {
+pub(super) fn render_tool_presentation(items: &[ToolPresentation]) -> impl IntoElement {
     let Some(first) = items.first() else {
         return div().into_any_element();
     };
     let title = first.title(items.len());
     let status = group_status(items);
     let marker = status_color(status);
+    // Elapsed and context-exclusion ride on each presentation; surface them
+    // while work is still in flight. Settled cards keep the quiet status
+    // label, with exact figures in the detail panel's metadata rows.
+    let elapsed_ms = items
+        .iter()
+        .filter_map(|item| item.elapsed_ms)
+        .max()
+        .filter(|_| matches!(status, CardStatus::Pending | CardStatus::Running));
+    let context_excluded = items.iter().any(|item| item.context_excluded);
     let rows = items
         .iter()
         .flat_map(|item| item.rows.iter().cloned())
@@ -142,15 +145,6 @@ pub(super) fn render_tool_presentation(
                     )
                 })
         }))
-        .when_some(error.map(str::to_owned), |card, error| {
-            card.child(
-                div()
-                    .font_family(theme::sans())
-                    .text_size(theme::text_size(theme::T_UI_SM))
-                    .text_color(theme::error())
-                    .child(sanitize_untrusted_text(&error)),
-            )
-        })
         .into_any_element()
 }
 

@@ -98,14 +98,10 @@ pub struct ResourceItem {
     pub description: Option<String>,
     pub state: ResourceLoadState,
     pub scope: ResourceScope,
-    #[serde(default)]
-    pub owner_scope: Option<String>,
     pub trust: ResourceTrust,
     #[serde(default)]
     pub path: Option<String>,
     pub source: String,
-    #[serde(default)]
-    pub origin: Option<String>,
     #[serde(default)]
     pub active: Option<bool>,
     #[serde(default)]
@@ -128,10 +124,6 @@ pub struct ResourceSettingsSnapshot {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PackageMutationPolicy {
-    pub install: bool,
-    pub remove: bool,
-    pub update: bool,
-    pub configure: bool,
     pub reason: String,
 }
 
@@ -139,7 +131,6 @@ pub struct PackageMutationPolicy {
 #[serde(rename_all = "camelCase")]
 pub struct ResourceInventorySnapshot {
     pub generation: u64,
-    pub project_trusted: bool,
     pub project_trust_reason: String,
     pub items: Vec<ResourceItem>,
     #[serde(default)]
@@ -257,11 +248,9 @@ mod tests {
             description: None,
             state,
             scope,
-            owner_scope: None,
             trust: ResourceTrust::Trusted,
             path: None,
             source: "test".to_owned(),
-            origin: None,
             active: None,
             pinned: None,
             filtered: None,

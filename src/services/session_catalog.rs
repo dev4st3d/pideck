@@ -79,16 +79,6 @@ impl SessionCatalogConfig {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct SessionCounts {
-    pub messages: u64,
-    pub user_messages: u64,
-    pub assistant_messages: u64,
-    pub tool_results: u64,
-    pub compactions: u64,
-    pub branches: u64,
-}
-
 impl SessionSummary {
     /// Transient row for a live runtime whose assigned JSONL path has not been
     /// created on disk yet. Pi defers that write until the first assistant message.
@@ -103,12 +93,8 @@ impl SessionSummary {
             id,
             name,
             first_user_summary: None,
-            created_at: "Now".to_owned(),
             updated_at: "Now".to_owned(),
-            parent_session: None,
             path,
-            version: 3,
-            counts: SessionCounts::default(),
             modified_sort_key: u128::MAX,
         }
     }
@@ -118,7 +104,6 @@ impl SessionSummary {
     pub(crate) fn test_stub(id: &str, path: PathBuf) -> Self {
         let mut summary = Self::live(path, Some(id.to_owned()));
         summary.id = id.to_owned();
-        summary.created_at = "2026-01-02T03:04:05.000Z".to_owned();
         summary.updated_at = "2026-01-02T03:04:05.000Z".to_owned();
         summary.modified_sort_key = 0;
         summary
@@ -130,12 +115,8 @@ pub struct SessionSummary {
     pub id: String,
     pub name: Option<String>,
     pub first_user_summary: Option<String>,
-    pub created_at: String,
     pub updated_at: String,
-    pub parent_session: Option<PathBuf>,
     pub path: PathBuf,
-    pub version: u64,
-    pub counts: SessionCounts,
     modified_sort_key: u128,
 }
 
@@ -342,7 +323,6 @@ fn scan_session_file(path: &Path, workspace_key: &str) -> Result<Option<SessionS
     let mut buffer = Vec::new();
     let mut line_number = 0_u64;
     let mut header: Option<Value> = None;
-    let mut counts = SessionCounts::default();
     let mut name = None;
     let mut first_user_summary = None;
     let mut updated_at = None;
@@ -401,21 +381,10 @@ fn scan_session_file(path: &Path, workspace_key: &str) -> Result<Option<SessionS
         }
         match entry_type {
             "message" => {
-                counts.messages = counts.messages.saturating_add(1);
-                match value.pointer("/message/role").and_then(Value::as_str) {
-                    Some("user") => {
-                        counts.user_messages = counts.user_messages.saturating_add(1);
-                        if first_user_summary.is_none() {
-                            first_user_summary = message_text(value.pointer("/message/content"));
-                        }
-                    }
-                    Some("assistant") => {
-                        counts.assistant_messages = counts.assistant_messages.saturating_add(1)
-                    }
-                    Some("toolResult") => {
-                        counts.tool_results = counts.tool_results.saturating_add(1)
-                    }
-                    _ => {}
+                if value.pointer("/message/role").and_then(Value::as_str) == Some("user")
+                    && first_user_summary.is_none()
+                {
+                    first_user_summary = message_text(value.pointer("/message/content"));
                 }
             }
             "session_info" => {
@@ -426,8 +395,6 @@ fn scan_session_file(path: &Path, workspace_key: &str) -> Result<Option<SessionS
                     .filter(|name| !name.is_empty())
                     .map(ToOwned::to_owned);
             }
-            "compaction" => counts.compactions = counts.compactions.saturating_add(1),
-            "branch_summary" => counts.branches = counts.branches.saturating_add(1),
             _ => {}
         }
     }
@@ -442,7 +409,7 @@ fn scan_session_file(path: &Path, workspace_key: &str) -> Result<Option<SessionS
         .and_then(Value::as_str)
         .expect("validated session id")
         .to_owned();
-    let created_at = header
+    let fallback_timestamp = header
         .get("timestamp")
         .and_then(Value::as_str)
         .unwrap_or("Unknown")
@@ -456,15 +423,8 @@ fn scan_session_file(path: &Path, workspace_key: &str) -> Result<Option<SessionS
         id,
         name,
         first_user_summary,
-        created_at: created_at.clone(),
-        updated_at: updated_at.unwrap_or(created_at),
-        parent_session: header
-            .get("parentSession")
-            .and_then(Value::as_str)
-            .map(PathBuf::from),
+        updated_at: updated_at.unwrap_or(fallback_timestamp),
         path: path.to_path_buf(),
-        version,
-        counts,
         modified_sort_key,
     }))
 }
@@ -790,11 +750,6 @@ mod tests {
         .unwrap();
         let scan = scan_sessions(&config(&workspace, &sessions)).unwrap();
         assert_eq!(scan.sessions.len(), 3);
-        assert!(
-            scan.sessions
-                .iter()
-                .all(|session| session.counts.user_messages == 1)
-        );
         assert!(
             scan.sessions
                 .iter()

@@ -5,12 +5,11 @@ use std::time::{Duration, Instant};
 use super::runtime::{
     BashExecution, BashStatus, CommandSource, CompactionState, DialogAnswer, DialogRequest,
     EffectKind, ErrorKind, ExtensionDialog, ExtensionFailure, FacetStatus, HydrationMode,
-    MAX_NOTIFICATIONS, MAX_RETIRED_EXTENSION_DIALOGS, MAX_UNKNOWN_RECORDS, MessageBlock,
-    MessageRole, NormalizedEvent, NormalizedResponse, OptimisticUserInput, PromptDelivery,
-    PromptImage, QueueContents, RequestFailureKind, RetryState, RuntimeEffect, RuntimeInput,
-    RuntimeIntent, RuntimeLifecycle, RuntimeMessage, RuntimeOperation, RuntimeRequest,
-    RuntimeState, SafeError, SessionMutation, StampedInput, SubmissionKind, ToolExecution,
-    ToolStatus, UnknownRecord, push_bounded,
+    MAX_NOTIFICATIONS, MAX_RETIRED_EXTENSION_DIALOGS, MessageBlock, MessageRole, NormalizedEvent,
+    NormalizedResponse, OptimisticUserInput, PromptDelivery, PromptImage, QueueContents,
+    RequestFailureKind, RetryState, RuntimeEffect, RuntimeInput, RuntimeIntent, RuntimeLifecycle,
+    RuntimeMessage, RuntimeOperation, RuntimeRequest, RuntimeState, SafeError, SessionMutation,
+    StampedInput, SubmissionKind, ToolExecution, ToolStatus, push_bounded,
 };
 use crate::attachments::PromptFile;
 use crate::services::rpc::{EntryId, RequestId};
@@ -287,14 +286,6 @@ fn reduce_intent(
             state.bump_revision();
             vec![effect(state, RuntimeRequest::SetAutoCompaction { enabled })]
         }
-        RuntimeIntent::SetAutoRetry { enabled } => {
-            if !settings_allowed(state) || state.pending_operation.is_some() {
-                return Vec::new();
-            }
-            state.pending_operation = Some(RuntimeOperation::SetAutoRetry(enabled));
-            state.bump_revision();
-            vec![effect(state, RuntimeRequest::SetAutoRetry { enabled })]
-        }
         RuntimeIntent::SetSessionName { name } => {
             let name = name.trim().to_owned();
             if name.is_empty() || !settings_allowed(state) || state.pending_operation.is_some() {
@@ -499,18 +490,6 @@ fn reduce_response(
         }
         (RuntimeRequest::GetModels, Ok(NormalizedResponse::Models(models))) => {
             state.models.ready(Arc::new(models));
-            Vec::new()
-        }
-        (
-            RuntimeRequest::GetTree { base_revision },
-            Ok(NormalizedResponse::Tree { tree, leaf_id }),
-        ) => {
-            state.tree_leaf_id = leaf_id;
-            if state.revision == base_revision || state.tree.data.is_none() {
-                state.tree.ready(Arc::new(tree));
-            } else {
-                state.tree.status = FacetStatus::Ready;
-            }
             Vec::new()
         }
         (RuntimeRequest::GetForkMessages, Ok(NormalizedResponse::ForkMessages(messages))) => {
@@ -792,15 +771,6 @@ fn reduce_response(
             }
             Vec::new()
         }
-        (RuntimeRequest::SetAutoRetry { enabled }, Ok(NormalizedResponse::Accepted)) => {
-            if matches!(state.pending_operation, Some(RuntimeOperation::SetAutoRetry(pending)) if pending == enabled)
-            {
-                state.auto_retry_enabled = Some(enabled);
-                state.pending_operation = None;
-                state.bump_revision();
-            }
-            Vec::new()
-        }
         (RuntimeRequest::SetSessionName { name }, Ok(NormalizedResponse::Accepted)) => {
             if matches!(state.pending_operation.as_ref(), Some(RuntimeOperation::SetSessionName(pending)) if pending == &name)
             {
@@ -868,7 +838,6 @@ fn reduce_response(
             | RuntimeRequest::SetThinkingLevel { .. }
             | RuntimeRequest::Compact { .. }
             | RuntimeRequest::SetAutoCompaction { .. }
-            | RuntimeRequest::SetAutoRetry { .. }
             | RuntimeRequest::SetSessionName { .. }
             | RuntimeRequest::ExportHtml { .. }),
             Err(failure),
@@ -1014,11 +983,9 @@ fn reduce_event(
         NormalizedEvent::AgentStart | NormalizedEvent::TurnStart => {
             state.lifecycle = RuntimeLifecycle::Running;
             state.pending_prompt_settled = false;
-            state.low_level_agent_end_seen = false;
         }
         NormalizedEvent::AgentEnd { messages, .. } => {
             upsert_messages(state, messages, MessagePhase::Terminal);
-            state.low_level_agent_end_seen = true;
             effects.push(effect(state, RuntimeRequest::GetStats));
         }
         NormalizedEvent::AgentSettled => settle(state),
@@ -1286,17 +1253,9 @@ fn reduce_event(
                     effects.push(extension_response(state, id, DialogAnswer::Cancelled));
                 }
                 state.bump_revision();
-            } else if state.retired_dialogs.contains(&id)
-                || state.dialogs.iter().any(|dialog| dialog.id == id)
+            } else if !state.retired_dialogs.contains(&id)
+                && !state.dialogs.iter().any(|dialog| dialog.id == id)
             {
-                push_bounded(
-                    &mut state.unknown_records,
-                    UnknownRecord {
-                        record_type: "extension_ui_request:duplicate_id".to_owned(),
-                    },
-                    MAX_UNKNOWN_RECORDS,
-                );
-            } else {
                 let timeout_ms = match &request {
                     DialogRequest::Select { timeout_ms, .. }
                     | DialogRequest::Confirm { timeout_ms, .. }
@@ -1364,13 +1323,9 @@ fn reduce_event(
                 super::runtime::MAX_RUNTIME_ERRORS,
             );
         }
-        NormalizedEvent::Unknown { record_type } => {
-            push_bounded(
-                &mut state.unknown_records,
-                UnknownRecord { record_type },
-                MAX_UNKNOWN_RECORDS,
-            );
-        }
+        // Unknown record types carry no actionable UI state; they are recognized
+        // here so the exhaustive match stays explicit while being dropped.
+        NormalizedEvent::Unknown { .. } => {}
     }
     effects
 }
@@ -1384,7 +1339,6 @@ fn settle(state: &mut RuntimeState) {
         }
     );
     state.lifecycle = RuntimeLifecycle::Settled;
-    state.low_level_agent_end_seen = false;
     if matches!(state.retry, RetryState::Cancelling) {
         state.retry = RetryState::Idle;
     }
@@ -1906,7 +1860,6 @@ fn fail_hydration_facet(state: &mut RuntimeState, request: &RuntimeRequest, erro
         RuntimeRequest::GetStats => state.stats.failed(error),
         RuntimeRequest::GetCommands => state.commands.failed(error),
         RuntimeRequest::GetModels => state.models.failed(error),
-        RuntimeRequest::GetTree { .. } => state.tree.failed(error),
         RuntimeRequest::GetForkMessages => state.fork_messages.failed(error),
         _ => state.bounded_error(error),
     }
@@ -1921,7 +1874,6 @@ fn is_hydration_request(request: &RuntimeRequest) -> bool {
             | RuntimeRequest::GetStats
             | RuntimeRequest::GetCommands
             | RuntimeRequest::GetModels
-            | RuntimeRequest::GetTree { .. }
             | RuntimeRequest::GetForkMessages
     )
 }
@@ -1934,7 +1886,6 @@ fn request_name(request: &RuntimeRequest) -> &'static str {
         RuntimeRequest::GetStats => "get_session_stats",
         RuntimeRequest::GetCommands => "get_commands",
         RuntimeRequest::GetModels => "get_available_models",
-        RuntimeRequest::GetTree { .. } => "get_tree",
         RuntimeRequest::GetForkMessages => "get_fork_messages",
         RuntimeRequest::Submit { kind, .. } => match kind {
             SubmissionKind::Prompt => "prompt",
@@ -1952,7 +1903,6 @@ fn request_name(request: &RuntimeRequest) -> &'static str {
         RuntimeRequest::SetFollowUpMode { .. } => "set_follow_up_mode",
         RuntimeRequest::Compact { .. } => "compact",
         RuntimeRequest::SetAutoCompaction { .. } => "set_auto_compaction",
-        RuntimeRequest::SetAutoRetry { .. } => "set_auto_retry",
         RuntimeRequest::SetSessionName { .. } => "set_session_name",
         RuntimeRequest::ExportHtml { .. } => "export_html",
         RuntimeRequest::SessionMutation(_) => "session mutation",
@@ -1972,12 +1922,9 @@ fn extension_response(
 }
 
 fn emit_effect(state: &mut RuntimeState, effect: EffectKind) -> RuntimeEffect {
-    let sequence = state.next_request;
-    state.next_request = state.next_request.saturating_add(1);
     RuntimeEffect {
         generation: state.generation,
         epoch: state.epoch,
-        sequence,
         effect,
     }
 }

@@ -55,10 +55,7 @@ impl Default for TerminalSize {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TerminalEvent {
-    Started {
-        shell: String,
-        process_id: Option<u32>,
-    },
+    Started,
     Output(Vec<u8>),
     Exited {
         code: u32,
@@ -132,24 +129,10 @@ impl TerminalWorker {
             .is_ok()
     }
 
-    /// Writes a command exactly as typed, followed by a carriage return.
-    pub fn write_line(&self, line: &str) -> bool {
-        let mut bytes = Vec::with_capacity(line.len() + 1);
-        bytes.extend_from_slice(line.as_bytes());
-        bytes.push(b'\r');
-        self.write_bytes(bytes)
-    }
-
     pub fn resize(&self, size: TerminalSize) -> bool {
         self.commands
             .try_send(TerminalCommand::Resize(size))
             .is_ok()
-    }
-
-    pub fn shutdown(&self) -> bool {
-        let first = !self.shutdown_requested.swap(true, Ordering::AcqRel);
-        let _ = self.commands.try_send(TerminalCommand::Shutdown);
-        first
     }
 }
 
@@ -255,7 +238,6 @@ fn run_terminal(
     };
     drop(pair.slave);
 
-    let process_id = child.process_id();
     let mut killer = child.clone_killer();
     let Ok(mut reader) = pair.master.try_clone_reader() else {
         let _ = killer.kill();
@@ -278,7 +260,7 @@ fn run_terminal(
         return;
     };
 
-    send_event(&events, TerminalEvent::Started { shell, process_id });
+    send_event(&events, TerminalEvent::Started);
 
     let reader_events = events.clone();
     let _ = thread::Builder::new()
@@ -462,7 +444,7 @@ mod tests {
             match events.try_recv() {
                 Ok(TerminalEvent::Output(bytes)) => output.extend(bytes),
                 Ok(TerminalEvent::Error { summary }) => panic!("terminal failed: {summary}"),
-                Ok(TerminalEvent::Started { .. } | TerminalEvent::Exited { .. }) => {}
+                Ok(TerminalEvent::Started | TerminalEvent::Exited { .. }) => {}
                 Err(async_channel::TryRecvError::Empty) => {
                     std::thread::sleep(Duration::from_millis(10));
                 }
@@ -484,7 +466,7 @@ mod tests {
 
         while Instant::now() < deadline && !started {
             match events.try_recv() {
-                Ok(TerminalEvent::Started { .. }) => started = true,
+                Ok(TerminalEvent::Started) => started = true,
                 Ok(TerminalEvent::Error { summary }) => panic!("terminal start failed: {summary}"),
                 Ok(TerminalEvent::Output(bytes)) => output.extend(bytes),
                 Ok(TerminalEvent::Exited { code }) => panic!("terminal exited early: {code}"),
@@ -495,7 +477,7 @@ mod tests {
             }
         }
         assert!(started, "ConPTY shell did not report readiness");
-        assert!(worker.write_line("echo PIDECK_TERMINAL_READY"));
+        assert!(worker.write_bytes(b"echo PIDECK_TERMINAL_READY\r".to_vec()));
 
         while Instant::now() < deadline
             && !String::from_utf8_lossy(&output).contains("PIDECK_TERMINAL_READY")
@@ -503,7 +485,7 @@ mod tests {
             match events.try_recv() {
                 Ok(TerminalEvent::Output(bytes)) => output.extend(bytes),
                 Ok(TerminalEvent::Error { summary }) => panic!("terminal output failed: {summary}"),
-                Ok(TerminalEvent::Started { .. } | TerminalEvent::Exited { .. }) => {}
+                Ok(TerminalEvent::Started | TerminalEvent::Exited { .. }) => {}
                 Err(async_channel::TryRecvError::Empty) => {
                     std::thread::sleep(Duration::from_millis(10));
                 }
@@ -515,7 +497,7 @@ mod tests {
             "shell output did not contain the command marker: {:?}",
             String::from_utf8_lossy(&output)
         );
-        let _ = worker.write_line("exit");
+        let _ = worker.write_bytes(b"exit\r".to_vec());
     }
 
     #[cfg(windows)]
@@ -526,8 +508,8 @@ mod tests {
         let second = TerminalWorker::spawn(workspace, TerminalSize::new(8, 80));
         let first_events = first.events();
         let second_events = second.events();
-        assert!(first.write_line("echo PIDECK_FIRST_TERMINAL"));
-        assert!(second.write_line("echo PIDECK_SECOND_TERMINAL"));
+        assert!(first.write_bytes(b"echo PIDECK_FIRST_TERMINAL\r".to_vec()));
+        assert!(second.write_bytes(b"echo PIDECK_SECOND_TERMINAL\r".to_vec()));
         let deadline = Instant::now() + Duration::from_secs(10);
         let first_output =
             wait_for_terminal_marker(&first_events, "PIDECK_FIRST_TERMINAL", deadline);
@@ -539,7 +521,7 @@ mod tests {
         assert!(!first_text.contains("PIDECK_SECOND_TERMINAL"));
         assert!(second_text.contains("PIDECK_SECOND_TERMINAL"));
         assert!(!second_text.contains("PIDECK_FIRST_TERMINAL"));
-        let _ = first.write_line("exit");
-        let _ = second.write_line("exit");
+        let _ = first.write_bytes(b"exit\r".to_vec());
+        let _ = second.write_bytes(b"exit\r".to_vec());
     }
 }

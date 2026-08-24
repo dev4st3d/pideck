@@ -77,11 +77,8 @@ pub struct ShellProjection {
     pub cache_read: DisplayValue,
     pub cache_write: DisplayValue,
     pub lifecycle: String,
-    pub headline: String,
-    pub detail: String,
     pub action: Option<RecoveryAction>,
     pub has_stale_values: bool,
-    pub no_model: bool,
 }
 
 impl ShellProjection {
@@ -89,7 +86,6 @@ impl ShellProjection {
         status: ControllerStatus,
         workspace: impl Into<String>,
         runtime: &RuntimeState,
-        controller_error: Option<&str>,
     ) -> Self {
         let workspace = workspace.into();
         let session = project_session(runtime);
@@ -107,84 +103,24 @@ impl ShellProjection {
             format_count(stats.cache_write_tokens)
         });
         let no_model = status == ControllerStatus::Active && model_is_unavailable(runtime);
-        let reducer_error = runtime
-            .errors
-            .back()
-            .map(|error| error.summary.as_str())
-            .or(match &runtime.session.status {
-                FacetStatus::Failed(error) => Some(error.summary.as_str()),
-                FacetStatus::Loading | FacetStatus::Ready => None,
-            });
-        let error = controller_error.or(reducer_error);
 
-        let (lifecycle, headline, detail, action) = match status {
-            ControllerStatus::Idle => (
-                "Not connected",
-                "Pi is ready to connect",
-                "The runtime will use this workspace with tools and project resources disabled.",
-                Some(RecoveryAction::Connect),
-            ),
-            ControllerStatus::Connecting => (
-                "Connecting",
-                "Starting Pi",
-                "Discovering Pi and waiting for correlated RPC readiness.",
-                Some(RecoveryAction::Stop),
-            ),
-            ControllerStatus::Stopping => (
-                "Stopping",
-                "Stopping Pi",
-                "The supervised runtime is shutting down.",
-                None,
-            ),
-            ControllerStatus::Stopped => (
-                "Stopped",
-                "Pi is stopped",
-                "Connect to start a fresh ephemeral runtime.",
-                Some(RecoveryAction::Connect),
-            ),
-            ControllerStatus::Failed => (
-                "Connection error",
-                "Pi could not connect",
-                error.unwrap_or("The Pi runtime is unavailable."),
-                Some(RecoveryAction::Retry),
-            ),
-            ControllerStatus::Active if no_model => (
-                "No model",
-                "No model is available",
-                "Configure credentials in Pi, then retry. Credentials remain managed by Pi.",
-                Some(RecoveryAction::Retry),
-            ),
+        let (lifecycle, action) = match status {
+            ControllerStatus::Idle => ("Not connected", Some(RecoveryAction::Connect)),
+            ControllerStatus::Connecting => ("Connecting", Some(RecoveryAction::Stop)),
+            ControllerStatus::Stopping => ("Stopping", None),
+            ControllerStatus::Stopped => ("Stopped", Some(RecoveryAction::Connect)),
+            ControllerStatus::Failed => ("Connection error", Some(RecoveryAction::Retry)),
+            ControllerStatus::Active if no_model => ("No model", Some(RecoveryAction::Retry)),
             ControllerStatus::Active => match runtime.lifecycle {
-                RuntimeLifecycle::Loading => (
-                    "Loading",
-                    "Reading runtime state",
-                    "Pi is ready. Session and model details are loading.",
-                    Some(RecoveryAction::Stop),
-                ),
-                RuntimeLifecycle::Ready | RuntimeLifecycle::Settled => (
-                    "Ready",
-                    "Pi is ready",
-                    "Live runtime, model, and usage values are shown here.",
-                    Some(RecoveryAction::Stop),
-                ),
-                RuntimeLifecycle::Running => (
-                    "Running",
-                    "Pi is running",
-                    "The active runtime reports work in progress.",
-                    Some(RecoveryAction::Stop),
-                ),
-                RuntimeLifecycle::Cancelling => (
-                    "Cancelling",
-                    "Pi is cancelling",
-                    "The current runtime operation is being cancelled.",
-                    Some(RecoveryAction::Stop),
-                ),
-                RuntimeLifecycle::Disconnected | RuntimeLifecycle::Failed => (
-                    "Connection error",
-                    "The Pi connection closed",
-                    error.unwrap_or("The last valid values remain visible."),
-                    Some(RecoveryAction::Retry),
-                ),
+                RuntimeLifecycle::Loading => ("Loading", Some(RecoveryAction::Stop)),
+                RuntimeLifecycle::Ready | RuntimeLifecycle::Settled => {
+                    ("Ready", Some(RecoveryAction::Stop))
+                }
+                RuntimeLifecycle::Running => ("Running", Some(RecoveryAction::Stop)),
+                RuntimeLifecycle::Cancelling => ("Cancelling", Some(RecoveryAction::Stop)),
+                RuntimeLifecycle::Disconnected | RuntimeLifecycle::Failed => {
+                    ("Connection error", Some(RecoveryAction::Retry))
+                }
             },
         };
 
@@ -214,11 +150,8 @@ impl ShellProjection {
             cache_read,
             cache_write,
             lifecycle: lifecycle.to_owned(),
-            headline: headline.to_owned(),
-            detail: detail.to_owned(),
             action,
             has_stale_values,
-            no_model,
         }
     }
 }
@@ -402,7 +335,6 @@ mod tests {
             ControllerStatus::Active,
             "C:\\workspace",
             &runtime,
-            None,
         );
         assert_eq!(projection.context, DisplayValue::Unknown);
         assert_ne!(projection.context.label(), "0");
@@ -420,16 +352,14 @@ mod tests {
             steering_mode: runtime::QueueDeliveryMode::All,
             follow_up_mode: runtime::QueueDeliveryMode::All,
             auto_compaction_enabled: true,
-            message_count: 0,
         });
         runtime.models.ready(Arc::new(Vec::new()));
         runtime.lifecycle = RuntimeLifecycle::Ready;
 
         let projection =
-            ShellProjection::from_runtime(ControllerStatus::Active, "workspace", &runtime, None);
-        assert!(projection.no_model);
+            ShellProjection::from_runtime(ControllerStatus::Active, "workspace", &runtime);
+        assert_eq!(projection.lifecycle, "No model");
         assert_eq!(projection.action, Some(RecoveryAction::Retry));
-        assert!(projection.detail.contains("Configure credentials in Pi"));
     }
 
     #[test]
@@ -464,7 +394,6 @@ mod tests {
             ControllerStatus::Active,
             "C:\\workspace",
             &runtime,
-            None,
         );
         assert_eq!(projection.lifecycle, "Ready");
         assert_eq!(

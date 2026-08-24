@@ -75,7 +75,6 @@ fn all_commands() -> Vec<(&'static str, Command)> {
             "set_auto_compaction",
             Command::SetAutoCompaction { enabled: true },
         ),
-        ("set_auto_retry", Command::SetAutoRetry { enabled: false }),
         ("abort_retry", Command::AbortRetry),
         (
             "bash",
@@ -112,7 +111,6 @@ fn all_commands() -> Vec<(&'static str, Command)> {
                 since: Some(EntryId::from("entry-1")),
             },
         ),
-        ("get_tree", Command::GetTree),
         ("get_last_assistant_text", Command::GetLastAssistantText),
         (
             "set_session_name",
@@ -234,7 +232,6 @@ fn every_installed_response_shape_decodes() {
         "set_steering_mode",
         "set_follow_up_mode",
         "set_auto_compaction",
-        "set_auto_retry",
         "abort_retry",
         "abort_bash",
         "set_session_name",
@@ -297,13 +294,12 @@ fn every_installed_response_shape_decodes() {
             Some(json!({"messages":[{"entryId":"entry-1","text":"prompt"}]})),
         ),
         success_response("get_entries", Some(json!({"entries":[],"leafId":null}))),
-        success_response("get_tree", Some(json!({"tree":[],"leafId":null}))),
         success_response("get_last_assistant_text", Some(json!({"text":null}))),
         success_response("get_messages", Some(json!({"messages":[]}))),
         success_response("get_commands", Some(json!({"commands":[]}))),
     ]);
 
-    assert_eq!(responses.len(), 32);
+    assert_eq!(responses.len(), 30);
     for value in responses {
         let expected_command = value["command"].as_str().unwrap().to_owned();
         let record = IncomingRecord::from_value(value).expect("installed response should decode");

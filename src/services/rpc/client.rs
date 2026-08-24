@@ -511,7 +511,6 @@ fn command_class(command: &Command) -> CommandClass {
         | Command::GetSessionStats
         | Command::GetForkMessages
         | Command::GetEntries { .. }
-        | Command::GetTree
         | Command::GetLastAssistantText
         | Command::GetMessages
         | Command::GetCommands => CommandClass::Read,
@@ -538,7 +537,6 @@ fn command_name(command: &Command) -> Option<&'static str> {
         Command::SetFollowUpMode { .. } => "set_follow_up_mode",
         Command::Compact { .. } => "compact",
         Command::SetAutoCompaction { .. } => "set_auto_compaction",
-        Command::SetAutoRetry { .. } => "set_auto_retry",
         Command::AbortRetry => "abort_retry",
         Command::Bash { .. } => "bash",
         Command::AbortBash => "abort_bash",
@@ -549,7 +547,6 @@ fn command_name(command: &Command) -> Option<&'static str> {
         Command::Clone => "clone",
         Command::GetForkMessages => "get_fork_messages",
         Command::GetEntries { .. } => "get_entries",
-        Command::GetTree => "get_tree",
         Command::GetLastAssistantText => "get_last_assistant_text",
         Command::SetSessionName { .. } => "set_session_name",
         Command::GetMessages => "get_messages",

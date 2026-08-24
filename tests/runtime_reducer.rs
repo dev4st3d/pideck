@@ -67,7 +67,6 @@ fn session_state(id: &str, streaming: bool, pending: u64) -> NormalizedSessionSt
             steering_mode: QueueDeliveryMode::OneAtATime,
             follow_up_mode: QueueDeliveryMode::All,
             auto_compaction_enabled: true,
-            message_count: 2,
         },
         is_streaming: streaming,
         is_compacting: false,
@@ -361,11 +360,6 @@ fn happy_path_hydrates_in_required_order_and_settles() {
     assert!(matches!(requests[3], RuntimeRequest::GetCommands));
     assert!(matches!(requests[4], RuntimeRequest::GetModels));
     assert!(matches!(requests[5], RuntimeRequest::GetForkMessages));
-    assert!(
-        requests
-            .iter()
-            .all(|request| !matches!(request, RuntimeRequest::GetTree { .. }))
-    );
     assert_eq!(state.lifecycle, RuntimeLifecycle::Running);
     assert_eq!(
         state.queue.as_ref(),
@@ -470,13 +464,7 @@ fn model_and_thinking_changes_use_stock_rpc_only_after_streaming_settles() {
 
 #[test]
 fn flat_entries_build_deep_history_without_requesting_nested_tree_json() {
-    let (mut state, hydration) = connected_state("deep");
-    assert!(hydration.iter().all(|effect| {
-        !matches!(
-            effect.effect,
-            EffectKind::Request(RuntimeRequest::GetTree { .. })
-        )
-    }));
+    let (mut state, _) = connected_state("deep");
 
     let entries = (0..246)
         .map(|index| RuntimeEntry {
@@ -529,14 +517,12 @@ fn agent_end_is_only_a_low_level_boundary() {
         }]
     ));
     assert_eq!(state.lifecycle, RuntimeLifecycle::Running);
-    assert!(state.low_level_agent_end_seen);
 
     apply(
         &mut state,
         RuntimeInput::Event(NormalizedEvent::AgentSettled),
     );
     assert_eq!(state.lifecycle, RuntimeLifecycle::Settled);
-    assert!(!state.low_level_agent_end_seen);
 }
 
 #[test]
@@ -2438,16 +2424,8 @@ fn stale_generation_and_epoch_inputs_have_no_side_effects() {
 }
 
 #[test]
-fn unknown_records_and_extension_failures_are_bounded_without_raw_payloads() {
+fn extension_failures_are_bounded_without_raw_payloads() {
     let (mut state, _) = connected_state("s1");
-    for index in 0..(MAX_UNKNOWN_RECORDS + 5) {
-        apply(
-            &mut state,
-            RuntimeInput::Event(NormalizedEvent::Unknown {
-                record_type: format!("future-{index}"),
-            }),
-        );
-    }
     for index in 0..(MAX_RUNTIME_ERRORS + 5) {
         apply(
             &mut state,
@@ -2458,7 +2436,6 @@ fn unknown_records_and_extension_failures_are_bounded_without_raw_payloads() {
             })),
         );
     }
-    assert_eq!(state.unknown_records.len(), MAX_UNKNOWN_RECORDS);
     assert_eq!(state.extension_errors.len(), MAX_RUNTIME_ERRORS);
 }
 
@@ -2892,21 +2869,6 @@ fn run_control_operations_dispatch_and_update_authoritative_settings() {
         refresh[0].effect,
         EffectKind::Request(RuntimeRequest::GetEntries { .. })
     ));
-
-    let auto = apply(
-        &mut state,
-        RuntimeInput::Intent(RuntimeIntent::SetAutoRetry { enabled: false }),
-    );
-    assert!(matches!(
-        dispatch_for_effect(&auto[0]),
-        RpcDispatch::Command(Command::SetAutoRetry { enabled: false })
-    ));
-    response(
-        &mut state,
-        RuntimeRequest::SetAutoRetry { enabled: false },
-        Ok(NormalizedResponse::Accepted),
-    );
-    assert_eq!(state.auto_retry_enabled, Some(false));
 }
 
 #[test]

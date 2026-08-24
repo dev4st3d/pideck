@@ -1,6 +1,5 @@
 //! Typed snapshots and guarded actions for Pi-owned task, subagent, and goal state.
 
-use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
@@ -92,31 +91,14 @@ pub struct TaskSnapshot {
     pub subject: String,
     pub description: String,
     pub status: TaskStatus,
-    pub active_form: Option<String>,
     pub owner: Option<String>,
     #[serde(default)]
     pub metadata: Value,
-    #[serde(default)]
-    pub blocks: Vec<String>,
     #[serde(default)]
     pub blocked_by: Vec<String>,
     pub created_at: u64,
     pub updated_at: u64,
     pub output: Option<String>,
-}
-
-impl TaskSnapshot {
-    pub fn open_blockers<'a>(&'a self, tasks: &'a HashMap<&str, &'a TaskSnapshot>) -> Vec<&'a str> {
-        self.blocked_by
-            .iter()
-            .filter_map(|id| {
-                tasks
-                    .get(id.as_str())
-                    .is_none_or(|task| task.status != TaskStatus::Completed)
-                    .then_some(id.as_str())
-            })
-            .collect()
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -160,8 +142,6 @@ pub struct SubagentSnapshot {
     pub result: Option<String>,
     pub error: Option<String>,
     pub tool_uses: u64,
-    pub started_at: u64,
-    pub completed_at: Option<u64>,
     pub queue_position: Option<u64>,
     pub max_concurrent: u64,
     pub output_file: Option<String>,
@@ -222,16 +202,10 @@ pub struct SubagentTranscriptEntry {
 pub struct SubagentScheduleSnapshot {
     pub id: String,
     pub name: String,
-    pub description: String,
     pub schedule: String,
     pub schedule_type: String,
     pub subagent_type: String,
     pub enabled: bool,
-    pub created_at: String,
-    pub last_run: Option<String>,
-    pub last_status: Option<String>,
-    pub next_run: Option<String>,
-    pub run_count: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -240,7 +214,6 @@ pub struct GoalSnapshot {
     pub active: Option<GoalItemSnapshot>,
     #[serde(default)]
     pub queue: Vec<GoalItemSnapshot>,
-    pub pending_action: Option<Value>,
     pub queue_frozen: bool,
     pub automatic_turn_limit: Option<u64>,
     pub no_progress_turn_limit: Option<u64>,
@@ -258,7 +231,6 @@ pub struct GoalItemSnapshot {
     pub token_budget: Option<u64>,
     pub tokens_used: u64,
     pub time_used_seconds: f64,
-    pub active_started_at: Option<u64>,
     #[serde(default)]
     pub automatic_model_turns: u64,
     #[serde(default)]
@@ -416,64 +388,6 @@ pub enum OrchestrationAction {
     },
 }
 
-pub fn task_cycle_members(tasks: &[TaskSnapshot]) -> HashSet<String> {
-    fn visit(
-        id: &str,
-        edges: &HashMap<&str, Vec<&str>>,
-        visiting: &mut Vec<String>,
-        visited: &mut HashSet<String>,
-        cycles: &mut HashSet<String>,
-    ) {
-        if let Some(index) = visiting.iter().position(|candidate| candidate == id) {
-            cycles.extend(visiting[index..].iter().cloned());
-            return;
-        }
-        if !visited.insert(id.to_owned()) {
-            return;
-        }
-        visiting.push(id.to_owned());
-        for next in edges.get(id).into_iter().flatten() {
-            visit(next, edges, visiting, visited, cycles);
-        }
-        visiting.pop();
-    }
-
-    let edges = tasks
-        .iter()
-        .map(|task| {
-            (
-                task.id.as_str(),
-                task.blocked_by.iter().map(String::as_str).collect(),
-            )
-        })
-        .collect::<HashMap<_, Vec<_>>>();
-    let mut visiting = Vec::new();
-    let mut visited = HashSet::new();
-    let mut cycles = HashSet::new();
-    for task in tasks {
-        visit(&task.id, &edges, &mut visiting, &mut visited, &mut cycles);
-    }
-    cycles
-}
-
-pub fn cascade_ready_tasks<'a>(
-    tasks: &'a [TaskSnapshot],
-    completed_id: &str,
-) -> Vec<&'a TaskSnapshot> {
-    let by_id = tasks
-        .iter()
-        .map(|task| (task.id.as_str(), task))
-        .collect::<HashMap<_, _>>();
-    tasks
-        .iter()
-        .filter(|task| {
-            task.status == TaskStatus::Pending
-                && task.blocked_by.iter().any(|id| id == completed_id)
-                && task.open_blockers(&by_id).is_empty()
-        })
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -484,10 +398,8 @@ mod tests {
             subject: format!("Task {id}"),
             description: String::new(),
             status,
-            active_form: None,
             owner: None,
             metadata: Value::Object(Default::default()),
-            blocks: Vec::new(),
             blocked_by: blocked_by.iter().map(|id| (*id).to_owned()).collect(),
             created_at: 1,
             updated_at: 1,
@@ -539,24 +451,6 @@ mod tests {
         );
         assert_eq!(snapshot.automatic_turn_limit, Some(12));
         assert_eq!(snapshot.no_progress_turn_limit, Some(4));
-    }
-
-    #[test]
-    fn task_graph_detects_cycles_and_cascade_only_after_all_dependencies() {
-        let mut tasks = vec![
-            task("1", TaskStatus::Completed, &[]),
-            task("2", TaskStatus::Pending, &["1", "3"]),
-            task("3", TaskStatus::Pending, &[]),
-            task("4", TaskStatus::Pending, &["5"]),
-            task("5", TaskStatus::Pending, &["4"]),
-        ];
-        assert_eq!(
-            task_cycle_members(&tasks),
-            HashSet::from(["4".to_owned(), "5".to_owned()])
-        );
-        assert!(cascade_ready_tasks(&tasks, "1").is_empty());
-        tasks[2].status = TaskStatus::Completed;
-        assert_eq!(cascade_ready_tasks(&tasks, "3")[0].id, "2");
     }
 
     #[test]

@@ -415,10 +415,8 @@ fn bridge_negotiates_mutates_through_sdk_exports_imports_and_restarts() {
     let inventory = client
         .call_default(BridgeCommand::GetResourceInventory)
         .expect("read real SDK resource inventory");
-    let inventory: pi_gui::resource_center::ResourceInventorySnapshot =
-        serde_json::from_value(inventory).expect("decode real SDK resource inventory");
-    assert!(!inventory.project_trusted);
-    assert!(!inventory.package_mutations.install);
+    serde_json::from_value::<pi_gui::resource_center::ResourceInventorySnapshot>(inventory)
+        .expect("decode real SDK resource inventory");
 
     client
         .call_default(BridgeCommand::SetLabel {
@@ -669,9 +667,6 @@ fn resource_inventory_rejects_project_code_tracks_dynamic_state_and_redacts_fail
         .expect("read resource inventory");
     let snapshot: pi_gui::resource_center::ResourceInventorySnapshot =
         serde_json::from_value(first.clone()).expect("decode resource inventory");
-    assert!(!snapshot.project_trusted);
-    assert!(!snapshot.package_mutations.install);
-    assert!(!snapshot.package_mutations.configure);
     assert!(snapshot.items.iter().any(|item| {
         item.kind == pi_gui::resource_center::ResourceKind::Tool
             && item.name == "synthetic_tool"

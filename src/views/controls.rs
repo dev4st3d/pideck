@@ -282,6 +282,7 @@ pub fn recovery_button(
                         .bg(theme::signal_hot())
                         .border_color(theme::signal_hot())
                 })
+                .focus(|button| button.border_color(theme::focus()))
                 .active(|button| {
                     button
                         .bg(theme::signal_deep())
@@ -360,6 +361,7 @@ pub fn text_action(
         .id(id.into())
         .h(px(26.0))
         .px(px(2.0))
+        .rounded(px(theme::RADIUS_SM))
         .flex()
         .items_center()
         .flex_1()
@@ -370,7 +372,9 @@ pub fn text_action(
                 .tab_index(0)
                 .cursor_pointer()
                 .hover(move |button| button.text_color(hot))
-                .focus(|button| button.text_color(theme::focus()))
+                // Focus keeps the family tint and adds a filled pill so the
+                // ring does not rely on text hue alone.
+                .focus(|button| button.bg(theme::panel()).text_color(theme::focus()))
                 .active(|button| button.opacity(0.7))
                 .on_click(move |event, window, cx| on_click(event, window, cx))
         })
@@ -398,6 +402,7 @@ pub fn text_choice(
         .id(id.into())
         .h(px(26.0))
         .px(px(2.0))
+        .rounded(px(theme::RADIUS_SM))
         .flex()
         .items_center()
         .text_color(if selected {
@@ -412,7 +417,9 @@ pub fn text_choice(
                 .tab_index(0)
                 .cursor_pointer()
                 .hover(|button| button.text_color(theme::bone()))
-                .focus(|button| button.text_color(theme::focus()))
+                // Focus pairs the family tint with a filled pill so the
+                // signal does not rely on text hue alone.
+                .focus(|button| button.bg(theme::panel()).text_color(theme::focus()))
                 .on_click(move |event, window, cx| on_click(event, window, cx))
         })
         .child(
@@ -515,6 +522,7 @@ pub fn chip_button(
                         button.bg(theme::panel()).text_color(theme::bone())
                     }
                 })
+                .focus(|button| button.border_color(theme::focus()))
                 .active(|button| button.bg(theme::panel_lift()))
                 .on_click(move |event, window, cx| on_click(event, window, cx))
         })
@@ -543,6 +551,9 @@ pub fn chrome_action(
         .h(px(22.0))
         .px(px(7.0))
         .rounded(px(theme::RADIUS_SM))
+        // Invisible border keeps geometry stable when focus retints it.
+        .border_1()
+        .border_color(clear())
         .flex()
         .items_center()
         .justify_center()
@@ -553,6 +564,7 @@ pub fn chrome_action(
                 .tab_index(0)
                 .cursor_pointer()
                 .hover(|button| button.bg(theme::canvas()).text_color(theme::bone_dim()))
+                .focus(|button| button.border_color(theme::focus()))
                 .active(|button| button.bg(theme::panel_lift()))
                 .on_click(move |event, window, cx| on_click(event, window, cx))
         })

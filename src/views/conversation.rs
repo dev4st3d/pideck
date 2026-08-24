@@ -1211,17 +1211,6 @@ fn is_final_assistant_reply(message: &RuntimeMessage) -> bool {
         && has_reply_text(message)
 }
 
-pub(in crate::views) fn latest_completed_response_key(
-    projection: &ConversationProjection,
-) -> Option<String> {
-    projection
-        .messages
-        .iter()
-        .rev()
-        .find(|message| is_final_assistant_reply(message))
-        .map(|message| message.key.0.clone())
-}
-
 fn push_message_activity(
     activity: &mut Vec<ActivityStep>,
     message: &RuntimeMessage,
@@ -2031,7 +2020,7 @@ fn render_tool_group(
         group.marker,
         tool_detail_trigger(
             &group.trigger_id,
-            render_tool_presentation(&group.presentations, None, false, None),
+            render_tool_presentation(&group.presentations),
             group.detail.clone(),
             root,
         ),
@@ -2106,12 +2095,7 @@ fn render_activity_step(
                 status_color(presentation.status),
                 tool_detail_trigger(
                     detail_id,
-                    render_tool_presentation(
-                        std::slice::from_ref(presentation.as_ref()),
-                        None,
-                        false,
-                        None,
-                    ),
+                    render_tool_presentation(std::slice::from_ref(presentation.as_ref())),
                     detail.clone(),
                     root,
                 ),
@@ -3080,7 +3064,6 @@ mod tests {
             steering_mode: None,
             follow_up_mode: None,
             auto_compaction_enabled: None,
-            auto_retry_enabled: None,
             pending_operation: None,
             context_awaiting_fresh_usage: false,
             retry: RetryState::Idle,
@@ -3106,9 +3089,5 @@ mod tests {
         assert_eq!(detail.prompt.as_deref(), Some("show files"));
         assert_eq!(detail.records[0].parameters.as_deref(), Some("{}"));
         assert_eq!(reply.as_deref().map(|m| m.key.0.as_str()), Some("a2"));
-        assert_eq!(
-            latest_completed_response_key(&projection).as_deref(),
-            Some("a2")
-        );
     }
 }

@@ -3,7 +3,7 @@ use serde_json::{Map, Value};
 
 use super::{
     AgentMessage, BashResult, CompactionResult, EntryId, Model, RequestId, SessionEntry,
-    SessionState, SessionStats, SessionTreeNode, SlashCommand, ThinkingLevel,
+    SessionState, SessionStats, SlashCommand, ThinkingLevel,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -30,7 +30,6 @@ pub enum ResponseResult {
     SetFollowUpMode,
     Compact(CompactionResult),
     SetAutoCompaction,
-    SetAutoRetry,
     AbortRetry,
     Bash(BashResult),
     AbortBash,
@@ -41,7 +40,6 @@ pub enum ResponseResult {
     Clone(CancelledData),
     GetForkMessages(ForkMessagesData),
     GetEntries(EntriesData),
-    GetTree(TreeData),
     GetLastAssistantText(LastAssistantTextData),
     SetSessionName,
     GetMessages(MessagesData),
@@ -116,13 +114,6 @@ pub struct EntriesData {
     pub leaf_id: Option<EntryId>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct TreeData {
-    pub tree: Vec<SessionTreeNode>,
-    #[serde(rename = "leafId")]
-    pub leaf_id: Option<EntryId>,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LastAssistantTextData {
     pub text: Option<String>,
@@ -157,7 +148,6 @@ impl ResponseResult {
             Self::SetFollowUpMode => "set_follow_up_mode",
             Self::Compact(_) => "compact",
             Self::SetAutoCompaction => "set_auto_compaction",
-            Self::SetAutoRetry => "set_auto_retry",
             Self::AbortRetry => "abort_retry",
             Self::Bash(_) => "bash",
             Self::AbortBash => "abort_bash",
@@ -168,7 +158,6 @@ impl ResponseResult {
             Self::Clone(_) => "clone",
             Self::GetForkMessages(_) => "get_fork_messages",
             Self::GetEntries(_) => "get_entries",
-            Self::GetTree(_) => "get_tree",
             Self::GetLastAssistantText(_) => "get_last_assistant_text",
             Self::SetSessionName => "set_session_name",
             Self::GetMessages(_) => "get_messages",
@@ -201,7 +190,6 @@ impl ResponseResult {
             Self::Clone(data) => value!(data),
             Self::GetForkMessages(data) => value!(data),
             Self::GetEntries(data) => value!(data),
-            Self::GetTree(data) => value!(data),
             Self::GetLastAssistantText(data) => value!(data),
             Self::GetMessages(data) => value!(data),
             Self::GetCommands(data) => value!(data),
@@ -214,7 +202,6 @@ impl ResponseResult {
             | Self::SetSteeringMode
             | Self::SetFollowUpMode
             | Self::SetAutoCompaction
-            | Self::SetAutoRetry
             | Self::AbortRetry
             | Self::AbortBash
             | Self::SetSessionName
@@ -342,7 +329,6 @@ impl RpcResponse {
             "set_follow_up_mode" => ResponseResult::SetFollowUpMode,
             "compact" => ResponseResult::Compact(decode(object, command)?),
             "set_auto_compaction" => ResponseResult::SetAutoCompaction,
-            "set_auto_retry" => ResponseResult::SetAutoRetry,
             "abort_retry" => ResponseResult::AbortRetry,
             "bash" => ResponseResult::Bash(decode(object, command)?),
             "abort_bash" => ResponseResult::AbortBash,
@@ -353,7 +339,6 @@ impl RpcResponse {
             "clone" => ResponseResult::Clone(decode(object, command)?),
             "get_fork_messages" => ResponseResult::GetForkMessages(decode(object, command)?),
             "get_entries" => ResponseResult::GetEntries(decode(object, command)?),
-            "get_tree" => ResponseResult::GetTree(decode(object, command)?),
             "get_last_assistant_text" => {
                 ResponseResult::GetLastAssistantText(decode(object, command)?)
             }

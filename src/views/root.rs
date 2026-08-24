@@ -372,9 +372,19 @@ pub struct RootView {
     font_save_generation: u64,
     app_update: PiDeckUpdateState,
     command_palette_open: bool,
+    /// Tab-containment boundary for the command palette sheet.
+    command_palette_focus: FocusHandle,
+    /// Focus to restore when the palette sheet closes.
+    command_palette_restore_focus: Option<FocusHandle>,
     hotkey_help_open: bool,
+    /// Tab-containment boundary for the hotkey help sheet.
+    hotkey_help_focus: FocusHandle,
     compaction_modal_open: bool,
+    /// Focus to restore when the compaction modal closes.
+    compaction_restore_focus: Option<FocusHandle>,
     pasted_image_preview: Option<usize>,
+    /// Focus to restore when the pasted-image viewer closes.
+    pasted_image_restore_focus: Option<FocusHandle>,
     pencil_enabled: bool,
     pencil_color: PencilColor,
     pencil_size: u16,
@@ -415,6 +425,8 @@ pub struct RootView {
     extension_dialog_timeout_task: Option<Task<()>>,
     selected_task_id: Option<String>,
     selected_subagent_id: Option<String>,
+    /// Focus to restore when the subagent dialog closes.
+    subagent_restore_focus: Option<FocusHandle>,
     /// Session rail edits one queue delivery mode at a time (steering or follow-up).
     delivery_focus: DeliveryFocus,
     usage_tooltip_hovered: bool,
@@ -617,6 +629,8 @@ impl RootView {
         let activity_detail_focus = cx.focus_handle();
         let inspector_focus = cx.focus_handle();
         let workspace_diff_focus = cx.focus_handle();
+        let command_palette_focus = cx.focus_handle();
+        let hotkey_help_focus = cx.focus_handle();
         let (conversation, extension_ui, render_projections, command_catalog_source) = {
             let controller = controller.read(cx);
             (
@@ -770,9 +784,14 @@ impl RootView {
             font_save_generation: 0,
             app_update: PiDeckUpdateState::Idle,
             command_palette_open: false,
+            command_palette_focus,
+            command_palette_restore_focus: None,
             hotkey_help_open: false,
+            hotkey_help_focus,
             compaction_modal_open: false,
+            compaction_restore_focus: None,
             pasted_image_preview: None,
+            pasted_image_restore_focus: None,
             pencil_enabled: false,
             pencil_color: PencilColor::Red,
             pencil_size: 6,
@@ -813,6 +832,7 @@ impl RootView {
             extension_dialog_timeout_task: None,
             selected_task_id: None,
             selected_subagent_id: None,
+            subagent_restore_focus: None,
             delivery_focus: DeliveryFocus::Steering,
             usage_tooltip_hovered: false,
             usage_tooltip_visible: false,
@@ -1058,6 +1078,18 @@ impl RootView {
         if self.cancel_extension_dialog(window, cx) {
             return;
         }
+        if self.compaction_modal_open {
+            self.close_compaction_modal(window, cx);
+            return;
+        }
+        if self.hotkey_help_open {
+            self.close_hotkey_help(window, cx);
+            return;
+        }
+        if self.command_palette_open {
+            self.close_command_palette(window, cx);
+            return;
+        }
         // Dismiss Session overlays before touching the run.
         if self.selected_subagent_id.is_some() {
             self.close_subagent(window, cx);
@@ -1109,9 +1141,7 @@ impl RootView {
             }
             ComposerEvent::Abort => {
                 if self.hotkey_help_open {
-                    self.hotkey_help_open = false;
-                    window.focus(&self.composer.read(cx).focus_handle(cx));
-                    cx.notify();
+                    self.close_hotkey_help(window, cx);
                 } else {
                     let _ = self.execute_native_action(NativeAction::Abort, "", window, cx);
                 }
@@ -1161,6 +1191,7 @@ impl RootView {
         }
         self.command_palette_open = false;
         self.hotkey_help_open = false;
+        self.pasted_image_restore_focus = window.focused(cx);
         self.pasted_image_preview = Some(index);
         self.pencil_stroke = None;
         self.pencil_undo.clear();
@@ -1174,7 +1205,11 @@ impl RootView {
             self.pencil_stroke = None;
             self.pencil_undo.clear();
             self.pencil_error = None;
-            window.focus(&self.composer.read(cx).focus_handle(cx));
+            if let Some(focus) = self.pasted_image_restore_focus.take() {
+                window.focus(&focus);
+            } else {
+                window.focus(&self.composer.read(cx).focus_handle(cx));
+            }
             cx.notify();
         }
     }
@@ -2278,6 +2313,7 @@ impl RootView {
         }
         self.command_palette_open = false;
         self.hotkey_help_open = false;
+        self.compaction_restore_focus = window.focused(cx);
         self.compaction_modal_open = true;
         self.compaction_composer.update(cx, |composer, cx| {
             composer.set_feedback(ComposerFeedback::Ready, cx)
@@ -2291,7 +2327,11 @@ impl RootView {
             return;
         }
         self.compaction_modal_open = false;
-        window.focus(&self.focus_handle);
+        if let Some(focus) = self.compaction_restore_focus.take() {
+            window.focus(&focus);
+        } else {
+            window.focus(&self.focus_handle);
+        }
         cx.notify();
     }
 
@@ -2318,10 +2358,9 @@ impl RootView {
                     });
                 }
             }
-            ComposerEvent::Abort | ComposerEvent::AbortBash => {
-                self.close_compaction_modal(window, cx)
-            }
+            ComposerEvent::Abort => self.close_compaction_modal(window, cx),
             ComposerEvent::FollowUp { .. }
+            | ComposerEvent::AbortBash
             | ComposerEvent::CommandNext
             | ComposerEvent::CommandPrevious
             | ComposerEvent::CommandAccept
@@ -3180,10 +3219,6 @@ impl RootView {
         });
     }
 
-    fn project_switch_enabled(&self) -> bool {
-        true
-    }
-
     fn persist_projects(&mut self, cx: &mut Context<Self>) {
         self.project_save_generation = self.project_save_generation.wrapping_add(1);
         let generation = self.project_save_generation;
@@ -3533,6 +3568,12 @@ impl RootView {
             composer.set_feedback(ComposerFeedback::Ready, cx)
         });
         window.focus(&self.focus_handle);
+    }
+
+    /// Read-only view of the last live-diff failure for render sites outside
+    /// this module; the transcript's trailing summary note surfaces the copy.
+    pub(in crate::views) fn workspace_diff_error(&self) -> Option<&str> {
+        self.workspace_diff_error.as_deref()
     }
 
     fn save_active_thread_ui(&mut self, cx: &mut Context<Self>) {
@@ -4542,6 +4583,18 @@ impl RootView {
             window.focus(&self.compaction_composer.read(cx).focus_handle(cx));
             return;
         }
+        if self.selected_subagent_id.is_some() {
+            self.cycle_focus_within(&self.subagent_dialog_focus, true, window, cx);
+            return;
+        }
+        if self.command_palette_open {
+            self.cycle_focus_within(&self.command_palette_focus, true, window, cx);
+            return;
+        }
+        if self.hotkey_help_open {
+            self.cycle_focus_within(&self.hotkey_help_focus, true, window, cx);
+            return;
+        }
         if self.workspace_diff_open {
             self.cycle_focus_within(&self.workspace_diff_focus, true, window, cx);
             return;
@@ -4577,6 +4630,18 @@ impl RootView {
         }
         if self.compaction_modal_open {
             window.focus(&self.compaction_composer.read(cx).focus_handle(cx));
+            return;
+        }
+        if self.selected_subagent_id.is_some() {
+            self.cycle_focus_within(&self.subagent_dialog_focus, false, window, cx);
+            return;
+        }
+        if self.command_palette_open {
+            self.cycle_focus_within(&self.command_palette_focus, false, window, cx);
+            return;
+        }
+        if self.hotkey_help_open {
+            self.cycle_focus_within(&self.hotkey_help_focus, false, window, cx);
             return;
         }
         if self.workspace_diff_open {
@@ -4648,15 +4713,14 @@ impl RootView {
             return;
         }
         if self.hotkey_help_open {
-            self.hotkey_help_open = false;
-            window.focus(&self.composer.read(cx).focus_handle(cx));
-            cx.notify();
+            self.close_hotkey_help(window, cx);
         } else {
             let _ = self.execute_native_action(NativeAction::Hotkeys, "", window, cx);
         }
     }
 
     fn open_command_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.command_palette_restore_focus = window.focused(cx);
         self.command_palette_open = true;
         self.hotkey_help_open = false;
         self.command_selection = 0;
@@ -4677,6 +4741,19 @@ impl RootView {
         self.command_search_composer.update(cx, |composer, cx| {
             composer.set_command_completion_active(false, cx)
         });
+        if let Some(focus) = self.command_palette_restore_focus.take() {
+            window.focus(&focus);
+        } else {
+            window.focus(&self.composer.read(cx).focus_handle(cx));
+        }
+        cx.notify();
+    }
+
+    fn close_hotkey_help(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.hotkey_help_open {
+            return;
+        }
+        self.hotkey_help_open = false;
         window.focus(&self.composer.read(cx).focus_handle(cx));
         cx.notify();
     }
@@ -4720,6 +4797,7 @@ impl RootView {
     }
 
     fn open_subagent(&mut self, agent_id: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.subagent_restore_focus = window.focused(cx);
         self.selected_subagent_id = Some(agent_id);
         self.subagent_dialog_scroll.scroll_to_bottom();
         window.focus(&self.subagent_dialog_focus);
@@ -4727,10 +4805,16 @@ impl RootView {
     }
 
     fn close_subagent(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.selected_subagent_id = None;
+        if self.selected_subagent_id.take().is_none() {
+            return;
+        }
         self.subagent_composer
             .update(cx, |composer, cx| composer.set_draft("", cx));
-        window.focus(&self.focus_handle);
+        if let Some(focus) = self.subagent_restore_focus.take() {
+            window.focus(&focus);
+        } else {
+            window.focus(&self.composer.read(cx).focus_handle(cx));
+        }
         cx.notify();
     }
 

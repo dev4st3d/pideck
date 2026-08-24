@@ -10,7 +10,6 @@ use crate::services::rpc::{
 };
 
 pub const MAX_RUNTIME_ERRORS: usize = 32;
-pub const MAX_UNKNOWN_RECORDS: usize = 32;
 pub const MAX_NOTIFICATIONS: usize = 32;
 pub const MAX_RETIRED_EXTENSION_DIALOGS: usize = 256;
 
@@ -48,8 +47,6 @@ pub enum ErrorKind {
     Protocol,
     Process,
     OptionalFacet,
-    Extension,
-    UnknownRecord,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -99,7 +96,6 @@ pub struct SessionSnapshot {
     pub steering_mode: QueueDeliveryMode,
     pub follow_up_mode: QueueDeliveryMode,
     pub auto_compaction_enabled: bool,
-    pub message_count: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -110,7 +106,6 @@ pub enum RuntimeOperation {
     SetFollowUpMode(QueueDeliveryMode),
     Compact,
     SetAutoCompaction(bool),
-    SetAutoRetry(bool),
     SetSessionName(String),
     ExportHtml,
 }
@@ -694,11 +689,6 @@ pub struct ExtensionFailure {
     pub summary: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct UnknownRecord {
-    pub record_type: String,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HydrationMode {
     Initial,
@@ -730,7 +720,6 @@ pub struct RuntimeState {
     pub compaction: CompactionState,
     pub pending_operation: Option<RuntimeOperation>,
     pub context_awaiting_fresh_usage: bool,
-    pub auto_retry_enabled: Option<bool>,
     pub dialogs: VecDeque<Arc<ExtensionDialog>>,
     pub retired_dialogs: HashSet<RequestId>,
     pub retired_dialog_order: VecDeque<RequestId>,
@@ -741,7 +730,6 @@ pub struct RuntimeState {
     pub requested_editor_text: Option<String>,
     pub extension_errors: Arc<VecDeque<ExtensionFailure>>,
     pub errors: VecDeque<SafeError>,
-    pub unknown_records: VecDeque<UnknownRecord>,
     pub durable_cursor: Option<EntryId>,
     pub cursor_session_id: Option<SessionId>,
     pub live_message_keys: HashSet<MessageKey>,
@@ -749,7 +737,6 @@ pub struct RuntimeState {
     pub prompt_delivery: PromptDelivery,
     pub pending_prompt_settled: bool,
     pub replacement_awaiting_state: bool,
-    pub low_level_agent_end_seen: bool,
     pub stale_inputs_ignored: u64,
     pub hydration_mode: HydrationMode,
     pub incremental_fallback_used: bool,
@@ -757,7 +744,6 @@ pub struct RuntimeState {
     pub message_structure_revision: u64,
     pub reasoning_tokens: u64,
     pub reasoning_message_count: usize,
-    pub next_request: u64,
     pub next_tool_sequence: u64,
 }
 
@@ -785,7 +771,6 @@ impl RuntimeState {
             compaction: CompactionState::Idle,
             pending_operation: None,
             context_awaiting_fresh_usage: false,
-            auto_retry_enabled: None,
             dialogs: VecDeque::new(),
             retired_dialogs: HashSet::new(),
             retired_dialog_order: VecDeque::new(),
@@ -796,7 +781,6 @@ impl RuntimeState {
             requested_editor_text: None,
             extension_errors: Arc::new(VecDeque::new()),
             errors: VecDeque::new(),
-            unknown_records: VecDeque::new(),
             durable_cursor: None,
             cursor_session_id: None,
             live_message_keys: HashSet::new(),
@@ -804,7 +788,6 @@ impl RuntimeState {
             prompt_delivery: PromptDelivery::None,
             pending_prompt_settled: false,
             replacement_awaiting_state: false,
-            low_level_agent_end_seen: false,
             stale_inputs_ignored: 0,
             hydration_mode: HydrationMode::Initial,
             incremental_fallback_used: false,
@@ -812,7 +795,6 @@ impl RuntimeState {
             message_structure_revision: 0,
             reasoning_tokens: 0,
             reasoning_message_count: 0,
-            next_request: 1,
             next_tool_sequence: 1,
         }
     }
@@ -915,9 +897,6 @@ pub enum RuntimeIntent {
     SetAutoCompaction {
         enabled: bool,
     },
-    SetAutoRetry {
-        enabled: bool,
-    },
     SetSessionName {
         name: String,
     },
@@ -955,9 +934,6 @@ pub enum RuntimeRequest {
     GetStats,
     GetCommands,
     GetModels,
-    GetTree {
-        base_revision: u64,
-    },
     GetForkMessages,
     Submit {
         request: RequestId,
@@ -999,9 +975,6 @@ pub enum RuntimeRequest {
     SetAutoCompaction {
         enabled: bool,
     },
-    SetAutoRetry {
-        enabled: bool,
-    },
     SetSessionName {
         name: String,
     },
@@ -1022,10 +995,6 @@ pub enum NormalizedResponse {
     Stats(RuntimeStats),
     Commands(Vec<RuntimeCommand>),
     Models(Vec<ModelSummary>),
-    Tree {
-        tree: Vec<RuntimeTreeNode>,
-        leaf_id: Option<EntryId>,
-    },
     ForkMessages(Vec<RuntimeForkMessage>),
     Accepted,
     ModelChanged {
@@ -1166,7 +1135,6 @@ pub enum NormalizedEvent {
 pub struct RuntimeEffect {
     pub generation: ConnectionGeneration,
     pub epoch: SessionEpoch,
-    pub sequence: u64,
     pub effect: EffectKind,
 }
 

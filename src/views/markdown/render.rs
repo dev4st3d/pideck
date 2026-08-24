@@ -261,8 +261,10 @@ impl BlockRender<'_, '_> {
                     .py(px(1.0))
                     .rounded(px(theme::RADIUS_SM))
                     .cursor_pointer()
+                    .tab_index(0)
                     .text_color(if copied { theme::live() } else { theme::ash() })
                     .hover(|button| button.bg(theme::panel_hover()).text_color(theme::bone()))
+                    .focus(|button| button.bg(theme::panel_hover()).text_color(theme::focus()))
                     // Keep the press from collapsing transcript selection.
                     .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .on_click(copy)
