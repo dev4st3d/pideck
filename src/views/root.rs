@@ -22,7 +22,7 @@ use crate::actions::{
     HistoryActivate, HistoryFirst, HistoryFold, HistoryLast, HistoryNext, HistoryPrevious,
     HistoryUnfold, ImagePreviewClose, ImagePreviewNext, ImagePreviewPrevious, IncreaseFontSize,
     ORCHESTRATION_ROW_CONTEXT, OpenAppUpdates, OpenCommandPalette, OrchestrationActivate, Retry,
-    ShowHotkeys, Stop, ToggleInspector, ToggleSidebar, ToggleTerminal,
+    ShowHotkeys, Stop, ToggleInspector, ToggleSidebar, ToggleTerminal, RestoreSavedInput,
 };
 use crate::attachments::{self, PromptFile};
 use crate::command_catalog::{
@@ -110,6 +110,10 @@ struct ThreadRuntimeStatus {
 
 #[derive(Default)]
 struct ThreadUiState {
+    editor: Option<crate::views::composer::ComposerDraftSnapshot>,
+    scroll: Option<ListOffset>,
+    following: Option<bool>,
+    saved_inputs: VecDeque<crate::state::runtime::RecoveredInput>,
     draft: String,
     images: Vec<PromptImage>,
     files: Vec<PromptFile>,
@@ -121,7 +125,8 @@ struct ThreadUiState {
 
 impl ThreadUiState {
     fn can_evict(&self) -> bool {
-        self.draft.is_empty()
+        self.saved_inputs.is_empty()
+            && self.draft.is_empty()
             && self.images.is_empty()
             && self.files.is_empty()
             && self.pending_draft.is_none()
@@ -1323,6 +1328,10 @@ impl RootView {
 
     fn on_connect(&mut self, _: &Connect, _: &mut Window, cx: &mut Context<Self>) {
         self.connect(cx);
+    }
+
+    fn on_restore_saved_input(&mut self, _: &RestoreSavedInput, window: &mut Window, cx: &mut Context<Self>) {
+        self.restore_saved_input(window, cx);
     }
 
     fn on_attach_files(&mut self, _: &AttachFiles, _: &mut Window, cx: &mut Context<Self>) {
@@ -3825,6 +3834,10 @@ impl RootView {
 
     fn save_active_thread_ui(&mut self, cx: &mut Context<Self>) {
         let ui = ThreadUiState {
+            editor: Some(self.composer.read(cx).snapshot_draft()),
+            scroll: Some(self.conversation_list_state.logical_scroll_top()),
+            following: Some(self.conversation_follow.get()),
+            saved_inputs: VecDeque::new(),
             draft: self.composer.read(cx).draft().to_owned(),
             images: self.composer.read(cx).images().to_vec(),
             files: self.composer.read(cx).files().to_vec(),
@@ -3838,28 +3851,59 @@ impl RootView {
             .iter_mut()
             .find(|slot| slot.id == self.active_runtime_id)
         {
+            let saved_inputs = std::mem::take(&mut slot.ui.saved_inputs);
             slot.ui = ui;
+            slot.ui.saved_inputs = saved_inputs;
         }
     }
 
     fn restore_active_thread_ui(&mut self, cx: &mut Context<Self>) {
-        let Some(slot) = self
-            .runtime_slots
-            .iter()
-            .find(|slot| slot.id == self.active_runtime_id)
-        else {
+        let Some(slot) = self.runtime_slots.iter_mut().find(|slot| slot.id == self.active_runtime_id) else {
             return;
         };
         self.pending_draft = slot.ui.pending_draft.clone();
         self.pending_bash = slot.ui.pending_bash.clone();
         self.pending_compaction_focus = slot.ui.pending_compaction_focus.clone();
         self.pending_session_name = slot.ui.pending_session_name.clone();
-        let draft = slot.ui.draft.clone();
         let images = slot.ui.images.clone();
         let files = slot.ui.files.clone();
-        self.composer.update(cx, |composer, cx| {
-            composer.restore_draft(&draft, images, files, cx)
-        });
+        if let Some(snapshot) = slot.ui.editor.take() {
+            self.composer.update(cx, |composer, cx| composer.restore_snapshot(snapshot, images, files, cx));
+        } else {
+            // A new session starts with its own undo history, never the previous session's.
+            let draft = slot.ui.draft.clone();
+            self.composer.update(cx, |composer, cx| composer.reset_draft(&draft, images, files, cx));
+        }
+    }
+
+    fn restore_thread_scroll(&mut self) {
+        let Some(slot) = self.runtime_slots.iter().find(|slot| slot.id == self.active_runtime_id) else {
+            return;
+        };
+        let following = slot.ui.following.unwrap_or(true);
+        self.conversation_follow.set(following);
+        if !following && let Some(offset) = slot.ui.scroll {
+            self.conversation_list_state.scroll_to(offset);
+        }
+    }
+
+    fn saved_input_count(&self) -> usize {
+        self.runtime_slots.iter().find(|slot| slot.id == self.active_runtime_id)
+            .map_or(0, |slot| slot.ui.saved_inputs.len())
+    }
+
+    fn restore_saved_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(index) = self.runtime_slots.iter().position(|slot| slot.id == self.active_runtime_id) else {
+            return;
+        };
+        let Some(saved) = self.runtime_slots[index].ui.saved_inputs.front().cloned() else {
+            return;
+        };
+        if self.composer.update(cx, |composer, cx| composer.restore_saved_input(&saved, cx)) {
+            self.runtime_slots[index].ui.saved_inputs.pop_front();
+            window.focus(&self.composer.read(cx).focus_handle(cx));
+        }
+        cx.notify();
     }
 
     fn thread_statuses(&self) -> HashMap<String, ThreadRuntimeStatus> {
@@ -3929,6 +3973,8 @@ impl RootView {
             self.runtime_slots[index].requested_session = Some(session);
         }
         self.runtime_slots[index].projection = projection;
+        let saved = self.runtime_slots[index].controller.update(cx, |controller, _| controller.take_recovered_inputs());
+        self.runtime_slots[index].ui.saved_inputs.extend(saved);
         if runtime_id == self.active_runtime_id {
             self.sync_runtime_state(false, window, cx);
         } else {
@@ -4002,6 +4048,7 @@ impl RootView {
         self.reset_for_project_switch(window, cx);
         self.restore_active_thread_ui(cx);
         self.sync_runtime_state(true, window, cx);
+        self.restore_thread_scroll();
         self.refresh_project_catalogs(cx);
         true
     }
@@ -4926,8 +4973,15 @@ impl RootView {
             .controller
             .update(cx, |controller, _| controller.take_requested_editor_text());
         if let Some(text) = requested_editor_text {
-            self.composer
-                .update(cx, |composer, cx| composer.set_draft(&text, cx));
+            if self.composer.read(cx).draft().is_empty() {
+                self.composer.update(cx, |composer, cx| composer.set_draft(&text, cx));
+            } else if self.composer.read(cx).draft() != text {
+                if let Some(slot) = self.runtime_slots.iter_mut().find(|slot| slot.id == self.active_runtime_id) {
+                    slot.ui.saved_inputs.push_back(crate::state::runtime::RecoveredInput {
+                        text, images: Vec::new(), files: Vec::new(),
+                    });
+                }
+            }
         }
         let conversation_list =
             ConversationListModel::updated(&self.conversation_list, &conversation, epoch_changed);
@@ -5039,6 +5093,7 @@ impl RootView {
         });
         if self.extension_ui.active_dialog.is_none()
             && self.model_panel.is_none()
+            && (self.focus_handle.is_focused(window) || self.composer.read(cx).focus_handle(cx).is_focused(window))
             && !was_available
             && matches!(
                 availability,

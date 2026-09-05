@@ -12,7 +12,7 @@ Ask before irreversible, security-sensitive, product-defining, or major scope-ex
 
 ## Project map
 
-- Rust 2024; minimum Rust 1.85; stable toolchain.
+- Rust 2024; declared syntax floor Rust 1.88; stable toolchain.
 - GPUI 0.2.2; Windows-first; primary font is Segoe UI.
 - `src/main.rs`: entry point; `src/app.rs`: app/window setup.
 - `src/lib.rs`: crate surface; `src/state.rs`: UI-independent state.

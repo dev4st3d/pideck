@@ -1,5 +1,6 @@
 //! Blocking Pi runtime work isolated behind a message-driven standard-thread boundary.
 
+use std::collections::VecDeque;
 use std::fmt;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
@@ -88,6 +89,7 @@ pub trait RuntimeService: Send + Sync + 'static {
 
 /// One connected runtime. Every method may block and is called only on worker threads.
 pub trait RuntimeConnection: Send + Sync + 'static {
+    fn prepare(&self, _effect: &RuntimeEffect) {}
     fn execute(&self, effect: RuntimeEffect) -> Option<StampedInput>;
     fn poll(&self, epoch: SessionEpoch, timeout: Duration) -> RuntimePoll;
     fn stop(&self);
@@ -183,15 +185,23 @@ struct RpcRuntimeConnection {
 }
 
 impl RuntimeConnection for RpcRuntimeConnection {
+    fn prepare(&self, effect: &RuntimeEffect) {
+        let stop_before = matches!(&effect.effect,
+            crate::state::runtime::EffectKind::Request(crate::state::runtime::RuntimeRequest::ClearQueue { .. }))
+            .then_some(effect.sequence);
+        self.client.prepare_effect(effect.epoch, stop_before);
+    }
+
     fn execute(&self, effect: RuntimeEffect) -> Option<StampedInput> {
         match dispatch_for_effect(&effect) {
             RpcDispatch::Command(command) => {
-                let call = match &effect.effect {
+                let id = match &effect.effect {
                     crate::state::runtime::EffectKind::Request(
                         crate::state::runtime::RuntimeRequest::ExecuteBash { request, .. },
-                    ) => self.client.request_with_id(request.clone(), command),
-                    _ => self.client.request(command),
+                    ) => Some(request.clone()),
+                    _ => None,
                 };
+                let call = self.client.request_effect(id, command, effect.epoch, effect.sequence);
                 normalize_call_result(&effect, call.wait())
             }
             RpcDispatch::ExtensionUiResponse(response) => {
@@ -255,10 +265,21 @@ fn start_failure(error: RpcClientStartError) -> RuntimeStartFailure {
             "Pi was not found. Install the supported Pi CLI, then retry.",
         ),
         RpcClientStartError::Process(StartError::Discovery(
-            DiscoveryError::IncompatibleVersion { .. } | DiscoveryError::MissingCapabilities(_),
+            DiscoveryError::IncompatibleNode(_),
         )) => RuntimeStartFailure::new(
             RuntimeStartFailureKind::IncompatiblePi,
-            "The installed Pi version is not compatible with this build.",
+            "Pi requires Node 22.19.0 or newer. Update Node, then reconnect.",
+        ),
+        RpcClientStartError::Process(StartError::Discovery(
+            DiscoveryError::IncompatibleVersion { .. }
+            | DiscoveryError::InvalidNpmInstall { .. }
+            | DiscoveryError::MissingCapabilities(_),
+        )) => RuntimeStartFailure::new(
+            RuntimeStartFailureKind::IncompatiblePi,
+            format!(
+                "Install @earendil-works/pi-coding-agent@{}, then reconnect. The current installation does not meet this build's contract.",
+                super::pi_process::SUPPORTED_PI_VERSION,
+            ),
         ),
         RpcClientStartError::Readiness(_) | RpcClientStartError::ReadinessRejected => {
             RuntimeStartFailure::new(
@@ -296,19 +317,48 @@ pub enum WorkerResult {
     },
 }
 
-fn send_result(results: &Sender<WorkerResult>, result: WorkerResult) {
-    match results.try_send(result) {
-        Ok(()) | Err(async_channel::TrySendError::Closed(_)) => {}
-        Err(async_channel::TrySendError::Full(WorkerResult::Input { input, .. }))
-            if matches!(
-                &input.input,
-                RuntimeInput::Event(
-                    NormalizedEvent::MessageUpdate(_) | NormalizedEvent::ToolUpdate { .. }
-                )
-            ) => {}
-        Err(async_channel::TrySendError::Full(result)) => {
-            let _ = results.send_blocking(result);
+// Keep the coordinator responsive when the UI is paused. Non-replaceable
+// records retain order in this bounded outbox; the internal producers provide
+// backpressure once it fills. Stop and shutdown never wait for a UI receive.
+struct ResultOutbox {
+    sender: Sender<WorkerResult>,
+    pending: VecDeque<WorkerResult>,
+}
+
+impl ResultOutbox {
+    fn flush(&mut self) {
+        while let Some(result) = self.pending.pop_front() {
+            match self.sender.try_send(result) {
+                Ok(()) => {}
+                Err(async_channel::TrySendError::Full(result)) => {
+                    self.pending.push_front(result);
+                    break;
+                }
+                Err(async_channel::TrySendError::Closed(_)) => {
+                    self.pending.clear();
+                    break;
+                }
+            }
         }
+    }
+
+    fn send(&mut self, result: WorkerResult) {
+        self.flush();
+        let result = if self.pending.is_empty() {
+            match self.sender.try_send(result) {
+                Ok(()) | Err(async_channel::TrySendError::Closed(_)) => return,
+                Err(async_channel::TrySendError::Full(result)) => result,
+            }
+        } else {
+            result
+        };
+        if matches!(&result, WorkerResult::Input { input, .. }
+            if matches!(&input.input, RuntimeInput::Event(
+                NormalizedEvent::MessageUpdate(_) | NormalizedEvent::ToolUpdate { .. })))
+        {
+            return;
+        }
+        self.pending.push_back(result);
     }
 }
 
@@ -401,6 +451,7 @@ impl RuntimeWorkerHandle {
         if self.shutdown_requested.swap(true, Ordering::AcqRel) {
             return false;
         }
+        self.results.close();
         self.commands.send(WorkerCommand::Shutdown).is_ok()
     }
 }
@@ -417,16 +468,29 @@ fn coordinator(
     results: Sender<WorkerResult>,
 ) {
     let (internal_sender, internal_receiver) = mpsc::sync_channel(MAX_PENDING_RUNTIME_EVENTS);
+    let mut results = ResultOutbox {
+        sender: results,
+        pending: VecDeque::new(),
+    };
     let mut desired_attempt = None;
     let mut active: Option<ActiveConnection> = None;
 
     loop {
-        while let Ok(result) = internal_receiver.try_recv() {
+        results.flush();
+        if results.sender.is_closed() {
+            stop_active(&mut active);
+            return;
+        }
+        for _ in 0..32 {
+            if results.pending.len() >= MAX_PENDING_RUNTIME_EVENTS {
+                break;
+            }
+            let Ok(result) = internal_receiver.try_recv() else { break };
             handle_internal(
                 result,
                 desired_attempt,
                 &mut active,
-                &results,
+                &mut results,
                 &internal_sender,
             );
         }
@@ -443,13 +507,8 @@ fn coordinator(
             } => {
                 desired_attempt = Some(attempt);
                 stop_active(&mut active);
-                send_result(
-                    &results,
-                    WorkerResult::Connecting {
-                        attempt,
-                        generation,
-                    },
-                );
+                results.pending.clear();
+                results.send(WorkerResult::Connecting { attempt, generation });
                 let service = Arc::clone(&service);
                 let internal = internal_sender.clone();
                 thread::spawn(move || match service.connect(generation) {
@@ -477,7 +536,8 @@ fn coordinator(
                 else {
                     continue;
                 };
-                current.epoch.store(effect.epoch.value(), Ordering::Release);
+                current.epoch.fetch_max(effect.epoch.value(), Ordering::AcqRel);
+                current.connection.prepare(&effect);
                 let connection = Arc::clone(&current.connection);
                 let internal = internal_sender.clone();
                 thread::spawn(move || {
@@ -490,6 +550,7 @@ fn coordinator(
                 });
             }
             WorkerCommand::Stop => {
+                results.pending.clear();
                 let stopped_attempt = desired_attempt.take();
                 if let Some(active_connection) = active.take() {
                     active_connection.cancelled.store(true, Ordering::Release);
@@ -502,7 +563,7 @@ fn coordinator(
                         });
                     });
                 } else if let Some(attempt) = stopped_attempt {
-                    send_result(&results, WorkerResult::Stopped { attempt });
+                    results.send(WorkerResult::Stopped { attempt });
                 }
             }
             WorkerCommand::Shutdown => {
@@ -517,7 +578,7 @@ fn handle_internal(
     result: InternalResult,
     desired_attempt: Option<AttemptGeneration>,
     active: &mut Option<ActiveConnection>,
-    results: &Sender<WorkerResult>,
+    results: &mut ResultOutbox,
     internal_sender: &mpsc::SyncSender<InternalResult>,
 ) {
     match result {
@@ -546,13 +607,7 @@ fn handle_internal(
                 epoch,
                 cancelled,
             });
-            send_result(
-                results,
-                WorkerResult::Connected {
-                    attempt,
-                    generation,
-                },
-            );
+            results.send(WorkerResult::Connected { attempt, generation });
         }
         InternalResult::ConnectionFailed {
             attempt,
@@ -560,14 +615,7 @@ fn handle_internal(
             failure,
         } => {
             if desired_attempt == Some(attempt) {
-                send_result(
-                    results,
-                    WorkerResult::ConnectionFailed {
-                        attempt,
-                        generation,
-                        failure,
-                    },
-                );
+                results.send(WorkerResult::ConnectionFailed { attempt, generation, failure });
             }
         }
         InternalResult::Input { attempt, input } => {
@@ -576,7 +624,7 @@ fn handle_internal(
                     .as_ref()
                     .is_some_and(|active| active.attempt == attempt)
             {
-                send_result(results, WorkerResult::Input { attempt, input });
+                results.send(WorkerResult::Input { attempt, input });
             }
         }
         InternalResult::PollClosed { attempt } => {
@@ -589,7 +637,7 @@ fn handle_internal(
             }
         }
         InternalResult::StopCompleted { attempt } => {
-            send_result(results, WorkerResult::Stopped { attempt });
+            results.send(WorkerResult::Stopped { attempt });
         }
     }
 }

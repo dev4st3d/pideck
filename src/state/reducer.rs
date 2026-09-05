@@ -10,9 +10,9 @@ use super::runtime::{
     PromptImage, QueueContents, RequestFailureKind, RetryState, RuntimeEffect, RuntimeInput,
     RuntimeIntent, RuntimeLifecycle, RuntimeMessage, RuntimeOperation, RuntimeRequest,
     RuntimeState, SafeError, SessionMutation, StampedInput, SubmissionKind, ToolExecution,
-    ToolStatus, UnknownRecord, push_bounded,
+    ToolStatus, UnknownRecord, StopPhase, RecoveredInput, push_bounded,
 };
-use crate::attachments::PromptFile;
+use crate::attachments::{PromptFile, expand_prompt};
 use crate::services::rpc::{EntryId, RequestId};
 
 const MAX_LIVE_BASH_OUTPUT_BYTES: usize = 256 * 1024;
@@ -27,7 +27,7 @@ pub fn reduce(state: &mut RuntimeState, stamped: StampedInput) -> Vec<RuntimeEff
         return Vec::new();
     }
 
-    match stamped.input {
+    let effects = match stamped.input {
         RuntimeInput::Connected { .. } => Vec::new(),
         RuntimeInput::Disconnected { error } => disconnect(state, error, stamped.observed_at),
         RuntimeInput::Intent(intent) => reduce_intent(state, intent, stamped.observed_at),
@@ -42,7 +42,11 @@ pub fn reduce(state: &mut RuntimeState, stamped: StampedInput) -> Vec<RuntimeEff
                 reduce_event(state, event, stamped.observed_at)
             }
         }
+    };
+    if state.stop_phase != StopPhase::Idle {
+        state.lifecycle = RuntimeLifecycle::Cancelling;
     }
+    effects
 }
 
 fn connect(
@@ -56,6 +60,7 @@ fn connect(
         return Vec::new();
     }
 
+    state.stop_phase = StopPhase::Idle;
     let generation_changed = generation != state.generation;
     if generation_changed {
         state.generation = generation;
@@ -86,6 +91,7 @@ fn disconnect(
     error: SafeError,
     observed_at: Instant,
 ) -> Vec<RuntimeEffect> {
+    state.stop_phase = StopPhase::Idle;
     state.pending_operation = None;
     state.replacement_awaiting_state = false;
     if matches!(state.prompt_delivery, PromptDelivery::Pending { .. }) {
@@ -198,8 +204,17 @@ fn reduce_intent(
             )]
         }
         RuntimeIntent::Abort => {
+            if state.stop_phase != StopPhase::Idle
+                || !matches!(state.lifecycle, RuntimeLifecycle::Running | RuntimeLifecycle::Cancelling)
+            {
+                return Vec::new();
+            }
+            let stop_id = state.next_request;
+            state.stop_phase = StopPhase::ClearingQueue { id: stop_id };
             state.lifecycle = RuntimeLifecycle::Cancelling;
-            vec![effect(state, RuntimeRequest::Abort)]
+            state.bump_revision();
+            // Pi's abort alone may start a queued follow-up. Drain it first.
+            vec![effect(state, RuntimeRequest::ClearQueue { stop_id })]
         }
         RuntimeIntent::AbortBash => {
             let Some(index) = state
@@ -706,9 +721,51 @@ fn reduce_response(
             state.bounded_error(failure.error);
             Vec::new()
         }
-        (RuntimeRequest::Abort | RuntimeRequest::AbortRetry, Ok(NormalizedResponse::Accepted)) => {
-            // Acknowledgement is not settlement. Pi may still be unwinding tools or retry work.
+        (
+            RuntimeRequest::ClearQueue { stop_id },
+            Ok(NormalizedResponse::QueueCleared { steering, follow_up }),
+        ) => {
+            if state.stop_phase != (StopPhase::ClearingQueue { id: stop_id }) {
+                return Vec::new();
+            }
+            recover_cleared_inputs(state, steering, SubmissionKind::Steer);
+            recover_cleared_inputs(state, follow_up, SubmissionKind::FollowUp);
+            state.queue = Arc::new(QueueContents::Known {
+                steering: Vec::new(),
+                follow_up: Vec::new(),
+            });
+            state.stop_phase = StopPhase::Aborting { id: stop_id };
             state.lifecycle = RuntimeLifecycle::Cancelling;
+            state.bump_revision();
+            vec![effect(state, RuntimeRequest::Abort { stop_id })]
+        }
+        (RuntimeRequest::Abort { stop_id }, Ok(NormalizedResponse::Accepted)) => {
+            if state.stop_phase == (StopPhase::Aborting { id: stop_id }) {
+                state.stop_phase = StopPhase::Idle;
+                // Pi 0.85.1 waits for agent idle before acknowledging abort.
+                // A late/duplicate acknowledgement must not cancel a later run.
+                settle(state);
+            }
+            Vec::new()
+        }
+        (RuntimeRequest::ClearQueue { stop_id }, Err(failure))
+        | (RuntimeRequest::Abort { stop_id }, Err(failure)) => {
+            if !matches!(state.stop_phase,
+                StopPhase::ClearingQueue { id } | StopPhase::Aborting { id } if id == stop_id)
+            {
+                return Vec::new();
+            }
+            state.stop_phase = StopPhase::Idle;
+            state.lifecycle = RuntimeLifecycle::Loading;
+            state.bounded_error(SafeError::new(
+                failure.error.kind,
+                "Stop could not be confirmed. Checking Pi state; no prompt will be replayed. Try Stop again if work is still running.",
+            ));
+            state.bump_revision();
+            vec![effect(state, RuntimeRequest::GetState)]
+        }
+        (RuntimeRequest::AbortRetry, Ok(NormalizedResponse::Accepted)) => {
+            // Settlement may have arrived first. Never regress Settled to Cancelling.
             Vec::new()
         }
         (RuntimeRequest::SetSteeringMode { mode }, Ok(NormalizedResponse::Accepted)) => {
@@ -1375,6 +1432,24 @@ fn reduce_event(
     effects
 }
 
+fn recover_cleared_inputs(state: &mut RuntimeState, messages: Vec<String>, kind: SubmissionKind) {
+    for text in messages {
+        // Match one queued input at a time; repeated identical prompts are distinct.
+        // Keep local file snapshots and image data, not just Pi's returned strings.
+        let position = state.optimistic_user_inputs.iter().position(|input| {
+            input.kind == kind && !input.authoritative_seen
+                && expand_prompt(&input.text, &input.files) == text
+        });
+        let recovered = if let Some(position) = position {
+            let input = state.optimistic_user_inputs.remove(position);
+            RecoveredInput { text: input.text, images: input.images, files: input.files }
+        } else {
+            RecoveredInput { text, images: Vec::new(), files: Vec::new() }
+        };
+        state.recovered_inputs.push_back(recovered);
+    }
+}
+
 fn settle(state: &mut RuntimeState) {
     state.pending_prompt_settled = matches!(
         state.prompt_delivery,
@@ -1404,6 +1479,7 @@ fn settle(state: &mut RuntimeState) {
 }
 
 fn clear_session_scoped_state(state: &mut RuntimeState) {
+    state.stop_phase = StopPhase::Idle;
     state.messages.data = None;
     state.reasoning_tokens = 0;
     state.reasoning_message_count = 0;
@@ -1943,7 +2019,8 @@ fn request_name(request: &RuntimeRequest) -> &'static str {
         },
         RuntimeRequest::InvokeCommand { .. } => "prompt",
         RuntimeRequest::ExecuteBash { .. } => "bash",
-        RuntimeRequest::Abort => "abort",
+        RuntimeRequest::ClearQueue { .. } => "clear_queue",
+        RuntimeRequest::Abort { .. } => "abort",
         RuntimeRequest::AbortBash => "abort_bash",
         RuntimeRequest::AbortRetry => "abort_retry",
         RuntimeRequest::SetModel { .. } => "set_model",

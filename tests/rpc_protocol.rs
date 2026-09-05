@@ -26,6 +26,7 @@ fn all_commands() -> Vec<(&'static str, Command)> {
             },
         ),
         ("abort", Command::Abort),
+        ("clear_queue", Command::ClearQueue),
         (
             "new_session",
             Command::NewSession {
@@ -695,4 +696,15 @@ fn generation_and_epoch_newtypes_do_not_interchange() {
     assert_eq!(epoch.next().value(), 5);
     assert_eq!(generation.to_string(), "4");
     assert_eq!(epoch.to_string(), "4");
+}
+
+#[test]
+fn clear_queue_preserves_order_duplicates_and_unicode_without_splitting_records() {
+    let incoming = decode_record(
+        r#"{"type":"response","id":"stop-1","command":"clear_queue","success":true,"data":{"steering":["a","a"],"followUp":["line\nnext","界"]}}"#.as_bytes()
+    ).expect("clear_queue response");
+    let IncomingRecord::Response(response) = incoming else { panic!("response") };
+    let ResponseResult::ClearQueue(data) = response.result else { panic!("clear_queue") };
+    assert_eq!(data.steering, ["a", "a"]);
+    assert_eq!(data.follow_up, ["line\nnext", "界"]);
 }

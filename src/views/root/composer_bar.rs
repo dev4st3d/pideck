@@ -1,7 +1,4 @@
-//! The prompt dock: a softly rounded, elevated surface that carries the
-//! composer input on top and one quiet control tray underneath (model and
-//! thinking selects left, status in the middle, tools and the submit orb at
-//! the right).
+//! Stable prompt surface with explicit delivery, recovery and model controls.
 
 use super::model_panels::{model_switcher_sheet, thinking_select_sheet};
 use super::overlays::{
@@ -21,6 +18,7 @@ fn clear() -> gpui::Rgba {
 
 pub(super) struct ComposerBarParams<'a> {
     pub(super) composer: &'a Entity<Composer>,
+    pub(super) saved_input_count: usize,
     pub(super) attachment_picker_pending: bool,
     pub(super) models: &'a ModelRuntimeProjection,
     pub(super) projection: &'a ShellProjection,
@@ -47,6 +45,7 @@ pub(super) fn composer_bar(
 ) -> impl IntoElement {
     let ComposerBarParams {
         composer,
+        saved_input_count,
         attachment_picker_pending,
         models,
         projection,
@@ -208,7 +207,7 @@ pub(super) fn composer_bar(
                     div()
                         .flex()
                         .flex_col()
-                        .rounded(px(theme::RADIUS_XL))
+                        .rounded(px(theme::RADIUS_MD))
                         .border_1()
                         .border_color(if card_active {
                             theme::focus()
@@ -216,7 +215,6 @@ pub(super) fn composer_bar(
                             theme::edge()
                         })
                         .bg(theme::panel())
-                        .shadow(theme::dock_shadow())
                         .overflow_hidden()
                         .can_drop(move |value, _, _| can_attach && value.is::<ExternalPaths>())
                         .drag_over::<ExternalPaths>(|style, _, _, _| {
@@ -225,6 +223,18 @@ pub(super) fn composer_bar(
                         .on_drop(cx.listener(|view, paths: &ExternalPaths, _, cx| {
                             view.attach_dropped_paths(paths.paths(), cx);
                         }))
+                        .when(saved_input_count > 0, |panel| {
+                            panel.child(
+                                div().flex().items_center().justify_between().px(px(12.0)).py(px(6.0))
+                                    .font_family(theme::sans()).text_size(theme::text_size(theme::T_UI_SM))
+                                    .text_color(theme::smoke())
+                                    .child(format!("{saved_input_count} saved input{}", if saved_input_count == 1 { "" } else { "s" }))
+                                    .child(tray_quiet_action(
+                                        "prompt-restore-input", "Restore next", true,
+                                        Box::new(cx.listener(|view, _, window, cx| view.restore_saved_input(window, cx))),
+                                    )),
+                            )
+                        })
                         .when(
                             extension_ui.widgets.iter().any(|(_, widget)| {
                                 widget.placement == WidgetPlacement::AboveEditor
@@ -376,7 +386,7 @@ pub(super) fn composer_bar(
                                         .when(running || bash_running, |tray| {
                                             tray.child(div().w(px(6.0))).child(tray_quiet_action(
                                                 "prompt-abort",
-                                                if bash_running { "Abort Bash" } else { "Abort" },
+                                                if bash_running { "Stop Bash" } else { "Stop" },
                                                 true,
                                                 Box::new(move |_, _, cx| {
                                                     abort_composer.update(cx, |composer, cx| {

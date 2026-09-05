@@ -1,15 +1,18 @@
 #!/usr/bin/env node
 
 import { basename, dirname, resolve, sep } from "node:path";
-import { pathToFileURL } from "node:url";
 import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
+import { Console } from "node:console";
 
-import { attachJsonlLineReader, serializeJsonLine } from "./jsonl.mjs";
+import { attachJsonlLineReader, createJsonlWriter } from "./jsonl.mjs";
+import { resolveSdkEntry } from "./pi-contract.mjs";
 import { piSettingsSnapshot, setPiSetting } from "./pi-settings.mjs";
 
 const PROTOCOL_VERSION = 1;
 const MAX_LINE_BYTES = 1024 * 1024;
+const MAX_ACTIVE_REQUESTS = 64;
+const MAX_ORCHESTRATION_SOCKETS = 8;
 const ORCHESTRATION_DISCONNECT_GRACE_MS = 2_500;
 const ORCHESTRATION_HANDSHAKE_TIMEOUT_MS = 2_000;
 const SESSION_VERSION = 3;
@@ -63,21 +66,33 @@ if (!sdkRoot) {
   process.exit(2);
 }
 
+// SDKs and installed extensions may log during import. Keep the protocol
+// stdout exclusive to framed records; diagnostics belong on drained stderr.
+globalThis.console = new Console({ stdout: process.stderr, stderr: process.stderr });
+
 let sdk;
 let sdkVersion;
 try {
-  const manifest = JSON.parse(readFileSync(resolve(sdkRoot, "package.json"), "utf8"));
-  if (typeof manifest.version !== "string" || manifest.version.length === 0) {
-    throw new Error("missing SDK version");
-  }
-  sdkVersion = manifest.version;
-  sdk = await import(pathToFileURL(resolve(sdkRoot, "dist", "index.js")).href);
+  const contract = resolveSdkEntry(sdkRoot);
+  sdkVersion = contract.version;
+  sdk = await import(contract.entry);
 } catch {
   process.stderr.write("pi-gui bridge could not load the compatible Pi SDK\n");
   process.exit(2);
 }
 
+let bridgeShuttingDown = false;
 const active = new Map();
+const orchestrationSockets = new Set();
+const orchestrationWriters = new WeakMap();
+const output = createJsonlWriter(process.stdout, {
+  maxRecordBytes: MAX_LINE_BYTES,
+  onFailure(code) {
+    process.stderr.write(`Pi SDK bridge transport stopped: ${code}\n`);
+    process.exitCode = 1;
+    queueMicrotask(shutdownBridge);
+  },
+});
 const authPrompts = new Map();
 let modelRuntimePromise;
 let modelRefreshPromise;
@@ -94,9 +109,9 @@ let orchestrationDisconnectTimer;
 const orchestrationPending = new Map();
 
 function emit(event, value) {
-  process.stdout.write(
-    serializeJsonLine({ version: PROTOCOL_VERSION, type: "event", event, ...value }),
-  );
+  if (!bridgeShuttingDown) {
+    output.write({ version: PROTOCOL_VERSION, type: "event", event, ...value });
+  }
 }
 
 function orchestrationError(message = "The orchestration adapter is unavailable.") {
@@ -130,6 +145,15 @@ function scheduleOrchestrationDisconnectNotice() {
 }
 
 function acceptOrchestrationSocket(socket) {
+  if (bridgeShuttingDown || orchestrationSockets.size >= MAX_ORCHESTRATION_SOCKETS) {
+    socket.destroy();
+    return;
+  }
+  orchestrationSockets.add(socket);
+  orchestrationWriters.set(socket, createJsonlWriter(socket, {
+    maxRecordBytes: MAX_LINE_BYTES,
+    onFailure: () => socket.destroy(),
+  }));
   let accepted = false;
   let handshakeTimer = setTimeout(() => socket.destroy(), ORCHESTRATION_HANDSHAKE_TIMEOUT_MS);
   handshakeTimer.unref?.();
@@ -208,6 +232,7 @@ function acceptOrchestrationSocket(socket) {
   }, { maxRecordBytes: MAX_LINE_BYTES });
   socket.on("close", () => {
     clearTimeout(handshakeTimer);
+    orchestrationSockets.delete(socket);
     detachJsonl();
     if (!accepted || orchestrationSocket !== socket) return;
     orchestrationSocket = undefined;
@@ -244,17 +269,12 @@ function requestOrchestration(action, sessionId) {
       rejectRequest(orchestrationError("The orchestration adapter did not answer in time."));
     }, 30_000);
     orchestrationPending.set(id, { resolve: resolveRequest, reject: rejectRequest, timer });
-    orchestrationSocket.write(
-      serializeJsonLine({ type: "request", id, sessionId, action }),
-      (error) => {
-        if (!error) return;
-        const pending = orchestrationPending.get(id);
-        if (!pending) return;
-        orchestrationPending.delete(id);
-        clearTimeout(pending.timer);
-        rejectRequest(orchestrationError("The orchestration adapter could not receive the action."));
-      },
-    );
+    const writer = orchestrationWriters.get(orchestrationSocket);
+    if (!writer?.write({ type: "request", id, sessionId, action })) {
+      orchestrationPending.delete(id);
+      clearTimeout(timer);
+      rejectRequest(orchestrationError("The orchestration adapter could not receive the action."));
+    }
   });
 }
 
@@ -292,7 +312,10 @@ async function getModelServices() {
         projectTrusted: false,
       });
       return { runtime, settings };
-    })();
+    })().catch((error) => {
+      modelRuntimePromise = undefined;
+      throw error;
+    });
   }
   return modelRuntimePromise;
 }
@@ -545,8 +568,9 @@ async function buildResourceSnapshot(signal, operation = "inventory") {
     phase: "start",
     message: operation === "reload" ? "Reloading installed resources." : "Inspecting installed resources.",
   });
-  resourcePlane?.session?.dispose?.();
-  resourcePlane = undefined;
+  // Commit a replacement only after it has finished. Cancellation must not
+  // destroy the last usable inventory or publish a stale resource generation.
+  const previousPlane = resourcePlane;
 
   const cwd = process.cwd();
   const agentDir = sdk.getAgentDir();
@@ -569,11 +593,12 @@ async function buildResourceSnapshot(signal, operation = "inventory") {
   try {
     globalResolved = await safeResolve(globalPackageManager);
   } catch {
-    diagnostics.push("Global resource discovery failed; prior files were not changed.");
+    throw new Error("Global resource discovery failed; the prior inventory remains active.");
   }
   try {
     allResolved = await safeResolve(inspectionPackageManager);
   } catch {
+    allResolved = globalResolved;
     diagnostics.push("Project resource discovery failed; project code was not loaded.");
   }
   if (signal.aborted) return { cancelled: true };
@@ -593,13 +618,17 @@ async function buildResourceSnapshot(signal, operation = "inventory") {
     additionalSkillPaths: additional.skill,
     additionalPromptTemplatePaths: additional.prompt,
     additionalThemePaths: additional.theme,
+    noExtensions: true,
+    noSkills: true,
+    noPromptTemplates: true,
+    noThemes: true,
     noContextFiles: true,
   });
 
   try {
     await loader.reload();
   } catch {
-    diagnostics.push("Installed resource loading failed. Project resources remained disabled.");
+    throw new Error("Resource loading failed; the prior inventory remains active.");
   }
   if (signal.aborted) return { cancelled: true };
 
@@ -833,6 +862,10 @@ async function buildResourceSnapshot(signal, operation = "inventory") {
       left.scope.localeCompare(right.scope) ||
       left.name.localeCompare(right.name),
   );
+  if (signal.aborted || bridgeShuttingDown) {
+    session?.dispose?.();
+    return { cancelled: true };
+  }
   resourceGeneration += 1;
   const snapshot = {
     generation: resourceGeneration,
@@ -856,6 +889,7 @@ async function buildResourceSnapshot(signal, operation = "inventory") {
     },
   };
   resourcePlane = { session, loader, snapshot };
+  try { previousPlane?.session?.dispose?.(); } catch { /* The new plane remains usable. */ }
   emit("resource_progress", {
     operation,
     phase: "complete",
@@ -866,15 +900,21 @@ async function buildResourceSnapshot(signal, operation = "inventory") {
 }
 
 async function resourceSnapshot(signal, reload = false) {
-  if (!reload && resourcePlane?.snapshot) return resourcePlane.snapshot;
-  if (!resourceBuildPromise) {
-    resourceBuildPromise = buildResourceSnapshot(signal, reload ? "reload" : "inventory").finally(
-      () => {
-        resourceBuildPromise = undefined;
-      },
-    );
+  // Serial, cancellation-local transactions. A later reload must not reuse a
+  // build that read the settings before that reload was requested. A cancelled
+  // reader must not cancel a different reader's inventory operation.
+  const previous = resourceBuildPromise ?? Promise.resolve();
+  const task = previous.catch(() => {}).then(async () => {
+    if (signal.aborted || bridgeShuttingDown) return { cancelled: true };
+    if (!reload && resourcePlane?.snapshot) return resourcePlane.snapshot;
+    return buildResourceSnapshot(signal, reload ? "reload" : "inventory");
+  });
+  resourceBuildPromise = task;
+  try {
+    return await task;
+  } finally {
+    if (resourceBuildPromise === task) resourceBuildPromise = undefined;
   }
-  return resourceBuildPromise;
 }
 
 function authInteraction(operationId, signal) {
@@ -887,6 +927,8 @@ function authInteraction(operationId, signal) {
         const key = `${operationId}:${promptId}`;
         const abort = () => {
           authPrompts.delete(key);
+          signal.removeEventListener("abort", abort);
+          prompt.signal?.removeEventListener("abort", abort);
           rejectPrompt(new Error("Authentication cancelled"));
         };
         if (signal.aborted || prompt.signal?.aborted) return abort();
@@ -939,7 +981,7 @@ function respond(id, ok, value) {
   const record = ok
     ? { version: PROTOCOL_VERSION, type: "response", id, ok: true, result: value }
     : { version: PROTOCOL_VERSION, type: "response", id, ok: false, error: value };
-  process.stdout.write(serializeJsonLine(record));
+  if (!bridgeShuttingDown) output.write(record);
 }
 
 function requireString(params, name) {
@@ -954,9 +996,34 @@ async function withSession(params, operation) {
   const sessionPath = requireString(params, "sessionPath");
   const cwd = requireString(params, "cwd");
   const sessionManager = sdk.SessionManager.open(sessionPath, undefined, cwd);
+  const agentDir = sdk.getAgentDir();
+  const settingsManager = sdk.SettingsManager.create(cwd, agentDir, { projectTrusted: false });
+  const installed = await safeResolve(new sdk.DefaultPackageManager({ cwd, agentDir, settingsManager }));
+  const resources = Object.fromEntries(resourceEntries(installed).map(([kind, entries]) => [
+    kind, entries.filter((entry) => entry.enabled).map((entry) => entry.path),
+  ]));
+  const resourceLoader = new sdk.DefaultResourceLoader({
+    cwd,
+    agentDir,
+    settingsManager: sdk.SettingsManager.inMemory({}, { projectTrusted: false }),
+    additionalExtensionPaths: resources.extension,
+    additionalSkillPaths: resources.skill,
+    additionalPromptTemplatePaths: resources.prompt,
+    additionalThemePaths: resources.theme,
+    noExtensions: true,
+    noSkills: true,
+    noPromptTemplates: true,
+    noThemes: true,
+    noContextFiles: true,
+  });
+  await resourceLoader.reload();
+  const { runtime: modelRuntime } = await getModelServices();
   const { session } = await sdk.createAgentSession({
     cwd,
     sessionManager,
+    settingsManager,
+    resourceLoader,
+    modelRuntime,
     noTools: "all",
   });
   try {
@@ -1041,7 +1108,12 @@ function exportActivePath(params) {
     parentId = entry.id;
     return linear;
   });
-  writeFileSync(outputPath, `${[header, ...entries].map((entry) => JSON.stringify(entry)).join("\n")}\n`);
+  // Never truncate an existing export, session, credential file, or symlink.
+  // The OS enforces exclusivity atomically; an exists-then-write check races.
+  writeFileSync(outputPath, `${[header, ...entries].map((entry) => JSON.stringify(entry)).join("\n")}\n`, {
+    flag: "wx",
+    mode: 0o600,
+  });
   return outputPath;
 }
 
@@ -1218,8 +1290,6 @@ async function execute(record) {
         const { settings } = await getModelServices();
         settings.setEnableSkillCommands(params.enabled);
         await settings.flush();
-        resourcePlane?.session?.dispose?.();
-        resourcePlane = undefined;
         result = await resourceSnapshot(token.abortController.signal, true);
         break;
       }
@@ -1233,8 +1303,6 @@ async function execute(record) {
         const { settings } = await getModelServices();
         settings.setTheme(theme);
         await settings.flush();
-        resourcePlane?.session?.dispose?.();
-        resourcePlane = undefined;
         result = await resourceSnapshot(token.abortController.signal, true);
         break;
       }
@@ -1263,7 +1331,11 @@ async function execute(record) {
         throw unsupported;
       }
     }
-    respond(id, true, result);
+    if (token.cancelled) {
+      respond(id, false, { code: "cancelled", message: "The operation was cancelled; it was not replayed." });
+    } else {
+      respond(id, true, result);
+    }
   } catch (error) {
     const sensitiveOperation = [
       "get_model_runtime",
@@ -1291,11 +1363,13 @@ async function execute(record) {
         ? "The bridge operation failed."
         : "Bridge operation failed";
     respond(id, false, {
-      code: error?.bridgeCode ?? "operation_failed",
-      message: message.slice(0, 400),
+      code: token.cancelled ? "cancelled" : error?.code === "EEXIST" ? "output_exists" : error?.bridgeCode ?? "operation_failed",
+      message: token.cancelled ? "The operation was cancelled; it was not replayed."
+        : error?.code === "EEXIST" ? "The output already exists. Choose a new filename; no file was overwritten."
+        : message.slice(0, 400),
     });
   } finally {
-    active.delete(id);
+    if (active.get(id) === token) active.delete(id);
   }
 }
 
@@ -1307,11 +1381,21 @@ const detachInput = attachJsonlLineReader(process.stdin, (line) => {
     respond("malformed", false, { code: "invalid_json", message: "Bridge record is not valid JSON" });
     return;
   }
-  if (record?.version !== PROTOCOL_VERSION || typeof record?.id !== "string") {
+  if (bridgeShuttingDown) return;
+  if (record?.version !== PROTOCOL_VERSION || typeof record?.id !== "string"
+      || record.id.length === 0 || record.id.length > 256) {
     respond(record?.id ?? "invalid", false, {
       code: "incompatible_protocol",
       message: "Unsupported bridge protocol version",
     });
+    return;
+  }
+  if (active.has(record.id)) {
+    // A second response with the same ID could settle the wrong operation.
+    // Close the transport instead of acknowledging or executing an ambiguous request.
+    process.stderr.write("Pi SDK bridge stopped: duplicate_request_id\n");
+    process.exitCode = 1;
+    shutdownBridge();
     return;
   }
   if (record.type === "cancel") {
@@ -1319,13 +1403,20 @@ const detachInput = attachJsonlLineReader(process.stdin, (line) => {
     if (operation) {
       operation.cancelled = true;
       operation.abortController.abort();
-      operation.session?.abortBranchSummary();
+      try { operation.session?.abortBranchSummary(); } catch { /* Cancellation remains idempotent. */ }
     }
     respond(record.id, true, { cancelled: Boolean(operation) });
     return;
   }
-  if (record.type !== "request" || typeof record.command !== "string") {
+  if (record.type !== "request" || typeof record.command !== "string"
+      || (record.params !== undefined && (record.params === null
+          || typeof record.params !== "object" || Array.isArray(record.params)))) {
     respond(record.id, false, { code: "invalid_request", message: "Invalid bridge request" });
+    return;
+  }
+  if (active.size >= MAX_ACTIVE_REQUESTS
+      || (active.size >= MAX_ACTIVE_REQUESTS - 1 && record.command !== "auth_respond")) {
+    respond(record.id, false, { code: "busy", message: "Too many bridge operations are active. Cancel or finish an operation first." });
     return;
   }
   const capability = CAPABILITY_BY_COMMAND[record.command];
@@ -1344,20 +1435,23 @@ const detachInput = attachJsonlLineReader(process.stdin, (line) => {
   },
 });
 
-let bridgeShuttingDown = false;
 function shutdownBridge() {
   if (bridgeShuttingDown) return;
   bridgeShuttingDown = true;
   detachInput();
+  process.stdin.destroy();
   for (const operation of active.values()) {
+    operation.cancelled = true;
     operation.abortController.abort();
-    operation.session?.abortBranchSummary();
+    try { operation.session?.abortBranchSummary(); } catch { /* Continue cleanup. */ }
   }
-  resourcePlane?.session?.dispose?.();
+  try { resourcePlane?.session?.dispose?.(); } catch { /* Continue cleanup. */ }
   cancelOrchestrationDisconnectNotice();
   failOrchestrationPending("The Pi SDK bridge stopped.");
-  orchestrationSocket?.destroy();
+  for (const socket of orchestrationSockets) socket.destroy();
   orchestrationServer?.close();
+  // An SDK extension may ignore abort. No hung child survives a host disconnect.
+  setTimeout(() => process.exit(process.exitCode ?? 0), 1_000).unref();
   if (ORCHESTRATION_ENDPOINT && process.platform !== "win32") {
     try {
       unlinkSync(ORCHESTRATION_ENDPOINT);
@@ -1370,3 +1464,5 @@ function shutdownBridge() {
 process.stdin.once("end", shutdownBridge);
 process.stdin.once("close", shutdownBridge);
 process.stdin.once("error", shutdownBridge);
+process.once("SIGTERM", shutdownBridge);
+process.once("SIGINT", shutdownBridge);

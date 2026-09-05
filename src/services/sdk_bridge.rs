@@ -3,11 +3,10 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::fs;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
-use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, Weak, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -18,19 +17,23 @@ use serde_json::Value;
 use crate::model_runtime::{AuthEvent, AuthMethod, ModelIdentity, ThinkingLevel};
 use crate::orchestration::{OrchestrationActionRequest, OrchestrationSnapshot};
 use crate::resource_center::ResourceInventorySnapshot;
-use crate::services::pi_process::SUPPORTED_PI_VERSION;
+use crate::services::pi_process::{ProcessHandle, SUPPORTED_PI_VERSION, spawn_contained};
 
 const PROTOCOL_VERSION: u64 = 1;
 const MAX_RECORD_BYTES: usize = 1024 * 1024;
+const MAX_BRIDGE_EVENTS: usize = 64;
+const MAX_PENDING_REQUESTS: usize = 64;
+const MAX_BUFFERED_WRITES: usize = 4 * MAX_RECORD_BYTES;
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 const BRIDGE_ENTRYPOINT: &str = "pi-bridge.mjs";
 const ORCHESTRATION_ADAPTER: &str = "orchestration-adapter.mjs";
-const EMBEDDED_BRIDGE_FILES: [(&str, &[u8]); 5] = [
+const EMBEDDED_BRIDGE_FILES: [(&str, &[u8]); 6] = [
     (
         BRIDGE_ENTRYPOINT,
         include_bytes!("../../bridge/pi-bridge.mjs"),
     ),
     ("jsonl.mjs", include_bytes!("../../bridge/jsonl.mjs")),
+    ("pi-contract.mjs", include_bytes!("../../bridge/pi-contract.mjs")),
     (
         "pi-settings.mjs",
         include_bytes!("../../bridge/pi-settings.mjs"),
@@ -420,8 +423,9 @@ pub enum BridgeEvent {
 }
 
 struct BridgeInner {
-    child: Mutex<Option<Child>>,
-    stdin: Mutex<Option<ChildStdin>>,
+    child: Mutex<Option<ProcessHandle>>,
+    outgoing: Sender<Vec<u8>>,
+    buffered_writes: AtomicUsize,
     pending: Mutex<HashMap<String, mpsc::Sender<Result<Value, BridgeError>>>>,
     next_id: AtomicU64,
     stopped: AtomicBool,
@@ -429,8 +433,21 @@ struct BridgeInner {
     event_sender: Sender<BridgeEvent>,
 }
 
+// Reader/writer threads own the transport, not its lifetime. The final client
+// owner closes the child even while a read or write is blocked in a pipe.
+struct BridgeLifetime(Weak<BridgeInner>);
+
+impl Drop for BridgeLifetime {
+    fn drop(&mut self) {
+        if let Some(inner) = self.0.upgrade() {
+            stop_bridge(&inner, "The Pi SDK bridge owner closed.");
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct SdkBridgeClient {
+    lifetime: Arc<BridgeLifetime>,
     inner: Arc<BridgeInner>,
     hello: BridgeHello,
     events: Receiver<BridgeEvent>,
@@ -444,47 +461,37 @@ impl SdkBridgeClient {
                 "The compatible Pi SDK bridge is unavailable.",
             ));
         }
-        let mut command = Command::new(&config.node);
-        command
-            .arg(&config.script)
-            .arg(&config.sdk_root)
-            .env(ORCHESTRATION_PIPE_ENV, &config.orchestration_endpoint)
-            .current_dir(&config.working_directory)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        super::suppress_console_window(&mut command);
-        let mut child = command.spawn().map_err(|_| {
-            BridgeError::new(
-                BridgeErrorKind::Unavailable,
-                "The Pi SDK bridge could not start.",
-            )
+        let mut process = spawn_contained(
+            &config.node,
+            &[config.script.into_os_string(), config.sdk_root.into_os_string()],
+            &config.working_directory,
+            &[(ORCHESTRATION_PIPE_ENV.into(), config.orchestration_endpoint.into())],
+        )
+        .map_err(|_| {
+            BridgeError::new(BridgeErrorKind::Unavailable, "The Pi SDK bridge could not start.")
         })?;
-        let stdin = child.stdin.take().ok_or_else(|| {
-            BridgeError::new(
+        let (Some(stdin), Some(stdout)) = (process.stdin.take(), process.stdout.take()) else {
+            let _ = process.handle.terminate();
+            let _ = process.handle.wait_for(Duration::from_secs(3));
+            return Err(BridgeError::new(
                 BridgeErrorKind::Unavailable,
-                "The bridge has no input pipe.",
-            )
-        })?;
-        let stdout = child.stdout.take().ok_or_else(|| {
-            BridgeError::new(
-                BridgeErrorKind::Unavailable,
-                "The bridge has no output pipe.",
-            )
-        })?;
-        if let Some(stderr) = child.stderr.take() {
+                "The Pi SDK bridge did not provide its standard pipes.",
+            ));
+        };
+        if let Some(mut stderr) = process.stderr.take() {
             thread::spawn(move || {
-                let mut reader = BufReader::new(stderr);
-                let mut buffer = Vec::new();
-                while reader.read_until(b'\n', &mut buffer).unwrap_or(0) > 0 {
-                    buffer.clear();
-                }
+                // Discard diagnostics with constant space, including a child that
+                // writes indefinitely without a newline. Never retain secrets.
+                let mut buffer = [0_u8; 8192];
+                while stderr.read(&mut buffer).unwrap_or(0) > 0 {}
             });
         }
-        let (event_sender, events) = async_channel::unbounded();
+        let (event_sender, events) = async_channel::bounded(MAX_BRIDGE_EVENTS);
+        let (outgoing, outgoing_receiver) = async_channel::bounded(MAX_PENDING_REQUESTS);
         let inner = Arc::new(BridgeInner {
-            child: Mutex::new(Some(child)),
-            stdin: Mutex::new(Some(stdin)),
+            child: Mutex::new(Some(process.handle)),
+            outgoing,
+            buffered_writes: AtomicUsize::new(0),
             pending: Mutex::new(HashMap::new()),
             next_id: AtomicU64::new(1),
             stopped: AtomicBool::new(false),
@@ -492,7 +499,9 @@ impl SdkBridgeClient {
             event_sender,
         });
         spawn_reader(stdout, Arc::clone(&inner));
+        spawn_writer(stdin, outgoing_receiver, Arc::clone(&inner));
         let provisional = Self {
+            lifetime: Arc::new(BridgeLifetime(Arc::downgrade(&inner))),
             inner,
             hello: BridgeHello {
                 protocol_version: 0,
@@ -535,6 +544,7 @@ impl SdkBridgeClient {
             ));
         }
         Ok(Self {
+            lifetime: provisional.lifetime,
             inner: provisional.inner,
             hello,
             events,
@@ -599,12 +609,23 @@ impl SdkBridgeClient {
             command: command_name,
             params,
         };
+        if id.is_empty() || id.len() > 256 || timeout.is_zero() {
+            return Err(BridgeError::new(BridgeErrorKind::Protocol, "Invalid bridge request identity or timeout."));
+        }
         let (sender, receiver) = mpsc::channel();
-        self.inner
-            .pending
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .insert(id.clone(), sender);
+        {
+            let mut pending = self.inner.pending.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            if self.inner.stopped.load(Ordering::Acquire) {
+                return Err(BridgeError::new(BridgeErrorKind::Disconnected, "The Pi SDK bridge stopped."));
+            }
+            if pending.contains_key(&id) {
+                return Err(BridgeError::new(BridgeErrorKind::Protocol, "A bridge request with this ID is already active."));
+            }
+            if pending.len() >= MAX_PENDING_REQUESTS {
+                return Err(BridgeError::rejected(Some("busy".to_owned()), "The Pi SDK bridge is busy. Finish or cancel an operation first."));
+            }
+            pending.insert(id.clone(), sender);
+        }
         if let Err(error) = write_record(&self.inner, &record) {
             self.inner
                 .pending
@@ -622,9 +643,10 @@ impl SdkBridgeClient {
                     .unwrap_or_else(|poisoned| poisoned.into_inner())
                     .remove(&id);
                 let _ = self.cancel(&id);
+                self.stop();
                 Err(BridgeError::new(
                     BridgeErrorKind::Timeout,
-                    "The bridge operation is still cancelling.",
+                    "The bridge operation timed out and its process was stopped. Its outcome is unknown; it was not replayed.",
                 ))
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => Err(BridgeError::new(
@@ -639,7 +661,7 @@ impl SdkBridgeClient {
             "bridge-cancel-{}",
             self.inner.next_id.fetch_add(1, Ordering::Relaxed)
         );
-        write_record(
+        let result = write_record(
             &self.inner,
             &CancelRecord {
                 version: PROTOCOL_VERSION,
@@ -647,43 +669,39 @@ impl SdkBridgeClient {
                 id: &id,
                 target_id,
             },
-        )
+        );
+        if result.is_err() {
+            self.stop();
+        }
+        result
     }
 
     pub fn stop(&self) {
-        if self.inner.stopped.swap(true, Ordering::AcqRel) {
-            return;
-        }
-        self.inner.healthy.store(false, Ordering::Release);
-        self.inner
-            .stdin
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .take();
-        if let Some(mut child) = self
-            .inner
-            .child
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .take()
-        {
-            let _ = child.kill();
-            let _ = child.wait();
-        }
-        fail_pending(&self.inner, "The Pi SDK bridge stopped.");
+        stop_bridge(&self.inner, "The Pi SDK bridge stopped.");
     }
+}
+
+fn stop_bridge(inner: &BridgeInner, summary: &str) {
+    if inner.stopped.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    inner.healthy.store(false, Ordering::Release);
+    inner.outgoing.close();
+    // Terminate the contained process tree to interrupt a blocked pipe writer.
+    // The coordinator never holds or waits for the writer's input handle.
+    if let Some(child) = inner.child.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).take() {
+        let _ = child.terminate();
+        let _ = child.wait_for(Duration::from_secs(3));
+    }
+    inner.event_sender.close();
+    fail_pending(inner, summary);
 }
 
 impl Drop for BridgeInner {
     fn drop(&mut self) {
-        if let Some(mut child) = self
-            .child
-            .get_mut()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .take()
-        {
-            let _ = child.kill();
-            let _ = child.wait();
+        if let Some(child) = self.child.get_mut().unwrap_or_else(|poisoned| poisoned.into_inner()).take() {
+            let _ = child.terminate();
+            let _ = child.wait_for(Duration::from_secs(3));
         }
     }
 }
@@ -692,49 +710,93 @@ fn write_record<T: Serialize>(inner: &BridgeInner, record: &T) -> Result<(), Bri
     let mut bytes = serde_json::to_vec(record).map_err(|_| {
         BridgeError::new(BridgeErrorKind::Protocol, "Bridge request encoding failed.")
     })?;
-    bytes.push(b'\n');
-    let mut guard = inner
-        .stdin
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let stdin = guard.as_mut().ok_or_else(|| {
-        BridgeError::new(BridgeErrorKind::Disconnected, "The bridge input is closed.")
-    })?;
-    let result = stdin
-        .write_all(&bytes)
-        .and_then(|_| stdin.flush())
-        .map_err(|_| BridgeError::new(BridgeErrorKind::Disconnected, "The bridge input failed."));
-    if result.is_err() {
-        inner.healthy.store(false, Ordering::Release);
+    if bytes.len() > MAX_RECORD_BYTES {
+        return Err(BridgeError::new(BridgeErrorKind::Protocol, "The bridge request exceeds the 1 MiB record limit."));
     }
-    result
+    if inner.stopped.load(Ordering::Acquire) {
+        return Err(BridgeError::new(BridgeErrorKind::Disconnected, "The Pi SDK bridge stopped."));
+    }
+    bytes.push(b'\n');
+    let byte_count = bytes.len();
+    if inner.buffered_writes.fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
+        used.checked_add(byte_count).filter(|total| *total <= MAX_BUFFERED_WRITES)
+    }).is_err() {
+        return Err(BridgeError::rejected(Some("busy".to_owned()), "The bridge input queue is full. The request was not sent."));
+    }
+    if inner.outgoing.try_send(bytes).is_err() {
+        inner.buffered_writes.fetch_sub(byte_count, Ordering::AcqRel);
+        return Err(BridgeError::rejected(Some("busy".to_owned()), "The bridge input is closed or full. The request was not sent."));
+    }
+    Ok(())
 }
 
-fn spawn_reader(stdout: impl std::io::Read + Send + 'static, inner: Arc<BridgeInner>) {
+fn spawn_writer(
+    mut stdin: Box<dyn Write + Send>,
+    outgoing: Receiver<Vec<u8>>,
+    inner: Arc<BridgeInner>,
+) {
+    thread::spawn(move || {
+        while let Ok(bytes) = outgoing.recv_blocking() {
+            if inner.stopped.load(Ordering::Acquire) {
+                break;
+            }
+            let result = stdin.write_all(&bytes).and_then(|_| stdin.flush());
+            inner.buffered_writes.fetch_sub(bytes.len(), Ordering::AcqRel);
+            if result.is_err() {
+                stop_bridge(&inner, "The bridge input failed. No operation was replayed.");
+                break;
+            }
+        }
+    });
+}
+
+/// The read limit is applied before allocation, including an unterminated
+/// record. Only LF delimits records; CR is stripped only as its optional suffix.
+fn read_bridge_record(reader: &mut impl BufRead, buffer: &mut Vec<u8>) -> io::Result<usize> {
+    buffer.clear();
+    let count = reader.take((MAX_RECORD_BYTES + 2) as u64).read_until(b'\n', buffer)?;
+    if buffer.last() == Some(&b'\n') {
+        buffer.pop();
+    }
+    if buffer.last() == Some(&b'\r') {
+        buffer.pop();
+    }
+    if buffer.len() > MAX_RECORD_BYTES {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "Bridge record too large"));
+    }
+    Ok(count)
+}
+
+fn spawn_reader(stdout: impl Read + Send + 'static, inner: Arc<BridgeInner>) {
     thread::spawn(move || {
         let mut reader = BufReader::new(stdout);
         let mut buffer = Vec::new();
         loop {
-            buffer.clear();
-            match reader.read_until(b'\n', &mut buffer) {
+            match read_bridge_record(&mut reader, &mut buffer) {
                 Ok(0) | Err(_) => break,
-                Ok(_) if buffer.len() > MAX_RECORD_BYTES => continue,
                 Ok(_) => {}
             }
             let Ok(value) = serde_json::from_slice::<Value>(&buffer) else {
-                continue;
+                break;
             };
+            if value.get("version").and_then(Value::as_u64) != Some(PROTOCOL_VERSION) {
+                break;
+            }
             if value.get("type").and_then(Value::as_str) == Some("event") {
                 if let Ok(event) = serde_json::from_value::<BridgeEvent>(value) {
-                    let _ = inner.event_sender.send_blocking(event);
+                    // Never block the response reader behind a stalled UI. A
+                    // saturated bridge is a visible failure, not an auth hang.
+                    if inner.event_sender.try_send(event).is_err() {
+                        break;
+                    }
                 }
                 continue;
             }
             let Ok(response) = serde_json::from_value::<ResponseRecord>(value) else {
-                continue;
+                break;
             };
             if response.version != PROTOCOL_VERSION || response.record_type != "response" {
-                continue;
+                break;
             }
             let sender = inner
                 .pending
@@ -755,13 +817,7 @@ fn spawn_reader(stdout: impl std::io::Read + Send + 'static, inner: Arc<BridgeIn
             };
             let _ = sender.send(result);
         }
-        inner.healthy.store(false, Ordering::Release);
-        inner
-            .stdin
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .take();
-        fail_pending(&inner, "The Pi SDK bridge disconnected.");
+        stop_bridge(&inner, "The Pi SDK bridge disconnected or exceeded a transport limit. Reconnect; no operation was replayed.");
     });
 }
 
@@ -806,7 +862,7 @@ pub struct SdkBridgeWorker {
 impl SdkBridgeWorker {
     pub fn spawn(working_directory: PathBuf, orchestration_endpoint: String) -> Self {
         let (commands, command_receiver) = mpsc::channel();
-        let (result_sender, results) = async_channel::unbounded();
+        let (result_sender, results) = async_channel::bounded(MAX_BRIDGE_EVENTS);
         thread::spawn(move || {
             bridge_worker(
                 working_directory,
@@ -841,6 +897,7 @@ impl SdkBridgeWorker {
 
 impl Drop for SdkBridgeWorker {
     fn drop(&mut self) {
+        self.results.close();
         let _ = self.commands.send(BridgeWorkerCommand::Shutdown);
     }
 }
@@ -851,7 +908,9 @@ fn bridge_worker(
     commands: mpsc::Receiver<BridgeWorkerCommand>,
     results: Sender<BridgeWorkerResult>,
 ) {
-    let (internal_sender, internal_receiver) = mpsc::channel();
+    let (internal_sender, internal_receiver) = mpsc::sync_channel(MAX_PENDING_REQUESTS);
+    let mut generation = 1_u64;
+    let mut in_flight = HashMap::<u64, BridgeCommand>::new();
     let mut client = start_discovered_bridge(&working_directory, &orchestration_endpoint);
     let mut event_receiver = client.as_ref().ok().map(SdkBridgeClient::events);
     let mut reconnect_delay = Duration::from_secs(1);
@@ -863,10 +922,18 @@ fn bridge_worker(
             .map_err(Clone::clone),
     ));
     loop {
+        if results.is_closed() {
+            if let Ok(active) = &client {
+                active.stop();
+            }
+            break;
+        }
         if client.as_ref().is_ok_and(|active| !active.is_healthy()) {
             if let Ok(active) = &client {
                 active.stop();
             }
+            generation = generation.saturating_add(1);
+            fail_worker_operations(&mut in_flight, &results);
             client = Err(BridgeError::new(
                 BridgeErrorKind::Disconnected,
                 "The Pi SDK bridge disconnected.",
@@ -892,12 +959,24 @@ fn bridge_worker(
             }
         }
         if let Some(events) = &event_receiver {
-            while let Ok(event) = events.try_recv() {
-                let _ = results.send_blocking(BridgeWorkerResult::Event(event));
+            for _ in 0..32 {
+                let Ok(event) = events.try_recv() else { break };
+                if results.send_blocking(BridgeWorkerResult::Event(event)).is_err() {
+                    break;
+                }
             }
         }
-        while let Ok(result) = internal_receiver.try_recv() {
-            let _ = results.send_blocking(result);
+        for _ in 0..32 {
+            let Ok((completed_generation, result)) = internal_receiver.try_recv() else { break };
+            if completed_generation != generation {
+                continue;
+            }
+            if let BridgeWorkerResult::Completed { id, .. } = &result {
+                in_flight.remove(id);
+            }
+            if results.send_blocking(result).is_err() {
+                break;
+            }
         }
         let command = match commands.recv_timeout(Duration::from_millis(10)) {
             Ok(command) => command,
@@ -906,23 +985,37 @@ fn bridge_worker(
         };
         match command {
             BridgeWorkerCommand::Execute { id, command } => {
+                if in_flight.contains_key(&id) {
+                    // Never give one request identity two terminal responses.
+                    continue;
+                }
+                if in_flight.len() >= MAX_PENDING_REQUESTS {
+                    let _ = results.send_blocking(BridgeWorkerResult::Completed {
+                        id,
+                        command,
+                        result: Err(BridgeError::rejected(Some("busy".to_owned()), "The bridge is busy. Finish or cancel an operation first.")),
+                    });
+                    continue;
+                }
                 let Err(unavailable) = client.as_ref() else {
                     let active = client
                         .as_ref()
                         .expect("matched successful bridge client")
                         .clone();
                     let internal = internal_sender.clone();
+                    let operation_generation = generation;
+                    in_flight.insert(id, command.clone());
                     thread::spawn(move || {
                         let result = active.call_with_id(
                             command.clone(),
                             format!("operation-{id}"),
                             Duration::from_secs(300),
                         );
-                        let _ = internal.send(BridgeWorkerResult::Completed {
+                        let _ = internal.send((operation_generation, BridgeWorkerResult::Completed {
                             id,
                             command,
                             result,
-                        });
+                        }));
                     });
                     continue;
                 };
@@ -944,6 +1037,8 @@ fn bridge_worker(
                 if let Ok(active) = &client {
                     active.stop();
                 }
+                generation = generation.saturating_add(1);
+                fail_worker_operations(&mut in_flight, &results);
                 client = start_discovered_bridge(&working_directory, &orchestration_endpoint);
                 event_receiver = client.as_ref().ok().map(SdkBridgeClient::events);
                 reconnect_delay = Duration::from_secs(1);
@@ -962,6 +1057,22 @@ fn bridge_worker(
                 break;
             }
         }
+    }
+}
+
+fn fail_worker_operations(
+    in_flight: &mut HashMap<u64, BridgeCommand>,
+    results: &Sender<BridgeWorkerResult>,
+) {
+    for (id, command) in in_flight.drain() {
+        let _ = results.send_blocking(BridgeWorkerResult::Completed {
+            id,
+            command,
+            result: Err(BridgeError::new(
+                BridgeErrorKind::Disconnected,
+                "The bridge disconnected before the operation completed. Its outcome is unknown; it was not replayed.",
+            )),
+        });
     }
 }
 
@@ -1005,6 +1116,32 @@ pub fn decode_resource_snapshot(value: Value) -> Result<ResourceInventorySnapsho
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bridge_reader_limits_unterminated_output_before_growing() {
+        let input = vec![b'x'; MAX_RECORD_BYTES * 8];
+        let mut reader = io::Cursor::new(input);
+        let mut bytes = Vec::new();
+        assert!(read_bridge_record(&mut reader, &mut bytes).is_err());
+        assert_eq!(reader.position(), (MAX_RECORD_BYTES + 2) as u64);
+        assert!(bytes.len() <= MAX_RECORD_BYTES + 2);
+    }
+
+    #[test]
+    fn bridge_reader_accepts_exact_limit_crlf_and_unicode_separators() {
+        let mut input = vec![b'x'; MAX_RECORD_BYTES];
+        input.extend_from_slice(b"\r\n");
+        input.extend_from_slice("a\u{2028}b\u{2029}c\nlast".as_bytes());
+        let mut reader = io::Cursor::new(input);
+        let mut bytes = Vec::new();
+        assert_eq!(read_bridge_record(&mut reader, &mut bytes).unwrap(), MAX_RECORD_BYTES + 2);
+        assert_eq!(bytes.len(), MAX_RECORD_BYTES);
+        read_bridge_record(&mut reader, &mut bytes).unwrap();
+        assert_eq!(String::from_utf8(bytes.clone()).unwrap(), "a\u{2028}b\u{2029}c");
+        read_bridge_record(&mut reader, &mut bytes).unwrap();
+        assert_eq!(bytes, b"last");
+        assert_eq!(read_bridge_record(&mut reader, &mut bytes).unwrap(), 0);
+    }
 
     #[test]
     fn embedded_bridge_materializes_every_runtime_module() {

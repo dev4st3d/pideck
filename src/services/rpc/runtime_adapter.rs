@@ -163,7 +163,8 @@ fn command_for_request(request: &RuntimeRequest) -> Command {
             command: command.clone(),
             exclude_from_context: Some(*exclude_from_context),
         },
-        RuntimeRequest::Abort => Command::Abort,
+        RuntimeRequest::ClearQueue { .. } => Command::ClearQueue,
+        RuntimeRequest::Abort { .. } => Command::Abort,
         RuntimeRequest::AbortBash => Command::AbortBash,
         RuntimeRequest::AbortRetry => Command::AbortRetry,
         RuntimeRequest::SetModel { provider, id } => Command::SetModel {
@@ -241,6 +242,12 @@ fn normalize_response(
                 is_compacting: state.is_compacting,
                 pending_message_count: state.pending_message_count,
             })
+        }
+        (RuntimeRequest::ClearQueue { .. }, ResponseResult::ClearQueue(data)) => {
+            NormalizedResponse::QueueCleared {
+                steering: data.steering,
+                follow_up: data.follow_up,
+            }
         }
         (RuntimeRequest::GetMessages { .. }, ResponseResult::GetMessages(data)) => {
             NormalizedResponse::Messages(data.messages.into_iter().map(persisted_message).collect())
@@ -330,7 +337,7 @@ fn normalize_response(
             ResponseResult::FollowUp,
         )
         | (RuntimeRequest::InvokeCommand { .. }, ResponseResult::Prompt)
-        | (RuntimeRequest::Abort, ResponseResult::Abort)
+        | (RuntimeRequest::Abort { .. }, ResponseResult::Abort)
         | (RuntimeRequest::AbortBash, ResponseResult::AbortBash)
         | (RuntimeRequest::AbortRetry, ResponseResult::AbortRetry)
         | (RuntimeRequest::SetThinkingLevel { .. }, ResponseResult::SetThinkingLevel)
@@ -394,6 +401,7 @@ fn normalize_response(
 
 fn normalize_client_error(request: &RuntimeRequest, error: RpcClientError) -> RequestFailure {
     let kind = match error.kind {
+        RpcClientErrorKind::CancelledBeforeSend => RequestFailureKind::Rejected,
         RpcClientErrorKind::UnknownOutcome => RequestFailureKind::UnknownOutcome,
         RpcClientErrorKind::ProcessExit
         | RpcClientErrorKind::StdoutFault
@@ -404,9 +412,14 @@ fn normalize_client_error(request: &RuntimeRequest, error: RpcClientError) -> Re
             RequestFailureKind::Protocol
         }
     };
+    let summary = if error.kind == RpcClientErrorKind::CancelledBeforeSend {
+        "This input was cancelled before it was sent. Its draft was kept.".to_owned()
+    } else {
+        failure_summary(request, kind)
+    };
     RequestFailure {
         kind,
-        error: SafeError::new(error_kind(error.kind), failure_summary(request, kind)),
+        error: SafeError::new(error_kind(error.kind), summary),
     }
 }
 
@@ -1260,7 +1273,8 @@ fn operation_name(request: &RuntimeRequest) -> &'static str {
         },
         RuntimeRequest::InvokeCommand { .. } => "command delivery",
         RuntimeRequest::ExecuteBash { .. } => "Bash execution",
-        RuntimeRequest::Abort => "abort",
+        RuntimeRequest::ClearQueue { .. } => "clear_queue",
+        RuntimeRequest::Abort { .. } => "abort",
         RuntimeRequest::AbortBash => "Bash cancellation",
         RuntimeRequest::AbortRetry => "retry cancellation",
         RuntimeRequest::SetModel { .. } => "model update",
@@ -1278,6 +1292,7 @@ fn operation_name(request: &RuntimeRequest) -> &'static str {
 
 fn error_kind(kind: RpcClientErrorKind) -> ErrorKind {
     match kind {
+        RpcClientErrorKind::CancelledBeforeSend => ErrorKind::Rejected,
         RpcClientErrorKind::UnknownOutcome => ErrorKind::UnknownOutcome,
         RpcClientErrorKind::Encoding | RpcClientErrorKind::ProtocolFault => ErrorKind::Protocol,
         RpcClientErrorKind::ProcessExit => ErrorKind::Process,
@@ -1290,6 +1305,7 @@ fn error_kind(kind: RpcClientErrorKind) -> ErrorKind {
 
 fn connection_summary(kind: RpcClientErrorKind) -> &'static str {
     match kind {
+        RpcClientErrorKind::CancelledBeforeSend => "The input was cancelled before it was sent",
         RpcClientErrorKind::UnknownOutcome => "A Pi operation has an unknown outcome",
         RpcClientErrorKind::Encoding | RpcClientErrorKind::ProtocolFault => {
             "The Pi protocol connection failed"

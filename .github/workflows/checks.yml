@@ -40,6 +40,7 @@ jobs:
         uses: actions/setup-node@v7
         with:
           node-version: "22"
+          check-latest: true
 
       - name: Test bridge
         shell: pwsh
@@ -82,5 +83,14 @@ jobs:
         with:
           shared-key: checks-tests
 
+      - name: Setup Node for bridge integration fixtures
+        uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+          check-latest: true
+
+      - name: Check all targets
+        run: cargo check --locked --all-targets
+
       - name: Test
-        run: cargo test --all-targets
+        run: cargo test --locked --all-targets

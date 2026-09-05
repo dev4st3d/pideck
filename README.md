@@ -1,46 +1,8 @@
-<div align="center">
-
 # Pideck
 
-**The desktop home for [Pi](https://github.com/earendil-works/pi)** — a native shell that turns the coding agent you already run from the terminal into a focused, keyboard-first workspace.
+A native Windows workspace for the Pi coding agent, built with Rust and GPUI 0.2.2. Pi owns agent execution, sessions and provider credentials.
 
-![Rust 1.85+](https://img.shields.io/badge/rust-1.85%2B-informational)
-![GPUI 0.2.2](https://img.shields.io/badge/GPUI-0.2.2-blueviolet)
-
-<br />
-
-![Pideck workspace](assets/screenshots/intro-2.png)
-
-</div>
-
----
-
-Pideck is written in **Rust** on **GPUI 0.2.2**. Pi remains the agent runtime and credential owner; Pideck discovers it, supervises it, and gives its full capability set — sessions, tools, extensions, orchestration — a polished interface.
-
-## Screenshots
-
-<table>
-  <tr>
-    <td align="center" width="50%">
-      <img src="assets/screenshots/intro.png" alt="Session workspace" /><br />
-      <b>Session & sidebar</b>
-    </td>
-    <td align="center" width="50%">
-      <img src="assets/screenshots/themes.png" alt="Theme picker" /><br />
-      <b>Themes</b>
-    </td>
-  </tr>
-  <tr>
-    <td align="center" width="50%">
-      <img src="assets/screenshots/diff-viewer.png" alt="Diff viewer" /><br />
-      <b>Diff viewer</b>
-    </td>
-    <td align="center" width="50%">
-      <img src="assets/screenshots/terminal.png" alt="Embedded terminal" /><br />
-      <b>Terminal</b>
-    </td>
-  </tr>
-</table>
+Requires **Pi 0.85.1** (`@earendil-works/pi-coding-agent@0.85.1`).
 
 ## Features
 
@@ -57,47 +19,39 @@ Pideck is written in **Rust** on **GPUI 0.2.2**. Pi remains the agent runtime an
 
 ## Supported extensions
 
-Every installed Pi extension is hosted natively: `select`, `confirm`, `input`, and `editor` dialogs become native windows, status lines and widgets render in place, window titles update the title bar, and extension commands join the palette.
+Supported Pi extension UI requests are mapped to native controls: `select`, `confirm`, `input`, and `editor` dialogs become native windows, status lines and widgets render in place, window titles update the title bar, and extension commands join the palette.
 
-**First-class Inspector supervision**
+**Inspector integrations retained from the supplied snapshot**
 
-| Extension | Tested release | Upstream Pi range | What you get |
+These are the snapshot's reference extension versions, not newly certified Pi 0.85.1 combinations. The adapter fixture tests exercise their protocol projections; live extension recertification is outstanding.
+
+| Extension | Snapshot reference | Documented Pi range | Interface |
 |---|---:|---:|---|
 | `@tintinweb/pi-tasks` | 0.7.2 | `>=0.80.0` | Task lists with dependencies, blockers, and outputs; guarded execute and stop |
 | `@tintinweb/pi-subagents` | 0.15.2 | `>=0.80.0` | Live lifecycle, queue, concurrency, schedules, worktrees, and memory; steer, stop, and resume agents; conversation overlay with a bounded live transcript |
 | `@narumitw/pi-goal` | 0.51.0 | `>=0.80.6` | Objective, wait state, safety limits, queue, budget, and elapsed time; guarded pause, resume, edit, and clear |
 | `@juicesharp/rpiv-ask-user-question` | 2.5.1 | `*` | Multi-question flows, choices, previews, notes, and multi-select answered through native dialogs |
 
-`pi-bar` 0.3.39 is also compatibility-tested. It stays installed for Pi's TUI but is omitted from GUI sessions because PiDeck supplies the native status shell.
+`pi-bar` 0.3.39 is the snapshot reference for the native-shell exclusion policy. It stays installed for Pi's TUI but is omitted from GUI sessions because PiDeck supplies the native status shell.
 
 ## Requirements
 
 | | |
 |---|---|
 | OS | Windows |
-| Rust | 1.85+ (stable, see `rust-toolchain.toml`) |
-| Pi | `@earendil-works/pi-coding-agent@0.84.2` |
+| Rust | Current stable with rustfmt and Clippy; declared syntax floor 1.88 (see `rust-toolchain.toml`) |
+| Pi | `@earendil-works/pi-coding-agent@0.85.1` |
 | Node | 22.19+; required only for Pi and the SDK bridge sidecar |
 
-## Install on Windows
+## Install prerequisites on Windows
 
-1. Install Pi if it is not already available:
-
-   ```powershell
-   npm install -g @earendil-works/pi-coding-agent@0.84.2
-   ```
-
-2. Download `PiDeck-win-Setup.exe` from the [latest GitHub Release](https://github.com/dev4st3d/pideck/releases/latest) and run it.
-
-PiDeck Setup installs per user, keeps future versions in the same application location, and creates Desktop and Start menu shortcuts. To keep PiDeck on the taskbar, launch it, right-click its taskbar icon, and choose **Pin to taskbar**. Windows requires this final pinning choice from the user.
-
-PiDeck checks for stable updates at startup. When one is available, use the titlebar update notice or **Settings → App → Update and restart**. The package is downloaded and verified off the UI thread, then PiDeck closes, updates in place, and reopens.
+Install a current stable Rust toolchain with the MSVC build tools, and Node 22.19.0 or newer. The source targets the official npm Pi package, not a frontend build toolchain. No application `package.json` or `npm install` in this repository is needed.
 
 ## Quick start from source
 
 ```powershell
-npm install -g @earendil-works/pi-coding-agent@0.84.2
-cargo run
+npm install -g @earendil-works/pi-coding-agent@0.85.1
+cargo run --locked
 ```
 
 If Cargo is not on `PATH`:
@@ -107,6 +61,8 @@ If Cargo is not on `PATH`:
 ```
 
 On first launch, pick or open a project — it joins the sidebar and reopens next time. Existing Pi credentials are reused; you can also authenticate from **Settings → Providers**.
+
+The main composer now keeps its height while focus moves. Session switches retain editor selection, undo history and transcript scroll position. Stop clears Pi's queue before aborting. Cleared messages appear as saved inputs and can be appended to the current draft with **Restore next** or **Ctrl+Shift+R**; typed text is not overwritten.
 
 ## Keyboard essentials
 

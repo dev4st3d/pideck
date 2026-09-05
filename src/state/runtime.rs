@@ -25,6 +25,22 @@ pub enum RuntimeLifecycle {
     Failed,
 }
 
+/// A stop is a correlated transaction, not an optimistic lifecycle toggle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum StopPhase {
+    #[default]
+    Idle,
+    ClearingQueue { id: u64 },
+    Aborting { id: u64 },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecoveredInput {
+    pub text: String,
+    pub images: Vec<PromptImage>,
+    pub files: Vec<PromptFile>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SafeError {
     pub kind: ErrorKind,
@@ -713,6 +729,8 @@ pub struct RuntimeState {
     pub epoch: SessionEpoch,
     pub display_epoch: SessionEpoch,
     pub lifecycle: RuntimeLifecycle,
+    pub stop_phase: StopPhase,
+    pub recovered_inputs: VecDeque<RecoveredInput>,
     pub session: Facet<SessionSnapshot>,
     pub messages: Facet<Vec<Arc<RuntimeMessage>>>,
     pub entries: Facet<Vec<Arc<RuntimeEntry>>>,
@@ -768,6 +786,8 @@ impl RuntimeState {
             epoch: SessionEpoch::default(),
             display_epoch: SessionEpoch::default(),
             lifecycle: RuntimeLifecycle::Loading,
+            stop_phase: StopPhase::Idle,
+            recovered_inputs: VecDeque::new(),
             session: Facet::default(),
             messages: Facet::default(),
             entries: Facet::default(),
@@ -977,7 +997,8 @@ pub enum RuntimeRequest {
         command: String,
         exclude_from_context: bool,
     },
-    Abort,
+    ClearQueue { stop_id: u64 },
+    Abort { stop_id: u64 },
     AbortBash,
     AbortRetry,
     SetModel {
@@ -1028,6 +1049,10 @@ pub enum NormalizedResponse {
     },
     ForkMessages(Vec<RuntimeForkMessage>),
     Accepted,
+    QueueCleared {
+        steering: Vec<String>,
+        follow_up: Vec<String>,
+    },
     ModelChanged {
         model: ModelSummary,
     },

@@ -128,6 +128,9 @@ fn dropping_worker_during_delayed_startup_stops_late_connection() {
     let service = Arc::new(FakeService::delayed(Duration::from_millis(80)));
     let worker = RuntimeWorkerHandle::spawn(service.clone());
     assert!(worker.connect(AttemptGeneration::new(1), ConnectionGeneration::new(1)));
+    // Establish that startup is in progress, rather than racing cancellation
+    // against a coordinator which has not consumed Connect at all.
+    wait_until(|| service.connection(1).is_some());
     drop(worker);
 
     wait_until(|| service.stop_count(1) == 1);
@@ -158,4 +161,39 @@ fn shutdown_is_send_only_once_and_releases_active_connection() {
 
     wait_until(|| weak.upgrade().is_none());
     assert_eq!(service.stop_count(1), 1);
+}
+
+#[test]
+fn stop_is_observed_when_nonreplaceable_runtime_results_saturate_the_ui_queue() {
+    use pi_gui::state::runtime::{NormalizedEvent, RuntimeInput};
+    struct Flood {
+        polls: AtomicUsize,
+        stopped: AtomicUsize,
+    }
+    impl RuntimeConnection for Flood {
+        fn execute(&self, _: RuntimeEffect) -> Option<StampedInput> { None }
+        fn poll(&self, epoch: SessionEpoch, _: Duration) -> RuntimePoll {
+            if self.stopped.load(Ordering::Acquire) != 0 { return RuntimePoll::Closed; }
+            let index = self.polls.fetch_add(1, Ordering::AcqRel);
+            RuntimePoll::Input(Box::new(StampedInput {
+                generation: ConnectionGeneration::new(1), epoch, observed_at: Instant::now(),
+                input: RuntimeInput::Event(NormalizedEvent::Unknown { record_type: format!("event-{index}") }),
+            }))
+        }
+        fn stop(&self) { self.stopped.fetch_add(1, Ordering::AcqRel); }
+    }
+    struct Service(Arc<Flood>);
+    impl RuntimeService for Service {
+        fn connect(&self, _: ConnectionGeneration) -> Result<Arc<dyn RuntimeConnection>, RuntimeStartFailure> {
+            Ok(self.0.clone())
+        }
+    }
+    let connection = Arc::new(Flood { polls: AtomicUsize::new(0), stopped: AtomicUsize::new(0) });
+    let worker = RuntimeWorkerHandle::spawn(Arc::new(Service(connection.clone())));
+    assert!(worker.connect(AttemptGeneration::new(1), ConnectionGeneration::new(1)));
+    // Deliberately do not consume worker.results(). Both result buffers fill.
+    wait_until(|| connection.polls.load(Ordering::Acquire) >= 600);
+    assert!(worker.stop());
+    wait_until(|| connection.stopped.load(Ordering::Acquire) > 0);
+    assert!(worker.request_shutdown());
 }

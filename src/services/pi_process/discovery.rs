@@ -13,7 +13,10 @@ use serde::Deserialize;
 use super::diagnostics::redact_diagnostic;
 use super::platform::{ExitStatus, spawn_contained};
 
-pub const SUPPORTED_PI_VERSION: &str = "0.84.2";
+pub const SUPPORTED_PI_VERSION: &str = "0.85.1";
+pub const PI_PACKAGE_NAME: &str = "@earendil-works/pi-coding-agent";
+const PI_CLI_ENTRY: &str = "dist/bundle/cli.js";
+const MIN_NODE_VERSION: (u64, u64, u64) = (22, 19, 0);
 const MAX_PROBE_OUTPUT: usize = 256 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -94,7 +97,10 @@ pub struct PiInstallation {
 impl PiInstallation {
     pub fn sdk_package_root(&self) -> Option<PathBuf> {
         let cli = self.launcher_arguments.first().map(PathBuf::from)?;
-        cli.parent()?.parent().map(Path::to_path_buf)
+        if !cli.ends_with(PI_CLI_ENTRY) {
+            return None;
+        }
+        cli.parent()?.parent()?.parent().map(Path::to_path_buf)
     }
 }
 
@@ -128,6 +134,7 @@ pub enum DiscoveryError {
         required: &'static str,
     },
     MissingCapabilities(Vec<&'static str>),
+    IncompatibleNode(String),
 }
 
 impl fmt::Display for DiscoveryError {
@@ -171,6 +178,10 @@ impl fmt::Display for DiscoveryError {
                 formatter,
                 "Pi {found} is incompatible; this build requires exactly {required}"
             ),
+            Self::IncompatibleNode(found) => write!(
+                formatter,
+                "Node {found} is incompatible; Pi {SUPPORTED_PI_VERSION} requires Node 22.19.0 or newer"
+            ),
             Self::MissingCapabilities(capabilities) => write!(
                 formatter,
                 "Pi is missing required command-line capabilities: {}",
@@ -202,6 +213,22 @@ pub fn discover_and_probe(
         .parent()
         .filter(|path| path.is_dir())
         .unwrap_or_else(|| Path::new("."));
+
+    if !launcher_arguments.is_empty() {
+        let node_version = run_probe(
+            &executable,
+            &[],
+            OsStr::new("--version"),
+            working_directory,
+            timeout,
+            "Node version probe",
+        )?;
+        if !supported_node_version(&node_version) {
+            return Err(DiscoveryError::IncompatibleNode(
+                first_nonempty_line(&node_version).unwrap_or_else(|| "unknown".to_owned()),
+            ));
+        }
+    }
 
     let version_output = run_probe(
         &executable,
@@ -328,6 +355,17 @@ fn resolve_launcher(candidate: &Path) -> Result<(PathBuf, Vec<OsString>), Discov
     if extension == "cmd" {
         return resolve_npm_shim(candidate);
     }
+    // npm's Unix symlink is canonicalized before this point. Execute its
+    // manifest-validated bundled entry with Node, never through a shell.
+    if candidate.ends_with(PI_CLI_ENTRY) {
+        let package = candidate
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .ok_or_else(|| DiscoveryError::UnsafeScript(candidate.to_path_buf()))?;
+        let paths = env::var_os("PATH").unwrap_or_default();
+        return resolve_npm_package(candidate, package, env::split_paths(&paths));
+    }
     if matches!(extension.as_str(), "bat" | "ps1") {
         return Err(DiscoveryError::UnsafeScript(candidate.to_path_buf()));
     }
@@ -368,6 +406,14 @@ fn resolve_npm_shim_with_paths(
         .join("node_modules")
         .join("@earendil-works")
         .join("pi-coding-agent");
+    resolve_npm_package(shim, &package_directory, node_search_paths)
+}
+
+fn resolve_npm_package(
+    shim: &Path,
+    package_directory: &Path,
+    node_search_paths: impl Iterator<Item = PathBuf>,
+) -> Result<(PathBuf, Vec<OsString>), DiscoveryError> {
     let manifest_path = package_directory.join("package.json");
     let bytes = fs::read(&manifest_path).map_err(|source| DiscoveryError::InvalidNpmInstall {
         path: shim.to_path_buf(),
@@ -378,9 +424,9 @@ fn resolve_npm_shim_with_paths(
             path: shim.to_path_buf(),
             message: format!("could not parse {}: {source}", manifest_path.display()),
         })?;
-    if manifest.name != "@earendil-works/pi-coding-agent"
+    if manifest.name != PI_PACKAGE_NAME
         || manifest.version != SUPPORTED_PI_VERSION
-        || manifest.bin.pi != "dist/cli.js"
+        || manifest.bin.pi != PI_CLI_ENTRY
     {
         return Err(DiscoveryError::InvalidNpmInstall {
             path: shim.to_path_buf(),
@@ -390,7 +436,7 @@ fn resolve_npm_shim_with_paths(
         });
     }
 
-    let package_directory = fs::canonicalize(&package_directory).map_err(|source| {
+    let package_directory = fs::canonicalize(package_directory).map_err(|source| {
         DiscoveryError::InvalidNpmInstall {
             path: shim.to_path_buf(),
             message: format!("could not canonicalize the package directory: {source}"),
@@ -583,6 +629,18 @@ fn read_probe_stream(mut stream: Box<dyn Read + Send>) -> Vec<u8> {
     retained
 }
 
+fn supported_node_version(output: &str) -> bool {
+    let Some(version) = first_nonempty_line(output) else {
+        return false;
+    };
+    let parts = version.trim_start_matches('v').split('.').collect::<Vec<_>>();
+    if parts.len() != 3 {
+        return false;
+    }
+    let parsed = parts.iter().map(|part| part.parse::<u64>()).collect::<Result<Vec<_>, _>>();
+    parsed.is_ok_and(|parts| (parts[0], parts[1], parts[2]) >= MIN_NODE_VERSION)
+}
+
 fn first_nonempty_line(bytes: &str) -> Option<String> {
     bytes
         .lines()
@@ -603,6 +661,31 @@ fn concise_probe_detail(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn node_floor_matches_pi_engine_requirement() {
+        for version in ["v22.19.0", "22.20.0", "v24.0.0\n"] {
+            assert!(supported_node_version(version), "{version}");
+        }
+        for version in ["v22.16.0", "v22.18.9", "v20.99.0", "v22.19", "v24.0.0-rc.1", ""] {
+            assert!(!supported_node_version(version), "{version}");
+        }
+    }
+
+    #[test]
+    fn bundled_launcher_resolves_sdk_root_not_dist_directory() {
+        let installation = PiInstallation {
+            executable: PathBuf::from("node"),
+            launcher_arguments: vec![OsString::from("/packages/pi/dist/bundle/cli.js")],
+            source: ExecutableSource::Explicit,
+            version: SUPPORTED_PI_VERSION.to_owned(),
+            capabilities: PiCapabilities::from_help("").0,
+        };
+        assert_eq!(installation.sdk_package_root(), Some(PathBuf::from("/packages/pi")));
+        let mut native = installation;
+        native.launcher_arguments.clear();
+        assert_eq!(native.sdk_package_root(), None);
+    }
 
     #[test]
     fn capability_probe_requires_every_launch_control() {
@@ -652,15 +735,15 @@ mod tests {
             .join("node_modules")
             .join("@earendil-works")
             .join("pi-coding-agent");
-        fs::create_dir_all(package.join("dist")).expect("create fake npm package");
+        fs::create_dir_all(package.join("dist/bundle")).expect("create fake npm package");
         let shim = root.join("pi.cmd");
         let node = root.join("node.exe");
         fs::write(&shim, "untrusted shell content").expect("write shim");
         fs::write(&node, "fake node").expect("write node");
-        fs::write(package.join("dist/cli.js"), "fake cli").expect("write cli");
+        fs::write(package.join("dist/bundle/cli.js"), "fake cli").expect("write cli");
         fs::write(
             package.join("package.json"),
-            r#"{"name":"@earendil-works/pi-coding-agent","version":"0.84.2","bin":{"pi":"dist/cli.js"}}"#,
+            r#"{"name":"@earendil-works/pi-coding-agent","version":"0.85.1","bin":{"pi":"dist/bundle/cli.js"}}"#,
         )
         .expect("write manifest");
 
@@ -671,7 +754,7 @@ mod tests {
             child_compatible_path(fs::canonicalize(node).expect("canonical node"))
         );
         assert_eq!(prefix.len(), 1);
-        assert!(Path::new(&prefix[0]).ends_with("dist/cli.js"));
+        assert!(Path::new(&prefix[0]).ends_with("dist/bundle/cli.js"));
         let _ = fs::remove_dir_all(root);
     }
 

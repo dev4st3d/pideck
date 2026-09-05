@@ -27,7 +27,7 @@ pub use gui_extensions::{apply_gui_extension_policy, resolve_agent_dir};
 pub use platform::ExitStatus;
 
 use diagnostics::{StderrRing, drain_stderr};
-use platform::{ProcessHandle, spawn_contained};
+pub(crate) use platform::{ProcessHandle, spawn_contained};
 
 // A cold `pi --version`/`--help` probe launches Node and parses the full CLI
 // bundle. On Windows with real-time AV scanning this measured 2.8s warm and

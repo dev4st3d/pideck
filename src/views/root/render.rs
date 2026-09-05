@@ -54,6 +54,7 @@ impl Render for RootView {
             .on_action(cx.listener(Self::on_stop))
             .on_action(cx.listener(Self::on_abort_run))
             .on_action(cx.listener(Self::on_attach_files))
+            .on_action(cx.listener(Self::on_restore_saved_input))
             .on_action(cx.listener(Self::on_activate_recovery))
             .on_action(cx.listener(Self::on_focus_next))
             .on_action(cx.listener(Self::on_focus_previous))
@@ -224,6 +225,7 @@ impl Render for RootView {
                             .child(composer_bar(
                                 ComposerBarParams {
                                     composer: &self.composer,
+                                    saved_input_count: self.saved_input_count(),
                                     attachment_picker_pending: self.attachment_picker_pending,
                                     models,
                                     projection,

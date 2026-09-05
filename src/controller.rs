@@ -117,20 +117,20 @@ fn runtime_connection_transition(
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum ReplaceableRuntimeUpdate {
-    Message(String),
-    Tool(String),
+    Message(AttemptGeneration, ConnectionGeneration, SessionEpoch, String),
+    Tool(AttemptGeneration, ConnectionGeneration, SessionEpoch, String),
 }
 
 fn replaceable_runtime_update(result: &WorkerResult) -> Option<ReplaceableRuntimeUpdate> {
-    let WorkerResult::Input { input, .. } = result else {
+    let WorkerResult::Input { attempt, input } = result else {
         return None;
     };
     match &input.input {
         RuntimeInput::Event(NormalizedEvent::MessageUpdate(message)) => {
-            Some(ReplaceableRuntimeUpdate::Message(message.key.0.clone()))
+            Some(ReplaceableRuntimeUpdate::Message(*attempt, input.generation, input.epoch, message.key.0.clone()))
         }
         RuntimeInput::Event(NormalizedEvent::ToolUpdate { id, .. }) => {
-            Some(ReplaceableRuntimeUpdate::Tool(id.as_str().to_owned()))
+            Some(ReplaceableRuntimeUpdate::Tool(*attempt, input.generation, input.epoch, id.as_str().to_owned()))
         }
         _ => None,
     }
@@ -1365,6 +1365,10 @@ impl RuntimeController {
 
     pub fn take_requested_editor_text(&mut self) -> Option<String> {
         self.core.runtime.requested_editor_text.take()
+    }
+
+    pub fn take_recovered_inputs(&mut self) -> Vec<crate::state::runtime::RecoveredInput> {
+        self.core.runtime.recovered_inputs.drain(..).collect()
     }
 
     pub fn catalog_projection(&self) -> CatalogProjection {
@@ -2921,6 +2925,24 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert_eq!(messages, vec![("b", 2), ("a", 3)]);
+    }
+
+    #[test]
+    fn runtime_batching_does_not_merge_equal_keys_from_different_sessions_or_attempts() {
+        let first = message_update("same-message", 1);
+        let mut other_epoch = message_update("same-message", 2);
+        if let WorkerResult::Input { input, .. } = &mut other_epoch {
+            input.epoch = input.epoch.next();
+        }
+        let mut other_attempt = message_update("same-message", 3);
+        if let WorkerResult::Input { attempt, .. } = &mut other_attempt {
+            *attempt = attempt.next();
+        }
+        let mut other_generation = message_update("same-message", 4);
+        if let WorkerResult::Input { input, .. } = &mut other_generation {
+            input.generation = input.generation.next();
+        }
+        assert_eq!(coalesce_runtime_results(vec![first, other_epoch, other_attempt, other_generation]).len(), 4);
     }
 
     #[test]

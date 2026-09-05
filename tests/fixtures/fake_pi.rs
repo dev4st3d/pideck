@@ -26,7 +26,7 @@ fn main() {
             }
         }
         let version = fs::read_to_string(executable_directory.join("fake-version.txt"))
-            .unwrap_or_else(|_| "0.84.2".to_owned());
+            .unwrap_or_else(|_| "0.85.1".to_owned());
         println!("{}", version.trim());
         return;
     }
@@ -281,6 +281,7 @@ fn response_for(command: &str, id: &str) -> String {
             "{\"model\":{\"id\":\"fake-model\",\"name\":\"Fake Model\",\"api\":\"fake-api\",\"provider\":\"fake-provider\",\"baseUrl\":\"https://invalid.example\",\"reasoning\":false,\"input\":[\"text\"],\"cost\":{\"input\":0.0,\"output\":0.0,\"cacheRead\":0.0,\"cacheWrite\":0.0},\"contextWindow\":100000,\"maxTokens\":4096},\"thinkingLevel\":\"medium\",\"isStreaming\":false,\"isCompacting\":false,\"steeringMode\":\"all\",\"followUpMode\":\"one-at-a-time\",\"sessionId\":\"fake-session\",\"autoCompactionEnabled\":true,\"messageCount\":0,\"pendingMessageCount\":0}",
         ),
         "get_messages" => Some("{\"messages\":[]}"),
+        "clear_queue" => Some("{\"steering\":[],\"followUp\":[]}"),
         "get_commands" => Some("{\"commands\":[]}"),
         "get_available_models" => Some(
             "{\"models\":[{\"id\":\"fake-model\",\"name\":\"Fake Model\",\"api\":\"fake-api\",\"provider\":\"fake-provider\",\"baseUrl\":\"https://invalid.example\",\"reasoning\":false,\"input\":[\"text\"],\"cost\":{\"input\":0.0,\"output\":0.0,\"cacheRead\":0.0,\"cacheWrite\":0.0},\"contextWindow\":100000,\"maxTokens\":4096}]}",

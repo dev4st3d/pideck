@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use super::{
     AssistantStreamAssembler, Command, ConnectionGeneration, ExtensionUiResponse, IncomingRecord,
     JsonlCodec, OutboundRecord, RequestId, ResponseResult, RpcCommand, RpcEvent, RpcResponse,
-    SessionState, encode_record,
+    SessionState, SessionEpoch, encode_record,
 };
 use crate::services::pi_process::{
     PiLaunchConfig, PiSupervisor, ProcessFailureKind, ShutdownReport, StartError, SupervisorState,
@@ -90,7 +90,7 @@ impl RpcDeadlines {
             | Command::Fork { .. }
             | Command::Clone => self.long_mutation,
             Command::Bash { .. } => self.bash,
-            Command::Abort | Command::AbortRetry | Command::AbortBash => self.urgent,
+            Command::ClearQueue | Command::Abort | Command::AbortRetry | Command::AbortBash => self.urgent,
             command if command_class(command) == CommandClass::Read => self.read,
             _ => self.mutation,
         }
@@ -132,6 +132,7 @@ impl std::error::Error for RpcClientStartError {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RpcClientErrorKind {
+    CancelledBeforeSend,
     UnknownOutcome,
     Encoding,
     ProtocolFault,
@@ -167,6 +168,7 @@ impl fmt::Display for RpcClientError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let operation = self.operation.as_deref().unwrap_or("RPC operation");
         match self.kind {
+            RpcClientErrorKind::CancelledBeforeSend => write!(formatter, "{operation} was cancelled before it was sent"),
             RpcClientErrorKind::UnknownOutcome => write!(
                 formatter,
                 "{operation} exceeded its deadline; its outcome is unknown and it was not cancelled"
@@ -309,20 +311,37 @@ impl RpcClient {
         connection.submit(command)
     }
 
-    pub(crate) fn request_with_id(&self, id: RequestId, command: Command) -> RpcCall {
+    /// Called by the coordinator before spawning a request waiter. Only atomics:
+    /// a delayed old-session thread can never become a new-session mutation.
+    pub(crate) fn prepare_effect(&self, epoch: SessionEpoch, stop_before: Option<u64>) {
+        if let Some(connection) = self.inner.active_connection() {
+            connection.effect_epoch.fetch_max(epoch.value(), Ordering::AcqRel);
+            if let Some(sequence) = stop_before {
+                connection.stop_before.fetch_max(sequence, Ordering::AcqRel);
+            }
+        }
+    }
+
+    pub(crate) fn request_effect(
+        &self,
+        id: Option<RequestId>,
+        command: Command,
+        epoch: SessionEpoch,
+        sequence: u64,
+    ) -> RpcCall {
         let generation = self.generation();
         let Some(connection) = self.inner.active_connection() else {
             return failed_call(
-                id,
+                id.unwrap_or_else(|| RequestId::new("unavailable-effect")),
                 generation,
-                RpcClientError::new(
-                    RpcClientErrorKind::Stopped,
-                    generation,
-                    command_name(&command),
-                ),
+                RpcClientError::new(RpcClientErrorKind::Stopped, generation, command_name(&command)),
             );
         };
-        connection.submit_with_id(id, command)
+        connection.submit_with_id(
+            id.unwrap_or_else(|| connection.next_id()),
+            command,
+            Some(EffectContext { epoch, sequence }),
+        )
     }
 
     pub fn send_extension_ui_response(
@@ -515,7 +534,7 @@ fn command_class(command: &Command) -> CommandClass {
         | Command::GetLastAssistantText
         | Command::GetMessages
         | Command::GetCommands => CommandClass::Read,
-        Command::Abort | Command::AbortRetry | Command::AbortBash => CommandClass::Bypass,
+        Command::ClearQueue | Command::Abort | Command::AbortRetry | Command::AbortBash => CommandClass::Bypass,
         _ => CommandClass::Mutation,
     }
 }
@@ -525,6 +544,7 @@ fn command_name(command: &Command) -> Option<&'static str> {
         Command::Prompt { .. } => "prompt",
         Command::Steer { .. } => "steer",
         Command::FollowUp { .. } => "follow_up",
+        Command::ClearQueue => "clear_queue",
         Command::Abort => "abort",
         Command::NewSession { .. } => "new_session",
         Command::GetState => "get_state",
@@ -557,7 +577,33 @@ fn command_name(command: &Command) -> Option<&'static str> {
     })
 }
 
+#[derive(Clone, Copy)]
+struct EffectContext {
+    epoch: SessionEpoch,
+    sequence: u64,
+}
+
+#[derive(Clone, Copy)]
+struct DispatchFence {
+    context: Option<EffectContext>,
+    queue_epoch: u64,
+}
+
+impl DispatchFence {
+    fn permits(self, command: &Command, epoch: u64, stop_before: u64, queue_epoch: u64) -> bool {
+        !self.context.is_some_and(|context| {
+            context.epoch.value() != epoch
+                || (is_prompt_command(command) && context.sequence < stop_before)
+        }) && (!is_prompt_command(command) || self.queue_epoch == queue_epoch)
+    }
+}
+
+fn is_prompt_command(command: &Command) -> bool {
+    matches!(command, Command::Prompt { .. } | Command::Steer { .. } | Command::FollowUp { .. })
+}
+
 struct MutationJob {
+    fence: DispatchFence,
     id: RequestId,
     command: Command,
     deadline: Duration,
@@ -577,6 +623,10 @@ struct PendingRegistry {
 }
 
 struct Connection {
+    dispatch_gate: Mutex<()>,
+    effect_epoch: AtomicU64,
+    stop_before: AtomicU64,
+    queue_epoch: AtomicU64,
     generation: ConnectionGeneration,
     supervisor: Mutex<Option<PiSupervisor>>,
     deadlines: RpcDeadlines,
@@ -602,6 +652,10 @@ impl Connection {
     ) -> Arc<Self> {
         let (mutation_sender, mutation_receiver) = mpsc::channel();
         let connection = Arc::new(Self {
+            dispatch_gate: Mutex::new(()),
+            effect_epoch: AtomicU64::new(SessionEpoch::default().value()),
+            stop_before: AtomicU64::new(0),
+            queue_epoch: AtomicU64::new(0),
             generation,
             supervisor: Mutex::new(Some(supervisor)),
             deadlines,
@@ -646,10 +700,14 @@ impl Connection {
     }
 
     fn submit(&self, command: Command) -> RpcCall {
-        self.submit_with_id(self.next_id(), command)
+        self.submit_with_id(self.next_id(), command, None)
     }
 
-    fn submit_with_id(&self, id: RequestId, command: Command) -> RpcCall {
+    fn submit_with_id(&self, id: RequestId, command: Command, context: Option<EffectContext>) -> RpcCall {
+        if matches!(command, Command::ClearQueue) {
+            self.queue_epoch.fetch_add(1, Ordering::AcqRel);
+        }
+        let fence = DispatchFence { context, queue_epoch: self.queue_epoch.load(Ordering::Acquire) };
         let deadline = self.deadlines.for_command(&command);
         match command_class(&command) {
             CommandClass::Mutation => {
@@ -663,6 +721,7 @@ impl Connection {
                     || self
                         .mutation_sender
                         .send(MutationJob {
+                            fence,
                             id,
                             command,
                             deadline,
@@ -678,14 +737,17 @@ impl Connection {
                 }
                 call
             }
-            CommandClass::Read => self.dispatch_direct_with_id(id, command, deadline, false),
-            CommandClass::Bypass => self.dispatch_direct_with_id(id, command, deadline, true),
+            CommandClass::Read => self.dispatch_direct_with_id(id, command, deadline, false, fence),
+            CommandClass::Bypass => self.dispatch_direct_with_id(id, command, deadline, true, fence),
         }
     }
 
     fn dispatch_direct(&self, command: Command, deadline: Duration, mutation: bool) -> RpcCall {
         let id = self.next_id();
-        self.dispatch_direct_with_id(id, command, deadline, mutation)
+        self.dispatch_direct_with_id(id, command, deadline, mutation, DispatchFence {
+            context: None,
+            queue_epoch: self.queue_epoch.load(Ordering::Acquire),
+        })
     }
 
     fn dispatch_direct_with_id(
@@ -694,6 +756,7 @@ impl Connection {
         command: Command,
         deadline: Duration,
         mutation: bool,
+        fence: DispatchFence,
     ) -> RpcCall {
         let (result, receiver) = mpsc::channel();
         let call = RpcCall {
@@ -701,7 +764,7 @@ impl Connection {
             generation: self.generation,
             receiver,
         };
-        self.register_and_write(id, command, deadline, mutation, result);
+        self.register_and_write(id, command, deadline, mutation, result, fence);
         call
     }
 
@@ -712,13 +775,29 @@ impl Connection {
         deadline: Duration,
         mutation: bool,
         result: mpsc::Sender<Result<RpcResponse, RpcClientError>>,
+        fence: DispatchFence,
     ) {
+        // Serialize the fence check with the actual write. This is not the
+        // mutation acknowledgement lock: urgent control can still interrupt work.
+        let _dispatch = self.dispatch_gate.lock().recover_poison();
         let operation = command_name(&command).unwrap_or("unknown");
         if self.closed.load(Ordering::Acquire) {
             let _ = result.send(Err(RpcClientError::new(
                 RpcClientErrorKind::Stopped,
                 self.generation,
                 Some(operation),
+            )));
+            return;
+        }
+        let cancelled = !fence.permits(
+            &command,
+            self.effect_epoch.load(Ordering::Acquire),
+            self.stop_before.load(Ordering::Acquire),
+            self.queue_epoch.load(Ordering::Acquire),
+        );
+        if cancelled {
+            let _ = result.send(Err(RpcClientError::new(
+                RpcClientErrorKind::CancelledBeforeSend, self.generation, Some(operation),
             )));
             return;
         }
@@ -734,15 +813,21 @@ impl Connection {
                 return;
             }
         };
-        self.pending.entries.lock().recover_poison().insert(
-            id,
-            PendingRequest {
+        {
+            let mut pending = self.pending.entries.lock().recover_poison();
+            if pending.contains_key(&id) {
+                let _ = result.send(Err(RpcClientError::new(
+                    RpcClientErrorKind::ProtocolFault, self.generation, Some(operation),
+                )));
+                return;
+            }
+            pending.insert(id, PendingRequest {
                 operation,
                 deadline: Instant::now() + deadline,
                 mutation,
                 result,
-            },
-        );
+            });
+        }
         self.pending.changed.notify_all();
 
         let write_result = self
@@ -1137,7 +1222,7 @@ fn mutation_loop(connection: Weak<Connection>, receiver: mpsc::Receiver<Mutation
             continue;
         }
         let (completion, completed) = mpsc::channel();
-        connection.register_and_write(job.id, job.command, job.deadline, true, completion);
+        connection.register_and_write(job.id, job.command, job.deadline, true, completion, job.fence);
         let result = completed.recv().unwrap_or_else(|_| {
             Err(RpcClientError::new(
                 RpcClientErrorKind::Stopped,
@@ -1146,5 +1231,26 @@ fn mutation_loop(connection: Weak<Connection>, receiver: mpsc::Receiver<Mutation
             ))
         });
         let _ = job.result.send(result);
+    }
+}
+
+#[cfg(test)]
+mod dispatch_fence_tests {
+    use super::*;
+
+    #[test]
+    fn old_session_work_and_pre_stop_prompts_cannot_cross_the_write_fence() {
+        let prompt = Command::FollowUp { message: "queued".to_owned(), images: None };
+        let fence = DispatchFence {
+            context: Some(EffectContext { epoch: SessionEpoch::new(2), sequence: 8 }),
+            queue_epoch: 3,
+        };
+        assert!(fence.permits(&prompt, 2, 0, 3));
+        assert!(!fence.permits(&prompt, 3, 0, 3));
+        assert!(!fence.permits(&Command::GetState, 3, 0, 3));
+        assert!(!fence.permits(&prompt, 2, 9, 3));
+        assert!(!fence.permits(&prompt, 2, 0, 4));
+        assert!(fence.permits(&Command::GetState, 2, 9, 4));
+        assert!(fence.permits(&Command::ClearQueue, 2, 9, 4));
     }
 }

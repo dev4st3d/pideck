@@ -758,3 +758,26 @@ fn installed_pi_real_extension_demo_exercises_every_stock_dialog() {
     assert!(!report.forced);
     let _ = fs::remove_dir_all(root);
 }
+
+#[test]
+fn clear_queue_cancels_prompts_waiting_in_the_local_mutation_lane() {
+    let environment = TestEnvironment::new("rpc-bypass");
+    let mut deadlines = environment.deadlines();
+    deadlines.mutation = Duration::from_secs(3);
+    deadlines.urgent = Duration::from_secs(3);
+    let client = RpcClient::start_with_deadlines(environment.config(), deadlines).expect("start");
+    let first = client.request(Command::SetAutoCompaction { enabled: false });
+    wait_for_file(&environment.root.join("seen-set_auto_compaction.txt"));
+    let queued = client.request(Command::FollowUp {
+        message: "must never run after stop".to_owned(), images: None,
+    });
+    let clear = client.request(Command::ClearQueue);
+    wait_for_file(&environment.root.join("seen-clear_queue.txt"));
+    fs::write(environment.root.join("release-first-mutation.txt"), "release").expect("release");
+    first.wait().expect("first response");
+    assert!(matches!(clear.wait().expect("clear response").result, ResponseResult::ClearQueue(_)));
+    assert_eq!(queued.wait().expect_err("unsent queue cancelled").kind,
+        RpcClientErrorKind::CancelledBeforeSend);
+    assert!(!environment.root.join("seen-follow_up.txt").exists());
+    client.stop();
+}

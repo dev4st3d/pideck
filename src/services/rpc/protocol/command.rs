@@ -43,6 +43,7 @@ pub enum Command {
         #[serde(skip_serializing_if = "Option::is_none")]
         images: Option<Vec<ImageContent>>,
     },
+    ClearQueue,
     Abort,
     NewSession {
         #[serde(rename = "parentSession", skip_serializing_if = "Option::is_none")]

@@ -2571,6 +2571,7 @@ pub(super) fn hotkey_help_overlay(cx: &mut Context<RootView>) -> impl IntoElemen
         ("Queue follow-up", "Alt+Enter"),
         ("Insert newline", "Shift+Enter"),
         ("Attach files", "Ctrl+O"),
+        ("Restore saved input", "Ctrl+Shift+R"),
         ("@ file / command menus", "↑ ↓ Enter Esc"),
         ("Abort run or Bash", "Esc"),
         ("Move focus", "Tab / Shift+Tab"),

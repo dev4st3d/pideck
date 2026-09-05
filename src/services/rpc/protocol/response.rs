@@ -17,6 +17,7 @@ pub enum ResponseResult {
     Prompt,
     Steer,
     FollowUp,
+    ClearQueue(ClearedQueueData),
     Abort,
     NewSession(CancelledData),
     GetState(SessionState),
@@ -55,6 +56,13 @@ pub enum ResponseResult {
         data: Option<Value>,
         raw: Value,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClearedQueueData {
+    pub steering: Vec<String>,
+    #[serde(rename = "followUp")]
+    pub follow_up: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -144,6 +152,7 @@ impl ResponseResult {
             Self::Prompt => "prompt",
             Self::Steer => "steer",
             Self::FollowUp => "follow_up",
+            Self::ClearQueue(_) => "clear_queue",
             Self::Abort => "abort",
             Self::NewSession(_) => "new_session",
             Self::GetState(_) => "get_state",
@@ -185,6 +194,7 @@ impl ResponseResult {
         }
 
         match self {
+            Self::ClearQueue(data) => value!(data),
             Self::NewSession(data) => value!(data),
             Self::GetState(data) => value!(data),
             Self::SetModel(data) => value!(data),
@@ -327,6 +337,7 @@ impl RpcResponse {
             "prompt" => ResponseResult::Prompt,
             "steer" => ResponseResult::Steer,
             "follow_up" => ResponseResult::FollowUp,
+            "clear_queue" => ResponseResult::ClearQueue(decode(object, command)?),
             "abort" => ResponseResult::Abort,
             "new_session" => ResponseResult::NewSession(decode(object, command)?),
             "get_state" => ResponseResult::GetState(decode(object, command)?),

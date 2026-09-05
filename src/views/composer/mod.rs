@@ -29,7 +29,7 @@ use crate::attachments::{
     AttachmentLoadLimits, LoadedAttachment, LoadedAttachmentBatch, MAX_ATTACHMENTS,
     MAX_IMAGE_ATTACHMENTS, MAX_IMAGE_BYTES, MAX_TOTAL_TEXT_SNAPSHOT_BYTES, PromptFile,
 };
-use crate::state::runtime::{PromptImage, SubmissionKind};
+use crate::state::runtime::{PromptImage, RecoveredInput, SubmissionKind};
 /// Pixel edge length for cached square attachment thumbs (display is smaller).
 const ATTACHMENT_THUMB_PX: u32 = 96;
 /// Expand/collapse the multiline input between single-line and multi-line heights.
@@ -136,6 +136,16 @@ pub(super) struct InputHeightMotion {
     pub(super) to: f32,
 }
 
+/// Session-local editor state. GPUI layout and IME ownership never cross sessions.
+#[derive(Clone)]
+pub(crate) struct ComposerDraftSnapshot {
+    buffer: TextBuffer,
+    thumbnails: Vec<Option<Arc<Image>>>,
+    scroll_y: Pixels,
+    preferred_x: Option<Pixels>,
+    enlarged: bool,
+}
+
 pub struct Composer {
     id_prefix: SharedString,
     action_label: SharedString,
@@ -209,7 +219,7 @@ impl Composer {
             reveal_cursor: true,
             last_layout: None,
             command_completion_active: false,
-            // Multiline starts collapsed; focus tracking snaps/animates open when active.
+            // Focus tracking is retained for compact dialog editors; the main editor is stable.
             input_expanded: false,
             height_hold: false,
             input_enlarged: false,
@@ -364,24 +374,23 @@ impl Composer {
         self.input_height_motion
     }
 
-    /// Settled shell height for the current expand/enlarge state.
+    /// Main-editor focus never changes the layout. Only explicit enlargement
+    /// changes its height; compact dialog editors retain their own sizing.
     pub(super) fn input_target_height(&self) -> f32 {
-        if self.chrome == ComposerChrome::Field {
-            return self.field_height();
-        }
-        let panel = self.chrome == ComposerChrome::Panel;
-        let padding_y = 8.0;
-        let line_height = if panel { 21.0 } else { 20.0 };
-        let collapsed = line_height + padding_y * 2.0;
-        let normal = if panel { 64.0 } else { 56.0 };
-        // ~6 text rows: room for longer prompts without eating the whole stream.
-        let enlarged = if panel { 128.0 } else { 152.0 };
-        if self.input_enlarged {
-            enlarged
-        } else if self.input_expanded {
-            normal
-        } else {
-            collapsed
+        match self.chrome {
+            ComposerChrome::Field => self.field_height(),
+            ComposerChrome::Full => {
+                if self.input_enlarged { 152.0 } else { 76.0 }
+            }
+            ComposerChrome::Panel => {
+                if self.input_enlarged {
+                    128.0
+                } else if self.input_expanded {
+                    64.0
+                } else {
+                    37.0
+                }
+            }
         }
     }
 
@@ -666,6 +675,92 @@ impl Composer {
         let cursor = cursor.min(self.buffer.text().len());
         self.buffer.move_to(cursor);
         self.after_edit(cx);
+    }
+
+    pub(crate) fn snapshot_draft(&self) -> ComposerDraftSnapshot {
+        ComposerDraftSnapshot {
+            buffer: self.buffer.clone(),
+            thumbnails: self.thumbnails.clone(),
+            scroll_y: self.scroll_y,
+            preferred_x: self.preferred_x,
+            enlarged: self.input_enlarged,
+        }
+    }
+
+    pub(crate) fn restore_snapshot(
+        &mut self,
+        snapshot: ComposerDraftSnapshot,
+        images: Vec<PromptImage>,
+        files: Vec<PromptFile>,
+        cx: &mut Context<Self>,
+    ) {
+        self.buffer = snapshot.buffer;
+        self.buffer.unmark_text();
+        self.thumbnails = snapshot.thumbnails;
+        self.images = images;
+        self.files = files;
+        self.image_bytes = self.images.iter().map(|image| decoded_image_len(&image.data)).sum();
+        self.attach_tokens = vec![0; self.images.len()];
+        self.file_attach_tokens = vec![0; self.files.len()];
+        self.scroll_y = snapshot.scroll_y;
+        self.preferred_x = snapshot.preferred_x;
+        self.input_enlarged = snapshot.enlarged;
+        self.input_height_motion = None;
+        self.is_selecting = false;
+        self.last_layout = None;
+        self.reveal_cursor = false;
+        self.feedback = ComposerFeedback::Ready;
+        self.update_disabled();
+        cx.notify();
+    }
+
+    /// Recovery is explicit and additive. Never replace what the user is typing.
+    /// Keep the source recoverable when existing attachments would exceed limits.
+    pub(crate) fn restore_saved_input(&mut self, saved: &RecoveredInput, cx: &mut Context<Self>) -> bool {
+        let image_bytes: usize = saved.images.iter().map(|image| decoded_image_len(&image.data)).sum();
+        let text_bytes: usize = self.files.iter().chain(&saved.files).map(PromptFile::snapshot_bytes).sum();
+        if self.images.len() + saved.images.len() > MAX_IMAGE_ATTACHMENTS
+            || self.images.len() + self.files.len() + saved.images.len() + saved.files.len() > MAX_ATTACHMENTS
+            || self.image_bytes.saturating_add(image_bytes) > MAX_IMAGE_BYTES
+            || text_bytes > MAX_TOTAL_TEXT_SNAPSHOT_BYTES
+        {
+            self.set_feedback(ComposerFeedback::Rejected(
+                "Saved input is safe. Remove some current attachments before restoring it.".to_owned(),
+            ), cx);
+            return false;
+        }
+        let current = self.buffer.text();
+        let merged = if current.is_empty() { saved.text.clone() }
+            else if saved.text.is_empty() { current.to_owned() }
+            else { format!("{current}\n\n{}", saved.text) };
+        self.set_draft(&merged, cx);
+        for image in &saved.images {
+            self.push_image_attachment(image.clone());
+        }
+        self.image_bytes += image_bytes;
+        for file in &saved.files {
+            self.push_file_attachment(file.clone());
+        }
+        self.feedback = ComposerFeedback::Ready;
+        self.update_disabled();
+        cx.notify();
+        true
+    }
+
+    pub(crate) fn reset_draft(
+        &mut self,
+        text: &str,
+        images: Vec<PromptImage>,
+        files: Vec<PromptFile>,
+        cx: &mut Context<Self>,
+    ) {
+        self.buffer = TextBuffer::default();
+        self.scroll_y = px(0.0);
+        self.preferred_x = None;
+        self.last_layout = None;
+        self.input_enlarged = false;
+        self.input_height_motion = None;
+        self.restore_draft(text, images, files, cx);
     }
 
     pub fn restore_draft(

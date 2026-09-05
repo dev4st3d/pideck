@@ -13,7 +13,7 @@ Release builds embed every runtime bridge module in `pi-gui.exe`. Rust materiali
 
 ## Cancellation and restart
 
-Cancellation is correlated by request ID. Operations with an SDK abort surface receive an `AbortSignal`; branch summaries also call Pi's abort API. Resource loading is not synchronously interruptible in Pi 0.84.2, so cancellation marks its result stale and Rust keeps the prior valid inventory. Restart is the recovery boundary for an extension that does not return: Rust closes/kills the sidecar, rejects pending requests, starts a fresh process, renegotiates hello, and reloads snapshots. No prompt or session operation is replayed automatically.
+Cancellation is correlated by request ID. Operations with an SDK abort surface receive an `AbortSignal`; branch summaries also call Pi's abort API. Resource loading is not synchronously interruptible in Pi 0.85.1, so cancellation marks its result stale and Rust keeps the prior valid inventory. Restart is the recovery boundary for an extension that does not return: Rust closes/kills the sidecar, rejects pending requests, starts a fresh process, renegotiates hello, and reloads snapshots. No prompt or session operation is replayed automatically.
 
 Closing stdin aborts active controllers, aborts an active branch summary, disposes the resource-plane session, and lets Node exit. Rust also waits after forced termination, so the sidecar cannot outlive its owner during normal shutdown.
 
@@ -29,8 +29,27 @@ Task completion is deliberately conservative: only the subagent extension's succ
 
 ## Resource and trust policy
 
-The resource plane uses only Pi 0.84.2 public SDK exports. Already-installed global resources are loaded into a disposable in-memory SDK session so tool inventory and active-tool state come from `getAllTools()` and `getActiveToolNames()`. Project settings are inspected through `SettingsManager` and `DefaultPackageManager` only to build provenance; project extensions and package code are never passed to the loader because Pi GUI fixes project trust to rejected.
+The resource plane uses only Pi 0.85.1 public SDK exports. Already-installed global resources are loaded into a disposable in-memory SDK session so tool inventory and active-tool state come from `getAllTools()` and `getActiveToolNames()`. Project settings are inspected through `SettingsManager` and `DefaultPackageManager` only to build provenance; project extensions and package code are never passed to the loader because Pi GUI fixes project trust to rejected.
 
 Every package resolution supplies Pi's explicit `skip` callback for missing sources. Therefore inventory and reload cannot install a package. Package install, remove, update, and configuration commands are capability-gated off until the GUI has explicit arbitrary-code confirmation, progress, pin/filter handling, and rollback-safe errors.
 
 Context contents, prompt contents, tool schemas, credentials, resolved environment values, headers, base URLs, raw extension errors, and raw settings errors are not returned. Intended source paths and bounded descriptive metadata are returned. Failures use stable redacted codes/messages; the Resource Center can retain the last valid snapshot after an error.
+
+
+## Pi 0.85.1 boundary
+
+The host requires Node >=22.19.0 and the exact official package identity `@earendil-works/pi-coding-agent`. Discovery validates the bundled npm CLI `dist/bundle/cli.js`. The sidecar validates the root public SDK export `./dist/index.js` and canonicalizes it inside the package before import. It does not import `dist/core/*`, source-only `./client`, or the experimental plugin entry. Standalone Pi executables can provide RPC but cannot provide the SDK package root required by this sidecar.
+
+The test fixtures are synthetic packages, not proof of a real Pi installation.
+
+### Transport and lifecycle budgets
+
+- UTF-8 byte framing splits only on LF, tolerates CRLF and a final unterminated record, and caps a record at 1 MiB. Oversized input is discarded through its next LF before parsing resumes.
+- Stdout/socket writers fail visibly above 4 MiB buffered output, with no second unbounded queue. SDK console logs go to stderr rather than contaminating protocol stdout.
+- At most 64 requests and eight orchestration sockets are active. An authentication response slot and cancellation remain available under request pressure. A duplicate active request identity closes the ambiguous transport.
+- Cancellation suppresses late success. It does not claim to undo a provider or filesystem mutation that already happened. No operation is automatically replayed.
+- Resource reloads are serialized, cancellation-local replacement transactions. Failed or cancelled builds retain the last valid plane. Implicit project resource discovery/execution remains disabled in actual loaders; project resources are inventoried without being loaded.
+- Exports use exclusive file creation with mode 0600 where supported. An existing file or symlink is never overwritten.
+- Host EOF and termination signals cancel operations, close accepted and unhandshaken sockets, remove the owned endpoint and enforce a one-second sidecar exit watchdog. The Rust host additionally owns a contained process tree, byte-bounded input queue and request deadlines.
+
+Run all tests from the source root with `node --test bridge/*.test.mjs` on POSIX, or `node --test (Get-ChildItem -Path bridge -Filter *.test.mjs).FullName` in PowerShell. Test support files under `bridge/test-support/` are not embedded in the application.

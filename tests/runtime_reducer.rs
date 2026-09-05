@@ -664,34 +664,89 @@ fn queued_continuation_does_not_settle_between_agent_runs() {
 }
 
 #[test]
-fn abort_and_abort_retry_stay_cancelling_until_agent_settled() {
+fn stop_clears_queue_before_abort_and_correlates_late_acknowledgements() {
     let (mut state, _) = connected_state("s1");
+    apply(&mut state, RuntimeInput::Event(NormalizedEvent::AgentStart));
     let effects = apply(&mut state, RuntimeInput::Intent(RuntimeIntent::Abort));
+    let EffectKind::Request(RuntimeRequest::ClearQueue { stop_id }) = effects[0].effect else {
+        panic!("Stop must clear the queue before aborting");
+    };
     assert_eq!(state.lifecycle, RuntimeLifecycle::Cancelling);
-    assert!(matches!(
-        effects[0].effect,
-        EffectKind::Request(RuntimeRequest::Abort)
-    ));
-    response(
-        &mut state,
-        RuntimeRequest::Abort,
-        Ok(NormalizedResponse::Accepted),
-    );
+    assert!(apply(&mut state, RuntimeInput::Intent(RuntimeIntent::Abort)).is_empty());
+    apply(&mut state, RuntimeInput::Event(NormalizedEvent::AgentSettled));
     assert_eq!(state.lifecycle, RuntimeLifecycle::Cancelling);
-    apply(
+    let effects = response(
         &mut state,
-        RuntimeInput::Event(NormalizedEvent::AgentSettled),
+        RuntimeRequest::ClearQueue { stop_id },
+        Ok(NormalizedResponse::QueueCleared { steering: vec![], follow_up: vec![] }),
     );
+    assert_eq!(effects.len(), 1);
+    assert!(matches!(effects[0].effect,
+        EffectKind::Request(RuntimeRequest::Abort { stop_id: id }) if id == stop_id));
+    assert!(response(
+        &mut state,
+        RuntimeRequest::ClearQueue { stop_id },
+        Ok(NormalizedResponse::QueueCleared { steering: vec![], follow_up: vec![] }),
+    ).is_empty());
+    apply(&mut state, RuntimeInput::Event(NormalizedEvent::AgentStart));
+    assert_eq!(state.lifecycle, RuntimeLifecycle::Cancelling);
+    response(&mut state, RuntimeRequest::Abort { stop_id }, Ok(NormalizedResponse::Accepted));
     assert_eq!(state.lifecycle, RuntimeLifecycle::Settled);
+    assert_eq!(state.stop_phase, StopPhase::Idle);
+    apply(&mut state, RuntimeInput::Event(NormalizedEvent::AgentStart));
+    response(&mut state, RuntimeRequest::Abort { stop_id }, Ok(NormalizedResponse::Accepted));
+    assert_eq!(state.lifecycle, RuntimeLifecycle::Running);
+}
 
+#[test]
+fn failed_queue_clear_does_not_abort_into_an_undrained_queue() {
+    let (mut state, _) = connected_state("s1");
+    apply(&mut state, RuntimeInput::Event(NormalizedEvent::AgentStart));
+    let effects = apply(&mut state, RuntimeInput::Intent(RuntimeIntent::Abort));
+    let EffectKind::Request(request) = effects[0].effect.clone() else { panic!("request") };
+    let effects = response(&mut state, request,
+        Err(failure(RequestFailureKind::UnknownOutcome, "lost clear response")));
+    assert_eq!(state.stop_phase, StopPhase::Idle);
+    assert_eq!(state.lifecycle, RuntimeLifecycle::Loading);
+    assert_eq!(effects.len(), 1);
+    assert!(matches!(effects[0].effect, EffectKind::Request(RuntimeRequest::GetState)));
+}
+
+#[test]
+fn stop_recovers_identical_queued_prompts_once_with_local_images() {
+    let (mut state, _) = connected_state("s1");
+    let image = PromptImage {
+        data: "AA==".to_owned(), mime_type: "image/png".to_owned(),
+        file_name: Some("context.png".to_owned()), source_path: None,
+    };
+    for id in ["queued-1", "queued-2"] {
+        state.optimistic_user_inputs.push(OptimisticUserInput {
+            request: RequestId::from(id), text: "continue".to_owned(),
+            images: vec![image.clone()], files: vec![], kind: SubmissionKind::FollowUp,
+            display_optimistically: false, accepted: true, authoritative_seen: false,
+            baseline_message_count: 0, baseline_message_key: None,
+        });
+    }
+    apply(&mut state, RuntimeInput::Event(NormalizedEvent::AgentStart));
+    let effects = apply(&mut state, RuntimeInput::Intent(RuntimeIntent::Abort));
+    let EffectKind::Request(request) = effects[0].effect.clone() else { panic!("request") };
+    let cleared = NormalizedResponse::QueueCleared {
+        steering: vec![], follow_up: vec!["continue".to_owned(), "continue".to_owned()],
+    };
+    response(&mut state, request.clone(), Ok(cleared.clone()));
+    response(&mut state, request, Ok(cleared));
+    assert_eq!(state.recovered_inputs.len(), 2);
+    assert!(state.recovered_inputs.iter().all(|input| input.images == vec![image.clone()]));
+    assert!(state.optimistic_user_inputs.is_empty());
+}
+
+#[test]
+fn late_abort_retry_acknowledgement_does_not_resurrect_cancelling() {
+    let (mut state, _) = connected_state("s1");
     apply(&mut state, RuntimeInput::Intent(RuntimeIntent::AbortRetry));
-    assert_eq!(state.retry, RetryState::Cancelling);
-    response(
-        &mut state,
-        RuntimeRequest::AbortRetry,
-        Ok(NormalizedResponse::Accepted),
-    );
-    assert_eq!(state.lifecycle, RuntimeLifecycle::Cancelling);
+    apply(&mut state, RuntimeInput::Event(NormalizedEvent::AgentSettled));
+    response(&mut state, RuntimeRequest::AbortRetry, Ok(NormalizedResponse::Accepted));
+    assert_eq!(state.lifecycle, RuntimeLifecycle::Settled);
 }
 
 #[test]
