@@ -53,3 +53,16 @@ The test fixtures are synthetic packages, not proof of a real Pi installation.
 - Host EOF and termination signals cancel operations, close accepted and unhandshaken sockets, remove the owned endpoint and enforce a one-second sidecar exit watchdog. The Rust host additionally owns a contained process tree, byte-bounded input queue and request deadlines.
 
 Run all tests from the source root with `node --test bridge/*.test.mjs` on POSIX, or `node --test (Get-ChildItem -Path bridge -Filter *.test.mjs).FullName` in PowerShell. Test support files under `bridge/test-support/` are not embedded in the application.
+
+
+## Indexed resource inventory
+
+`resource-index.mjs` owns per-inventory identity and path indexes. It preserves the previous first-related-row merge behavior and provenance precedence (exact match, package source, then original order), while avoiding repeated whole-catalog normalization/filter/sort passes. Indexes are rebuilt for each inventory; no stale cross-generation cache was added.
+
+Tools and dynamically registered providers exported from the same file have separate name-qualified IDs. Path-only deduplication is intentionally not used for these kinds. Segment-aware ancestry includes filesystem roots, partial updates preserve retained paths, and moved/colliding identities continue choosing the earliest surviving row. Diagnostics remain deduplicated.
+
+The existing cancelled/failed resource replacement transaction remains unchanged: the previous valid resource plane is retained. The additional runtime module is one of seven embedded bridge modules in `src/services/sdk_bridge.rs`; `scripts/verify-source.mjs` checks that runtime imports and packaged modules exist and agree.
+
+`resource-index.test.mjs` adds deterministic index/provenance checks, including a 1,200-operation differential sequence. `pi-bridge-resources.test.mjs` exercises multiple tools and providers originating in one synthetic extension. These fixtures use the public SDK shape but are not real Pi or installed-extension certification.
+
+Run `node scripts/bench-resource-index.mjs` from the repository root for the isolated baseline/indexed algorithm benchmark. Optional integer sizes replace its default 250/500/1000 resources. Results are printed as JSON and exclude SDK loading, filesystems, startup and rendering.

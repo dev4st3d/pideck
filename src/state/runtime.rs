@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::Instant;
 
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::attachments::{PromptFile, PromptFileMetadata};
@@ -34,7 +35,7 @@ pub enum StopPhase {
     Aborting { id: u64 },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RecoveredInput {
     pub text: String,
     pub images: Vec<PromptImage>,
@@ -564,7 +565,7 @@ pub enum CompactionKind {
     Overflow,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PromptImage {
     pub data: String,
     pub mime_type: String,

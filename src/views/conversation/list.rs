@@ -317,7 +317,7 @@ fn turn_row(content: AnyElement) -> AnyElement {
 /// Keep stream chrome clear of the side rails. Padding lives on each list item
 /// because GPUI `List` does not reliably inset item widths from container `px`.
 fn stream_gutter() -> gpui::Div {
-    div().w_full().px(px(theme::STREAM_PAD_X))
+    div().w_full().max_w(px(theme::READING_W)).mx_auto().px(px(theme::STREAM_PAD_X))
 }
 
 fn trailing(

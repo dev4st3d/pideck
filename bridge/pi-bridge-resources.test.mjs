@@ -102,3 +102,31 @@ test("cancelled and failed reloads retain the last valid resource plane and proj
   assert.deepEqual(fixture.records.filter((record) => record.event === "resources_changed")
     .map((record) => record.generation), [1, 2]);
 });
+
+
+test("inventory preserves all tools and providers exported from the same extension", async (t) => {
+  const exportsFixture = resourceFixture
+    .replace('getExtensions() { return { extensions: [], errors: [] }; }', `getExtensions() {
+      return { extensions: [], errors: [], runtime: {
+        pendingProviderRegistrations: [
+          { name: "provider-first", extensionPath: resolve("global-extension.mjs") },
+          { name: "provider-second", extensionPath: resolve("global-extension.mjs") },
+        ],
+      } };
+    }`)
+    .replace('getActiveToolNames: () => [], getAllTools: () => [],', `
+      getActiveToolNames: () => ["tool-second"],
+      getAllTools: () => ["tool-first", "tool-second"].map((name) => ({
+        name, description: "synthetic tool", sourceInfo: { path: resolve("global-extension.mjs") },
+      })),`);
+  const fixture = startFixture(t, exportsFixture);
+  await fixture.ready();
+  const response = await fixture.request("multi-export-inventory", "get_resource_inventory");
+  assert.equal(response.ok, true);
+  const tools = response.result.items.filter((row) => row.kind === "tool");
+  const providers = response.result.items.filter((row) => row.kind === "provider");
+  assert.deepEqual(tools.map((row) => row.name), ["tool-first", "tool-second"]);
+  assert.deepEqual(providers.map((row) => row.name), ["provider-first", "provider-second"]);
+  assert.deepEqual(tools.map((row) => row.active), [false, true]);
+  assert.equal(new Set([...tools, ...providers].map((row) => row.id)).size, 4);
+});

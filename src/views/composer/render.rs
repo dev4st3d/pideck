@@ -287,7 +287,7 @@ impl Composer {
             .on_scroll_wheel(cx.listener(Self::on_scroll_wheel))
             .child(ComposerTextElement { input: cx.entity() });
 
-        let input = if let Some(motion) = height_motion {
+        let input = if let Some(motion) = height_motion.filter(|_| theme::motion_enabled()) {
             let from = motion.from;
             let to = motion.to;
             let anim_id = SharedString::from(format!("{id_prefix}-input-height"));
@@ -560,7 +560,7 @@ impl Composer {
             .gap(px(12.0))
             .children(chips);
 
-        if strip_key == 0 {
+        if strip_key == 0 || !theme::motion_enabled() {
             strip.into_any_element()
         } else {
             let enter_id = SharedString::from(format!("{id_prefix}-attachments-enter"));
@@ -733,7 +733,7 @@ impl Composer {
                 )
             });
 
-        if attach_token == 0 {
+        if attach_token == 0 || !theme::motion_enabled() {
             chip.into_any_element()
         } else {
             let pop_id = SharedString::from(format!("{}-file-pop", self.id_prefix));
@@ -878,7 +878,7 @@ impl Composer {
                 )
             });
 
-        if attach_token == 0 {
+        if attach_token == 0 || !theme::motion_enabled() {
             // Restored drafts stay settled (no pop).
             chip.into_any_element()
         } else {

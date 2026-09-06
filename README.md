@@ -1,97 +1,118 @@
 # Pideck
 
-A native Windows workspace for the Pi coding agent, built with Rust and GPUI 0.2.2. Pi owns agent execution, sessions and provider credentials.
+A native Windows workspace for the Pi coding agent, built with Rust and GPUI 0.2.2. Pi owns agent execution, sessions, provider credentials and extension semantics.
 
-Requires **Pi 0.85.1** (`@earendil-works/pi-coding-agent@0.85.1`).
+## Workspace
 
-## Features
+The Workbench layout keeps projects and sessions on the left, conversation and input in the center, and a dismissible inspector on the right. Navigation yields to the conversation when the window is narrow. History and the inspector do not consume the center at the same time.
 
-- Collapsible project sidebar with multi-thread catalogs, live background-work status, and session switch / rename / export
-- Multiline composer with drag-and-drop attachments, `@` file completion, `/` command completion, and direct Bash (`!` / `!!`)
-- Steer mid-run with `Enter`, queue follow-ups with `Alt+Enter`, delivery state always visible
-- Streaming Markdown transcript with tool cards, expandable args, diff and image previews, copy, and elapsed time
-- Read-only Git change summary with a bounded per-file diff viewer after each response
-- Provider authentication, searchable model switcher, and thinking controls — Pideck never stores credentials
-- Command palette (`Ctrl+Shift+P`) merging native actions with discovered extension, skill, and prompt-template commands
-- Embedded PTY terminal, keyboard-first recovery (connect / retry / stop), and hotkey help (`Ctrl+/`)
-- Resource Center inventory for extensions, tools, skills, prompt templates, themes, and packages
-- No telemetry, no analytics, no remote reporting
+Graphite and Paper are the two supported appearances. Both use a shared type scale, restrained semantic accents, readable status text, a 960-logical-pixel reading measure and visible keyboard focus. Existing theme preferences map to the corresponding dark or light appearance; system-installed fonts remain configurable.
 
-## Supported extensions
-
-Supported Pi extension UI requests are mapped to native controls: `select`, `confirm`, `input`, and `editor` dialogs become native windows, status lines and widgets render in place, window titles update the title bar, and extension commands join the palette.
-
-**Inspector integrations retained from the supplied snapshot**
-
-These are the snapshot's reference extension versions, not newly certified Pi 0.85.1 combinations. The adapter fixture tests exercise their protocol projections; live extension recertification is outstanding.
-
-| Extension | Snapshot reference | Documented Pi range | Interface |
-|---|---:|---:|---|
-| `@tintinweb/pi-tasks` | 0.7.2 | `>=0.80.0` | Task lists with dependencies, blockers, and outputs; guarded execute and stop |
-| `@tintinweb/pi-subagents` | 0.15.2 | `>=0.80.0` | Live lifecycle, queue, concurrency, schedules, worktrees, and memory; steer, stop, and resume agents; conversation overlay with a bounded live transcript |
-| `@narumitw/pi-goal` | 0.51.0 | `>=0.80.6` | Objective, wait state, safety limits, queue, budget, and elapsed time; guarded pause, resume, edit, and clear |
-| `@juicesharp/rpiv-ask-user-question` | 2.5.1 | `*` | Multi-question flows, choices, previews, notes, and multi-select answered through native dialogs |
-
-`pi-bar` 0.3.39 is the snapshot reference for the native-shell exclusion policy. It stays installed for Pi's TUI but is omitted from GUI sessions because PiDeck supplies the native status shell.
+- Multiline composer with grapheme navigation, IME, clipboard, undo/redo, file/image attachments, `@` files and `/` commands.
+- Separate Send, Steer, Queue and Stop behavior. Input stays editable while acceptance is pending; a late acknowledgement cannot clear a newer revision or newly changed attachments.
+- Session-owned local draft checkpoints retain text, selection, undo/redo, attachments, saved inputs and transcript position across normal application closure. Recovery never sends a prompt automatically.
+- Streaming Markdown, selectable transcript text, tool details, image previews and read-only Git changes/diffs.
+- Searchable model selection, thinking controls, provider authentication, command palette, settings, history, resources and task/subagent/goal inspector integrations.
+- Embedded multi-tab PTY terminal and a bounded pool of supervised background session runtimes.
+- No telemetry, analytics or remote reporting. Authentication fields are not draft-checkpointed.
 
 ## Requirements
 
-| | |
+| Component | Requirement |
 |---|---|
-| OS | Windows |
-| Rust | Current stable with rustfmt and Clippy; declared syntax floor 1.88 (see `rust-toolchain.toml`) |
+| OS | Windows; native application validation remains outstanding |
+| Rust | Stable MSVC toolchain, Windows SDK/build tools, rustfmt and Clippy; declared syntax floor 1.88 |
+| GPUI | 0.2.2 in the included Cargo.lock |
 | Pi | `@earendil-works/pi-coding-agent@0.85.1` |
-| Node | 22.19+; required only for Pi and the SDK bridge sidecar |
+| Node | Stable 22.19.0 or newer |
 
-## Install prerequisites on Windows
+There is no application `package.json` or frontend npm build. Node is used for Pi, its SDK sidecar, bridge tests and the optional source checks/benchmark. Dependencies and runtimes are not included in this source ZIP.
 
-Install a current stable Rust toolchain with the MSVC build tools, and Node 22.19.0 or newer. The source targets the official npm Pi package, not a frontend build toolchain. No application `package.json` or `npm install` in this repository is needed.
+## Run from source
 
-## Quick start from source
+Install the prerequisites, then run from the extracted repository:
 
 ```powershell
 npm install -g @earendil-works/pi-coding-agent@0.85.1
 cargo run --locked
 ```
 
-If Cargo is not on `PATH`:
+A release-mode source build uses:
 
 ```powershell
-& "$env:USERPROFILE\.cargo\bin\cargo.exe" run
+cargo build --release --locked
 ```
 
-On first launch, pick or open a project — it joins the sidebar and reopens next time. Existing Pi credentials are reused; you can also authenticate from **Settings → Providers**.
+The launch directory joins the project sidebar. Existing Pi sessions and credentials remain Pi-owned. Open a project, select or create a session, then use **Settings → Providers** to authenticate and **Models** to choose an available model.
 
-The main composer now keeps its height while focus moves. Session switches retain editor selection, undo history and transcript scroll position. Stop clears Pi's queue before aborting. Cleared messages appear as saved inputs and can be appended to the current draft with **Restore next** or **Ctrl+Shift+R**; typed text is not overwritten.
+The supplied source retains the existing executable discovery, strict version checks, rejected-project-trust launch policy, queue cancellation and process supervision. It does not install extensions automatically or modify a user's project to demonstrate a feature.
+
+## Local drafts and recovery
+
+Drafts are stored beside the app settings file, normally under `%APPDATA%\Pideck\drafts-v1`. `PI_GUI_SETTINGS_PATH` changes the settings location and therefore the adjacent drafts directory. These are app-owned checkpoints, not Pi session files.
+
+The contents are **local plaintext**, including draft text, undo history, attachment snapshots/base64 image data and source paths. Protect this directory like your Pi session directory. No credential input fields are saved by this mechanism. No file in a user project is created for draft storage.
+
+Every two seconds, changed session drafts are offered to a bounded background writer; unchanged drafts are not reserialized. Normal close waits asynchronously for queued writes and checks for intervening edits. Failures keep the window open with recovery feedback. A forced process/OS termination can lose changes after the last completed checkpoint; this is not a crash-proof or encrypted vault.
+
+An unreadable, mismatched-owner or unsupported-version checkpoint is retained rather than overwritten. The feedback identifies a corrupt checkpoint when available. Back it up and repair or move that file, then select **Retry storage**. Never delete a Pi session as part of local draft recovery. Restored uncertain submissions require inspecting the conversation before deciding whether to send again.
+
+While an attachment picker/read is active, session switching is temporarily blocked so the result cannot land in a different session. Cleared Pi queue messages remain available under **Restore next**, which appends instead of replacing a current draft.
 
 ## Keyboard essentials
 
 | Action | Keys |
 |---|---|
 | Command palette | `Ctrl+Shift+P` |
-| Connect · Retry · Stop | `Ctrl+Alt+C` · `Ctrl+Alt+R` · `Ctrl+Alt+S` |
+| Project navigation / inspector | `Ctrl+B` / `Ctrl+I` |
+| Connect / Retry / Stop | `Ctrl+Alt+C` / `Ctrl+Alt+R` / `Ctrl+Alt+S` |
 | Workspace terminal | `` Ctrl+` `` |
-| Attach files | `Ctrl+O` or drag onto the composer |
-| Send / steer · newline · queue follow-up | `Enter` · `Shift+Enter` · `Alt+Enter` |
-| Direct Bash · Bash excluded from context | `!cmd` · `!!cmd` |
-| Abort the active run | `Escape` |
+| Attach files | `Ctrl+O`, or drag onto the composer |
+| Send or steer / newline / queue | `Enter` / `Shift+Enter` / `Alt+Enter` |
+| Restore a saved input | `Ctrl+Shift+R` |
+| Direct Bash / Bash excluded from context | `!command` / `!!command` |
+| Abort current run | `Escape` |
 | Hotkey help | `Ctrl+/` |
 
-The full map lives in [info/README.md](info/README.md).
+The full keyboard and launch-policy map is in [info/README.md](info/README.md).
+
+## Extension integrations
+
+Supported Pi extension UI requests use native dialogs, status lines, widgets, title updates and palette commands. Custom TUI components remain unsupported rather than appearing as dead native controls.
+
+The snapshot's reference versions are retained, **not live-certified in this delivery**:
+
+| Extension | Snapshot reference | Integration |
+|---|---:|---|
+| `@tintinweb/pi-tasks` | 0.7.2 | Dependencies, blockers, outputs, guarded execute/stop |
+| `@tintinweb/pi-subagents` | 0.15.2 | Lifecycle, queue, concurrency, schedules, worktrees, memory, steer/stop/resume |
+| `@narumitw/pi-goal` | 0.51.0 | Objective, limits, budget, queue and guarded goal actions |
+| `@juicesharp/rpiv-ask-user-question` | 2.5.1 | Native multi-question, choice, note and multi-select flows |
+
+`pi-bar` 0.3.39 is the snapshot reference for GUI-session exclusion; TUI packages remain installed. Public SDK compatibility checks and synthetic fixtures are not a substitute for exercising those installed extensions.
+
+## Validation
+
+On a configured Windows machine:
+
+```powershell
+.\scripts\validate.ps1
+```
+
+The script checks source/asset contracts, formatting, all Rust targets/tests, bridge tests and Clippy, using the included lockfile. It does not install dependencies or publish anything.
+
+Bridge tests and isolated catalog benchmark can also run directly:
+
+```powershell
+node --test (Get-ChildItem -Path bridge -Filter *.test.mjs).FullName
+node scripts/verify-source.mjs
+node scripts/bench-resource-index.mjs
+```
+
+The benchmark excludes Pi startup, filesystem loading, networking and native rendering.
 
 ## Documentation
 
-| Doc | Contents |
-|---|---|
-| [info/README.md](info/README.md) | Launch policy, keyboard map, architecture map |
-| [AGENTS.md](AGENTS.md) | Conventions for contributors and coding agents |
-
-## Development
-
-```powershell
-cargo fmt --all -- --check
-cargo check --all-targets
-cargo test --all-targets
-```
-
-Dev builds use `opt-level = 1` so GPUI rendering stays fluid without a full release profile; the hot rendering crates compile at `opt-level = 3`.
+- [info/README.md](info/README.md): runtime policy and architecture map.
+- [bridge/README.md](bridge/README.md): public SDK bridge, IPC, trust and resource indexing.
+- [AGENTS.md](AGENTS.md): contributor instructions. Its referenced `GPUI.md` was absent from the supplied snapshot; this delivery does not claim otherwise.

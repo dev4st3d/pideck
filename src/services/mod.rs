@@ -1,4 +1,7 @@
+pub(crate) mod accessibility;
 pub mod app_update;
+pub mod atomic_file;
+pub(crate) mod draft_store;
 pub mod git_diff;
 pub mod path_actions;
 pub mod pi_process;

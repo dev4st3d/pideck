@@ -39,186 +39,81 @@ pub(super) fn model_settings_panel(
     } else {
         matches!(projection.phase, CatalogPhase::Refreshing)
     };
-    div()
-        .flex_1()
-        .min_w_0()
-        .h_full()
-        .flex()
-        .flex_col()
-        .bg(theme::canvas())
+    let categories = [
+        (ModelSettingsTab::Providers, "Providers"),
+        (ModelSettingsTab::Models, "Models"),
+        (ModelSettingsTab::Thinking, "Thinking"),
+        (ModelSettingsTab::Pi, "Pi runtime"),
+        (ModelSettingsTab::Usage, "Usage"),
+        (ModelSettingsTab::Typography, "Typography"),
+        (ModelSettingsTab::Resources, "Resources"),
+        (ModelSettingsTab::App, "About & updates"),
+    ];
+    let title = categories.iter().find(|(target, _)| *target == tab)
+        .map(|(_, title)| *title).unwrap_or("Settings");
+    let body = match tab {
+        ModelSettingsTab::Providers => providers_settings(projection, cx).into_any_element(),
+        ModelSettingsTab::Models => models_settings(projection, search, cx).into_any_element(),
+        ModelSettingsTab::Thinking => thinking_settings(projection, cx).into_any_element(),
+        ModelSettingsTab::Pi => pi_settings(projection, pi_scroll, cx),
+        ModelSettingsTab::Usage => usage_settings(projection).into_any_element(),
+        ModelSettingsTab::Typography => typography_settings(font_catalog, font_role, font_search, cx).into_any_element(),
+        ModelSettingsTab::Resources => resource_center_settings(resources, resource_scope_filter, resource_state_filter, cx).into_any_element(),
+        ModelSettingsTab::App => app_settings(app_update, cx).into_any_element(),
+    };
+    div().flex_1().min_w_0().h_full().flex().flex_col().bg(theme::canvas())
         .child(
-            div()
-                .px(px(theme::STREAM_PAD_X))
-                .pt(px(16.0))
-                .pb(px(14.0))
-                .flex()
-                .flex_col()
-                .gap(px(14.0))
-                .border_b_1()
-                .border_color(theme::edge_soft())
-                .child(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .justify_between()
-                        .gap(px(12.0))
-                        .child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .gap(px(2.0))
-                                .child(
-                                    div()
-                                        .font_family(theme::sans())
-                                        .text_size(theme::text_size(theme::T_UI))
-                                        .font_weight(FontWeight::BOLD)
-                                        .text_color(theme::bone())
-                                        .child(if tab == ModelSettingsTab::Resources {
-                                            "Resource Center"
-                                        } else if tab == ModelSettingsTab::Typography {
-                                            "Typography"
-                                        } else if tab == ModelSettingsTab::Pi {
-                                            "Pi settings"
-                                        } else if tab == ModelSettingsTab::App {
-                                            "PiDeck"
-                                        } else {
-                                            "Model settings"
-                                        }),
-                                )
-                                .child(
-                                    div()
-                                        .font_family(theme::sans())
-                                        .text_size(theme::text_size(theme::T_TINY))
-                                        .text_color(theme::ash())
-                                        .child(
-                                            if tab == ModelSettingsTab::Resources {
-                                                "Audited Pi resources, provenance, trust, load state, and active tools."
-                                            } else if tab == ModelSettingsTab::Typography {
-                                                "Choose any installed system font for the app's three text roles."
-                                            } else if tab == ModelSettingsTab::Pi {
-                                                "Typed controls backed by Pi's SettingsManager and effective global values."
-                                            } else if tab == ModelSettingsTab::App {
-                                                "Installed version and updates published through GitHub Releases."
-                                            } else {
-                                                "Providers, defaults, cycle order, and usage. Session model and thinking live in the prompt box."
-                                            },
-                                        ),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .flex()
-                                .flex_row()
-                                .items_center()
-                                .gap(px(6.0))
-                                .flex_shrink_0()
-                                .when(
-                                    tab != ModelSettingsTab::Typography
-                                        && tab != ModelSettingsTab::App,
-                                    |actions| {
-                                    actions.child(controls::quiet_button(
-                                        "refresh-model-catalog",
-                                        if refreshing {
-                                            "Refreshing…"
-                                        } else if tab == ModelSettingsTab::Resources {
-                                            "Reload"
-                                        } else {
-                                            "Refresh"
-                                        },
-                                        !refreshing,
-                                        Box::new(cx.listener(move |view, _, _, cx| {
-                                            if tab == ModelSettingsTab::Resources {
-                                                view.reload_resources(cx);
-                                            } else {
-                                                view.refresh_models(cx);
-                                            }
-                                        })),
-                                    ))
-                                },
-                                )
-                                .child(controls::quiet_button(
-                                    "close-model-settings",
-                                    "Done",
-                                    true,
-                                    Box::new(cx.listener(|view, _, window, cx| {
-                                        view.close_model_panel(window, cx)
-                                    })),
-                                )),
-                        ),
-                )
-                .child(
-                    controls::tab_track().children(
-                        [
-                            (ModelSettingsTab::Providers, "Providers"),
-                            (ModelSettingsTab::Models, "Models"),
-                            (ModelSettingsTab::Thinking, "Thinking"),
-                            (ModelSettingsTab::Pi, "Pi"),
-                            (ModelSettingsTab::Usage, "Usage"),
-                            (ModelSettingsTab::Typography, "Type"),
-                            (ModelSettingsTab::Resources, "Resources"),
-                            (ModelSettingsTab::App, "App"),
-                        ]
-                        .into_iter()
-                        .map(|(target, label)| {
-                            controls::tab_button(
-                                gpui::SharedString::from(format!("model-tab-{label}")),
-                                label,
-                                tab == target,
-                                Box::new(cx.listener(move |view, _, window, cx| {
-                                    view.set_model_settings_tab(target, window, cx)
-                                })),
-                            )
-                        }),
-                    ),
-                ),
+            div().px(px(theme::STREAM_PAD_X)).py(px(14.0))
+                .flex().items_center().justify_between().gap(px(12.0))
+                .border_b_1().border_color(theme::edge_soft())
+                .child(div().flex().flex_col().gap(px(3.0))
+                    .child(div().font_family(theme::sans()).text_size(theme::text_size(theme::T_TINY))
+                        .text_color(theme::smoke()).child("Settings"))
+                    .child(div().font_family(theme::sans()).text_size(theme::text_size(theme::T_UI))
+                        .font_weight(FontWeight::SEMIBOLD).text_color(theme::bone()).child(title)))
+                .child(div().flex().items_center().gap(px(6.0)).flex_shrink_0()
+                    .when(tab != ModelSettingsTab::Typography && tab != ModelSettingsTab::App, |actions| {
+                        actions.child(controls::quiet_button(
+                            "refresh-model-catalog",
+                            if refreshing { "Refreshing…" } else { "Refresh" },
+                            !refreshing,
+                            Box::new(cx.listener(move |view, _, _, cx| {
+                                if tab == ModelSettingsTab::Resources { view.reload_resources(cx); }
+                                else { view.refresh_models(cx); }
+                            })),
+                        ))
+                    })
+                    .child(controls::quiet_button("close-model-settings", "Done", true,
+                        Box::new(cx.listener(|view, _, window, cx| view.close_model_panel(window, cx))),
+                    ))),
         )
-        .child(match tab {
-            ModelSettingsTab::Providers => providers_settings(projection, cx).into_any_element(),
-            ModelSettingsTab::Models => models_settings(projection, search, cx).into_any_element(),
-            ModelSettingsTab::Thinking => thinking_settings(projection, cx).into_any_element(),
-            ModelSettingsTab::Pi => pi_settings(projection, pi_scroll, cx),
-            ModelSettingsTab::Usage => usage_settings(projection).into_any_element(),
-            ModelSettingsTab::Typography => typography_settings(
-                font_catalog,
-                font_role,
-                font_search,
-                cx,
-            )
-            .into_any_element(),
-            ModelSettingsTab::Resources => resource_center_settings(
-                resources,
-                resource_scope_filter,
-                resource_state_filter,
-                cx,
-            )
-            .into_any_element(),
-            ModelSettingsTab::App => app_settings(app_update, cx).into_any_element(),
-        })
-        .when(
-            tab != ModelSettingsTab::Resources
-                && tab != ModelSettingsTab::Typography
-                && tab != ModelSettingsTab::App,
-            |panel| {
-                panel
-                .when_some(catalog_phase_note(&projection.phase), |panel, note| {
-                    panel.child(controls::panel_footer_status(note))
-                })
-                .when_some(projection.feedback.clone(), |panel, feedback| {
-                    panel.child(controls::panel_footer_status(feedback))
-                })
-            },
-        )
-        .when(tab == ModelSettingsTab::Typography, |panel| {
-            panel.when_some(font_feedback.map(str::to_owned), |panel, feedback| {
-                panel.child(controls::panel_footer_status(feedback))
-            })
-        })
-        .when(tab == ModelSettingsTab::Resources, |panel| {
-            panel.when_some(resources.feedback.clone(), |panel, feedback| {
-                panel.child(controls::panel_footer_status(feedback))
-            })
-        })
+        .child(div().flex_1().min_h_0().flex()
+            .child(div().id("settings-categories").w(px(152.0)).h_full().flex_shrink_0()
+                .p(px(8.0)).flex().flex_col().gap(px(3.0)).overflow_y_scroll()
+                .border_r_1().border_color(theme::edge_soft())
+                .children(categories.into_iter().map(|(target, label)| {
+                    div().id(gpui::SharedString::from(format!("settings-category-{label}")))
+                        .tab_index(0).min_h(px(36.0)).px(px(10.0)).py(px(8.0))
+                        .rounded(px(theme::RADIUS)).border_1()
+                        .border_color(gpui::rgba(0x0000_0000))
+                        .font_family(theme::sans()).text_size(theme::text_size(theme::T_UI_SM))
+                        .font_weight(if tab == target { FontWeight::SEMIBOLD } else { FontWeight::NORMAL })
+                        .bg(if tab == target { theme::panel_lift() } else { gpui::rgba(0x0000_0000) })
+                        .text_color(if tab == target { theme::bone() } else { theme::smoke() })
+                        .cursor_pointer().hover(|row| row.bg(theme::panel_lift()).text_color(theme::bone()))
+                        .focus(|row| row.border_color(theme::focus()))
+                        .on_click(cx.listener(move |view, _, window, cx| view.set_model_settings_tab(target, window, cx)))
+                        .child(label)
+                })))
+            .child(div().flex_1().min_w_0().h_full().flex().flex_col().child(body)))
+        .when(tab != ModelSettingsTab::Resources && tab != ModelSettingsTab::Typography && tab != ModelSettingsTab::App,
+            |panel| panel
+                .when_some(catalog_phase_note(&projection.phase), |panel, note| panel.child(controls::panel_footer_status(note)))
+                .when_some(projection.feedback.clone(), |panel, feedback| panel.child(controls::panel_footer_status(feedback))))
+        .when(tab == ModelSettingsTab::Typography, |panel| panel
+            .when_some(font_feedback.map(str::to_owned), |panel, feedback| panel.child(controls::panel_footer_status(feedback))))
+        .when(tab == ModelSettingsTab::Resources, |panel| panel
+            .when_some(resources.feedback.clone(), |panel, feedback| panel.child(controls::panel_footer_status(feedback))))
 }
 
 fn app_settings(state: &PiDeckUpdateState, cx: &mut Context<RootView>) -> impl IntoElement {

@@ -42,6 +42,9 @@ jobs:
           node-version: "22"
           check-latest: true
 
+      - name: Verify source package and palette contracts
+        run: node scripts/verify-source.mjs
+
       - name: Test bridge
         shell: pwsh
         run: node --test (Get-ChildItem -Path bridge -Filter *.test.mjs).FullName
@@ -65,7 +68,7 @@ jobs:
           shared-key: checks-clippy
 
       - name: Clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
 
   tests:
     name: Rust tests

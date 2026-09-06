@@ -1,8 +1,11 @@
 //! UI-independent application projections and Pi runtime state.
 
+pub(crate) mod drafts;
+pub(crate) mod editor;
 pub mod history;
 pub mod reducer;
 pub mod runtime;
+pub(crate) mod workspace_layout;
 
 use runtime::{
     Facet, FacetStatus, RuntimeLifecycle, RuntimeState, RuntimeStats, RuntimeThinkingLevel,
@@ -475,3 +478,4 @@ mod tests {
         assert!(projection.has_stale_values);
     }
 }
+

@@ -38,6 +38,7 @@ pub fn run() {
 
     let application = Application::new().with_assets(Assets);
     application.run(move |cx: &mut App| {
+        crate::services::accessibility::refresh_motion_preference();
         let font_catalog = fonts::initialize(cx);
         cx.bind_keys([
             KeyBinding::new("ctrl-alt-c", Connect, None),
@@ -77,7 +78,7 @@ pub fn run() {
         cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
-                window_min_size: Some(size(px(1080.0), px(640.0))),
+                window_min_size: Some(size(px(800.0), px(540.0))),
                 titlebar: Some(TitlebarOptions {
                     title: Some(SharedString::from("πdeck")),
                     appears_transparent: false,
@@ -110,6 +111,10 @@ pub fn run() {
                         font_catalog.clone(),
                         cx,
                     )
+                });
+                let weak_root = root.downgrade();
+                window.on_window_should_close(cx, move |window, cx| {
+                    weak_root.update(cx, |root, cx| root.request_close(window, cx)).unwrap_or(true)
                 });
                 controller.update(cx, |controller, cx| {
                     controller.connect_to_session(preferred_session.clone(), cx)

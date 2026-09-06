@@ -1,6 +1,6 @@
 //! Local file attachment loading and prompt expansion.
 //!
-//! Pi 0.83 RPC accepts images natively. Readable files therefore remain GUI-owned
+//! Pi 0.85.1 RPC accepts images natively. Readable files therefore remain GUI-owned
 //! draft data and are expanded into bounded, named text blocks only at the RPC edge.
 
 use std::collections::HashSet;
@@ -48,7 +48,7 @@ pub struct PromptFileMetadata {
     pub delivery: FileDelivery,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PromptFile {
     pub metadata: PromptFileMetadata,
     pub content: Option<Arc<str>>,

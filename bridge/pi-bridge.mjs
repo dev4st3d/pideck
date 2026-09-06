@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { basename, dirname, resolve, sep } from "node:path";
+import { basename, dirname, resolve } from "node:path";
 import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { Console } from "node:console";
@@ -8,6 +8,7 @@ import { Console } from "node:console";
 import { attachJsonlLineReader, createJsonlWriter } from "./jsonl.mjs";
 import { resolveSdkEntry } from "./pi-contract.mjs";
 import { piSettingsSnapshot, setPiSetting } from "./pi-settings.mjs";
+import { ResourceIndex, ResourceSources, normalizedPath, pathContains } from "./resource-index.mjs";
 
 const PROTOCOL_VERSION = 1;
 const MAX_LINE_BYTES = 1024 * 1024;
@@ -410,19 +411,6 @@ async function refreshModels(signal) {
   return modelRefreshPromise;
 }
 
-function normalizedPath(value) {
-  if (typeof value !== "string" || !value) return undefined;
-  const normalized = resolve(value);
-  return process.platform === "win32" ? normalized.toLowerCase() : normalized;
-}
-
-function pathContains(parent, child) {
-  const normalizedParent = normalizedPath(parent);
-  const normalizedChild = normalizedPath(child);
-  if (!normalizedParent || !normalizedChild) return false;
-  return normalizedChild === normalizedParent || normalizedChild.startsWith(`${normalizedParent}${sep}`);
-}
-
 function safePath(value) {
   return typeof value === "string" && value.length <= 4096 ? value : undefined;
 }
@@ -455,7 +443,8 @@ function sourceInfoForResolved(resource) {
 }
 
 function resourceId(kind, path, source, name) {
-  return `${kind}:${normalizedPath(path) ?? source ?? name}`;
+  const owner = normalizedPath(path) ?? source ?? name;
+  return kind === "tool" || kind === "provider" ? `${kind}:${owner}#${name}` : `${kind}:${owner}`;
 }
 
 function itemFromSource(kind, name, sourceInfo, values = {}) {
@@ -514,44 +503,6 @@ function resourceEntries(resolved) {
     ["prompt", resolved.prompts ?? []],
     ["theme", resolved.themes ?? []],
   ];
-}
-
-function findResolvedSource(resolved, kind, path) {
-  const entries = resourceEntries(resolved).find(([candidate]) => candidate === kind)?.[1] ?? [];
-  return entries
-    .map((entry) => sourceInfoForResolved(entry))
-    .filter(
-      (sourceInfo) =>
-        pathContains(sourceInfo.path, path) ||
-        (sourceInfo.baseDir && pathContains(sourceInfo.baseDir, path)),
-    )
-    .sort((left, right) => {
-      const leftExact = normalizedPath(left.path) === normalizedPath(path) ? 0 : 1;
-      const rightExact = normalizedPath(right.path) === normalizedPath(path) ? 0 : 1;
-      if (leftExact !== rightExact) return leftExact - rightExact;
-      const leftPackage = left.origin === "package" ? 0 : 1;
-      const rightPackage = right.origin === "package" ? 0 : 1;
-      return leftPackage - rightPackage;
-    })[0];
-}
-
-function upsertResource(items, item) {
-  const existing = items.findIndex(
-    (candidate) =>
-      candidate.kind === item.kind &&
-      ((candidate.path && item.path && pathContains(candidate.path, item.path)) ||
-        (candidate.path && item.path && pathContains(item.path, candidate.path)) ||
-        candidate.id === item.id),
-  );
-  if (existing < 0) {
-    items.push(item);
-    return;
-  }
-  items[existing] = {
-    ...items[existing],
-    ...item,
-    diagnostics: [...new Set([...(items[existing].diagnostics ?? []), ...(item.diagnostics ?? [])])],
-  };
 }
 
 async function safeResolve(packageManager) {
@@ -632,13 +583,14 @@ async function buildResourceSnapshot(signal, operation = "inventory") {
   }
   if (signal.aborted) return { cancelled: true };
 
-  const items = [];
+  const index = new ResourceIndex();
+  const items = index.items;
+  const sources = new ResourceSources(allResolved);
   for (const [kind, resources] of resourceEntries(allResolved)) {
     for (const resource of resources) {
       const sourceInfo = sourceInfoForResolved(resource);
       const projectRejected = sourceInfo.scope === "project";
-      upsertResource(
-        items,
+      index.upsert(
         itemFromSource(kind, basename(resource.path), sourceInfo, {
           path: resource.path,
           state: projectRejected || !resource.enabled ? "disabled" : "loaded",
@@ -653,10 +605,9 @@ async function buildResourceSnapshot(signal, operation = "inventory") {
   const extensionsResult = loader.getExtensions();
   for (const extension of extensionsResult.extensions ?? []) {
     const sourceInfo =
-      findResolvedSource(allResolved, "extension", extension.resolvedPath ?? extension.path) ??
+      sources.find("extension", extension.resolvedPath ?? extension.path) ??
       extension.sourceInfo;
-    upsertResource(
-      items,
+    index.upsert(
       itemFromSource("extension", basename(extension.path), sourceInfo, {
         path: extension.resolvedPath ?? extension.path,
       }),
@@ -664,14 +615,13 @@ async function buildResourceSnapshot(signal, operation = "inventory") {
   }
   for (const failure of extensionsResult.errors ?? []) {
     const sourceInfo =
-      findResolvedSource(allResolved, "extension", failure.path) ?? {
+      sources.find("extension", failure.path) ?? {
         path: failure.path,
         source: "extension",
         scope: "user",
         origin: "top-level",
       };
-    upsertResource(
-      items,
+    index.upsert(
       itemFromSource("extension", basename(failure.path), sourceInfo, {
         path: failure.path,
         state: "error",
@@ -683,9 +633,8 @@ async function buildResourceSnapshot(signal, operation = "inventory") {
   const skills = loader.getSkills();
   for (const skill of skills.skills ?? []) {
     const sourceInfo =
-      findResolvedSource(allResolved, "skill", skill.filePath) ?? skill.sourceInfo;
-    upsertResource(
-      items,
+      sources.find("skill", skill.filePath) ?? skill.sourceInfo;
+    index.upsert(
       itemFromSource("skill", skill.name, sourceInfo, {
         path: skill.filePath,
         description: skill.description,
@@ -695,9 +644,8 @@ async function buildResourceSnapshot(signal, operation = "inventory") {
   const prompts = loader.getPrompts();
   for (const prompt of prompts.prompts ?? []) {
     const sourceInfo =
-      findResolvedSource(allResolved, "prompt", prompt.filePath) ?? prompt.sourceInfo;
-    upsertResource(
-      items,
+      sources.find("prompt", prompt.filePath) ?? prompt.sourceInfo;
+    index.upsert(
       itemFromSource("prompt", prompt.name, sourceInfo, {
         path: prompt.filePath,
         description: prompt.description,
@@ -707,9 +655,8 @@ async function buildResourceSnapshot(signal, operation = "inventory") {
   const themes = loader.getThemes();
   for (const theme of themes.themes ?? []) {
     const sourceInfo =
-      findResolvedSource(allResolved, "theme", theme.sourcePath) ?? theme.sourceInfo;
-    upsertResource(
-      items,
+      sources.find("theme", theme.sourcePath) ?? theme.sourceInfo;
+    index.upsert(
       itemFromSource("theme", theme.name ?? basename(theme.sourcePath ?? "theme"), sourceInfo, {
         path: theme.sourcePath,
       }),
@@ -722,14 +669,13 @@ async function buildResourceSnapshot(signal, operation = "inventory") {
   ]) {
     for (const diagnostic of resourceDiagnostics) {
       const sourceInfo =
-        findResolvedSource(allResolved, kind, diagnostic.path) ?? {
+        sources.find(kind, diagnostic.path) ?? {
           path: diagnostic.path,
           source: kind,
           scope: "user",
           origin: "top-level",
         };
-      upsertResource(
-        items,
+      index.upsert(
         itemFromSource(kind, basename(diagnostic.path ?? kind), sourceInfo, {
           path: diagnostic.path,
           state: diagnostic.type === "warning" ? "loaded" : "error",
@@ -763,9 +709,8 @@ async function buildResourceSnapshot(signal, operation = "inventory") {
     const activeTools = new Set(session.getActiveToolNames());
     for (const tool of session.getAllTools()) {
       const sourceInfo =
-        findResolvedSource(allResolved, "extension", tool.sourceInfo?.path) ?? tool.sourceInfo;
-      upsertResource(
-        items,
+        sources.find("extension", tool.sourceInfo?.path) ?? tool.sourceInfo;
+      index.upsert(
         itemFromSource("tool", tool.name, sourceInfo, {
           path: tool.sourceInfo?.path,
           description: tool.description,
@@ -779,14 +724,13 @@ async function buildResourceSnapshot(signal, operation = "inventory") {
 
   for (const provider of dynamicProviders) {
     const sourceInfo =
-      findResolvedSource(allResolved, "extension", provider.extensionPath) ?? {
+      sources.find("extension", provider.extensionPath) ?? {
         path: provider.extensionPath,
         source: "extension",
         scope: "user",
         origin: "top-level",
       };
-    upsertResource(
-      items,
+    index.upsert(
       itemFromSource("provider", provider.name, sourceInfo, {
         path: provider.extensionPath,
         description: "Provider registered dynamically by an extension.",

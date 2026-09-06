@@ -348,10 +348,8 @@ impl ProjectRegistry {
         };
         let bytes = serde_json::to_vec_pretty(&stored)
             .map_err(|_| ProjectRegistryError::InaccessibleStorage)?;
-        if let Some(parent) = self.storage_path.parent() {
-            fs::create_dir_all(parent).map_err(|_| ProjectRegistryError::InaccessibleStorage)?;
-        }
-        fs::write(&self.storage_path, bytes).map_err(|_| ProjectRegistryError::InaccessibleStorage)
+        crate::services::atomic_file::write(&self.storage_path, &bytes)
+            .map_err(|_| ProjectRegistryError::InaccessibleStorage)
     }
 }
 

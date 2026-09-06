@@ -580,3 +580,37 @@ fn saved_input_is_additive_and_attachment_limits_leave_it_recoverable(cx: &mut T
         assert_eq!(composer.image_bytes, 1);
     });
 }
+
+#[gpui::test]
+fn late_acceptance_never_clears_an_edited_then_undone_draft(cx: &mut TestAppContext) {
+    cx.update(|cx| cx.bind_keys(composer_key_bindings()));
+    let (harness, cx) = cx.add_window_view(ComposerHarness::new);
+    let composer = harness.read_with(cx, |harness, _| harness.composer.clone());
+    cx.simulate_input("same text");
+    let revision = composer.read_with(cx, |composer, _| composer.draft_revision());
+    composer.update(cx, |composer, cx| composer.set_feedback(ComposerFeedback::Pending(SubmissionKind::Prompt), cx));
+    cx.simulate_input(" edited");
+    cx.simulate_keystrokes("ctrl-z");
+    assert_eq!(composer.read_with(cx, |composer, _| composer.draft().to_owned()), "same text");
+    let cleared = composer.update(cx, |composer, cx| {
+        composer.clear_accepted_revision(revision, "same text", SubmissionKind::Prompt, cx)
+    });
+    assert!(!cleared);
+    assert_eq!(composer.read_with(cx, |composer, _| composer.draft().to_owned()), "same text");
+}
+
+#[gpui::test]
+fn acceptance_keeps_attachments_added_after_submission(cx: &mut TestAppContext) {
+    let (harness, cx) = cx.add_window_view(ComposerHarness::new);
+    let composer = harness.read_with(cx, |harness, _| harness.composer.clone());
+    composer.update(cx, |composer, cx| composer.set_draft("original", cx));
+    let revision = composer.read_with(cx, |composer, _| composer.draft_revision());
+    composer.update(cx, |composer, _| composer.push_image_attachment(PromptImage {
+        data: String::new(), mime_type: "image/png".into(), file_name: None, source_path: None,
+    }));
+    let cleared = composer.update(cx, |composer, cx| {
+        composer.clear_accepted_revision(revision, "original", SubmissionKind::Prompt, cx)
+    });
+    assert!(!cleared);
+    assert_eq!(composer.read_with(cx, |composer, _| composer.attachment_count()), 1);
+}

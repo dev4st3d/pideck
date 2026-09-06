@@ -27,12 +27,13 @@ const MAX_BUFFERED_WRITES: usize = 4 * MAX_RECORD_BYTES;
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 const BRIDGE_ENTRYPOINT: &str = "pi-bridge.mjs";
 const ORCHESTRATION_ADAPTER: &str = "orchestration-adapter.mjs";
-const EMBEDDED_BRIDGE_FILES: [(&str, &[u8]); 6] = [
+const EMBEDDED_BRIDGE_FILES: [(&str, &[u8]); 7] = [
     (
         BRIDGE_ENTRYPOINT,
         include_bytes!("../../bridge/pi-bridge.mjs"),
     ),
     ("jsonl.mjs", include_bytes!("../../bridge/jsonl.mjs")),
+    ("resource-index.mjs", include_bytes!("../../bridge/resource-index.mjs")),
     ("pi-contract.mjs", include_bytes!("../../bridge/pi-contract.mjs")),
     (
         "pi-settings.mjs",

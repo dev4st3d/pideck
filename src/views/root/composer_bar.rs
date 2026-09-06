@@ -10,7 +10,7 @@ use crate::views::composer::ComposerFeedback;
 use gpui::{SharedString, rgba};
 
 /// One vertical rhythm for every control in the prompt tray.
-const TRAY_CONTROL_H: f32 = 28.0;
+const TRAY_CONTROL_H: f32 = 32.0;
 
 fn clear() -> gpui::Rgba {
     rgba(0x0000_0000)
@@ -19,6 +19,7 @@ fn clear() -> gpui::Rgba {
 pub(super) struct ComposerBarParams<'a> {
     pub(super) composer: &'a Entity<Composer>,
     pub(super) saved_input_count: usize,
+    pub(super) draft_feedback: Option<&'a str>,
     pub(super) attachment_picker_pending: bool,
     pub(super) models: &'a ModelRuntimeProjection,
     pub(super) projection: &'a ShellProjection,
@@ -46,6 +47,7 @@ pub(super) fn composer_bar(
     let ComposerBarParams {
         composer,
         saved_input_count,
+        draft_feedback,
         attachment_picker_pending,
         models,
         projection,
@@ -127,6 +129,9 @@ pub(super) fn composer_bar(
     let follow_composer = composer.clone();
 
     div()
+        .flex()
+        .flex_col()
+        .items_center()
         .flex_shrink_0()
         .px(px(theme::STREAM_PAD_X))
         .pt(px(10.0))
@@ -136,6 +141,7 @@ pub(super) fn composer_bar(
         .child(
             div()
                 .w_full()
+                .max_w(px(theme::READING_W - 2.0 * theme::STREAM_PAD_X))
                 .relative()
                 .when_some(slash_completion, |host, completion| {
                     host.child(
@@ -247,13 +253,15 @@ pub(super) fn composer_bar(
                             },
                         )
                         .child(composer.clone())
-                        // Bottom tray: context selects left, one status line in
-                        // the middle, tools and the submit orb at the right.
+                        // Context and delivery stay visible. Status uses its own
+                        // wrapping line rather than competing with the actions.
                         .child(
                             div()
                                 .flex()
                                 .flex_row()
+                                .flex_wrap()
                                 .items_center()
+                                .justify_between()
                                 .gap(px(8.0))
                                 .px(px(10.0))
                                 .pb(px(10.0))
@@ -298,43 +306,6 @@ pub(super) fn composer_bar(
                                 )
                                 .child(
                                     div()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .flex()
-                                        .flex_row()
-                                        .items_center()
-                                        .overflow_hidden()
-                                        .when_some(tray_line, |row, (text, color, mono)| {
-                                            if mono {
-                                                row.child(
-                                                    div()
-                                                        .min_w_0()
-                                                        .font_family(theme::mono())
-                                                        .text_size(theme::text_size(theme::T_TINY))
-                                                        .text_color(color)
-                                                        .overflow_hidden()
-                                                        .text_ellipsis()
-                                                        .whitespace_nowrap()
-                                                        .child(text),
-                                                )
-                                            } else {
-                                                row.child(
-                                                    div()
-                                                        .min_w_0()
-                                                        .font_family(theme::sans())
-                                                        .text_size(theme::text_size(theme::T_UI_SM))
-                                                        .font_weight(FontWeight::SEMIBOLD)
-                                                        .text_color(color)
-                                                        .overflow_hidden()
-                                                        .text_ellipsis()
-                                                        .whitespace_nowrap()
-                                                        .child(text),
-                                                )
-                                            }
-                                        }),
-                                )
-                                .child(
-                                    div()
                                         .flex()
                                         .flex_row()
                                         .items_center()
@@ -366,23 +337,6 @@ pub(super) fn composer_bar(
                                                 view.toggle_composer_enlarged(window, cx);
                                             })),
                                         ))
-                                        .child(tray_icon(
-                                            "prompt-model-settings",
-                                            "icons/cog.svg",
-                                            false,
-                                            true,
-                                            "Model and provider settings",
-                                            None,
-                                            Box::new(cx.listener(|view, _, window, cx| {
-                                                view.show_model_panel(
-                                                    ModelPanel::Settings(
-                                                        ModelSettingsTab::Providers,
-                                                    ),
-                                                    window,
-                                                    cx,
-                                                )
-                                            })),
-                                        ))
                                         .when(running || bash_running, |tray| {
                                             tray.child(div().w(px(6.0))).child(tray_quiet_action(
                                                 "prompt-abort",
@@ -398,7 +352,7 @@ pub(super) fn composer_bar(
                                         .when(running, |tray| {
                                             tray.child(tray_quiet_action(
                                                 "prompt-follow-up",
-                                                "Follow up",
+                                                "Queue",
                                                 can_submit,
                                                 Box::new(move |_, _, cx| {
                                                     follow_composer.update(cx, |composer, cx| {
@@ -408,7 +362,7 @@ pub(super) fn composer_bar(
                                             ))
                                         })
                                         .child(div().w(px(4.0)))
-                                        .child(submit_orb(
+                                        .child(submit_button(
                                             "prompt-submit",
                                             running,
                                             can_submit,
@@ -420,6 +374,17 @@ pub(super) fn composer_bar(
                                         )),
                                 ),
                         )
+                        .when_some(tray_line, |panel, (text, color, mono)| {
+                            panel.child(
+                                div().px(px(14.0)).pb(px(10.0))
+                                    .font_family(if mono { theme::mono() } else { theme::sans() })
+                                    .text_size(theme::text_size(theme::T_UI_SM))
+                                    .text_color(color).child(text),
+                            )
+                        })
+                        .when_some(draft_feedback, |panel, feedback| {
+                            panel.child(draft_storage_notice(feedback, cx))
+                        })
                         .when(
                             extension_ui.widgets.iter().any(|(_, widget)| {
                                 widget.placement == WidgetPlacement::BelowEditor
@@ -436,6 +401,36 @@ pub(super) fn composer_bar(
                         }),
                 ),
         )
+}
+
+/// Shared by the prompt dock and full-page settings, so a failed close never
+/// leaves its recovery action on a hidden screen.
+pub(super) fn draft_storage_notice(feedback: &str, cx: &mut Context<RootView>) -> impl IntoElement {
+    div()
+        .px(px(14.0))
+        .py(px(8.0))
+        .flex()
+        .flex_wrap()
+        .items_center()
+        .justify_between()
+        .gap(px(8.0))
+        .border_t_1()
+        .border_color(theme::edge_soft())
+        .font_family(theme::sans())
+        .text_size(theme::text_size(theme::T_UI_SM))
+        .text_color(theme::data())
+        .child(div().min_w_0().flex_1().child(feedback.to_owned()))
+        .child(tray_quiet_action(
+            "draft-status-retry", "Retry storage", true,
+            Box::new(cx.listener(|view, _, window, cx| view.retry_draft_storage(window, cx))),
+        ))
+        .child(tray_quiet_action(
+            "draft-status-dismiss", "Dismiss", true,
+            Box::new(cx.listener(|view, _, _, cx| {
+                view.draft_feedback = None;
+                cx.notify();
+            })),
+        ))
 }
 
 /// Tray select trigger: a quiet, borderless-looking chip until hovered or
@@ -593,54 +588,43 @@ fn tray_quiet_action(
         .child(label)
 }
 
-/// The primary affordance: a round send button. Filled while it can act,
-/// quiet while the draft is empty.
-fn submit_orb(
+/// A labeled primary action. Delivery mode is legible without a tooltip.
+fn submit_button(
     id: impl Into<SharedString>,
     running: bool,
     can_submit: bool,
     on_click: controls::ClickHandler,
 ) -> impl IntoElement {
+    let ink = if can_submit { theme::canvas() } else { theme::smoke() };
     div()
         .id(id.into())
-        .size(px(TRAY_CONTROL_H))
-        .rounded_full()
-        .flex()
-        .items_center()
-        .justify_center()
-        .flex_shrink_0()
-        .bg(if can_submit {
-            theme::signal()
-        } else {
-            theme::panel_lift()
-        })
+        .h(px(TRAY_CONTROL_H))
+        .min_w(px(76.0))
+        .px(px(12.0))
+        .rounded(px(theme::RADIUS))
+        .border_1()
+        .border_color(if can_submit { theme::signal() } else { clear() })
+        .flex().items_center().justify_center().gap(px(6.0)).flex_shrink_0()
+        .font_family(theme::sans())
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_size(theme::text_size(theme::T_UI_SM))
+        .text_color(ink)
+        .bg(if can_submit { theme::signal() } else { theme::panel_lift() })
         .when(can_submit, |button| {
-            button
-                .tab_index(0)
-                .cursor_pointer()
+            button.tab_index(0).cursor_pointer()
                 .hover(|button| button.bg(theme::signal_hot()))
-                .focus(|button| button.bg(theme::signal_hot()))
+                .focus(|button| button.border_color(theme::bone()))
                 .active(|button| button.bg(theme::signal_deep()))
                 .on_click(move |event, window, cx| on_click(event, window, cx))
         })
         .tooltip(controls::text_tooltip(
             if can_submit {
-                if running { "Steer" } else { "Send" }
-            } else {
-                "Write a prompt or attach a file first"
-            },
+                if running { "Steer the running agent" } else { "Send prompt" }
+            } else { "Write a prompt or attach a file first" },
             Some("Enter"),
         ))
-        .child(
-            svg()
-                .path("icons/arrow-up.svg")
-                .size(px(13.0))
-                .text_color(if can_submit {
-                    theme::canvas()
-                } else {
-                    theme::smoke()
-                }),
-        )
+        .child(if running { "Steer" } else { "Send" })
+        .child(svg().path("icons/arrow-up.svg").size(px(13.0)).text_color(ink))
 }
 
 fn short_model_label(

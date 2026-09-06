@@ -17,7 +17,7 @@ pub(super) struct SessionRailParams<'a> {
     pub(super) rail_open: bool,
 }
 
-/// Session facts for the left rail. Not an overlay — the transcript keeps its width.
+/// A right-hand companion. Project navigation no longer changes identity.
 pub(super) fn session_rail(
     params: SessionRailParams<'_>,
     cx: &mut Context<RootView>,
@@ -46,6 +46,20 @@ pub(super) fn session_rail(
         .overflow_hidden()
         .child(
             div()
+                .h(px(48.0))
+                .px(px(14.0))
+                .flex_shrink_0()
+                .flex()
+                .items_center()
+                .justify_between()
+                .child(controls::section_label("Session inspector"))
+                .child(controls::quiet_button(
+                    "close-session-inspector", "Close", true,
+                    Box::new(cx.listener(|view, _, window, cx| view.toggle_inspector(window, cx))),
+                )),
+        )
+        .child(
+            div()
                 .id("session-rail-scroll")
                 .w_full()
                 .min_w_0()
@@ -56,8 +70,8 @@ pub(super) fn session_rail(
                 .child(
                     div()
                         .w_full()
-                        .px(px(10.0))
-                        .pt(px(10.0))
+                        .px(px(14.0))
+                        .pt(px(4.0))
                         .pb(px(24.0))
                         .flex()
                         .flex_col()

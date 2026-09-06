@@ -1,4 +1,4 @@
-use super::composer_bar::{ComposerBarParams, composer_bar};
+use super::composer_bar::{ComposerBarParams, composer_bar, draft_storage_notice};
 use super::inspector::{SessionRailParams, session_rail, subagent_dialog};
 use super::model_panels::{
     ModelSettingsPanelParams, ProviderAuthModalParams, model_settings_panel, provider_auth_modal,
@@ -18,6 +18,12 @@ use crate::views::diff_summary::diff_overlay;
 impl Render for RootView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         theme::set_active(self.active_theme);
+        let layout = self.workspace_layout(window);
+        if !matches!(self.model_panel, Some(ModelPanel::Settings(_))) && ((!layout.navigation && self.sidebar_tree_focus.is_focused(window))
+            || (!layout.inspector && self.inspector_focus.is_focused(window))
+            || (!layout.history && self.history_focus.is_focused(window))) {
+            window.focus(&self.composer.read(cx).focus_handle(cx));
+        }
         if self.terminal_open {
             let max_terminal_height =
                 (f32::from(window.viewport_size().height) - theme::TITLE_H - 210.0).max(180.0);
@@ -102,7 +108,7 @@ impl Render for RootView {
                         && catalog.current_session_file.is_some()
                         && !catalog.switching,
                     theme_menu_open: self.theme_menu_open,
-                    sidebar_open: self.sidebar_open,
+                    sidebar_open: layout.navigation,
                     terminal_open: self.terminal_open,
                     inspector_open: self.session_rail_visible(),
                     workspace_diff_available: self.workspace_diff.is_some(),
@@ -111,6 +117,11 @@ impl Render for RootView {
                 },
                 cx,
             ))
+            .when(matches!(self.model_panel, Some(ModelPanel::Settings(_))), |shell| {
+                shell.when_some(self.draft_feedback.as_deref(), |shell, feedback| {
+                    shell.child(draft_storage_notice(feedback, cx))
+                })
+            })
             .child(
                 div()
                     .flex_1()
@@ -118,10 +129,8 @@ impl Render for RootView {
                     .flex()
                     .flex_row()
                     .child(workspace_rail(
-                        self.sidebar_open,
-                        self.sidebar_motion_key,
-                        match self.rail_mode {
-                            RailMode::Places => sessions_panel(
+                        layout.navigation,
+                        sessions_panel(
                                 SessionsPanelParams {
                                     catalog,
                                     projects: &self.projects,
@@ -133,7 +142,7 @@ impl Render for RootView {
                                     project_switch_enabled,
                                     conversation: &self.conversation,
                                     history_open: self.history_open,
-                                    sidebar_open: self.sidebar_open,
+                                    sidebar_open: layout.navigation,
                                     cursor: self.sidebar_cursor.as_ref(),
                                     // Strong cursor ring is keyboard-only (:focus-visible).
                                     tree_focused: self.sidebar_tree_focus.is_focused(window)
@@ -142,29 +151,10 @@ impl Render for RootView {
                                     scroll: &self.sessions_scroll,
                                 },
                                 cx,
-                            )
-                            .into_any_element(),
-                            RailMode::Session => session_rail(
-                                SessionRailParams {
-                                    projection,
-                                    conversation: &self.conversation,
-                                    orchestration,
-                                    selected_task_id: self.selected_task_id.as_deref(),
-                                    goal_edit_composer: &self.goal_edit_composer,
-                                    delivery_focus: self.delivery_focus,
-                                    usage_tooltip_hovered: self.usage_tooltip_hovered,
-                                    usage_tooltip_visible: self.usage_tooltip_visible,
-                                    usage_tooltip_epoch: self.usage_tooltip_epoch,
-                                    inspector_focus: &self.inspector_focus,
-                                    rail_open: self.sidebar_open,
-                                },
-                                cx,
-                            )
-                            .into_any_element(),
-                        },
+                            ),
                     ))
                     .when(
-                        self.history_open && self.rail_mode == RailMode::Places,
+                        layout.history,
                         |layout| {
                             layout.child(history_panel(
                                 HistoryPanelParams {
@@ -226,6 +216,7 @@ impl Render for RootView {
                                 ComposerBarParams {
                                     composer: &self.composer,
                                     saved_input_count: self.saved_input_count(),
+                                    draft_feedback: self.draft_feedback.as_deref(),
                                     attachment_picker_pending: self.attachment_picker_pending,
                                     models,
                                     projection,
@@ -264,6 +255,33 @@ impl Render for RootView {
                                     )
                             })
                             .into_any_element(),
+                    })
+                    .when(layout.inspector, |row| {
+                        row.child(
+                            div()
+                                .w(px(theme::INSPECT_W))
+                                .h_full()
+                                .flex_shrink_0()
+                                .border_l_1()
+                                .border_color(theme::edge_soft())
+                                .bg(theme::floor())
+                                .child(session_rail(
+                                    SessionRailParams {
+                                        projection,
+                                        conversation: &self.conversation,
+                                        orchestration,
+                                        selected_task_id: self.selected_task_id.as_deref(),
+                                        goal_edit_composer: &self.goal_edit_composer,
+                                        delivery_focus: self.delivery_focus,
+                                        usage_tooltip_hovered: self.usage_tooltip_hovered,
+                                        usage_tooltip_visible: self.usage_tooltip_visible,
+                                        usage_tooltip_epoch: self.usage_tooltip_epoch,
+                                        inspector_focus: &self.inspector_focus,
+                                        rail_open: true,
+                                    },
+                                    cx,
+                                )),
+                        )
                     }),
             )
             .when_some(self.activity_detail.clone(), |shell, detail| {

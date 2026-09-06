@@ -4,17 +4,17 @@ Companion to the root [README](../README.md). This page covers launch policy, ke
 
 ## Launch policy
 
-Install the tested Pi package:
+Install the pinned Pi package (real-Pi execution was not certified in this source delivery):
 
 ```powershell
 npm install -g @earendil-works/pi-coding-agent@0.85.1
-cargo run
+cargo run --locked
 ```
 
 If Cargo is not on `PATH` on Windows:
 
 ```powershell
-& "$env:USERPROFILE\.cargo\bin\cargo.exe" run
+& "$env:USERPROFILE\.cargo\bin\cargo.exe" run --locked
 ```
 
 The launch folder is added to the persistent project sidebar. The app reopens the last available active project and stores project expansion and last-thread state in `pideck-projects.json` under Pi's agent directory.
@@ -64,11 +64,21 @@ If no model is available, open **Settings → Providers**, authenticate, refresh
 | Next focus | `Tab` |
 | Previous focus | `Shift+Tab` |
 
-Typography uses installed system fonts. Open `/settings` and choose separate Main, Sans, and Mono families in the Type tab; selections apply immediately and persist locally. Shell theme picks from the title-bar theme menu also apply immediately and persist in the same local settings file.
+Typography uses installed system fonts. Open `/settings` and choose separate Main, Sans, and Mono families in the Typography category; selections apply immediately and persist locally. Shell theme picks from the title-bar theme menu also apply immediately and persist in the same local settings file.
 
 ## Shell capabilities
 
 Workers own discovery, readiness, hydration, prompts, streaming, tools, retries, compaction, session catalogs, direct Bash, SDK session/model/resource operations, orchestration, command discovery, and shutdown. The GPUI controller observes normalized state and never performs I/O from `render`. Surfaces show only live values or explicit Loading / Awaiting / Unknown / stale / stopped / error.
+
+### Workbench shell and local state
+
+Graphite and Paper are the supported appearances. The left project/session column, center conversation and right inspector use a common semantic palette and type scale. The transcript has a 960px maximum reading measure. At the 800px logical window minimum, navigation yields to an open inspector/history companion rather than compressing the center below its 480px reservation. History and inspector cannot occupy the workspace together. Settings retain their own vertical category list.
+
+`services/accessibility.rs` reads the Windows client-area animation preference. Reduced motion removes synthetic wheel easing and transient chrome animation; this still needs native Windows verification.
+
+The local draft writer checkpoints session-owned text, selection, undo/redo, attachments, recovered inputs and transcript position every two seconds when changed. Draft files are app-owned plaintext beside settings, not Pi session data. A late disk restore cannot replace newer typing. Normal close flushes asynchronously; failures keep the editor open. A pending acknowledgement is revision-fenced across text and attachments. Runtime reuse/eviction waits for draft recovery and a checkpoint accepted by the bounded writer. Attachment picking/loading blocks session switches until it finishes.
+
+See [Local drafts and recovery](../README.md#local-drafts-and-recovery) for storage behavior and plaintext-data implications. No native performance or rendered-UI certification is implied by this architecture map.
 
 ### Workspace and sessions
 
@@ -171,7 +181,14 @@ Main-session queue items are authoritative and read-only (stock Pi RPC has no re
 | `src/views/conversation.rs`, `src/views/markdown.rs` | Turn-grouped live transcript, selectable text, safe CommonMark, metadata, notices |
 | `src/views/tool_card.rs` | Generic tool/Bash payload normalization, previews, image/diff, copy, output-path actions |
 | `src/views/diff_summary.rs` | Response-tail changed-file disclosure and bounded file-oriented diff viewer |
-| `src/views/composer/` | Native GPUI input handler, text buffer, multiline layout/paint |
+| `src/state/editor.rs` | UI-independent Unicode editing, span-based undo/redo, revisions and validated recovery |
+| `src/state/drafts.rs`, `src/services/draft_store.rs` | Versioned session-owned checkpoints and bounded coalescing I/O worker |
+| `src/services/atomic_file.rs` | Create-new sibling writes and replacement without deleting the previous destination |
+| `src/state/workspace_layout.rs` | Logical-width column resolution and geometric transcript-tail policy |
+| `src/views/root/drafts.rs` | Runtime-fenced restore, checkpoint scheduling and asynchronous close barrier |
+| `src/views/composer/` | Native GPUI input handler, multiline layout/paint and attachment revision ownership |
+| `bridge/resource-index.mjs` | Per-inventory identity/path/provenance indexes; preserves separate named exports |
+| `src/services/accessibility.rs` | Windows reduced-motion preference boundary |
 | `src/views/controls.rs` | Focus-visible recovery control and inspector rows |
 
 ### Runtime pool and recovery

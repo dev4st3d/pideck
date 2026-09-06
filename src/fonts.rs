@@ -177,24 +177,10 @@ pub fn family(role: FontRole) -> SharedString {
 }
 
 pub fn save(path: &Path, preferences: &FontPreferences, theme: Option<&str>) -> io::Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
     let document = SettingsDocument::from_parts(preferences, theme);
     let bytes = serde_json::to_vec_pretty(&document)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-    let temporary = path.with_extension("json.tmp");
-    fs::write(&temporary, bytes)?;
-    if let Err(error) = fs::rename(&temporary, path) {
-        if path.exists() {
-            fs::remove_file(path)?;
-            fs::rename(&temporary, path)
-        } else {
-            Err(error)
-        }
-    } else {
-        Ok(())
-    }
+    crate::services::atomic_file::write(path, &bytes)
 }
 
 fn load(path: &Path) -> io::Result<SettingsDocument> {

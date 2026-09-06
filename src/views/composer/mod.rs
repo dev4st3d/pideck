@@ -1,4 +1,3 @@
-mod buffer;
 mod element;
 mod render;
 #[cfg(test)]
@@ -16,7 +15,8 @@ use gpui::{
 };
 use image::GenericImageView;
 
-use self::buffer::TextBuffer;
+use crate::state::editor::TextBuffer;
+use crate::state::drafts::{DraftRevision, EditorStamp, StoredEditor};
 use self::element::EditorLayout;
 use crate::actions::{
     AbortRun, AcceptInput, ComposerBackspace, ComposerCopy, ComposerCut, ComposerDelete,
@@ -30,6 +30,7 @@ use crate::attachments::{
     MAX_IMAGE_ATTACHMENTS, MAX_IMAGE_BYTES, MAX_TOTAL_TEXT_SNAPSHOT_BYTES, PromptFile,
 };
 use crate::state::runtime::{PromptImage, RecoveredInput, SubmissionKind};
+use crate::theme;
 /// Pixel edge length for cached square attachment thumbs (display is smaller).
 const ATTACHMENT_THUMB_PX: u32 = 96;
 /// Expand/collapse the multiline input between single-line and multi-line heights.
@@ -140,10 +141,47 @@ pub(super) struct InputHeightMotion {
 #[derive(Clone)]
 pub(crate) struct ComposerDraftSnapshot {
     buffer: TextBuffer,
+    attachment_revision: u64,
     thumbnails: Vec<Option<Arc<Image>>>,
     scroll_y: Pixels,
     preferred_x: Option<Pixels>,
     enlarged: bool,
+}
+
+impl ComposerDraftSnapshot {
+    pub(crate) fn stamp(&self) -> EditorStamp {
+        EditorStamp {
+            revision: DraftRevision { text: self.buffer.revision(), attachments: self.attachment_revision },
+            selection: self.buffer.selection().clone(), reversed: self.buffer.selection_reversed(),
+            scroll: f32::from(self.scroll_y).to_bits(), preferred_x: self.preferred_x.map(|x| f32::from(x).to_bits()),
+            enlarged: self.enlarged,
+        }
+    }
+
+    pub(crate) fn stored(&self) -> StoredEditor {
+        let mut buffer = self.buffer.clone();
+        // Finalize only the copied composition. Saving must not steal live IME ownership.
+        buffer.unmark_text();
+        StoredEditor {
+            buffer,
+            attachment_revision: self.attachment_revision,
+            scroll_y: f32::from(self.scroll_y),
+            preferred_x: self.preferred_x.map(f32::from),
+            enlarged: self.enlarged,
+        }
+    }
+
+    /// Call on the restore worker, not the event loop: thumbnails decode images.
+    pub(crate) fn from_stored(editor: StoredEditor, images: &[PromptImage]) -> Self {
+        Self {
+            buffer: editor.buffer,
+            attachment_revision: editor.attachment_revision,
+            thumbnails: images.iter().map(attachment_thumbnail).collect(),
+            scroll_y: px(editor.scroll_y),
+            preferred_x: editor.preferred_x.map(px),
+            enlarged: editor.enlarged,
+        }
+    }
 }
 
 pub struct Composer {
@@ -152,6 +190,7 @@ pub struct Composer {
     chrome: ComposerChrome,
     pub(super) focus_handle: FocusHandle,
     buffer: TextBuffer,
+    attachment_revision: u64,
     images: Vec<PromptImage>,
     files: Vec<PromptFile>,
     /// Compressed square previews parallel to `images` (None when decode fails).
@@ -198,6 +237,7 @@ impl Composer {
             chrome: ComposerChrome::Full,
             focus_handle: cx.focus_handle(),
             buffer: TextBuffer::default(),
+            attachment_revision: 0,
             images: Vec::new(),
             files: Vec::new(),
             thumbnails: Vec::new(),
@@ -491,7 +531,7 @@ impl Composer {
     }
 
     fn begin_height_motion(&mut self, from: f32, to: f32, cx: &mut Context<Self>) {
-        if (from - to).abs() < 0.5 {
+        if !theme::motion_enabled() || (from - to).abs() < 0.5 {
             self.input_height_motion = None;
             cx.notify();
             return;
@@ -556,12 +596,14 @@ impl Composer {
         let token = self.next_attach_token();
         self.attach_tokens.push(token);
         self.images.push(prompt);
+        self.attachment_revision = self.attachment_revision.wrapping_add(1);
     }
 
     fn push_file_attachment(&mut self, file: PromptFile) {
         let token = self.next_attach_token();
         self.file_attach_tokens.push(token);
         self.files.push(file);
+        self.attachment_revision = self.attachment_revision.wrapping_add(1);
     }
 
     pub fn replace_image(
@@ -585,6 +627,7 @@ impl Composer {
 
         let thumb = attachment_thumbnail(&image);
         self.images[index] = image;
+        self.attachment_revision = self.attachment_revision.wrapping_add(1);
         self.set_thumbnail_slot(index, thumb);
         // Keep attach_token stable so pencil edits do not re-pop the chip.
         self.ensure_attach_token_slot(index);
@@ -677,9 +720,18 @@ impl Composer {
         self.after_edit(cx);
     }
 
+    pub(crate) fn draft_stamp(&self) -> EditorStamp {
+        EditorStamp {
+            revision: self.draft_revision(), selection: self.buffer.selection().clone(),
+            reversed: self.buffer.selection_reversed(), scroll: f32::from(self.scroll_y).to_bits(),
+            preferred_x: self.preferred_x.map(|x| f32::from(x).to_bits()), enlarged: self.input_enlarged,
+        }
+    }
+
     pub(crate) fn snapshot_draft(&self) -> ComposerDraftSnapshot {
         ComposerDraftSnapshot {
             buffer: self.buffer.clone(),
+            attachment_revision: self.attachment_revision,
             thumbnails: self.thumbnails.clone(),
             scroll_y: self.scroll_y,
             preferred_x: self.preferred_x,
@@ -695,6 +747,7 @@ impl Composer {
         cx: &mut Context<Self>,
     ) {
         self.buffer = snapshot.buffer;
+        self.attachment_revision = snapshot.attachment_revision;
         self.buffer.unmark_text();
         self.thumbnails = snapshot.thumbnails;
         self.images = images;
@@ -781,6 +834,7 @@ impl Composer {
         self.file_attach_tokens = files.iter().map(|_| 0).collect();
         self.images = images;
         self.files = files;
+        self.attachment_revision = self.attachment_revision.wrapping_add(1);
         self.update_disabled();
         cx.notify();
     }
@@ -809,6 +863,7 @@ impl Composer {
     /// Whether the primary submit affordance is live right now.
     pub(crate) fn can_submit(&self) -> bool {
         !self.disabled
+            && !matches!(self.feedback, ComposerFeedback::Pending(_))
             && (self.allow_empty_submit
                 || !self.buffer.text().trim().is_empty()
                 || self.has_attachments())
@@ -864,6 +919,21 @@ impl Composer {
         cleared
     }
 
+    pub(crate) fn draft_revision(&self) -> DraftRevision {
+        DraftRevision { text: self.buffer.revision(), attachments: self.attachment_revision }
+    }
+
+    pub(crate) fn clear_accepted_revision(
+        &mut self, expected: DraftRevision, expected_text: &str,
+        kind: SubmissionKind, cx: &mut Context<Self>,
+    ) -> bool {
+        if self.draft_revision() != expected {
+            self.set_feedback(ComposerFeedback::Accepted(kind), cx);
+            return false;
+        }
+        self.clear_accepted(expected_text, kind, cx)
+    }
+
     pub fn clear_accepted(
         &mut self,
         expected_draft: &str,
@@ -877,6 +947,7 @@ impl Composer {
         self.feedback = ComposerFeedback::Accepted(kind);
         self.update_disabled();
         if cleared {
+            self.attachment_revision = self.attachment_revision.wrapping_add(1);
             self.images.clear();
             self.files.clear();
             self.thumbnails.clear();
@@ -899,10 +970,10 @@ impl Composer {
                 | ComposerAvailability::BashCancelling
         ) || matches!(
             self.feedback,
-            ComposerFeedback::Pending(_)
-                | ComposerFeedback::BashRunning { .. }
-                | ComposerFeedback::LoadingAttachments
-        );
+            ComposerFeedback::BashRunning { .. } | ComposerFeedback::LoadingAttachments
+        ) || (self.chrome != ComposerChrome::Full
+            && matches!(self.feedback, ComposerFeedback::Pending(_)));
+
     }
 
     fn backspace(&mut self, _: &ComposerBackspace, window: &mut Window, cx: &mut Context<Self>) {
@@ -1122,6 +1193,7 @@ impl Composer {
             return;
         }
         let image = self.images.remove(index);
+        self.attachment_revision = self.attachment_revision.wrapping_add(1);
         if index < self.thumbnails.len() {
             self.thumbnails.remove(index);
         }
@@ -1139,6 +1211,7 @@ impl Composer {
             return;
         }
         self.files.remove(index);
+        self.attachment_revision = self.attachment_revision.wrapping_add(1);
         if index < self.file_attach_tokens.len() {
             self.file_attach_tokens.remove(index);
         }
@@ -1208,7 +1281,7 @@ impl Composer {
             cx.emit(ComposerEvent::CommandAccept);
             return;
         }
-        if self.disabled {
+        if self.disabled || matches!(self.feedback, ComposerFeedback::Pending(_)) {
             return;
         }
         // Live filter fields have no submit action; Enter is a no-op.

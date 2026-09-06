@@ -1,62 +1,30 @@
 use std::time::Duration;
 
 use gpui::{
-    Animation, AnimationExt, AnyElement, SharedString, deferred, ease_out_quint, relative, svg,
+    AnyElement, SharedString, deferred, relative, svg,
 };
 
 use super::shared::{action_id, runtime_operation_label, short_path};
 use super::*;
 
-/// Subtle open/close duration; keep under 300ms per GPUI motion guidance.
-const SIDEBAR_MOTION_MS: u64 = 220;
-
-/// One left rail. Width is shared by Places and Session so the transcript
-/// never reflows when the mode flips.
-pub(super) fn workspace_rail(open: bool, motion_key: u64, body: impl IntoElement) -> AnyElement {
-    let expanded_w = theme::SIDE_W;
-    let target_w = if open { expanded_w } else { 0.0 };
-    let shell = div()
+/// Stable navigation: no animated width reflow while editing or selecting text.
+pub(super) fn workspace_rail(open: bool, body: impl IntoElement) -> AnyElement {
+    div()
         .id("workspace-rail")
+        .w(px(if open { theme::SIDE_W } else { 0.0 }))
         .h_full()
         .flex_shrink_0()
         .overflow_hidden()
         .child(
             div()
-                .id("workspace-rail-body")
-                .w(px(expanded_w))
+                .w(px(theme::SIDE_W))
                 .h_full()
-                .flex()
-                .flex_col()
-                .bg(theme::canvas())
+                .bg(theme::floor())
                 .border_r_1()
                 .border_color(theme::edge_soft())
                 .child(body),
-        );
-
-    if motion_key == 0 {
-        shell.w(px(target_w)).into_any_element()
-    } else {
-        shell
-            .with_animation(
-                ("workspace-rail", motion_key),
-                Animation::new(Duration::from_millis(SIDEBAR_MOTION_MS))
-                    .with_easing(ease_out_quint()),
-                move |panel, delta| {
-                    let (from, to) = if open {
-                        (0.0, expanded_w)
-                    } else {
-                        (expanded_w, 0.0)
-                    };
-                    let fade = if open {
-                        0.55 + 0.45 * delta
-                    } else {
-                        1.0 - 0.45 * delta
-                    };
-                    panel.w(px(from + (to - from) * delta)).opacity(fade)
-                },
-            )
-            .into_any_element()
-    }
+        )
+        .into_any_element()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -214,7 +182,7 @@ pub(super) fn titlebar(params: TitlebarParams<'_>, cx: &mut Context<RootView>) -
                                 .min_w_0()
                                 .font_family(theme::sans())
                                 .text_size(theme::text_size(theme::T_TITLE))
-                                .font_weight(FontWeight::BOLD)
+                                .font_weight(FontWeight::MEDIUM)
                                 .text_color(theme::bone())
                                 .overflow_hidden()
                                 .text_ellipsis()
@@ -267,7 +235,6 @@ pub(super) fn titlebar(params: TitlebarParams<'_>, cx: &mut Context<RootView>) -
         )
         .child(
             div()
-                .min_w(px(290.0))
                 .flex()
                 .flex_row()
                 .items_center()
@@ -306,7 +273,7 @@ pub(super) fn titlebar(params: TitlebarParams<'_>, cx: &mut Context<RootView>) -
                     ChromeIconSpec {
                         id: "toggle-inspector",
                         icon_path: "icons/inspector.svg",
-                        tooltip_label: "Session",
+                        tooltip_label: "Session inspector",
                         tooltip_hint: Some("Ctrl+I"),
                         on: inspector_open,
                         enabled: true,

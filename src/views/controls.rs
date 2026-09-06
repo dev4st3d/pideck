@@ -182,7 +182,7 @@ pub fn square_status_indicator(
     cycle: Duration,
     color: gpui::Rgba,
 ) -> gpui::AnyElement {
-    if !animated {
+    if !animated || !theme::motion_enabled() {
         return div()
             .relative()
             .flex_shrink_0()
@@ -876,25 +876,30 @@ pub fn session_usage(params: SessionUsageParams) -> impl IntoElement {
         )
         .when(tooltip_visible, |summary| {
             let appearing = tooltip_hovered;
-            summary.child(deferred(
+            let tooltip = tooltip
+                .element()
+                .id("session-usage-tooltip-surface")
+                .absolute()
+                .top(relative(1.0))
+                .left_0()
+                .right_0()
+                .mt(px(6.0))
+                .occlude()
+                .on_hover(move |hovered, window, cx| (tooltip_hover)(hovered, window, cx));
+            let tooltip = if theme::motion_enabled() {
                 tooltip
-                    .element()
-                    .id("session-usage-tooltip-surface")
-                    .absolute()
-                    .top(relative(1.0))
-                    .left_0()
-                    .right_0()
-                    .mt(px(6.0))
-                    .occlude()
-                    .on_hover(move |hovered, window, cx| (tooltip_hover)(hovered, window, cx))
                     .with_animation(
                         ("session-usage-tooltip", tooltip_epoch),
                         tooltip_animation,
                         move |tooltip, progress| {
                             tooltip.opacity(if appearing { progress } else { 1.0 - progress })
                         },
-                    ),
-            ))
+                    )
+                    .into_any_element()
+            } else {
+                tooltip.into_any_element()
+            };
+            summary.child(deferred(tooltip))
         })
 }
 

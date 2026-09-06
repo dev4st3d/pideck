@@ -75,6 +75,7 @@ use crate::views::conversation::{
 use crate::views::terminal::{TerminalPanelEvent, TerminalView};
 
 mod composer_bar;
+mod drafts;
 mod inspector;
 mod model_panels;
 mod overlays;
@@ -88,6 +89,7 @@ use overlays::{annotate_prompt_image, extension_dialog_key, single_line_title, w
 struct PendingDraft {
     request: crate::services::rpc::RequestId,
     text: String,
+    revision: crate::state::drafts::DraftRevision,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -114,6 +116,7 @@ struct ThreadUiState {
     scroll: Option<ListOffset>,
     following: Option<bool>,
     saved_inputs: VecDeque<crate::state::runtime::RecoveredInput>,
+    recovery_revision: u64,
     draft: String,
     images: Vec<PromptImage>,
     files: Vec<PromptFile>,
@@ -157,6 +160,11 @@ struct ThreadRuntimeSlot {
     projection: ThreadRuntimeProjection,
     last_activated: u64,
     ui: ThreadUiState,
+    draft_owner: Option<crate::services::draft_store::DraftOwner>,
+    draft_ready: bool,
+    draft_loading: bool,
+    draft_load_error: Option<String>,
+    last_checkpoint: Option<drafts::CheckpointStamp>,
 }
 
 const MAX_LIVE_THREAD_RUNTIMES: usize = 8;
@@ -314,13 +322,6 @@ enum DeliveryFocus {
     FollowUp,
 }
 
-/// Left rail content. The conversation always keeps the remaining width.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RailMode {
-    Places,
-    Session,
-}
-
 struct RenderProjections {
     shell: ShellProjection,
     catalog: CatalogProjection,
@@ -374,6 +375,7 @@ pub struct RootView {
     font_role: FontRole,
     font_feedback: Option<String>,
     font_save_generation: u64,
+    font_save_task: Option<Task<()>>,
     app_update: PiDeckUpdateState,
     command_palette_open: bool,
     hotkey_help_open: bool,
@@ -441,6 +443,11 @@ pub struct RootView {
     project_scan_task: Option<Task<()>>,
     project_save_generation: u64,
     project_save_task: Option<Task<()>>,
+    draft_store: Option<Arc<crate::services::draft_store::DraftStore>>,
+    draft_feedback: Option<String>,
+    draft_checkpoint_task: Option<Task<()>>,
+    close_pending: bool,
+    close_after_restore: bool,
     sessions_scroll: ScrollHandle,
     sessions_scroll_motion: ConversationScrollMotion,
     subagent_dialog_focus: FocusHandle,
@@ -449,12 +456,10 @@ pub struct RootView {
     history: HistoryBrowser,
     history_focus: FocusHandle,
     history_open: bool,
-    /// Left rail visibility (animated open/close). Both modes hide when closed.
+    /// Navigation preference is preserved when a narrow window temporarily hides it.
     sidebar_open: bool,
-    /// Bumps on each rail open/close so width animation only runs after user action.
-    sidebar_motion_key: u64,
-    /// Places or Session. Restored when the rail reopens with Ctrl+B.
-    rail_mode: RailMode,
+    /// Optional right companion panel; never replaces the project navigation.
+    inspector_open: bool,
     /// Roving keyboard cursor inside the workspace tree (None until navigated).
     sidebar_cursor: Option<shell::SidebarNode>,
     /// Focus for the sidebar's single tree tab stop.
@@ -634,9 +639,22 @@ impl RootView {
         );
         let conversation_follow = Rc::new(Cell::new(true));
         conversation_list_state.set_scroll_handler({
-            let conversation_follow = Rc::clone(&conversation_follow);
-            move |event, _, _| {
-                conversation_follow.set(event.visible_range.end >= event.count);
+            let root = cx.weak_entity();
+            move |_, _, cx| {
+                let root = root.clone();
+                // ListState holds a mutable RefCell borrow while calling this.
+                // Defer geometry reads, and retain only a weak root (no cycle).
+                cx.defer(move |cx| {
+                    let _ = root.update(cx, |view, cx| {
+                        let list = &view.conversation_list_state;
+                        let max = f32::from(list.max_offset_for_scrollbar().height);
+                        let offset = f32::from(-list.scroll_px_offset_for_scrollbar().y);
+                        let following = crate::state::workspace_layout::at_transcript_tail(offset, max);
+                        if view.conversation_follow.replace(following) != following {
+                            cx.notify();
+                        }
+                    });
+                });
             }
         });
         conversation_list_state.scroll_to(ListOffset {
@@ -734,6 +752,11 @@ impl RootView {
         let initial_projection = controller.read(cx).thread_runtime_projection();
         let mut runtime_observations = HashMap::new();
         runtime_observations.insert(initial_runtime_id, controller_observation);
+        let draft_directory = font_catalog.settings_path.parent().unwrap_or(std::path::Path::new(".")).join("drafts-v1");
+        let (draft_store, draft_feedback) = match crate::services::draft_store::DraftStore::new(draft_directory) {
+            Ok(store) => (Some(Arc::new(store)), None),
+            Err(error) => (None, Some(format!("Local draft storage is unavailable: {error}"))),
+        };
         let mut view = Self {
             controller: controller.clone(),
             render_projections,
@@ -763,6 +786,7 @@ impl RootView {
             font_catalog,
             font_role: FontRole::Sans,
             font_save_generation: 0,
+            font_save_task: None,
             app_update: PiDeckUpdateState::Idle,
             command_palette_open: false,
             hotkey_help_open: false,
@@ -821,6 +845,8 @@ impl RootView {
                 projection: initial_projection,
                 last_activated: 1,
                 ui: ThreadUiState::default(),
+                draft_owner: None, draft_ready: false, draft_loading: false,
+                draft_load_error: None, last_checkpoint: None,
             }],
             runtime_observations,
             active_runtime_id: initial_runtime_id,
@@ -836,6 +862,11 @@ impl RootView {
             project_scan_task: None,
             project_save_generation: 0,
             project_save_task: None,
+            draft_store,
+            draft_feedback,
+            draft_checkpoint_task: None,
+            close_pending: false,
+            close_after_restore: false,
             sessions_scroll: ScrollHandle::new(),
             sessions_scroll_motion: ConversationScrollMotion::default(),
             subagent_dialog_focus,
@@ -845,8 +876,7 @@ impl RootView {
             history_focus,
             history_open: false,
             sidebar_open: true,
-            sidebar_motion_key: 0,
-            rail_mode: RailMode::Places,
+            inspector_open: false,
             sidebar_cursor: None,
             sidebar_tree_pointer_focus: false,
             sidebar_tree_focus: cx.focus_handle(),
@@ -909,6 +939,7 @@ impl RootView {
             view.persist_projects(cx);
         }
         view.check_for_app_update(cx);
+        view.start_draft_checkpoints(cx);
         view
     }
 
@@ -918,15 +949,19 @@ impl RootView {
     }
 
     fn toggle_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.sidebar_open = !self.sidebar_open;
-        self.sidebar_motion_key = self.sidebar_motion_key.wrapping_add(1);
+        if self.sidebar_open && !self.workspace_layout(window).navigation {
+            self.inspector_open = false;
+            self.history_open = false;
+        } else {
+            self.sidebar_open = !self.sidebar_open;
+        }
         if !self.sidebar_open {
             // History sits beside Places; hide it when the rail closes.
             self.history_open = false;
             self.history_confirmation = None;
             self.hovered_thread_key = None;
             // Never leave focus parked on chrome that just became invisible.
-            if self.sidebar_tree_focus.is_focused(window) || self.inspector_focus.is_focused(window)
+            if self.sidebar_tree_focus.is_focused(window)
             {
                 window.focus(&self.focus_handle);
             }
@@ -948,7 +983,6 @@ impl RootView {
             return;
         }
         self.sidebar_open = true;
-        self.sidebar_motion_key = self.sidebar_motion_key.wrapping_add(1);
     }
 
     /// Painted workspace rows in scroll order; shared with the sidebar render
@@ -1175,42 +1209,42 @@ impl RootView {
     }
 
     fn terminal_size(&self, window: &Window) -> TerminalSize {
-        let mut width = f32::from(window.viewport_size().width);
-        if self.sidebar_open {
-            width -= theme::SIDE_W;
-        }
-        if self.history_open {
-            width -= theme::HISTORY_W;
-        }
+        let width = self.workspace_layout(window).center_width;
         let rows = ((self.terminal_height - 50.0) / 18.0).floor().max(4.0) as u16;
         let cols = ((width - 24.0) / 7.4).floor().max(24.0) as u16;
         TerminalSize::new(rows, cols)
     }
 
-    fn session_rail_visible(&self) -> bool {
-        self.sidebar_open && self.rail_mode == RailMode::Session
+    fn workspace_layout(&self, window: &Window) -> crate::state::workspace_layout::WorkspaceLayout {
+        let settings = matches!(self.model_panel, Some(ModelPanel::Settings(_)));
+        crate::state::workspace_layout::WorkspaceLayout::resolve(
+            f32::from(window.viewport_size().width), self.sidebar_open,
+            self.history_open && !settings, self.inspector_open && !settings,
+        )
     }
 
-    fn show_places_rail(&mut self, window: &mut Window) {
-        self.rail_mode = RailMode::Places;
-        window.focus(&self.sidebar_tree_focus);
+    fn session_rail_visible(&self) -> bool {
+        self.inspector_open && !self.history_open
+    }
+
+    fn show_places_rail(&mut self, window: &mut Window, cx: &Context<Self>) {
+        self.inspector_open = false;
+        window.focus(&self.composer.read(cx).focus_handle(cx));
     }
 
     fn show_session_rail(&mut self, window: &mut Window) {
-        if !self.sidebar_open {
-            self.sidebar_open = true;
-            self.sidebar_motion_key = self.sidebar_motion_key.wrapping_add(1);
-        }
-        self.rail_mode = RailMode::Session;
-        // History is a Places companion; Session must not add a second chrome column.
+        self.inspector_open = true;
         self.history_open = false;
         self.history_confirmation = None;
         window.focus(&self.inspector_focus);
     }
 
     fn toggle_inspector(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if matches!(self.model_panel, Some(ModelPanel::Settings(_))) {
+            self.close_model_panel(window, cx);
+        }
         if self.session_rail_visible() {
-            self.show_places_rail(window);
+            self.show_places_rail(window, cx);
         } else {
             self.show_session_rail(window);
         }
@@ -2056,7 +2090,7 @@ impl RootView {
                 request,
                 kind: AcceptedSubmissionKind::Prompt(kind),
             }) => {
-                self.pending_draft = Some(PendingDraft { request, text });
+                self.pending_draft = Some(PendingDraft { request, text, revision: self.composer.read(cx).draft_revision() });
                 self.composer.update(cx, |composer, cx| {
                     composer.set_feedback(ComposerFeedback::Pending(kind), cx)
                 });
@@ -2108,7 +2142,7 @@ impl RootView {
                 request,
                 kind: AcceptedSubmissionKind::Prompt(kind),
             }) => {
-                self.pending_draft = Some(PendingDraft { request, text });
+                self.pending_draft = Some(PendingDraft { request, text, revision: self.composer.read(cx).draft_revision() });
                 self.composer.update(cx, |composer, cx| {
                     composer.set_feedback(ComposerFeedback::Pending(kind), cx)
                 });
@@ -2410,6 +2444,10 @@ impl RootView {
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
         let arguments = raw_arguments.trim();
+        if matches!(action, NativeAction::Tree | NativeAction::Fork | NativeAction::Clone)
+            && matches!(self.model_panel, Some(ModelPanel::Settings(_))) {
+            self.close_model_panel(window, cx);
+        }
         match action {
             NativeAction::Model => {
                 self.show_model_panel(ModelPanel::Switcher, window, cx);
@@ -2430,7 +2468,7 @@ impl RootView {
                 self.history_confirmation = None;
                 if self.history_open {
                     self.ensure_sidebar_open();
-                    self.rail_mode = RailMode::Places;
+                    self.inspector_open = false;
                     self.sync_history_selection();
                     window.focus(&self.history_focus);
                 } else {
@@ -2441,7 +2479,7 @@ impl RootView {
             }
             NativeAction::Fork => {
                 self.ensure_sidebar_open();
-                self.rail_mode = RailMode::Places;
+                self.inspector_open = false;
                 self.history_open = true;
                 self.sync_history_selection();
                 self.history_confirmation = None;
@@ -2451,7 +2489,7 @@ impl RootView {
             }
             NativeAction::Clone => {
                 self.ensure_sidebar_open();
-                self.rail_mode = RailMode::Places;
+                self.inspector_open = false;
                 self.history_open = true;
                 self.sync_history_selection();
                 self.history_confirmation = Some(HistoryConfirmation::Clone);
@@ -2934,9 +2972,10 @@ impl RootView {
         let install = cx
             .background_executor()
             .spawn(async { app_update::download_and_schedule_update() });
+        let handle = cx.windows().first().copied();
         cx.spawn(async move |view, cx| {
             let result = install.await;
-            let _ = view.update(cx, |view, cx| {
+            let restart = view.update(cx, |view, cx| {
                 view.app_update = match result {
                     Ok(InstallOutcome::RestartScheduled) => PiDeckUpdateState::Restarting,
                     Ok(InstallOutcome::AlreadyCurrent) => PiDeckUpdateState::Current,
@@ -2945,10 +2984,13 @@ impl RootView {
                 };
                 let restart = matches!(view.app_update, PiDeckUpdateState::Restarting);
                 cx.notify();
-                if restart {
-                    cx.quit();
-                }
-            });
+                restart
+            }).unwrap_or(false);
+            if restart && let Some(handle) = handle {
+                let _ = handle.update(cx, |_, window, cx| {
+                    let _ = view.update(cx, |view, cx| view.request_close(window, cx));
+                });
+            }
         })
         .detach();
     }
@@ -2999,30 +3041,23 @@ impl RootView {
         let preferences = self.font_catalog.preferences.clone();
         let theme = self.font_catalog.theme_key.clone();
         let success = success.map(str::to_owned);
-        let save = cx
-            .background_executor()
-            .spawn(async move { fonts::save(&path, &preferences, theme.as_deref()) });
-        cx.spawn(async move |view, cx| {
-            let result = save.await;
+        let previous = self.font_save_task.take();
+        self.font_save_task = Some(cx.spawn(async move |view, cx| {
+            if let Some(previous) = previous { previous.await; }
+            let result = cx.background_executor().spawn(async move {
+                fonts::save(&path, &preferences, theme.as_deref())
+            }).await;
             let _ = view.update(cx, |view, cx| {
-                if view.font_save_generation != generation {
-                    return;
-                }
+                if view.font_save_generation != generation { return; }
                 match result {
                     Ok(()) => {
-                        if let Some(message) = success {
-                            view.font_feedback = Some(message);
-                            cx.notify();
-                        }
+                        if let Some(message) = success { view.font_feedback = Some(message); }
                     }
-                    Err(error) => {
-                        view.font_feedback = Some(format!("Settings could not be saved: {error}"));
-                        cx.notify();
-                    }
+                    Err(error) => view.font_feedback = Some(format!("Settings could not be saved: {error}")),
                 }
+                cx.notify();
             });
-        })
-        .detach();
+        }));
     }
 
     fn set_model_provider_filter(&mut self, provider: Option<String>, cx: &mut Context<Self>) {
@@ -3485,7 +3520,7 @@ impl RootView {
     }
 
     fn project_switch_enabled(&self) -> bool {
-        true
+        !self.attachment_picker_pending
     }
 
     fn persist_projects(&mut self, cx: &mut Context<Self>) {
@@ -3838,6 +3873,7 @@ impl RootView {
             scroll: Some(self.conversation_list_state.logical_scroll_top()),
             following: Some(self.conversation_follow.get()),
             saved_inputs: VecDeque::new(),
+            recovery_revision: 0,
             draft: self.composer.read(cx).draft().to_owned(),
             images: self.composer.read(cx).images().to_vec(),
             files: self.composer.read(cx).files().to_vec(),
@@ -3852,9 +3888,12 @@ impl RootView {
             .find(|slot| slot.id == self.active_runtime_id)
         {
             let saved_inputs = std::mem::take(&mut slot.ui.saved_inputs);
+            let recovery_revision = slot.ui.recovery_revision;
             slot.ui = ui;
             slot.ui.saved_inputs = saved_inputs;
+            slot.ui.recovery_revision = recovery_revision;
         }
+        self.checkpoint_slot(self.active_runtime_id);
     }
 
     fn restore_active_thread_ui(&mut self, cx: &mut Context<Self>) {
@@ -3901,6 +3940,7 @@ impl RootView {
         };
         if self.composer.update(cx, |composer, cx| composer.restore_saved_input(&saved, cx)) {
             self.runtime_slots[index].ui.saved_inputs.pop_front();
+            self.runtime_slots[index].ui.recovery_revision = self.runtime_slots[index].ui.recovery_revision.wrapping_add(1);
             window.focus(&self.composer.read(cx).focus_handle(cx));
         }
         cx.notify();
@@ -3974,12 +4014,16 @@ impl RootView {
         }
         self.runtime_slots[index].projection = projection;
         let saved = self.runtime_slots[index].controller.update(cx, |controller, _| controller.take_recovered_inputs());
-        self.runtime_slots[index].ui.saved_inputs.extend(saved);
+        if !saved.is_empty() {
+            self.runtime_slots[index].ui.recovery_revision = self.runtime_slots[index].ui.recovery_revision.wrapping_add(1);
+            self.runtime_slots[index].ui.saved_inputs.extend(saved);
+        }
         if runtime_id == self.active_runtime_id {
             self.sync_runtime_state(false, window, cx);
         } else {
             cx.notify();
         }
+        self.maybe_restore_draft(runtime_id, window, cx);
     }
 
     fn create_thread_runtime(
@@ -4005,6 +4049,8 @@ impl RootView {
             projection,
             last_activated: 0,
             ui: ThreadUiState::default(),
+            draft_owner: None, draft_ready: false, draft_loading: false,
+            draft_load_error: None, last_checkpoint: None,
         });
         controller.update(cx, |controller, cx| {
             controller.connect_to_session(session, cx)
@@ -4018,6 +4064,11 @@ impl RootView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
+        if self.attachment_picker_pending {
+            self.project_feedback = Some("Finish choosing or loading attachments before switching sessions.".into());
+            cx.notify();
+            return false;
+        }
         if runtime_id == self.active_runtime_id {
             return false;
         }
@@ -4060,6 +4111,11 @@ impl RootView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
+        if self.attachment_picker_pending {
+            self.project_feedback = Some("Finish choosing or loading attachments before switching sessions.".into());
+            cx.notify();
+            return false;
+        }
         if !project_path.is_dir() {
             self.project_feedback = Some("Project folder is unavailable.".to_owned());
             cx.notify();
@@ -4117,6 +4173,10 @@ impl RootView {
             .iter()
             .filter(|slot| {
                 project_key(&slot.project_path) == project
+                    && !slot.draft_loading
+                    && slot.draft_load_error.is_none()
+                    && slot.draft_ready
+                    && slot.last_checkpoint.is_some()
                     && can_reuse_runtime_for_navigation(&slot.projection, &slot.ui)
             })
             .min_by_key(|slot| (slot.id != self.active_runtime_id, slot.last_activated))
@@ -4144,7 +4204,16 @@ impl RootView {
         }
         self.runtime_slots[index].requested_session = session;
         self.runtime_slots[index].ui = ThreadUiState::default();
-        runtime_id == self.active_runtime_id || self.activate_runtime(runtime_id, window, cx)
+        self.runtime_slots[index].draft_owner = None;
+        self.runtime_slots[index].draft_ready = false;
+        self.runtime_slots[index].draft_load_error = None;
+        self.runtime_slots[index].last_checkpoint = None;
+        if runtime_id == self.active_runtime_id {
+            self.restore_active_thread_ui(cx);
+            true
+        } else {
+            self.activate_runtime(runtime_id, window, cx)
+        }
     }
 
     fn evict_oldest_inactive_runtime(&mut self, cx: &mut Context<Self>) -> bool {
@@ -4153,6 +4222,10 @@ impl RootView {
             .iter()
             .filter(|slot| {
                 slot.id != self.active_runtime_id
+                    && !slot.draft_loading
+                    && slot.draft_load_error.is_none()
+                    && slot.draft_ready
+                    && slot.last_checkpoint.is_some()
                     && !slot.projection.keeps_background_process()
                     && slot.ui.can_evict()
             })
@@ -4462,7 +4535,7 @@ impl RootView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        if event.delta.precise() {
+        if event.delta.precise() || !theme::motion_enabled() {
             // Precise (touchpad) deltas are applied here instead of falling
             // through to the stock handler: it accumulates fractional
             // offsets, and rows resting between pixel grids re-rasterize
@@ -4532,7 +4605,7 @@ impl RootView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        if event.delta.precise() {
+        if event.delta.precise() || !theme::motion_enabled() {
             // Pixel deltas already carry the platform's touchpad precision and
             // momentum. Never layer synthetic motion on top of them.
             self.conversation_scroll_motion.cancel();
@@ -4980,6 +5053,7 @@ impl RootView {
                     slot.ui.saved_inputs.push_back(crate::state::runtime::RecoveredInput {
                         text, images: Vec::new(), files: Vec::new(),
                     });
+                    slot.ui.recovery_revision = slot.ui.recovery_revision.wrapping_add(1);
                 }
             }
         }
@@ -5202,8 +5276,9 @@ impl RootView {
             PromptDelivery::Pending { .. } => {}
             PromptDelivery::Accepted { kind, .. } => {
                 let expected = pending.text.clone();
+                let revision = pending.revision;
                 self.composer.update(cx, |composer, cx| {
-                    composer.clear_accepted(&expected, kind, cx);
+                    composer.clear_accepted_revision(revision, &expected, kind, cx);
                 });
                 self.pending_draft = None;
             }
