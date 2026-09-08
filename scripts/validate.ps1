@@ -1,4 +1,4 @@
-# Run from Windows PowerShell or PowerShell 7. This does not install packages,
+# Run from Windows PowerShell or PowerShell 7. Prepares verified fonts; does not install packages,
 # alter credentials, publish releases, or launch agent prompts.
 $ErrorActionPreference = 'Stop'
 $root = Split-Path $PSScriptRoot -Parent
@@ -20,11 +20,13 @@ try {
             throw "$Executable $($Arguments -join ' ') failed with exit code $LASTEXITCODE."
         }
     }
+    # Validate existing local font bytes, or obtain the manifest-matching set.
+    Invoke-Checked -Executable 'node' -Arguments @('scripts/prepare-fonts.mjs')
     Invoke-Checked -Executable 'node' -Arguments @('scripts/verify-source.mjs')
     Invoke-Checked -Executable 'cargo' -Arguments @('fmt', '--all', '--', '--check')
     Invoke-Checked -Executable 'cargo' -Arguments @('check', '--locked', '--all-targets')
     Invoke-Checked -Executable 'cargo' -Arguments @('test', '--locked', '--all-targets')
-    $tests = @(Get-ChildItem -Path bridge -Filter '*.test.mjs' | Sort-Object Name | ForEach-Object FullName)
+    $tests = @(Get-ChildItem -Path bridge,scripts -Filter '*.test.mjs' | Sort-Object Name | ForEach-Object FullName)
     Invoke-Checked -Executable 'node' -Arguments (@('--test') + $tests)
     Invoke-Checked -Executable 'cargo' -Arguments @('clippy', '--locked', '--all-targets', '--all-features', '--', '-D', 'warnings')
 } finally {

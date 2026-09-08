@@ -1,5 +1,6 @@
-//! System-font discovery and local Pideck settings (typography + theme).
+//! Embedded design fonts, system-font discovery, and local typography settings.
 
+use std::borrow::Cow;
 use std::collections::HashSet;
 use std::env;
 use std::fs;
@@ -11,9 +12,9 @@ use gpui::{App, SharedString};
 use serde::{Deserialize, Serialize};
 
 const SETTINGS_FILE: &str = "settings.json";
-const DEFAULT_MAIN: &str = "Segoe UI";
-const DEFAULT_SANS: &str = "Segoe UI";
-const DEFAULT_MONO: &str = "Cascadia Mono";
+const DEFAULT_MAIN: &str = "DM Sans";
+const DEFAULT_SANS: &str = "DM Sans";
+const DEFAULT_MONO: &str = "IBM Plex Mono";
 
 static ACTIVE: OnceLock<RwLock<FontPreferences>> = OnceLock::new();
 
@@ -134,7 +135,19 @@ pub struct FontCatalog {
 }
 
 pub fn initialize(cx: &App) -> FontCatalog {
+    // Register before resolving even the first text run. These are the four
+    // exact files from the supplied design, not similarly named OS substitutes.
+    let embedded: Vec<Cow<'static, [u8]>> = vec![
+        Cow::Borrowed(include_bytes!(concat!(env!("OUT_DIR"), "/fonts/DMSans-Variable.ttf"))),
+        Cow::Borrowed(include_bytes!(concat!(env!("OUT_DIR"), "/fonts/InstrumentSerif-Regular.ttf"))),
+        Cow::Borrowed(include_bytes!(concat!(env!("OUT_DIR"), "/fonts/IBMPlexMono-Regular.ttf"))),
+        Cow::Borrowed(include_bytes!(concat!(env!("OUT_DIR"), "/fonts/IBMPlexMono-Medium.ttf"))),
+    ];
+    cx.text_system().add_fonts(embedded).expect("register PiDeck design fonts");
     let mut families = cx.text_system().all_font_names();
+    // Some backends enumerate OS families only; the embedded families remain
+    // valid for font selection and must not be replaced by fallback defaults.
+    families.extend(["DM Sans", "Instrument Serif", "IBM Plex Mono"].map(str::to_owned));
     sort_and_deduplicate(&mut families);
 
     let settings_path = settings_path();
@@ -149,6 +162,9 @@ pub fn initialize(cx: &App) -> FontCatalog {
         ),
     };
     let mut preferences = document.preferences();
+    if preferences.main == "Segoe UI" { preferences.main = DEFAULT_MAIN.to_owned(); }
+    if preferences.sans == "Segoe UI" { preferences.sans = DEFAULT_SANS.to_owned(); }
+    if preferences.mono == "Cascadia Mono" { preferences.mono = DEFAULT_MONO.to_owned(); }
     apply_available_defaults(&mut preferences, &families);
     install(preferences.clone());
 
@@ -231,8 +247,8 @@ fn apply_available_defaults(preferences: &mut FontPreferences, families: &[Strin
 
 fn default_for(role: FontRole, families: &[String]) -> Option<&str> {
     let preferred = match role {
-        FontRole::Main | FontRole::Sans => ["Segoe UI", "SF Pro Text", "Noto Sans", "Arial"],
-        FontRole::Mono => ["Cascadia Mono", "SF Mono", "Noto Sans Mono", "Consolas"],
+        FontRole::Main | FontRole::Sans => ["DM Sans", "Segoe UI", "SF Pro Text", "Noto Sans", "Arial"],
+        FontRole::Mono => ["IBM Plex Mono", "Cascadia Mono", "SF Mono", "Noto Sans Mono", "Consolas"],
     };
     preferred.into_iter().find_map(|candidate| {
         families

@@ -61,6 +61,7 @@ fn connect(
     }
 
     state.stop_phase = StopPhase::Idle;
+    state.queue_clear_request = None;
     let generation_changed = generation != state.generation;
     if generation_changed {
         state.generation = generation;
@@ -92,6 +93,7 @@ fn disconnect(
     observed_at: Instant,
 ) -> Vec<RuntimeEffect> {
     state.stop_phase = StopPhase::Idle;
+    state.queue_clear_request = None;
     state.pending_operation = None;
     state.replacement_awaiting_state = false;
     if matches!(state.prompt_delivery, PromptDelivery::Pending { .. }) {
@@ -203,7 +205,19 @@ fn reduce_intent(
                 },
             )]
         }
+        RuntimeIntent::ClearQueuedInputs => {
+            if state.queue_clear_request.is_some() || state.stop_phase != StopPhase::Idle
+                || !matches!(state.lifecycle, RuntimeLifecycle::Ready | RuntimeLifecycle::Running | RuntimeLifecycle::Settled) {
+                return Vec::new();
+            }
+            let clear_id = state.next_request;
+            state.queue_clear_request = Some(clear_id);
+            state.bump_revision();
+            vec![effect(state, RuntimeRequest::ClearQueuedInputs { clear_id })]
+        }
         RuntimeIntent::Abort => {
+            // A queue-only clear already in flight still owns its acknowledgement.
+            // Keep it correlated so Stop cannot discard its recoverable inputs.
             if state.stop_phase != StopPhase::Idle
                 || !matches!(state.lifecycle, RuntimeLifecycle::Running | RuntimeLifecycle::Cancelling)
             {
@@ -720,6 +734,24 @@ fn reduce_response(
             }
             state.bounded_error(failure.error);
             Vec::new()
+        }
+        (RuntimeRequest::ClearQueuedInputs { clear_id }, Ok(NormalizedResponse::QueueCleared { steering, follow_up })) => {
+            if state.queue_clear_request != Some(clear_id) { return Vec::new(); }
+            state.queue_clear_request = None;
+            // Removed inputs are recoverable locally, not silently destroyed.
+            recover_cleared_inputs(state, steering, SubmissionKind::Steer);
+            recover_cleared_inputs(state, follow_up, SubmissionKind::FollowUp);
+            state.queue = Arc::new(QueueContents::Known { steering: Vec::new(), follow_up: Vec::new() });
+            state.bump_revision();
+            // Reconcile messages queued after this request without stopping Pi.
+            vec![effect(state, RuntimeRequest::GetState)]
+        }
+        (RuntimeRequest::ClearQueuedInputs { clear_id }, Err(failure)) => {
+            if state.queue_clear_request != Some(clear_id) { return Vec::new(); }
+            state.queue_clear_request = None;
+            state.bounded_error(failure.error);
+            state.bump_revision();
+            vec![effect(state, RuntimeRequest::GetState)]
         }
         (
             RuntimeRequest::ClearQueue { stop_id },
@@ -2019,7 +2051,7 @@ fn request_name(request: &RuntimeRequest) -> &'static str {
         },
         RuntimeRequest::InvokeCommand { .. } => "prompt",
         RuntimeRequest::ExecuteBash { .. } => "bash",
-        RuntimeRequest::ClearQueue { .. } => "clear_queue",
+        RuntimeRequest::ClearQueue { .. } | RuntimeRequest::ClearQueuedInputs { .. } => "clear_queue",
         RuntimeRequest::Abort { .. } => "abort",
         RuntimeRequest::AbortBash => "abort_bash",
         RuntimeRequest::AbortRetry => "abort_retry",

@@ -3,7 +3,7 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use gpui::{
-    AnyElement, App, Entity, FontWeight, IntoElement, ListState, SharedString, div, prelude::*, px,
+    AnyElement, App, Entity, IntoElement, ListState, SharedString, div, prelude::*, px,
 };
 
 use super::{
@@ -11,7 +11,7 @@ use super::{
 };
 use crate::controller::ConversationProjection;
 use crate::services::git_diff::WorkspaceDiff;
-use crate::state::runtime::{FacetStatus, MessageRole};
+use crate::state::runtime::{FacetStatus, MessageRole, RuntimeLifecycle};
 use crate::theme;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -264,41 +264,8 @@ impl ConversationListModel {
     }
 }
 
-fn header(turn_count: usize) -> impl IntoElement {
-    stream_gutter().pb(px(20.0)).child(
-        div()
-            .w_full()
-            .flex()
-            .flex_col()
-            .gap(px(10.0))
-            .child(
-                div()
-                    .w_full()
-                    .flex()
-                    .flex_row()
-                    .items_baseline()
-                    .justify_between()
-                    .child(
-                        div()
-                            .font_family(theme::sans())
-                            .text_size(theme::text_size(theme::T_TINY))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(theme::ash())
-                            .child("Thread"),
-                    )
-                    .child(
-                        div()
-                            .font_family(theme::mono())
-                            .text_size(theme::text_size(theme::T_TINY))
-                            .text_color(theme::smoke())
-                            .child(format!(
-                                "{turn_count} turn{}",
-                                if turn_count == 1 { "" } else { "s" }
-                            )),
-                    ),
-            )
-            .child(div().w_full().h(px(1.0)).bg(theme::edge_soft())),
-    )
+fn header(_turn_count: usize) -> impl IntoElement {
+    stream_gutter().h(px(22.0))
 }
 
 fn row(content: AnyElement) -> AnyElement {
@@ -317,7 +284,7 @@ fn turn_row(content: AnyElement) -> AnyElement {
 /// Keep stream chrome clear of the side rails. Padding lives on each list item
 /// because GPUI `List` does not reliably inset item widths from container `px`.
 fn stream_gutter() -> gpui::Div {
-    div().w_full().max_w(px(theme::READING_W)).mx_auto().px(px(theme::STREAM_PAD_X))
+    div().w_full().max_w(px(theme::READING_W + 2.0 * theme::STREAM_PAD_X)).mx_auto().px(px(theme::STREAM_PAD_X))
 }
 
 fn trailing(
@@ -343,7 +310,6 @@ fn trailing(
     stream_gutter()
         .flex()
         .flex_col()
-        .gap(px(super::TURN_GAP))
         .when(has_chain, |list| {
             list.child(
                 div()
@@ -365,13 +331,17 @@ fn trailing(
                     .when_some(tail, |chain, activity| chain.child(activity)),
             )
         })
-        .when_some(stream.diff_summary.snapshot.clone(), |tail, snapshot| {
+        .when(matches!(projection.lifecycle, RuntimeLifecycle::Running | RuntimeLifecycle::Cancelling), |tail| {
+            tail.child(super::working_label(projection.lifecycle))
+        })
+        .when_some(stream.diff_summary.snapshot.clone().filter(|snapshot| !snapshot.is_empty()), |tail, snapshot| {
             tail.child(crate::views::diff_summary::summary_card(
                 &snapshot,
                 stream.diff_summary.files_expanded,
                 stream.diff_summary.root.clone(),
             ))
         })
+        .children(super::response_actions(projection, &stream.diff_summary.root))
         .when(
             projection.messages.is_empty()
                 && projection.accepted_user_inputs.is_empty()

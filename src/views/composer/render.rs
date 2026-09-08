@@ -204,9 +204,9 @@ impl Composer {
         // on the card surface (no inner well) and no footer renders here. Panel
         // chrome keeps a self-contained bordered field with its own status row.
         let desk = self.chrome == ComposerChrome::Full;
-        let input_padding_x = 14.0;
-        let input_padding_y = 10.0;
-        let input_line_height = if panel { 21.0 } else { 20.0 };
+        let input_padding_x = if desk { 19.0 } else { 14.0 };
+        let input_padding_y = if desk { 15.0 } else { 10.0 };
+        let input_line_height = if desk { 24.0 } else if panel { 21.0 } else { 20.0 };
         // Idle: one row · focused: multi-line · user enlarge: taller pinned shell.
         let height_motion = self.input_height_motion();
         let settled_height = self.input_target_height();
@@ -226,7 +226,7 @@ impl Composer {
             .px(px(input_padding_x))
             .py(px(input_padding_y))
             .overflow_hidden()
-            .text_size(theme::text_size(theme::T_BODY_SM))
+            .text_size(theme::text_size(if desk { 16.0 } else { theme::T_BODY_SM }))
             .line_height(theme::text_size(input_line_height))
             .text_color(if self.disabled {
                 theme::smoke()

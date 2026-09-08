@@ -10,7 +10,7 @@ use gpui::{
     Animation, AnimationExt, AnyElement, App, ClipboardItem, Context, CursorStyle, Entity,
     FocusHandle, Focusable, FontWeight, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent,
     MouseUpEvent, Pixels, Render, SharedString, StyledText, TextLayout, Window, div,
-    ease_out_quint, prelude::*, pulsating_between, px, relative, svg,
+    ease_out_quint, prelude::*, px, relative, svg,
 };
 
 use crate::actions::{TranscriptCopy, TranscriptSelectAll};
@@ -50,16 +50,13 @@ const DISCLOSURE_HISTORY_MAX_PX: f32 = 420.0;
 // turn. Every section hangs on one rail column so the turn reads as a single
 // chain instead of a boxed card stack. Speaker nodes are larger than activity
 // beads so the eye reads structure at a glance.
-pub(super) const THREAD_RAIL_W: f32 = 12.0;
 const NODE_SPEAKER: f32 = 7.0;
 const NODE_STEP: f32 = 4.0;
 /// Cap-height the node centers sit on inside their rows.
-const NODE_ALIGN: f32 = 9.0;
-pub(super) const THREAD_GAP: f32 = 12.0;
 /// Whitespace between turns; the chain rests between links.
 const TURN_GAP: f32 = 32.0;
 /// Rhythm between sections inside one turn.
-const TURN_SECTION_GAP: f32 = 12.0;
+const TURN_SECTION_GAP: f32 = 18.0;
 
 #[derive(Debug, Clone, Copy)]
 struct DisclosureMotion {
@@ -393,6 +390,7 @@ impl StreamBandCache {
 }
 
 pub(super) struct TranscriptText {
+    emphasize_lead: bool,
     id: SharedString,
     source_hash: u64,
     document: MarkdownDocument,
@@ -424,6 +422,7 @@ impl TranscriptText {
     pub(super) fn new(id: String, text: &str, cx: &mut Context<Self>) -> Self {
         let document = MarkdownDocument::parse(text);
         Self {
+            emphasize_lead: false,
             id: SharedString::from(id),
             source_hash: source_hash(text),
             sole_text: sole_text_snapshot(&document),
@@ -688,7 +687,11 @@ impl Focusable for TranscriptText {
 impl Render for TranscriptText {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let selectable = self.document.is_selectable_prose();
-        let default_style = window.text_style();
+        let mut default_style = window.text_style();
+        if self.emphasize_lead && self.document.sole_prose().is_some() {
+            default_style.font_size = theme::text_size(17.0).into();
+            default_style.font_weight = FontWeight::MEDIUM;
+        }
 
         let content = if let (Some(prose), Some(sole_text)) =
             (self.document.sole_prose(), self.sole_text.as_ref())
@@ -714,6 +717,7 @@ impl Render for TranscriptText {
             };
             let id = self.id.clone();
             let options = render::MarkdownRenderOptions {
+                emphasize_lead: self.emphasize_lead,
                 default_style: &default_style,
                 base_font_px,
                 selection,
@@ -860,7 +864,7 @@ fn turn_card(
         .w_full()
         .flex()
         .flex_col()
-        .when(!links_below, |turn| turn.pb(px(TURN_GAP)))
+        .when(!links_below && model.reply.is_some(), |turn| turn.pb(px(TURN_GAP)))
         .child(user_prompt(
             number,
             user,
@@ -883,6 +887,13 @@ fn turn_card(
         // The chain crosses the turn break: the rail spans the resting
         // whitespace so a follow-up grows straight out of the reply.
         .when(links_below, |turn| turn.child(turn_bridge()))
+}
+
+fn working_label(lifecycle: RuntimeLifecycle) -> impl IntoElement {
+    div().w_full().mt(px(24.0)).h(px(20.0)).font_family(theme::sans())
+        .text_size(theme::text_size(12.0)).line_height(px(20.0))
+        .text_color(theme::working())
+        .child(if lifecycle == RuntimeLifecycle::Cancelling { "Stopping…" } else { "Working…" })
 }
 
 fn optimistic_turn(
@@ -973,107 +984,26 @@ fn user_prompt(
             ("Turn".to_owned(), format!("{index:02}")),
             ("Timestamp".to_owned(), format_timestamp(message.timestamp)),
         ],
-        time_label: Some(format_timestamp(message.timestamp)),
+        time_label: Some(super::time_labels::message_label(message.timestamp)),
         status_label: None,
     };
     user_prompt_section(meta, false, links_above, continues, body)
 }
 
-/// One node on a turn's thread: a centered dot plus, unless the turn ends
-/// here, the hairline hanging down to the next section. A live node breathes
-/// so in-flight work reads from the rail alone.
-fn thread_rail(
-    marker: gpui::Rgba,
-    dot: f32,
-    links_above: bool,
-    continues: bool,
-    pulse: Option<SharedString>,
-) -> impl IntoElement {
-    let node = div()
-        .w(px(dot))
-        .h(px(dot))
-        .rounded_full()
-        .bg(marker)
-        .flex_shrink_0();
-    // When the chain reaches in from an earlier row, the node hangs off the
-    // incoming hairline instead of floating at the top of its own row.
-    let node = if links_above {
-        node
-    } else {
-        node.mt(px(NODE_ALIGN - dot / 2.0))
-    };
-    let node = match pulse {
-        Some(id) => node
-            .with_animation(
-                id,
-                Animation::new(Duration::from_millis(1600))
-                    .repeat()
-                    .with_easing(pulsating_between(0.45, 1.0)),
-                |node, delta| node.opacity(delta),
-            )
-            .into_any_element(),
-        None => node.into_any_element(),
-    };
-    div()
-        .w(px(THREAD_RAIL_W))
-        .flex_shrink_0()
-        .flex()
-        .flex_col()
-        .items_center()
-        .when(links_above, |rail| {
-            rail.child(
-                div()
-                    .w(px(1.0))
-                    .h(px(NODE_ALIGN - dot / 2.0))
-                    .bg(theme::edge()),
-            )
-        })
-        .child(node)
-        .when(continues, |rail| {
-            rail.child(
-                div()
-                    .flex_1()
-                    .w(px(1.0))
-                    .min_h(px(8.0))
-                    .mt(px(3.0))
-                    .rounded_full()
-                    .bg(theme::edge()),
-            )
-        })
-}
-
-/// A section of a turn hung on the shared thread: rail on the left, content
-/// using the full stream width so the turn reads as one composed chain.
+/// Sections share the full reading measure. Tool trees have their own connectors.
 fn thread_section(
-    marker: gpui::Rgba,
-    dot: f32,
-    links_above: bool,
-    continues: bool,
-    pulse: Option<SharedString>,
+    _marker: gpui::Rgba,
+    _dot: f32,
+    _links_above: bool,
+    _continues: bool,
+    _pulse: Option<SharedString>,
     body: impl IntoElement,
 ) -> impl IntoElement {
-    div()
-        .w_full()
-        .flex()
-        .flex_row()
-        .gap(px(THREAD_GAP))
-        .child(thread_rail(marker, dot, links_above, continues, pulse))
-        .child(div().flex_1().min_w_0().w_full().child(body))
+    div().w_full().min_w_0().child(body)
 }
 
-/// The rail continuing through the resting whitespace between turns, so one
-/// turn's last section chains straight into the next prompt.
 fn turn_bridge() -> impl IntoElement {
-    div().w_full().h(px(TURN_GAP)).flex().flex_row().child(
-        div()
-            .w(px(THREAD_RAIL_W))
-            .flex_shrink_0()
-            .h_full()
-            .flex()
-            .flex_col()
-            .items_center()
-            .child(div().w(px(1.0)).flex_1().bg(theme::edge())),
-    )
+    div().w_full().h(px(TURN_GAP))
 }
 
 /// Editorial prompt section: a quiet warm card for what was asked, hanging on
@@ -1090,105 +1020,40 @@ struct UserPromptMeta {
 fn user_prompt_section(
     meta: UserPromptMeta,
     pending: bool,
-    links_above: bool,
-    continues: bool,
+    _links_above: bool,
+    _continues: bool,
     body: Vec<AnyElement>,
 ) -> impl IntoElement {
-    let mark = if pending {
-        theme::data()
-    } else {
-        theme::signal()
-    };
-    // Pending turns keep breathing on the thread until the transcript answers.
-    let pulse = pending.then(|| SharedString::from(format!("thread-pulse:{}", meta.id)));
-    thread_section(
-        mark,
-        NODE_SPEAKER,
-        links_above,
-        continues,
-        pulse,
-        div()
-            .w_full()
-            .flex()
-            .flex_col()
-            .pb(px(TURN_SECTION_GAP))
+    let timestamp = meta.time_label.clone();
+    div().w_full().flex().flex_col().pb(px(22.0))
+        .when_some(timestamp, |section, time| {
+            section.child(div().h(px(16.0)).mb(px(17.0))
+                .font_family(theme::sans()).text_size(theme::text_size(11.0))
+                .line_height(px(16.0)).text_color(theme::ash()).child(time))
+        })
+        .child(div().w_full().min_h(px(95.0)).rounded(px(7.0))
+            .bg(theme::user_message()).px(px(18.0)).pt(px(14.0)).pb(px(9.0))
+            .flex().flex_col().gap(px(6.0))
             .child(user_prompt_header(meta, pending))
-            .when(!body.is_empty(), |section| {
-                section.child(
-                    div()
-                        .w_full()
-                        .mt(px(6.0))
-                        .rounded(px(theme::RADIUS_MD))
-                        .bg(theme::user_message())
-                        .overflow_hidden()
-                        .flex()
-                        .flex_row()
-                        .child(div().w(px(3.0)).flex_shrink_0().bg(if pending {
-                            theme::data()
-                        } else {
-                            theme::signal()
-                        }))
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .px(px(13.0))
-                                .py(px(11.0))
-                                .flex()
-                                .flex_col()
-                                .gap(px(6.0))
-                                .children(body),
-                        ),
-                )
-            }),
-    )
+            .children(body))
 }
 
 fn user_prompt_header(meta: UserPromptMeta, pending: bool) -> impl IntoElement {
-    div()
-        .w_full()
-        .flex()
-        .flex_row()
-        .items_center()
-        .justify_between()
-        .gap(px(12.0))
-        .child(
-            div()
-                .font_family(theme::sans())
-                .text_size(theme::text_size(theme::T_LABEL))
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(if pending { theme::data() } else { theme::ash() })
-                .child("You"),
-        )
-        .child(
-            div()
-                .flex_shrink_0()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(10.0))
-                .when_some(meta.status_label, |row, label| {
-                    row.child(
-                        div()
-                            .font_family(theme::mono())
-                            .text_size(theme::text_size(theme::T_TINY))
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(theme::data())
-                            .child(label),
-                    )
-                })
-                .when_some(meta.time_label, |row, time| {
-                    row.child(
-                        div()
-                            .font_family(theme::mono())
-                            .text_size(theme::text_size(theme::T_TINY))
-                            .text_color(theme::smoke())
-                            .child(time),
-                    )
-                })
-                .child(message_meta_info(meta.id, meta.rows)),
-        )
+    div().group("prompt-heading").w_full().h(px(18.0)).flex().items_center()
+        .justify_between().gap(px(12.0))
+        .child(div().font_family(theme::sans()).text_size(theme::text_size(12.0))
+            .line_height(px(18.0)).font_weight(FontWeight::SEMIBOLD)
+            .text_color(theme::bone()).child("You"))
+        .child(div().flex_shrink_0().flex().items_center().gap(px(10.0))
+            .when(pending, |row| row.when_some(meta.status_label, |row, label| {
+                row.child(div().font_family(theme::sans()).text_size(theme::text_size(11.0))
+                    .text_color(theme::working()).child(label))
+            }))
+            .child(div().opacity(0.0).group_hover("prompt-heading", |info| info.opacity(1.0))
+                .child(message_meta_info(meta.id, meta.rows))))
 }
+
+
 
 /// One spine step inside a turn's activity band. Owned so a band model can
 /// be cached across frames; details carry the expensive payload clones and
@@ -1333,6 +1198,34 @@ pub(in crate::views) fn latest_completed_response_key(
         .rev()
         .find(|message| is_final_assistant_reply(message))
         .map(|message| message.key.0.clone())
+}
+
+pub(super) fn response_actions(
+    projection: &ConversationProjection,
+    root: &Entity<crate::views::RootView>,
+) -> Option<AnyElement> {
+    if !matches!(projection.lifecycle, RuntimeLifecycle::Ready | RuntimeLifecycle::Settled) {
+        return None;
+    }
+    let message = projection.messages.iter().rev().find(|message| is_final_assistant_reply(message))?;
+    let text = message.content.iter().filter_map(|block| match block {
+        MessageBlock::Text { text, .. } => Some(text.as_str()),
+        _ => None,
+    }).collect::<Vec<_>>().join("\n\n");
+    let retry_root = root.clone();
+    Some(div().w_full().h(px(36.0)).flex().items_center()
+        .font_family(theme::sans()).text_size(theme::text_size(12.0)).text_color(theme::ash())
+        .child(div().id("copy-response").h(px(30.0)).flex().items_center().tab_index(0).cursor_pointer()
+            .hover(|link| link.text_color(theme::bone())).focus(|link| link.text_color(theme::focus()))
+            .on_click(move |_, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(text.clone())))
+            .child("Copy response"))
+        .child(" · ")
+        .child(div().id("retry-response").h(px(30.0)).flex().items_center().tab_index(0).cursor_pointer()
+            .hover(|link| link.text_color(theme::bone())).focus(|link| link.text_color(theme::focus()))
+            .tooltip(crate::views::controls::text_tooltip("Retry from the last user prompt in a new branch; keep this response", None::<&str>))
+            .on_click(move |_, window, cx| retry_root.update(cx, |view, cx| view.retry_last_response(window, cx)))
+            .child("Retry"))
+        .into_any_element())
 }
 
 fn push_message_activity(
@@ -1811,6 +1704,26 @@ impl ToolGroupModel {
     }
 }
 
+fn update_lead_emphasis(
+    texts: &HashMap<String, Entity<TranscriptText>>,
+    reply: Option<&RuntimeMessage>,
+    cx: &mut App,
+) {
+    let lead = reply.and_then(|message| {
+        message.content.iter().find(|block| matches!(block, MessageBlock::Text { .. }))
+            .map(|block| fragment_key(message, block))
+    });
+    for (key, entity) in texts {
+        let emphasize = lead.as_ref() == Some(key);
+        entity.update(cx, |view, cx| {
+            if view.emphasize_lead != emphasize {
+                view.emphasize_lead = emphasize;
+                cx.notify();
+            }
+        });
+    }
+}
+
 fn build_turn_model(
     projection: &ConversationProjection,
     user_index: usize,
@@ -1821,6 +1734,7 @@ fn build_turn_model(
     let prompt = message_prompt_text(&projection.messages[user_index]);
     let texts = cached_message_texts(projection, user_index..body.end, cache, cx);
     let (steps, reply) = split_turn(&projection.messages[body], projection, Some(&prompt));
+    update_lead_emphasis(&texts, reply.as_deref(), cx);
     let (rows, history_count, latest, summary) = assemble_band(steps);
     StreamBandModel {
         texts,
@@ -1841,6 +1755,7 @@ fn build_preamble_model(
     let texts = cached_message_texts(projection, message_index..message_index + 1, cache, cx);
     let messages = std::slice::from_ref(&projection.messages[message_index]);
     let (steps, reply) = split_turn(messages, projection, None);
+    update_lead_emphasis(&texts, reply.as_deref(), cx);
     let (rows, history_count, latest, summary) = assemble_band(steps);
     StreamBandModel {
         texts,
@@ -1881,74 +1796,26 @@ fn activity_band(
     let Some(latest_step) = model.latest.as_ref() else {
         return div().into_any_element();
     };
-    let step_count = model.history_count + 1;
-    let children = model
-        .rows
-        .iter()
-        .map(|row| match row {
-            // History steps chain straight into the latest step below them.
+    let state = render.disclosures.read(cx);
+    let expanded = state.is_expanded(disclosure_key);
+    let show_history = state.shows_history(disclosure_key);
+    let motion = state.motion(disclosure_key);
+    // Do not create hidden text layouts, detail hit targets, or tool trees.
+    let history_panel = if show_history && model.history_count > 0 {
+        let children = model.rows.iter().map(|row| match row {
             BandRow::Step(step) => render_activity_step(step, true, &model.texts, render.root),
             BandRow::Group(group) => render_tool_group(group, true, render.root),
-        })
-        .collect::<Vec<_>>();
-
-    let expanded = render.disclosures.read(cx).is_expanded(disclosure_key);
-    let show_history = render.disclosures.read(cx).shows_history(disclosure_key);
-    let motion = render.disclosures.read(cx).motion(disclosure_key);
-
-    let animate_latest = !show_history
-        && matches!(
-            latest_step,
-            ActivityStep::Tool { presentation, .. }
-                if matches!(
-                    presentation.status,
-                    CardStatus::Pending | CardStatus::Running | CardStatus::Cancelling
-                )
-        );
-    let latest = render_activity_step(latest_step, has_reply, &model.texts, render.root);
-    let latest = if animate_latest {
-        div()
-            .w_full()
-            .child(latest)
-            .with_animation(
-                SharedString::from(format!(
-                    "activity-latest-tool:{disclosure_key}:{step_count}"
-                )),
-                Animation::new(Duration::from_millis(180)).with_easing(ease_out_quint()),
-                |row, delta| row.ml(px(6.0 * (1.0 - delta))).opacity(0.68 + 0.32 * delta),
-            )
-            .into_any_element()
-    } else {
-        latest
-    };
-
-    let history_panel = if show_history && model.history_count > 0 {
-        Some(activity_history_panel(
-            disclosure_key,
-            model.history_count,
-            expanded,
-            motion,
-            children,
-        ))
-    } else {
-        None
-    };
-
-    div()
-        .w_full()
-        .flex()
-        .flex_col()
-        .when(model.history_count > 0, |band| {
-            band.child(activity_disclosure(
-                disclosure_key,
-                model.history_count,
-                model.summary.clone(),
-                expanded,
-                render.disclosures,
-            ))
-        })
+        }).collect();
+        Some(activity_history_panel(disclosure_key, model.history_count, expanded, motion, children))
+    } else { None };
+    div().w_full().flex().flex_col()
+        .when(model.history_count > 0, |band| band.child(activity_disclosure(
+            disclosure_key, model.history_count, model.summary.clone(), expanded, render.disclosures,
+        )))
         .children(history_panel)
-        .child(latest)
+        .child(div().w_full().when(!show_history, |latest| latest.pt(px(2.0)))
+            .child(render_activity_step(latest_step, false, &model.texts, render.root)))
+        .when(has_reply, |band| band.pb(px(31.0)))
         .into_any_element()
 }
 
@@ -1961,7 +1828,6 @@ fn activity_history_panel(
 ) -> AnyElement {
     let body = div()
         .w_full()
-        .pt(px(2.0))
         .flex()
         .flex_col()
         .children(children);
@@ -2062,101 +1928,22 @@ fn activity_disclosure(
 ) -> impl IntoElement {
     let click_key = key.to_owned();
     let click_state = disclosures.clone();
-    let keyboard_key = key.to_owned();
-    let keyboard_state = disclosures.clone();
-    let label = if history_count == 1 {
-        "1 earlier step".to_owned()
-    } else {
-        format!("{history_count} earlier steps")
-    };
-
-    // Quiet link-style control. The bare chevron sits on the rail column so
-    // the thread reads unbroken; feedback is a color shift, not another box.
-    div()
-        .id(SharedString::from(format!("activity-disclosure:{key}")))
-        .tab_index(0)
-        .cursor_pointer()
-        .w_full()
-        .pb(px(6.0))
-        .flex()
-        .flex_row()
-        .gap(px(THREAD_GAP))
-        .text_color(theme::ash())
-        .hover(|row| row.text_color(theme::bone_dim()))
+    let label = format!("{history_count} earlier step{}", if history_count == 1 { "" } else { "s" });
+    div().id(SharedString::from(format!("activity-disclosure:{key}")))
+        .tab_index(0).cursor_pointer().w_full().h(px(20.0)).mb(px(18.0))
+        .flex().items_center().text_color(theme::ash())
+        .hover(|row| row.text_color(theme::bone()))
         .focus(|row| row.text_color(theme::focus()))
         .on_click(move |_, _, cx| {
             click_state.update(cx, |state, cx| state.toggle(&click_key, cx));
         })
-        .on_key_down(move |event: &gpui::KeyDownEvent, _, cx| {
-            if matches!(event.keystroke.key.as_str(), "enter" | "space") {
-                cx.stop_propagation();
-                keyboard_state.update(cx, |state, cx| state.toggle(&keyboard_key, cx));
-            }
-        })
-        .child(
-            div()
-                .w(px(THREAD_RAIL_W))
-                .flex_shrink_0()
-                .flex()
-                .flex_col()
-                .items_center()
-                .child(
-                    svg()
-                        .path(if expanded {
-                            "icons/chevron-down.svg"
-                        } else {
-                            "icons/chevron-right.svg"
-                        })
-                        .size(px(9.0))
-                        .mt(px(4.5))
-                        .text_color(theme::smoke()),
-                )
-                .child(
-                    div()
-                        .flex_1()
-                        .w(px(1.0))
-                        .min_h(px(6.0))
-                        .mt(px(3.0))
-                        .rounded_full()
-                        .bg(theme::edge()),
-                ),
-        )
-        .child(
-            div()
-                .min_w_0()
-                .flex_1()
-                .overflow_hidden()
-                .whitespace_nowrap()
-                .flex()
-                .flex_row()
-                .items_baseline()
-                .gap(px(10.0))
-                .child(
-                    div()
-                        .flex_shrink_0()
-                        .overflow_hidden()
-                        .text_ellipsis()
-                        .whitespace_nowrap()
-                        .font_family(theme::sans())
-                        .text_size(theme::text_size(theme::T_UI_SM))
-                        .font_weight(FontWeight::MEDIUM)
-                        .child(label),
-                )
-                .when_some(summary, |row, summary| {
-                    row.child(
-                        div()
-                            .min_w_0()
-                            .flex_1()
-                            .overflow_hidden()
-                            .text_ellipsis()
-                            .whitespace_nowrap()
-                            .font_family(theme::mono())
-                            .text_size(theme::text_size(theme::T_TINY))
-                            .text_color(theme::smoke())
-                            .child(summary),
-                    )
-                }),
-        )
+        .child(svg().path(if expanded { "icons/chevron-down.svg" } else { "icons/chevron-right.svg" })
+            .size(px(16.0)).mr(px(8.0)).flex_shrink_0())
+        .child(div().w(px(136.0)).flex_shrink_0().font_family(theme::sans())
+            .text_size(theme::text_size(12.0)).line_height(px(20.0)).child(label))
+        .when_some(summary, |row, summary| row.child(div().min_w_0().flex_1()
+            .overflow_hidden().text_ellipsis().whitespace_nowrap().font_family(theme::mono())
+            .text_size(theme::text_size(10.0)).text_color(theme::ash()).child(summary)))
 }
 
 fn render_tool_group(
@@ -2231,7 +2018,8 @@ fn render_activity_step(
             continues,
             theme::ash(),
             None,
-            activity_selectable(key, texts),
+            div().when(continues, |text| text.pb(px(12.0)))
+                .child(activity_selectable(key, texts)),
         )
         .into_any_element(),
         ActivityStep::Image { mime_type } => step_shell(
@@ -2360,54 +2148,19 @@ fn activity_detail_link(
     detail: &Arc<ActivityDetail>,
     root: &Entity<crate::views::RootView>,
 ) -> AnyElement {
-    let id = detail
-        .records
-        .first()
-        .map(|record| record.id.clone())
-        .unwrap_or_else(|| "activity".to_owned());
-    let click_detail = detail.clone();
-    let click_root = root.clone();
-    let keyboard_detail = detail.clone();
-    let keyboard_root = root.clone();
-    div()
-        .id(SharedString::from(format!("activity-detail-link:{id}")))
-        .tab_index(0)
-        .cursor_pointer()
-        .h(px(20.0))
-        .px(px(2.0))
-        .flex_shrink_0()
-        .flex()
-        .items_center()
-        .overflow_hidden()
-        .whitespace_nowrap()
-        .font_family(theme::mono())
-        .text_size(theme::text_size(theme::T_TINY))
-        .font_weight(FontWeight::MEDIUM)
-        .text_color(theme::smoke())
-        .hover(|link| link.text_color(theme::bone_dim()))
-        .focus(|link| link.text_color(theme::bone_dim()))
-        // Skip GPUI's mouse-down focus + active refresh on this chip. Click still
-        // fires; keyboard focus via Tab is unchanged. Prevents a one-frame pop
-        // before the detail overlay steals focus.
-        .capture_any_mouse_down(|event, window, _| {
-            if event.button == MouseButton::Left {
-                window.prevent_default();
-            }
-        })
+    let id = detail.records.first().map(|record| record.id.clone()).unwrap_or_else(|| "activity".to_owned());
+    let detail = detail.clone();
+    let root = root.clone();
+    div().id(SharedString::from(format!("activity-detail-link:{id}")))
+        .tab_index(0).cursor_pointer().h(px(20.0)).flex().items_center().gap(px(14.0))
+        .font_family(theme::sans()).text_size(theme::text_size(11.0)).text_color(theme::ash())
+        .hover(|link| link.text_color(theme::bone()))
+        .focus(|link| link.text_color(theme::focus()))
         .on_click(move |_, window, cx| {
-            click_root.update(cx, |view, cx| {
-                view.open_activity_detail(click_detail.clone(), window, cx)
-            });
+            root.update(cx, |view, cx| view.open_activity_detail(detail.clone(), window, cx));
         })
-        .on_key_down(move |event: &gpui::KeyDownEvent, window, cx| {
-            if matches!(event.keystroke.key.as_str(), "enter" | "space") {
-                cx.stop_propagation();
-                keyboard_root.update(cx, |view, cx| {
-                    view.open_activity_detail(keyboard_detail.clone(), window, cx)
-                });
-            }
-        })
-        .child("details ↗")
+        .child("Details")
+        .child(svg().path("icons/external.svg").size(px(16.0)).text_color(theme::ash()))
         .into_any_element()
 }
 
@@ -2417,41 +2170,16 @@ fn tool_detail_trigger(
     detail: Arc<ActivityDetail>,
     root: &Entity<crate::views::RootView>,
 ) -> AnyElement {
-    let click_detail = detail.clone();
-    let click_root = root.clone();
-    let keyboard_detail = detail;
-    let keyboard_root = root.clone();
-    // Flat trigger: rested transparent so the step reads as text on the
-    // canvas; hover and keyboard focus lift the wash instead of drawing a box.
-    // The invisible border keeps geometry stable when focus retints it.
-    div()
-        .id(SharedString::from(format!("activity-detail-tool:{id}")))
-        .tab_index(0)
-        .cursor_pointer()
-        .w_full()
-        .min_h(px(26.0))
-        .px(px(4.0))
-        .py(px(2.0))
-        .rounded(px(theme::RADIUS_SM))
-        .border_1()
-        .border_color(gpui::rgba(0x0000_0000))
-        .hover(|trigger| trigger.bg(theme::panel()))
-        // Recess on press — a lighter active fill makes nested chips look bigger.
-        .active(|trigger| trigger.bg(theme::canvas()))
-        .focus(|trigger| trigger.bg(theme::panel()).border_color(theme::edge()))
-        .on_click(move |_, window, cx| {
-            click_root.update(cx, |view, cx| {
-                view.open_activity_detail(click_detail.clone(), window, cx)
-            });
-        })
-        .on_key_down(move |event: &gpui::KeyDownEvent, window, cx| {
-            if matches!(event.keystroke.key.as_str(), "enter" | "space") {
-                cx.stop_propagation();
-                let detail = keyboard_detail.clone();
-                keyboard_root.update(cx, |view, cx| view.open_activity_detail(detail, window, cx));
-            }
-        })
-        .child(body)
+    let root = root.clone();
+    div().w_full().relative().child(body)
+        .child(div().id(SharedString::from(format!("activity-detail-tool:{id}")))
+            .absolute().right(px(35.0)).top_0().w(px(66.0)).h(px(20.0))
+            .tab_index(0).cursor_pointer().rounded(px(2.0))
+            .hover(|button| button.bg(gpui::Rgba { a: 0.35, ..theme::selection() }))
+            .focus(|button| button.bg(gpui::Rgba { a: 0.5, ..theme::selection() }))
+            .on_click(move |_, window, cx| {
+                root.update(cx, |view, cx| view.open_activity_detail(detail.clone(), window, cx));
+            }))
         .into_any_element()
 }
 
@@ -2472,7 +2200,7 @@ fn step_shell(
             .pb(if continues {
                 px(TURN_SECTION_GAP)
             } else {
-                px(4.0)
+                px(0.0)
             })
             .child(body),
     )
@@ -2499,14 +2227,14 @@ fn assistant_reply(
                 .pb(px(2.0))
                 .flex()
                 .flex_col()
-                .gap(px(8.0))
+                .gap(px(13.0))
                 .child(
-                    div().flex().flex_row().items_center().gap(px(8.0)).child(
+                    div().h(px(18.0)).flex().flex_row().items_center().gap(px(8.0)).child(
                         div()
                             .font_family(theme::sans())
                             .text_size(theme::text_size(theme::T_LABEL))
                             .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(theme::ash())
+                            .text_color(theme::bone())
                             .child("Pi"),
                     ),
                 )
@@ -2515,7 +2243,7 @@ fn assistant_reply(
                         &fragment_key(message, block),
                         texts,
                         theme::sans(),
-                        theme::T_BODY,
+                        theme::T_BODY_SM,
                         theme::bone(),
                         FontWeight::NORMAL,
                     )),
@@ -2624,7 +2352,7 @@ fn selectable(
     weight: FontWeight,
 ) -> AnyElement {
     // Compact long-read rhythm; tighter than the shell's 1.58 chat default.
-    selectable_with_leading(key, texts, font, size, color, weight, 1.52)
+    selectable_with_leading(key, texts, font, size, color, weight, 1.6)
 }
 
 fn prompt_selectable(key: &str, texts: &HashMap<String, Entity<TranscriptText>>) -> AnyElement {
@@ -2632,10 +2360,10 @@ fn prompt_selectable(key: &str, texts: &HashMap<String, Entity<TranscriptText>>)
         key,
         texts,
         theme::sans(),
-        theme::T_BODY_SM,
+        theme::T_BODY,
         theme::bone(),
         FontWeight::NORMAL,
-        1.48,
+        1.5,
     )
 }
 
@@ -2644,10 +2372,10 @@ fn activity_selectable(key: &str, texts: &HashMap<String, Entity<TranscriptText>
         key,
         texts,
         theme::sans(),
-        theme::T_UI_SM,
-        theme::bone_dim(),
+        theme::T_BODY_SM,
+        theme::bone(),
         FontWeight::NORMAL,
-        1.42,
+        1.6,
     )
 }
 

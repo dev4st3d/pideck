@@ -1817,6 +1817,14 @@ impl RuntimeController {
         cx.notify();
     }
 
+    pub fn clear_queued_inputs(&mut self, cx: &mut Context<Self>) -> bool {
+        self.send_core_effects(|core| core.intent(RuntimeIntent::ClearQueuedInputs), cx)
+    }
+
+    pub fn queue_clear_pending(&self) -> bool {
+        self.core.runtime.queue_clear_request.is_some()
+    }
+
     pub fn set_steering_mode(&mut self, mode: QueueDeliveryMode, cx: &mut Context<Self>) -> bool {
         self.send_core_effects(|core| core.set_steering_mode(mode), cx)
     }

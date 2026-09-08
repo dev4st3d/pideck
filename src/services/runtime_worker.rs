@@ -187,7 +187,7 @@ struct RpcRuntimeConnection {
 impl RuntimeConnection for RpcRuntimeConnection {
     fn prepare(&self, effect: &RuntimeEffect) {
         let stop_before = matches!(&effect.effect,
-            crate::state::runtime::EffectKind::Request(crate::state::runtime::RuntimeRequest::ClearQueue { .. }))
+            crate::state::runtime::EffectKind::Request(crate::state::runtime::RuntimeRequest::ClearQueue { .. } | crate::state::runtime::RuntimeRequest::ClearQueuedInputs { .. }))
             .then_some(effect.sequence);
         self.client.prepare_effect(effect.epoch, stop_before);
     }

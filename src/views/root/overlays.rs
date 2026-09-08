@@ -232,7 +232,6 @@ pub(super) fn conversation_area(params: ConversationAreaParams) -> impl IntoElem
                     })
                     .size_full()
                     .min_w_0()
-                    .pt(px(20.0))
                     .pb(px(20.0)),
                 )
                 .child(
@@ -570,7 +569,7 @@ fn command_row(
                         .overflow_hidden()
                         .text_ellipsis()
                         .whitespace_nowrap()
-                        .child(format!("/{}{}", entry.name, hint)),
+                        .child(if matches!(entry.target, CommandTarget::Session { .. }) { entry.name.clone() } else { format!("/{}{}", entry.name, hint) }),
                 )
                 .child(
                     div()
@@ -2406,11 +2405,11 @@ pub(super) fn command_palette_overlay(
     let result_label = if matches.is_empty() {
         "No matches".to_owned()
     } else if matches.len() > visible {
-        format!("{visible}+ commands")
+        format!("{visible}+ results")
     } else if matches.len() == 1 {
-        "1 command".to_owned()
+        "1 result".to_owned()
     } else {
-        format!("{} commands", matches.len())
+        format!("{} results", matches.len())
     };
 
     div()
@@ -2461,14 +2460,14 @@ pub(super) fn command_palette_overlay(
                                         .font_weight(FontWeight::BOLD)
                                         .text_size(theme::text_size(theme::T_BODY))
                                         .text_color(theme::bone())
-                                        .child("Command palette"),
+                                        .child("Search"),
                                 )
                                 .child(
                                     div()
                                         .font_family(theme::sans())
                                         .text_size(theme::text_size(theme::T_TINY))
                                         .text_color(theme::smoke())
-                                        .child("Native actions, extensions, prompts, and skills"),
+                                        .child("Conversations, native actions, extensions, prompts, and skills"),
                                 ),
                         )
                         .child(controls::chrome_action(

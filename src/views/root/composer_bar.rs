@@ -10,7 +10,7 @@ use crate::views::composer::ComposerFeedback;
 use gpui::{SharedString, rgba};
 
 /// One vertical rhythm for every control in the prompt tray.
-const TRAY_CONTROL_H: f32 = 32.0;
+const TRAY_CONTROL_H: f32 = 36.0;
 
 fn clear() -> gpui::Rgba {
     rgba(0x0000_0000)
@@ -18,6 +18,8 @@ fn clear() -> gpui::Rgba {
 
 pub(super) struct ComposerBarParams<'a> {
     pub(super) composer: &'a Entity<Composer>,
+    pub(super) queue: &'a QueueContents,
+    pub(super) queue_clear_pending: bool,
     pub(super) saved_input_count: usize,
     pub(super) draft_feedback: Option<&'a str>,
     pub(super) attachment_picker_pending: bool,
@@ -41,11 +43,13 @@ pub(super) struct ComposerBarParams<'a> {
 
 pub(super) fn composer_bar(
     params: ComposerBarParams<'_>,
-    window: &Window,
+    _window: &Window,
     cx: &mut Context<RootView>,
 ) -> impl IntoElement {
     let ComposerBarParams {
         composer,
+        queue,
+        queue_clear_pending,
         saved_input_count,
         draft_feedback,
         attachment_picker_pending,
@@ -80,20 +84,16 @@ pub(super) fn composer_bar(
     let file_completion =
         (slash_completion.is_none() && !file_matches.is_empty()).then_some(file_matches);
 
-    let input_focused = composer.read(cx).focus_handle(cx).is_focused(window);
-    // Keep the card lit while one of its floating sheets owns focus.
-    let card_active = input_focused || model_open || thinking_open;
     let availability = composer.read(cx).availability();
     let running = availability == ComposerAvailability::Running;
     let bash_running = availability == ComposerAvailability::BashRunning;
-    let can_submit = composer.read(cx).can_submit();
-    let input_enlarged = composer.read(cx).input_enlarged();
+    let can_submit = composer.read(cx).can_submit() && !queue_clear_pending;
 
     // The tray carries one line of meaning at a time: a clamp notice outranks
     // a binding notice, which outranks the composer's own status. While the
     // desk is simply idle the line offers keyboard hints instead of noise.
-    let idle_ready = availability == ComposerAvailability::Idle
-        && matches!(composer.read(cx).feedback(), ComposerFeedback::Ready);
+    let quiet_feedback = matches!(composer.read(cx).feedback(),
+        ComposerFeedback::Ready | ComposerFeedback::Accepted(_) | ComposerFeedback::BashCompleted);
     let feedback_color = match composer.read(cx).feedback() {
         ComposerFeedback::Rejected(_) | ComposerFeedback::Uncertain => theme::error(),
         ComposerFeedback::Pending(_)
@@ -113,12 +113,9 @@ pub(super) fn composer_bar(
             .filter(|_| !model_open && !thinking_open)
         {
             Some((binding, theme::smoke(), true))
-        } else if idle_ready {
-            Some((
-                composer.read(cx).hint_text().to_owned(),
-                theme::smoke(),
-                true,
-            ))
+        } else if quiet_feedback || (running && !matches!(composer.read(cx).feedback(),
+            ComposerFeedback::Rejected(_) | ComposerFeedback::Uncertain | ComposerFeedback::LoadingAttachments)) {
+            None
         } else {
             let status = composer.read(cx).status_text();
             (!status.is_empty()).then_some((status, feedback_color, false))
@@ -134,14 +131,14 @@ pub(super) fn composer_bar(
         .items_center()
         .flex_shrink_0()
         .px(px(theme::STREAM_PAD_X))
-        .pt(px(10.0))
-        .pb(px(14.0))
+        .pt(px(0.0))
+        .pb(px(13.0))
         // Overlay host: popups are absolute and must not grow this bar's layout height.
         .relative()
         .child(
             div()
                 .w_full()
-                .max_w(px(theme::READING_W - 2.0 * theme::STREAM_PAD_X))
+                .max_w(px(theme::READING_W))
                 .relative()
                 .when_some(slash_completion, |host, completion| {
                     host.child(
@@ -209,17 +206,14 @@ pub(super) fn composer_bar(
                             }),
                     )
                 })
+                .child(queue_preview(queue, queue_clear_pending, cx))
                 .child(
                     div()
                         .flex()
                         .flex_col()
-                        .rounded(px(theme::RADIUS_MD))
+                        .rounded(px(theme::RADIUS_XL))
                         .border_1()
-                        .border_color(if card_active {
-                            theme::focus()
-                        } else {
-                            theme::edge()
-                        })
+                        .border_color(theme::edge())
                         .bg(theme::panel())
                         .overflow_hidden()
                         .can_drop(move |value, _, _| can_attach && value.is::<ExternalPaths>())
@@ -253,127 +247,32 @@ pub(super) fn composer_bar(
                             },
                         )
                         .child(composer.clone())
-                        // Context and delivery stay visible. Status uses its own
-                        // wrapping line rather than competing with the actions.
-                        .child(
-                            div()
-                                .flex()
-                                .flex_row()
-                                .flex_wrap()
-                                .items_center()
-                                .justify_between()
-                                .gap(px(8.0))
-                                .px(px(10.0))
-                                .pb(px(10.0))
-                                .pt(px(2.0))
-                                .child(
-                                    div()
-                                        .flex()
-                                        .flex_row()
-                                        .items_center()
-                                        .gap(px(4.0))
-                                        .flex_shrink_0()
-                                        .child(tray_select(
-                                            "prompt-model-picker",
-                                            model_label,
-                                            model_open,
-                                            can_pick_model,
-                                            148.0,
-                                            "Switch model",
-                                            Box::new(cx.listener(|view, _, window, cx| {
-                                                view.toggle_model_panel(
-                                                    ModelPanel::Switcher,
-                                                    window,
-                                                    cx,
-                                                )
-                                            })),
-                                        ))
-                                        .child(tray_select(
-                                            "prompt-thinking-select",
-                                            thinking_label,
-                                            thinking_open,
-                                            can_pick_thinking,
-                                            108.0,
-                                            "Thinking effort",
-                                            Box::new(cx.listener(|view, _, window, cx| {
-                                                view.toggle_model_panel(
-                                                    ModelPanel::Thinking,
-                                                    window,
-                                                    cx,
-                                                )
-                                            })),
-                                        )),
-                                )
-                                .child(
-                                    div()
-                                        .flex()
-                                        .flex_row()
-                                        .items_center()
-                                        .gap(px(2.0))
-                                        .flex_shrink_0()
-                                        .child(tray_icon(
-                                            "prompt-attach-files",
-                                            "icons/paperclip.svg",
-                                            false,
-                                            can_attach,
-                                            "Attach files",
-                                            Some("Ctrl+O"),
-                                            Box::new(cx.listener(|view, _, _, cx| {
-                                                view.choose_attachments(cx);
-                                            })),
-                                        ))
-                                        .child(tray_icon(
-                                            "prompt-enlarge-input",
-                                            "icons/expand.svg",
-                                            input_enlarged,
-                                            true,
-                                            if input_enlarged {
-                                                "Shrink input"
-                                            } else {
-                                                "Enlarge input"
-                                            },
-                                            None,
-                                            Box::new(cx.listener(|view, _, window, cx| {
-                                                view.toggle_composer_enlarged(window, cx);
-                                            })),
-                                        ))
-                                        .when(running || bash_running, |tray| {
-                                            tray.child(div().w(px(6.0))).child(tray_quiet_action(
-                                                "prompt-abort",
-                                                if bash_running { "Stop Bash" } else { "Stop" },
-                                                true,
-                                                Box::new(move |_, _, cx| {
-                                                    abort_composer.update(cx, |composer, cx| {
-                                                        composer.request_abort(cx);
-                                                    });
-                                                }),
-                                            ))
-                                        })
-                                        .when(running, |tray| {
-                                            tray.child(tray_quiet_action(
-                                                "prompt-follow-up",
-                                                "Queue",
-                                                can_submit,
-                                                Box::new(move |_, _, cx| {
-                                                    follow_composer.update(cx, |composer, cx| {
-                                                        composer.emit_accept(true, cx);
-                                                    });
-                                                }),
-                                            ))
-                                        })
-                                        .child(div().w(px(4.0)))
-                                        .child(submit_button(
-                                            "prompt-submit",
-                                            running,
-                                            can_submit,
-                                            Box::new(move |_, _, cx| {
-                                                submit_composer.update(cx, |composer, cx| {
-                                                    composer.emit_accept(false, cx);
-                                                });
-                                            }),
-                                        )),
-                                ),
-                        )
+                        .child(div().min_h(px(47.0)).px(px(19.0)).pb(px(11.0)).flex().items_center()
+                            .justify_between().gap(px(12.0)).flex_wrap()
+                            .child(div().flex().items_center().gap(px(20.0)).flex_shrink_0()
+                                .child(div().w(px(74.0)).child(attach_button(can_attach,
+                                    Box::new(cx.listener(|view, _, _, cx| view.choose_attachments(cx))))))
+                                .child(div().w(px(108.0)).child(tray_select(
+                                    "prompt-model-picker", model_label, model_open, can_pick_model, 96.0, "Switch model",
+                                    Box::new(cx.listener(|view, _, window, cx| view.toggle_model_panel(ModelPanel::Switcher, window, cx))),
+                                )))
+                                .child(tray_select(
+                                    "prompt-thinking-select", thinking_label, thinking_open, can_pick_thinking, 132.0, "Thinking effort",
+                                    Box::new(cx.listener(|view, _, window, cx| view.toggle_model_panel(ModelPanel::Thinking, window, cx))),
+                                )))
+                            .child(div().flex().items_center().gap(px(8.0)).flex_shrink_0()
+                                .when(running || bash_running, |tray| tray.child(delivery_button(
+                                    "prompt-abort", if bash_running { "Stop Bash" } else { "Stop" }, "icons/stop-square.svg",
+                                    if bash_running { 104.0 } else { 84.0 }, true, false,
+                                    Box::new(move |_, _, cx| { abort_composer.update(cx, |composer, cx| composer.request_abort(cx)); }),
+                                )))
+                                .when(running, |tray| tray.child(delivery_button(
+                                    "prompt-follow-up", "Queue", "icons/queue-return.svg", 94.0, can_submit, false,
+                                    Box::new(move |_, _, cx| { follow_composer.update(cx, |composer, cx| composer.emit_accept(true, cx)); }),
+                                )))
+                                .child(submit_button("prompt-submit", running, can_submit,
+                                    Box::new(move |_, _, cx| { submit_composer.update(cx, |composer, cx| composer.emit_accept(false, cx)); }),
+                                ))))
                         .when_some(tray_line, |panel, (text, color, mono)| {
                             panel.child(
                                 div().px(px(14.0)).pb(px(10.0))
@@ -401,6 +300,12 @@ pub(super) fn composer_bar(
                         }),
                 ),
         )
+        .child(div().w_full().max_w(px(theme::READING_W)).mt(px(12.0)).h(px(18.0))
+            .flex().items_center().justify_between().gap(px(16.0))
+            .font_family(theme::sans()).text_size(theme::text_size(11.0)).line_height(px(18.0))
+            .text_color(theme::ash())
+            .child(div().min_w_0().overflow_hidden().text_ellipsis().whitespace_nowrap().child(composer.read(cx).hint_text()))
+            .child(div().flex_shrink_0().child(usage_label(projection))))
 }
 
 /// Shared by the prompt dock and full-page settings, so a failed close never
@@ -436,122 +341,87 @@ pub(super) fn draft_storage_notice(feedback: &str, cx: &mut Context<RootView>) -
 /// Tray select trigger: a quiet, borderless-looking chip until hovered or
 /// open, so the tray reads as one surface instead of a row of boxes.
 fn tray_select(
-    id: impl Into<SharedString>,
-    label: SharedString,
-    open: bool,
-    enabled: bool,
-    max_width: f32,
-    tooltip_label: &'static str,
-    on_click: controls::ClickHandler,
+    id: impl Into<SharedString>, label: SharedString, open: bool, enabled: bool,
+    width: f32, tooltip_label: &'static str, on_click: controls::ClickHandler,
 ) -> impl IntoElement {
-    div()
-        .id(id.into())
-        .h(px(TRAY_CONTROL_H))
-        .max_w(px(max_width))
-        .px(px(9.0))
-        .rounded(px(theme::RADIUS_MD))
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap(px(5.0))
-        .flex_shrink_0()
-        .bg(if open { theme::panel_lift() } else { clear() })
-        .border_1()
-        .border_color(if open { theme::edge() } else { clear() })
-        .text_color(if !enabled {
-            theme::smoke()
-        } else if open {
-            theme::bone()
-        } else {
-            theme::bone_dim()
-        })
-        .when(enabled, |button| {
-            button
-                .tab_index(0)
-                .cursor_pointer()
-                .hover(|button| button.bg(theme::panel_lift()).text_color(theme::bone()))
-                .focus(|button| button.border_color(theme::focus()))
-                .active(|button| button.bg(theme::panel_hover()))
-                .on_click(move |event, window, cx| on_click(event, window, cx))
-        })
+    div().id(id.into()).h(px(TRAY_CONTROL_H)).w(px(width)).rounded(px(5.0))
+        .flex().items_center().gap(px(10.0)).flex_shrink_0()
+        .bg(if open { theme::selection() } else { clear() })
+        .text_color(if tooltip_label == "Thinking effort" || !enabled { theme::ash() } else { theme::bone() })
+        .when(enabled, |button| button.tab_index(0).cursor_pointer()
+            .hover(|style| style.bg(theme::panel_hover())).focus(|style| style.bg(theme::selection()))
+            .on_click(move |event, window, cx| on_click(event, window, cx)))
         .tooltip(controls::text_tooltip(tooltip_label, None::<&str>))
-        .child(
-            div()
-                .min_w_0()
-                .flex_1()
-                .font_family(theme::main())
-                .text_size(theme::text_size(theme::T_LABEL))
-                .font_weight(FontWeight::SEMIBOLD)
-                .overflow_hidden()
-                .text_ellipsis()
-                .whitespace_nowrap()
-                .child(label),
-        )
-        .child(
-            svg()
-                .path(if open {
-                    "icons/chevron-up.svg"
-                } else {
-                    "icons/chevron-down.svg"
-                })
-                .size(px(11.0))
-                .text_color(if open { theme::data() } else { theme::smoke() })
-                .flex_shrink_0(),
-        )
+        .child(div().min_w_0().flex_1().font_family(theme::sans()).text_size(theme::text_size(12.0))
+            .line_height(px(18.0)).font_weight(FontWeight::NORMAL).overflow_hidden().text_ellipsis().whitespace_nowrap().child(label))
+        .child(svg().path(if open { "icons/chevron-up.svg" } else { "icons/chevron-down.svg" })
+            .size(px(16.0)).text_color(theme::ash()).flex_shrink_0())
 }
 
-/// Tray icon action: slightly larger hit target than the old chrome icons,
-/// corners in family with the card.
-fn tray_icon(
-    id: impl Into<SharedString>,
-    icon_path: &'static str,
-    selected: bool,
-    enabled: bool,
-    tooltip_label: &'static str,
-    tooltip_hint: Option<&'static str>,
-    on_click: controls::ClickHandler,
-) -> impl IntoElement {
-    div()
-        .id(id.into())
-        .size(px(TRAY_CONTROL_H))
-        .rounded(px(theme::RADIUS_MD))
-        .flex()
-        .items_center()
-        .justify_center()
-        .flex_shrink_0()
-        .bg(if selected {
-            theme::panel_lift()
-        } else {
-            clear()
-        })
-        .text_color(if selected {
-            theme::bone()
-        } else {
-            theme::smoke()
-        })
-        .when(enabled, |button| {
-            button
-                .tab_index(0)
-                .cursor_pointer()
-                .hover(|button| button.bg(theme::panel_lift()).text_color(theme::bone_dim()))
-                .focus(|button| button.text_color(theme::focus()))
-                .active(|button| button.bg(theme::panel_hover()))
-                .on_click(move |event, window, cx| on_click(event, window, cx))
-        })
-        .tooltip(controls::text_tooltip(tooltip_label, tooltip_hint))
-        .child(
-            svg()
-                .path(icon_path)
-                .size(px(13.0))
-                .text_color(if selected {
-                    theme::bone()
-                } else if enabled {
-                    theme::smoke()
-                } else {
-                    theme::edge_hard()
-                }),
-        )
+fn attach_button(enabled: bool, on_click: controls::ClickHandler) -> impl IntoElement {
+    div().id("prompt-attach-files").h(px(36.0)).flex().items_center().gap(px(7.0))
+        .text_color(theme::ash()).font_family(theme::sans()).text_size(theme::text_size(12.0))
+        .when(enabled, |button| button.tab_index(0).cursor_pointer().focus(|style| style.bg(theme::selection()))
+            .hover(|style| style.text_color(theme::bone()))
+            .on_click(move |event, window, cx| on_click(event, window, cx)))
+        .tooltip(controls::text_tooltip("Attach files", Some("Ctrl+O")))
+        .child(svg().path("icons/paperclip.svg").size(px(16.0)).text_color(theme::ash())).child("Attach")
 }
+
+fn delivery_button(
+    id: impl Into<SharedString>, label: &'static str, icon: &'static str,
+    width: f32, enabled: bool, primary: bool, on_click: controls::ClickHandler,
+) -> impl IntoElement {
+    div().id(id.into()).h(px(36.0)).w(px(width)).px(px(12.0)).rounded(px(6.0))
+        .flex().items_center().justify_between().flex_shrink_0()
+        .font_family(theme::sans()).text_size(theme::text_size(13.0)).font_weight(FontWeight::MEDIUM)
+        .bg(if primary { theme::signal() } else { theme::panel_lift() })
+        .text_color(if primary { theme::on_accent() } else { theme::bone() })
+        .when(enabled, |button| button.tab_index(0).cursor_pointer()
+            .hover(move |style| style.bg(if primary { theme::signal_hot() } else { theme::panel_hover() }))
+            .focus(|style| style.border_1().border_color(theme::focus()))
+            .on_click(move |event, window, cx| on_click(event, window, cx)))
+        .tooltip(controls::text_tooltip(if enabled { label } else { "Write a prompt or attach a file first" }, None::<&str>))
+        .child(label)
+        .child(svg().path(icon).size(px(16.0)).text_color(if primary { theme::on_accent() } else { theme::ash() }))
+}
+
+fn queue_preview(queue: &QueueContents, clearing: bool, cx: &mut Context<RootView>) -> impl IntoElement {
+    let (count, message) = match queue {
+        QueueContents::Unknown { pending_count } => (*pending_count as usize, format!("{pending_count} pending messages")),
+        QueueContents::Known { steering, follow_up } => {
+            let count = steering.len() + follow_up.len();
+            let first = steering.first().or_else(|| follow_up.first()).cloned().unwrap_or_default();
+            (count, if count > 1 { format!("{first}  (+{} more)", count - 1) } else { first })
+        }
+    };
+    div().when(count > 0, |host| host.child(div().id("queued-input-preview").h(px(47.0)).w_full()
+        .border_t_1().border_color(theme::edge_soft()).pl(px(12.0)).pr(px(20.0))
+        .flex().items_center().gap(px(0.0)).font_family(theme::sans())
+        .child(div().w(px(68.0)).flex_shrink_0().text_size(theme::text_size(11.0)).font_weight(FontWeight::MEDIUM).text_color(theme::signal()).child("Queued"))
+        .child(div().min_w_0().flex_1().pr(px(16.0)).text_size(theme::text_size(12.0)).text_color(theme::ash())
+            .overflow_hidden().text_ellipsis().whitespace_nowrap().child(message))
+        .child(div().id("remove-queued-inputs").h(px(32.0)).flex().items_center().gap(px(12.0))
+            .flex_shrink_0().text_size(theme::text_size(11.0)).text_color(theme::ash())
+            .when(!clearing, |button| button.tab_index(0).cursor_pointer().focus(|style| style.bg(theme::selection()))
+                .tooltip(controls::text_tooltip("Remove queued inputs without stopping Pi. Removed inputs remain in saved inputs.", None::<&str>))
+                .on_click(cx.listener(|view, _, _, cx| { view.controller.update(cx, |controller, cx| { controller.clear_queued_inputs(cx); }); })))
+            .child(if clearing { "Removing…" } else if count > 1 { "Clear all" } else { "Remove" })
+            .child(svg().path("icons/close.svg").size(px(16.0)).text_color(theme::ash())))))
+}
+
+fn usage_label(projection: &ShellProjection) -> String {
+    use crate::state::DisplayValue;
+    let context = projection.context_percent.as_ref().map(|percent| format!("{percent} context"));
+    let cost = match &projection.cost {
+        DisplayValue::Known(value) => Some(value.clone()),
+        DisplayValue::Stale(value) => Some(format!("{value} · stale")),
+        _ => None,
+    };
+    [context, cost].into_iter().flatten().collect::<Vec<_>>().join(" · ")
+}
+
+
 
 /// Quiet text action for run-state affordances (Abort, Follow up).
 fn tray_quiet_action(
@@ -589,43 +459,11 @@ fn tray_quiet_action(
 }
 
 /// A labeled primary action. Delivery mode is legible without a tooltip.
-fn submit_button(
-    id: impl Into<SharedString>,
-    running: bool,
-    can_submit: bool,
-    on_click: controls::ClickHandler,
-) -> impl IntoElement {
-    let ink = if can_submit { theme::canvas() } else { theme::smoke() };
-    div()
-        .id(id.into())
-        .h(px(TRAY_CONTROL_H))
-        .min_w(px(76.0))
-        .px(px(12.0))
-        .rounded(px(theme::RADIUS))
-        .border_1()
-        .border_color(if can_submit { theme::signal() } else { clear() })
-        .flex().items_center().justify_center().gap(px(6.0)).flex_shrink_0()
-        .font_family(theme::sans())
-        .font_weight(FontWeight::SEMIBOLD)
-        .text_size(theme::text_size(theme::T_UI_SM))
-        .text_color(ink)
-        .bg(if can_submit { theme::signal() } else { theme::panel_lift() })
-        .when(can_submit, |button| {
-            button.tab_index(0).cursor_pointer()
-                .hover(|button| button.bg(theme::signal_hot()))
-                .focus(|button| button.border_color(theme::bone()))
-                .active(|button| button.bg(theme::signal_deep()))
-                .on_click(move |event, window, cx| on_click(event, window, cx))
-        })
-        .tooltip(controls::text_tooltip(
-            if can_submit {
-                if running { "Steer the running agent" } else { "Send prompt" }
-            } else { "Write a prompt or attach a file first" },
-            Some("Enter"),
-        ))
-        .child(if running { "Steer" } else { "Send" })
-        .child(svg().path("icons/arrow-up.svg").size(px(13.0)).text_color(ink))
+fn submit_button(id: impl Into<SharedString>, running: bool, can_submit: bool, on_click: controls::ClickHandler) -> impl IntoElement {
+    delivery_button(id, if running { "Steer" } else { "Send" }, "icons/arrow-up.svg",
+        if running { 96.0 } else { 92.0 }, can_submit, true, on_click)
 }
+
 
 fn short_model_label(
     projection: &ShellProjection,
@@ -670,15 +508,15 @@ fn short_thinking_label(
             compact_label(&label, 10)
         }
     };
-    format!("Think: {value}").into()
+    format!("Thinking: {value}").into()
 }
 
 fn thinking_short(level: ThinkingLevel) -> String {
     match level {
         ThinkingLevel::Off => "Off".to_owned(),
-        ThinkingLevel::Minimal => "Min".to_owned(),
+        ThinkingLevel::Minimal => "Minimal".to_owned(),
         ThinkingLevel::Low => "Low".to_owned(),
-        ThinkingLevel::Medium => "Med".to_owned(),
+        ThinkingLevel::Medium => "Medium".to_owned(),
         ThinkingLevel::High => "High".to_owned(),
         ThinkingLevel::Xhigh => "XHigh".to_owned(),
         ThinkingLevel::Max => "Max".to_owned(),

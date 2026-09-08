@@ -6,5 +6,6 @@ mod markdown;
 mod root;
 mod terminal;
 mod tool_card;
+mod time_labels;
 
 pub use root::RootView;

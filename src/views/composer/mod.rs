@@ -246,7 +246,7 @@ impl Composer {
             attach_seq: 0,
             strip_motion_key: 0,
             image_bytes: 0,
-            placeholder: "Message Pi…  @ file  / command  ! shell".into(),
+            placeholder: "Message Pi... @ file / command ! shell".into(),
             masked: false,
             field_height: None,
             allow_empty_submit: false,
@@ -420,7 +420,7 @@ impl Composer {
         match self.chrome {
             ComposerChrome::Field => self.field_height(),
             ComposerChrome::Full => {
-                if self.input_enlarged { 152.0 } else { 76.0 }
+                if self.input_enlarged { 183.0 } else { theme::COMPOSER_H - 49.0 }
             }
             ComposerChrome::Panel => {
                 if self.input_enlarged {
@@ -1496,10 +1496,10 @@ impl Composer {
     pub(crate) fn hint_text(&self) -> &'static str {
         match self.availability {
             ComposerAvailability::Running => {
-                "Enter steer · Alt+Enter follow up · Shift+Enter newline · Ctrl+O files · Esc abort"
+                "Enter to steer · Alt Enter to queue · Esc to stop"
             }
             ComposerAvailability::Idle => {
-                "Enter send · Shift+Enter newline · Ctrl+O files · Ctrl+V image"
+                "Enter to send · Shift Enter for newline"
             }
             ComposerAvailability::BashRunning => "Esc aborts Bash only",
             ComposerAvailability::BashCancelling => "Waiting for Bash to stop",

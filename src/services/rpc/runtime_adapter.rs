@@ -163,7 +163,7 @@ fn command_for_request(request: &RuntimeRequest) -> Command {
             command: command.clone(),
             exclude_from_context: Some(*exclude_from_context),
         },
-        RuntimeRequest::ClearQueue { .. } => Command::ClearQueue,
+        RuntimeRequest::ClearQueue { .. } | RuntimeRequest::ClearQueuedInputs { .. } => Command::ClearQueue,
         RuntimeRequest::Abort { .. } => Command::Abort,
         RuntimeRequest::AbortBash => Command::AbortBash,
         RuntimeRequest::AbortRetry => Command::AbortRetry,
@@ -243,7 +243,7 @@ fn normalize_response(
                 pending_message_count: state.pending_message_count,
             })
         }
-        (RuntimeRequest::ClearQueue { .. }, ResponseResult::ClearQueue(data)) => {
+        (RuntimeRequest::ClearQueue { .. } | RuntimeRequest::ClearQueuedInputs { .. }, ResponseResult::ClearQueue(data)) => {
             NormalizedResponse::QueueCleared {
                 steering: data.steering,
                 follow_up: data.follow_up,
@@ -1273,7 +1273,7 @@ fn operation_name(request: &RuntimeRequest) -> &'static str {
         },
         RuntimeRequest::InvokeCommand { .. } => "command delivery",
         RuntimeRequest::ExecuteBash { .. } => "Bash execution",
-        RuntimeRequest::ClearQueue { .. } => "clear_queue",
+        RuntimeRequest::ClearQueue { .. } | RuntimeRequest::ClearQueuedInputs { .. } => "clear_queue",
         RuntimeRequest::Abort { .. } => "abort",
         RuntimeRequest::AbortBash => "Bash cancellation",
         RuntimeRequest::AbortRetry => "retry cancellation",

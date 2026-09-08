@@ -4,9 +4,11 @@ A native Windows workspace for the Pi coding agent, built with Rust and GPUI 0.2
 
 ## Workspace
 
-The Workbench layout keeps projects and sessions on the left, conversation and input in the center, and a dismissible inspector on the right. Navigation yields to the conversation when the window is narrow. History and the inspector do not consume the center at the same time.
+The reference layout has a 40-pixel custom native titlebar, 64-pixel navigation rail, 240-pixel project sidebar, a shared 60-pixel conversation toolbar, and an 840-pixel reading/composer measure. History, the inspector, terminal and settings remain functional native views. Narrow windows retain the conversation and collapse secondary columns.
 
-Graphite and Paper are the two supported appearances. Both use a shared type scale, restrained semantic accents, readable status text, a 960-logical-pixel reading measure and visible keyboard focus. Existing theme preferences map to the corresponding dark or light appearance; system-installed fonts remain configurable.
+Original, Linen, Graphite and Midnight share the same geometry. Midnight uses the normal toolbar position, not the displaced position in its supplied export. Typography uses the exact DM Sans, Instrument Serif and IBM Plex Mono design files, imported before building. User-selected font families remain configurable; the old default Segoe UI/Cascadia Mono preferences migrate to the design defaults.
+
+This is a source implementation, **not a certified 1:1 native match**. Rust compilation, rustfmt, Rust tests and native screenshot verification were not executable in the delivery environment. See [the rebuild record](docs/REBUILD.md) for completed checks and outstanding validation.
 
 - Multiline composer with grapheme navigation, IME, clipboard, undo/redo, file/image attachments, `@` files and `/` commands.
 - Separate Send, Steer, Queue and Stop behavior. Input stays editable while acceptance is pending; a late acknowledgement cannot clear a newer revision or newly changed attachments.
@@ -33,9 +35,13 @@ There is no application `package.json` or frontend npm build. Node is used for P
 Install the prerequisites, then run from the extracted repository:
 
 ```powershell
+node scripts/prepare-fonts.mjs --zip "C:\path\to\pideck-design.zip"
 npm install -g @earendil-works/pi-coding-agent@0.85.1
+cargo fmt --all
 cargo run --locked
 ```
+
+Font binaries are not redistributed in this ZIP. The first command extracts the four files from your original design ZIP and verifies their exact SHA-256 hashes. It does not substitute system fonts. An extracted design/fonts directory also works with `--dir`; without arguments, the script verifies existing files or downloads the manifest sources and rejects a changed hash. `build.rs` embeds the prepared bytes in the executable, so end users do not need to install the fonts.
 
 A release-mode source build uses:
 
@@ -63,7 +69,7 @@ While an attachment picker/read is active, session switching is temporarily bloc
 
 | Action | Keys |
 |---|---|
-| Command palette | `Ctrl+Shift+P` |
+| Search conversations / command palette | `Ctrl+K` or `Ctrl+Shift+P` |
 | Project navigation / inspector | `Ctrl+B` / `Ctrl+I` |
 | Connect / Retry / Stop | `Ctrl+Alt+C` / `Ctrl+Alt+R` / `Ctrl+Alt+S` |
 | Workspace terminal | `` Ctrl+` `` |
@@ -99,12 +105,12 @@ On a configured Windows machine:
 .\scripts\validate.ps1
 ```
 
-The script checks source/asset contracts, formatting, all Rust targets/tests, bridge tests and Clippy, using the included lockfile. It does not install dependencies or publish anything.
+The script prepares/verifies design fonts, checks source/asset contracts, formatting, all Rust targets/tests, bridge/font-import tests and Clippy, using the included lockfile. It does not install Rust/Pi dependencies or publish anything. Run `cargo fmt --all` before the first validation; formatting could not be normalized with rustfmt in the delivery environment.
 
 Bridge tests and isolated catalog benchmark can also run directly:
 
 ```powershell
-node --test (Get-ChildItem -Path bridge -Filter *.test.mjs).FullName
+node --test (Get-ChildItem -Path bridge,scripts -Filter *.test.mjs).FullName
 node scripts/verify-source.mjs
 node scripts/bench-resource-index.mjs
 ```
@@ -115,4 +121,4 @@ The benchmark excludes Pi startup, filesystem loading, networking and native ren
 
 - [info/README.md](info/README.md): runtime policy and architecture map.
 - [bridge/README.md](bridge/README.md): public SDK bridge, IPC, trust and resource indexing.
-- [AGENTS.md](AGENTS.md): contributor instructions. Its referenced `GPUI.md` was absent from the supplied snapshot; this delivery does not claim otherwise.
+- [AGENTS.md](AGENTS.md): contributor instructions. The bundled `GPUI.md` is the native UI development reference.

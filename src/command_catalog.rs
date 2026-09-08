@@ -4,6 +4,7 @@ use crate::state::runtime::{CommandProvenance, CommandSource, FacetStatus, Runti
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum CommandGroup {
+    Session,
     Native,
     Extension,
     Prompt,
@@ -13,6 +14,7 @@ pub enum CommandGroup {
 impl CommandGroup {
     pub fn label(self) -> &'static str {
         match self {
+            Self::Session => "Conversations",
             Self::Native => "Native",
             Self::Extension => "Extension",
             Self::Prompt => "Prompt",
@@ -42,6 +44,7 @@ pub enum NativeAction {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CommandTarget {
+    Session { project: std::path::PathBuf, session: std::path::PathBuf },
     Native(NativeAction),
     Dynamic(CommandSource),
 }
@@ -69,6 +72,9 @@ impl CommandEntry {
     }
 
     pub fn provenance_label(&self) -> String {
+        if let CommandTarget::Session { project, .. } = &self.target {
+            return project.to_string_lossy().into_owned();
+        }
         let Some(provenance) = &self.provenance else {
             return "Built into Pideck".to_owned();
         };

@@ -458,6 +458,7 @@ pub struct RootView {
     history_open: bool,
     /// Navigation preference is preserved when a narrow window temporarily hides it.
     sidebar_open: bool,
+    project_menu_open: bool,
     /// Optional right companion panel; never replaces the project navigation.
     inspector_open: bool,
     /// Roving keyboard cursor inside the workspace tree (None until navigated).
@@ -542,7 +543,7 @@ impl RootView {
             .and_then(theme::ThemeId::from_key)
             .unwrap_or_else(|| {
                 font_catalog.theme_key = None;
-                theme::ThemeId::PiDeckDark
+                theme::ThemeId::ParchmentDesk
             });
         theme::set_active(active_theme);
         let font_scale = theme::FontScale::default();
@@ -573,7 +574,7 @@ impl RootView {
             Composer::field("font-search", "Search system fonts…", "", cx).with_field_height(30.0)
         });
         let command_search_composer = cx.new(|cx| {
-            Composer::field("command-search", "Search commands…", "", cx).with_field_height(34.0)
+            Composer::field("command-search", "Search sessions and commands…", "", cx).with_field_height(34.0)
         });
         let auth_input_composer = cx.new(|cx| {
             Composer::field(
@@ -876,6 +877,7 @@ impl RootView {
             history_focus,
             history_open: false,
             sidebar_open: true,
+            project_menu_open: false,
             inspector_open: false,
             sidebar_cursor: None,
             sidebar_tree_pointer_focus: false,
@@ -1071,6 +1073,9 @@ impl RootView {
                 }
             }
             shell::SidebarNode::Thread { project, .. } => {
+                // The active project is represented by the fixed header, not
+                // a tree row. Never move the roving cursor to an invisible node.
+                if self.projects.is_active(&project) { return; }
                 self.sidebar_cursor = Some(shell::SidebarNode::Project(project));
                 cx.notify();
             }
@@ -1898,17 +1903,18 @@ impl RootView {
 
     fn refresh_command_palette_matches(&mut self, cx: &Context<Self>) {
         let query = self.command_search_composer.read(cx).draft().to_owned();
-        let matches = self
-            .command_catalog()
-            .filtered(&query)
-            .into_iter()
-            .cloned()
-            .collect();
+        let mut matches = shell::session_search_entries(
+            &self.projects, &self.render_projections.catalog, &self.project_catalogs,
+            &self.thread_statuses(), &query, self.project_switch_enabled(),
+        );
+        matches.extend(self.command_catalog().filtered(&query).into_iter().cloned());
+        // The palette renders at most 60 rows. Keyboard selection must not
+        // move into invisible results beyond that same bound.
+        matches.truncate(60);
         self.command_palette_matches = matches;
-        self.command_selection = self
-            .command_selection
-            .min(self.command_palette_matches.len().saturating_sub(1));
+        self.command_selection = self.command_selection.min(self.command_palette_matches.len().saturating_sub(1));
     }
+
 
     fn move_command_selection(&mut self, delta: isize, palette: bool, cx: &mut Context<Self>) {
         let count = if palette {
@@ -2028,6 +2034,11 @@ impl RootView {
         }
         self.close_command_palette(window, cx);
         match entry.target {
+            CommandTarget::Session { project, session } => {
+                // Switching checkpoints the current draft; unlike executing a
+                // slash command, opening a search result must never clear it.
+                self.activate_project(project, Some(session), window, cx);
+            }
             CommandTarget::Native(action) => {
                 match self.execute_native_action(action, &arguments, window, cx) {
                     Ok(()) => {
@@ -3442,6 +3453,25 @@ impl RootView {
         }
     }
 
+    pub(in crate::views) fn retry_last_response(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let history = self.controller.read(cx).history_projection();
+        if history.switching || !matches!(history.lifecycle, RuntimeLifecycle::Ready | RuntimeLifecycle::Settled) {
+            return;
+        }
+        self.ensure_sidebar_open();
+        self.inspector_open = false;
+        self.history_open = true;
+        if let Some(message) = history.fork_messages.last() {
+            self.history.select(message.entry_id.clone(), &history.tree);
+            self.history_confirmation = Some(HistoryConfirmation::Fork(message.entry_id.clone()));
+        } else {
+            self.sync_history_selection();
+            self.history_confirmation = None;
+        }
+        window.focus(&self.history_focus);
+        cx.notify();
+    }
+
     fn request_fork(&mut self, cx: &mut Context<Self>) {
         let Some(entry) = self.history.selected().cloned() else {
             return;
@@ -4678,8 +4708,8 @@ impl RootView {
         workspace: &str,
         cx: &mut Context<Self>,
     ) {
-        let identity = latest_completed_response_key(conversation)
-            .map(|key| (conversation.epoch.value(), key));
+        let identity = Some((conversation.epoch.value(),
+            latest_completed_response_key(conversation).unwrap_or_default()));
         if identity == self.workspace_diff_identity {
             return;
         }
@@ -4711,10 +4741,7 @@ impl RootView {
                 if view.workspace_diff_generation != generation {
                     return;
                 }
-                view.workspace_diff = result
-                    .ok()
-                    .filter(|snapshot| !snapshot.is_empty())
-                    .map(Arc::new);
+                view.workspace_diff = result.ok().map(Arc::new);
                 view.conversation_list
                     .refresh_trailing(&view.conversation_list_state);
                 cx.notify();

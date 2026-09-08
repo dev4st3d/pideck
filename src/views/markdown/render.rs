@@ -23,14 +23,14 @@ use super::{
 /// Vertical rhythm between sibling blocks.
 const BLOCK_GAP: f32 = 10.0;
 /// Prose leading; tighter than the shell's chat default, easy on long reads.
-const PROSE_LEADING: f32 = 1.45;
+const PROSE_LEADING: f32 = 1.6;
 const CODE_LEADING: f32 = 1.35;
 /// Inline code sits a half step below the surrounding font size.
 const INLINE_CODE_SCALE: f32 = 0.92;
 const QUOTE_BAR_W: f32 = 2.0;
 const QUOTE_INDENT: f32 = 10.0;
-const MARKER_COL_W: f32 = 18.0;
-const LIST_GAP: f32 = 4.0;
+const MARKER_COL_W: f32 = 6.0;
+const LIST_GAP: f32 = 6.0;
 
 /// One selectable text leaf: block index-order selection in the conversation
 /// view pairs these snapshots with hit-tested `TextLayout`s.
@@ -45,6 +45,7 @@ pub(in crate::views) struct LeafInfo {
 pub(in crate::views) type LeafPoint = (usize, usize);
 
 pub(in crate::views) struct MarkdownRenderOptions<'a> {
+    pub emphasize_lead: bool,
     /// Window text style refined by the surrounding transcript wrapper.
     pub default_style: &'a TextStyle,
     /// `default_style` resolved to pixels for relative inline-code sizing.
@@ -75,6 +76,16 @@ pub(in crate::views) fn render_document(
             .flex_col()
             .gap(px(BLOCK_GAP))
             .children(blocks.iter().enumerate().map(|(index, block)| {
+                if index == 0 && options.emphasize_lead {
+                    if let MarkdownBlock::Prose(prose) = block {
+                        let mut style = options.default_style.clone();
+                        style.font_size = theme::text_size(17.0).into();
+                        style.font_weight = FontWeight::MEDIUM;
+                        return div().text_size(theme::text_size(17.0))
+                            .child(renderer.prose_leaf(prose, &style, 24.0 / 17.0, None))
+                            .into_any_element();
+                    }
+                }
                 renderer.render_block(block, options.default_style, index == 0)
             }))
             .into_any_element();
@@ -116,7 +127,8 @@ impl BlockRender<'_, '_> {
                 .items_center()
                 .child(div().h(px(1.0)).w_full().bg(theme::edge_soft()))
                 .into_any_element(),
-            MarkdownBlock::List(items) => self.render_list(items, style),
+            MarkdownBlock::List(items) => div().pt(px(12.0)).pb(px(8.0))
+                .child(self.render_list(items, style)).into_any_element(),
             MarkdownBlock::Table(table) => render_table(table),
         }
     }
@@ -376,7 +388,7 @@ impl BlockRender<'_, '_> {
             .w_full()
             .flex()
             .flex_row()
-            .gap(px(8.0))
+            .gap(px(3.0))
             .child(
                 // Hanging marker column: wrapped lines hang on the content,
                 // nested lists indent as structure.
@@ -385,12 +397,12 @@ impl BlockRender<'_, '_> {
                     .flex_shrink_0()
                     .flex()
                     .flex_row()
-                    .justify_end()
+                    .justify_start()
                     .line_height(relative(PROSE_LEADING))
                     .child(
                         div()
                             .font_family(theme::sans())
-                            .text_size(theme::text_size(theme::T_UI))
+                            .text_size(theme::text_size(theme::T_BODY_SM))
                             .text_color(color)
                             .child(marker),
                     ),

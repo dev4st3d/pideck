@@ -3138,3 +3138,80 @@ fn stale_generation_cannot_complete_run_control_operation() {
     assert_eq!(state.stale_inputs_ignored, ignored_before + 1);
     assert!(state.pending_operation.is_none());
 }
+
+#[test]
+fn queue_only_clear_recovers_inputs_without_stopping_the_active_run() {
+    let (mut state, _) = connected_state("queue-only");
+    apply(&mut state, RuntimeInput::Event(NormalizedEvent::AgentStart));
+    apply(&mut state, RuntimeInput::Event(NormalizedEvent::QueueUpdate {
+        steering: vec!["Use the local fixture".to_owned()],
+        follow_up: vec!["Then run the tests".to_owned()],
+    }));
+    let effects = apply(&mut state, RuntimeInput::Intent(RuntimeIntent::ClearQueuedInputs));
+    assert_eq!(effects.len(), 1);
+    let EffectKind::Request(RuntimeRequest::ClearQueuedInputs { clear_id }) = effects[0].effect else {
+        panic!("Remove must issue a queue-only clear");
+    };
+    assert_eq!(state.lifecycle, RuntimeLifecycle::Running);
+    assert_eq!(state.stop_phase, StopPhase::Idle);
+    assert_eq!(state.queue_clear_request, Some(clear_id));
+    assert!(matches!(dispatch_for_effect(&effects[0]), RpcDispatch::Command(Command::ClearQueue)));
+    assert!(apply(&mut state, RuntimeInput::Intent(RuntimeIntent::ClearQueuedInputs)).is_empty());
+    let cleared = NormalizedResponse::QueueCleared {
+        steering: vec!["Use the local fixture".to_owned()],
+        follow_up: vec!["Then run the tests".to_owned()],
+    };
+    let effects = response(&mut state, RuntimeRequest::ClearQueuedInputs { clear_id }, Ok(cleared.clone()));
+    assert_eq!(state.lifecycle, RuntimeLifecycle::Running);
+    assert_eq!(state.stop_phase, StopPhase::Idle);
+    assert_eq!(state.queue_clear_request, None);
+    assert_eq!(state.recovered_inputs.len(), 2);
+    assert!(matches!(effects.as_slice(), [RuntimeEffect { effect: EffectKind::Request(RuntimeRequest::GetState), .. }]));
+    assert!(response(&mut state, RuntimeRequest::ClearQueuedInputs { clear_id }, Ok(cleared)).is_empty());
+    assert_eq!(state.recovered_inputs.len(), 2, "Late acknowledgements cannot recover the same inputs twice");
+}
+
+#[test]
+fn queue_only_clear_failure_reconciles_without_aborting_or_replaying() {
+    let (mut state, _) = connected_state("queue-failed");
+    apply(&mut state, RuntimeInput::Event(NormalizedEvent::AgentStart));
+    let effects = apply(&mut state, RuntimeInput::Intent(RuntimeIntent::ClearQueuedInputs));
+    let EffectKind::Request(request) = effects[0].effect.clone() else { panic!("request") };
+    let effects = response(&mut state, request, Err(failure(RequestFailureKind::UnknownOutcome, "Clear acknowledgement lost")));
+    assert_eq!(state.lifecycle, RuntimeLifecycle::Running);
+    assert_eq!(state.stop_phase, StopPhase::Idle);
+    assert_eq!(state.queue_clear_request, None);
+    assert!(state.recovered_inputs.is_empty());
+    assert!(matches!(effects.as_slice(), [RuntimeEffect { effect: EffectKind::Request(RuntimeRequest::GetState), .. }]));
+}
+
+#[test]
+fn stop_preserves_the_acknowledgement_of_an_in_flight_queue_only_clear() {
+    let (mut state, _) = connected_state("queue-stop-race");
+    apply(&mut state, RuntimeInput::Event(NormalizedEvent::AgentStart));
+    let effects = apply(&mut state, RuntimeInput::Intent(RuntimeIntent::ClearQueuedInputs));
+    let EffectKind::Request(RuntimeRequest::ClearQueuedInputs { clear_id }) = effects[0].effect else { panic!("queue clear") };
+    let effects = apply(&mut state, RuntimeInput::Intent(RuntimeIntent::Abort));
+    let EffectKind::Request(RuntimeRequest::ClearQueue { stop_id }) = effects[0].effect else { panic!("stop clear") };
+    assert_eq!(state.queue_clear_request, Some(clear_id));
+    response(&mut state, RuntimeRequest::ClearQueuedInputs { clear_id }, Ok(NormalizedResponse::QueueCleared {
+        steering: vec![], follow_up: vec!["Recover me even if Stop was clicked".to_owned()],
+    }));
+    assert_eq!(state.recovered_inputs.len(), 1);
+    assert_eq!(state.lifecycle, RuntimeLifecycle::Cancelling);
+    assert_eq!(state.stop_phase, StopPhase::ClearingQueue { id: stop_id });
+    let effects = response(&mut state, RuntimeRequest::ClearQueue { stop_id }, Ok(NormalizedResponse::QueueCleared {
+        steering: vec![], follow_up: vec![],
+    }));
+    assert!(matches!(effects[0].effect, EffectKind::Request(RuntimeRequest::Abort { stop_id: id }) if id == stop_id));
+    assert_eq!(state.recovered_inputs.len(), 1);
+}
+
+#[test]
+fn queue_only_clear_is_not_available_while_disconnected_or_stopping() {
+    let mut state = RuntimeState::new(GENERATION);
+    assert!(apply(&mut state, RuntimeInput::Intent(RuntimeIntent::ClearQueuedInputs)).is_empty());
+    state.lifecycle = RuntimeLifecycle::Cancelling;
+    state.stop_phase = StopPhase::ClearingQueue { id: 42 };
+    assert!(apply(&mut state, RuntimeInput::Intent(RuntimeIntent::ClearQueuedInputs)).is_empty());
+}

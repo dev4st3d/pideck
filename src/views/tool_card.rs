@@ -1,6 +1,6 @@
 mod data;
 
-use gpui::{FontWeight, IntoElement, div, prelude::*, px, relative};
+use gpui::{FontWeight, IntoElement, div, prelude::*, px};
 use serde_json::Value;
 
 pub(super) use self::data::{
@@ -47,109 +47,46 @@ pub(super) fn render_tool_presentation(
     let Some(first) = items.first() else {
         return div().into_any_element();
     };
-    let title = first.title(items.len());
+    let rows = items.iter().flat_map(|item| item.rows.iter()).collect::<Vec<_>>();
     let status = group_status(items);
-    let marker = status_color(status);
-    let rows = items
-        .iter()
-        .flat_map(|item| item.rows.iter().cloned())
-        .collect::<Vec<_>>();
-
     div()
-        .w_full()
-        .min_w_0()
-        .flex()
-        .flex_col()
-        .gap(px(3.0))
+        .w_full().min_w_0().pl(px(4.0)).pr(px(35.0))
+        .flex().flex_col()
         .child(
-            div()
-                .w_full()
-                .flex()
-                .flex_row()
-                .items_center()
-                .justify_between()
-                .gap(px(12.0))
-                .child(
-                    div()
-                        .min_w_0()
-                        .flex_1()
-                        .overflow_hidden()
-                        .text_ellipsis()
-                        .whitespace_nowrap()
-                        .font_family(theme::mono())
-                        .text_size(theme::text_size(theme::T_MONO))
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(theme::bone())
-                        .child(title),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(10.0))
-                        .flex_shrink_0()
-                        .when_some(elapsed_ms, |row, elapsed| {
-                            row.child(meta_text(format_elapsed(elapsed)))
-                        })
-                        .when(context_excluded, |row| {
-                            row.child(meta_text("not in context".to_owned()))
-                        })
-                        .child(
-                            div()
-                                .flex_shrink_0()
-                                .whitespace_nowrap()
-                                .font_family(theme::mono())
-                                .text_size(theme::text_size(theme::T_TINY))
-                                .text_color(marker)
-                                .child(status_label(status)),
-                        )
-                        .child(detail_hint()),
-                ),
+            div().w_full().h(px(20.0)).flex().items_center().gap(px(12.0))
+                .child(div().flex_1().min_w_0().overflow_hidden().text_ellipsis()
+                    .whitespace_nowrap().font_family(theme::mono())
+                    .text_size(theme::text_size(12.0)).font_weight(FontWeight::MEDIUM)
+                    .text_color(theme::bone()).child(first.title(items.len())))
+                .child(div().flex_shrink_0().flex().items_center().gap(px(32.0))
+                    .when_some(elapsed_ms, |row, elapsed| row.child(meta_text(format_elapsed(elapsed))))
+                    .when(context_excluded, |row| row.child(meta_text("not in context".to_owned())))
+                    .child(div().font_family(theme::mono()).text_size(theme::text_size(11.0))
+                        .text_color(status_color(status)).child(status_label(status)))
+                    .child(detail_hint())),
         )
-        .children(rows.iter().enumerate().map(|(index, row)| {
-            let branch = if index + 1 == rows.len() {
-                "└ "
-            } else {
-                "├ "
-            };
-            div()
-                .w_full()
-                .flex()
-                .flex_row()
-                .items_baseline()
-                .gap(px(8.0))
-                .child(
-                    div()
-                        .min_w_0()
-                        .overflow_hidden()
-                        .text_ellipsis()
-                        .whitespace_nowrap()
-                        .font_family(theme::mono())
-                        .text_size(theme::text_size(theme::T_MONO_SM))
-                        .line_height(relative(1.4))
-                        .text_color(theme::ash())
-                        .child(format!("{branch}{}", row.label)),
-                )
-                .when_some(row.detail.clone(), |line, detail| {
-                    line.child(
-                        div()
-                            .flex_shrink_0()
-                            .font_family(theme::mono())
-                            .text_size(theme::text_size(theme::T_TINY))
-                            .text_color(theme::smoke())
-                            .child(format!("- {detail}")),
-                    )
-                })
-        }))
+        .child(div().w_full().mt(px(6.0)).flex().flex_col()
+            .children(rows.iter().enumerate().map(|(index, row)| {
+                // Draw connectors as geometry, never as platform-dependent box glyphs.
+                let last = index + 1 == rows.len();
+                div().w_full().h(px(22.0)).flex().items_start()
+                    .child(div().relative().w(px(24.0)).h_full().flex_shrink_0()
+                        .child(div().absolute().left(px(8.0)).top_0().w(px(1.0))
+                            .h(px(if last { 11.0 } else { 22.0 })).bg(theme::tool_branch()))
+                        .child(div().absolute().left(px(8.0)).top(px(10.0))
+                            .w(px(8.0)).h(px(1.0)).bg(theme::tool_branch())))
+                    .child(div().min_w_0().overflow_hidden().text_ellipsis().whitespace_nowrap()
+                        .font_family(theme::mono()).text_size(theme::text_size(12.0))
+                        .line_height(px(20.0)).text_color(theme::ash()).child(row.label.clone()))
+                    .when_some(row.detail.clone(), |line, detail| {
+                        line.child(div().ml(px(8.0)).flex_shrink_0().font_family(theme::mono())
+                            .text_size(theme::text_size(11.0)).line_height(px(20.0))
+                            .text_color(theme::smoke()).child(format!("· {detail}")))
+                    })
+            })))
         .when_some(error.map(str::to_owned), |card, error| {
-            card.child(
-                div()
-                    .font_family(theme::sans())
-                    .text_size(theme::text_size(theme::T_UI_SM))
-                    .text_color(theme::error())
-                    .child(sanitize_untrusted_text(&error)),
-            )
+            card.child(div().font_family(theme::sans()).text_size(theme::text_size(12.0))
+                .text_color(theme::error()).child(sanitize_untrusted_text(&error)))
         })
         .into_any_element()
 }
@@ -186,16 +123,12 @@ fn meta_text(text: String) -> impl IntoElement {
         .child(text)
 }
 
-/// Quiet text-only affordance; the wrapping step already signals clickability.
+/// The interactive Details hit target is installed by the conversation view.
 fn detail_hint() -> impl IntoElement {
-    div()
-        .flex_shrink_0()
-        .whitespace_nowrap()
-        .font_family(theme::mono())
-        .text_size(theme::text_size(theme::T_TINY))
-        .font_weight(FontWeight::MEDIUM)
-        .text_color(theme::smoke())
-        .child("details ↗")
+    div().w(px(66.0)).flex_shrink_0().flex().items_center().justify_between()
+        .font_family(theme::sans()).text_size(theme::text_size(11.0))
+        .text_color(theme::ash()).child("Details")
+        .child(gpui::svg().path("icons/external.svg").size(px(16.0)).text_color(theme::ash()))
 }
 
 fn status_label(status: CardStatus) -> &'static str {
@@ -215,7 +148,7 @@ pub(super) fn status_color(status: CardStatus) -> gpui::Rgba {
         CardStatus::Success => theme::live(),
         CardStatus::Error => theme::error(),
         CardStatus::Cancelled | CardStatus::Uncertain => theme::signal(),
-        CardStatus::Pending | CardStatus::Running | CardStatus::Cancelling => theme::data(),
+        CardStatus::Pending | CardStatus::Running | CardStatus::Cancelling => theme::working(),
     }
 }
 

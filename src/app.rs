@@ -1,5 +1,5 @@
 use gpui::{
-    App, Application, Bounds, KeyBinding, SharedString, TitlebarOptions, WindowBounds,
+    App, Application, Bounds, KeyBinding, WindowBounds,
     WindowOptions, prelude::*, px, size,
 };
 
@@ -17,7 +17,7 @@ use crate::services::session_catalog::{SessionCatalogConfig, without_windows_ver
 use crate::{fonts, views::RootView};
 
 const WINDOW_WIDTH: f32 = 1440.0;
-const WINDOW_HEIGHT: f32 = 860.0;
+const WINDOW_HEIGHT: f32 = 960.0;
 
 pub fn run() {
     let working_directory = std::env::current_dir()
@@ -45,6 +45,7 @@ pub fn run() {
             KeyBinding::new("ctrl-alt-r", Retry, None),
             KeyBinding::new("ctrl-alt-s", Stop, None),
             KeyBinding::new("ctrl-shift-p", OpenCommandPalette, None),
+            KeyBinding::new("ctrl-k", OpenCommandPalette, None),
             KeyBinding::new("ctrl-/", ShowHotkeys, None),
             KeyBinding::new("ctrl-b", ToggleSidebar, None),
             KeyBinding::new("ctrl-`", ToggleTerminal, None),
@@ -79,11 +80,7 @@ pub fn run() {
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 window_min_size: Some(size(px(800.0), px(540.0))),
-                titlebar: Some(TitlebarOptions {
-                    title: Some(SharedString::from("πdeck")),
-                    appears_transparent: false,
-                    traffic_light_position: None,
-                }),
+                titlebar: None,
                 app_id: Some("pideck".into()),
                 ..Default::default()
             },

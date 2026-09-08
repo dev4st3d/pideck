@@ -75,6 +75,7 @@ pub struct ShellProjection {
     pub thinking: DisplayValue,
     pub cost: DisplayValue,
     pub context: DisplayValue,
+    pub context_percent: Option<String>,
     pub input_tokens: DisplayValue,
     pub output_tokens: DisplayValue,
     pub cache_read: DisplayValue,
@@ -100,6 +101,17 @@ impl ShellProjection {
         let thinking = project_thinking(runtime);
         let cost = project_stats(&runtime.stats, |stats| format_cost(stats.cost));
         let context = project_context(runtime);
+        let context_percent = (!runtime.context_awaiting_fresh_usage
+            && runtime.stats.status == runtime::FacetStatus::Ready)
+            .then_some(runtime.stats.data.as_ref()).flatten()
+            .and_then(|stats| stats.context_percent.or_else(|| {
+                match (stats.context_tokens, stats.context_window) {
+                    (Some(tokens), Some(window)) if window > 0 => Some(tokens as f64 * 100.0 / window as f64),
+                    _ => None,
+                }
+            }))
+            .filter(|percent| percent.is_finite() && *percent >= 0.0)
+            .map(|percent| format!("{percent:.0}%"));
         let input_tokens = project_stats(&runtime.stats, |stats| format_count(stats.input_tokens));
         let output_tokens =
             project_stats(&runtime.stats, |stats| format_count(stats.output_tokens));
@@ -212,6 +224,7 @@ impl ShellProjection {
             thinking,
             cost,
             context,
+            context_percent,
             input_tokens,
             output_tokens,
             cache_read,
@@ -475,6 +488,7 @@ mod tests {
             DisplayValue::Stale("120".to_owned())
         );
         assert_eq!(projection.cost, DisplayValue::Stale("$0.12".to_owned()));
+        assert_eq!(projection.context_percent, None);
         assert!(projection.has_stale_values);
     }
 }

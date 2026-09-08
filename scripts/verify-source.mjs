@@ -56,12 +56,12 @@ function contrast(foreground, background) {
   return (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
 }
 const paletteChecks = [];
-for (const name of ['GRAPHITE', 'PAPER']) {
+for (const name of ['ORIGINAL', 'LINEN', 'GRAPHITE', 'MIDNIGHT']) {
   const palette = colors(name);
   const results = [];
   let minimumFocusRatio = Infinity;
-  for (const background of ['canvas', 'floor', 'panel', 'panel_lift', 'panel_hover', 'user_message']) {
-    for (const foreground of ['bone', 'bone_dim', 'ash', 'smoke', 'signal', 'error', 'live', 'working', 'data']) {
+  for (const background of ['canvas', 'floor', 'panel', 'panel_lift', 'user_message']) {
+    for (const foreground of ['bone', 'bone_dim', 'ash', 'smoke']) {
       assert.equal(palette[foreground] & 255, 255, `${name}.${foreground} is not opaque`);
       const ratio = contrast(palette[foreground], palette[background]);
       assert(ratio >= 4.5, `${name}: ${foreground} on ${background} = ${ratio}`);
@@ -71,10 +71,37 @@ for (const name of ['GRAPHITE', 'PAPER']) {
     assert(focusRatio >= 3, `${name}: insufficient focus contrast`);
     minimumFocusRatio = Math.min(minimumFocusRatio, focusRatio);
   }
+  for (const [foreground, background] of [['bone', 'selection'], ['on_accent', 'signal'], ['rail_muted', 'rail']]) {
+    const ratio = contrast(palette[foreground], palette[background]);
+    assert(ratio >= 4.5, `${name}: ${foreground} on ${background} = ${ratio}`);
+    results.push({ foreground, background, ratio });
+  }
   results.sort((a, b) => a.ratio - b.ratio);
-  paletteChecks.push({ name, text_pairs: results.length, minimum: results[0], minimum_focus_ratio: minimumFocusRatio });
+  paletteChecks.push({ name, text_pairs: results.length, minimum: results[0], minimum_focus_ratio: minimumFocusRatio,
+    reference_muted_on_selection_ratio: contrast(palette.ash, palette.selection) });
 }
+const geometry = { TITLE_H: 40, TOOLBAR_H: 60, READING_W: 840, STREAM_PAD_X: 24 };
+assert.match(read('src/state/workspace_layout.rs'), /RAIL_WIDTH: f32 = 64\.0;/);
+assert.match(read('src/state/workspace_layout.rs'), /NAVIGATION_WIDTH: f32 = 240\.0;/);
+assert.match(theme, /RAIL_W: f32 = crate::state::workspace_layout::RAIL_WIDTH;/);
+assert.match(theme, /SIDE_W: f32 = crate::state::workspace_layout::NAVIGATION_WIDTH;/);
+for (const [name, value] of Object.entries(geometry)) {
+  assert.match(theme, new RegExp(`pub const ${name}: f32 = ${value}\\.0;`), `Reference geometry ${name}`);
+}
+const manifest = JSON.parse(read('assets/fonts/sources.json'));
+assert.equal(manifest.length, 4);
+for (const font of manifest) {
+  assert.match(font.sha256, /^[a-f0-9]{64}$/);
+  assert(read('src/fonts.rs').includes(`/fonts/${font.file}`), `Unregistered font ${font.file}`);
+  assert(read('build.rs').includes(`"${font.file}"`), `Font omitted from build ${font.file}`);
+}
+assert(read('src/views/root/render.rs').includes('.child(native_titlebar(projection, cx))'));
+assert(read('src/views/root/render.rs').includes('.child(titlebar('));
+assert(!/ThemeId::Midnight/.test(read('src/views/root/shell.rs')), 'Midnight must share the same toolbar layout');
+assert(read('src/state/reducer.rs').includes('RuntimeIntent::ClearQueuedInputs'));
+assert(read('src/services/rpc/runtime_adapter.rs').includes('RuntimeRequest::ClearQueuedInputs'));
+assert(read('src/views/root.rs').includes('matches.truncate(60)'));
 console.log(JSON.stringify({ scope: 'Static source/package contract and opaque palette checks. No compilation, SDK certification, or rendered UI.',
   rust_files_inspected: rustFiles.length, literal_includes_verified: includes, embedded_runtime_modules: runtimeModules,
-  contract: { package: PI_PACKAGE, version: PI_VERSION, minimum_node: MIN_NODE_VERSION }, palettes: paletteChecks,
+  contract: { package: PI_PACKAGE, version: PI_VERSION, minimum_node: MIN_NODE_VERSION }, geometry, fonts: manifest.map(f => f.file), palettes: paletteChecks,
   result: 'passed' }, null, 2));

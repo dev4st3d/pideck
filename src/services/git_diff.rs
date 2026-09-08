@@ -55,6 +55,7 @@ pub struct DiffFile {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkspaceDiff {
+    pub branch: Option<String>,
     pub files: Vec<DiffFile>,
     pub patch_truncated: bool,
     pub counts_partial: bool,
@@ -97,6 +98,10 @@ pub fn load_workspace_diff(workspace: &Path) -> Result<WorkspaceDiff, GitDiffErr
         return Err(GitDiffError::NotRepository);
     }
 
+    let branch = run_git(&root, &["symbolic-ref", "--quiet", "--short", "HEAD"], 4096)
+        .or_else(|_| run_git(&root, &["rev-parse", "--short", "HEAD"], 4096))
+        .ok().map(|output| sanitize_text(String::from_utf8_lossy(&output.bytes).trim()))
+        .filter(|name| !name.is_empty());
     let has_head = run_git(
         &root,
         &["rev-parse", "--verify", "HEAD"],
@@ -217,6 +222,7 @@ pub fn load_workspace_diff(workspace: &Path) -> Result<WorkspaceDiff, GitDiffErr
     }
 
     Ok(WorkspaceDiff {
+        branch,
         files: merged.into_values().collect(),
         patch_truncated,
         counts_partial,
@@ -812,6 +818,7 @@ mod tests {
     #[test]
     fn workspace_totals_ignore_binary_line_counts() {
         let snapshot = WorkspaceDiff {
+            branch: None,
             files: vec![
                 DiffFile {
                     path: "a.rs".into(),

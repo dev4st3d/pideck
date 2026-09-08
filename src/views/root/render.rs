@@ -10,7 +10,7 @@ use super::overlays::{
 };
 use super::shell::{
     HistoryPanelParams, SessionsPanelParams, TitlebarParams, history_panel, sessions_panel,
-    titlebar, workspace_rail,
+    titlebar, native_titlebar, navigation_rail, workspace_rail,
 };
 use super::*;
 use crate::views::diff_summary::diff_overlay;
@@ -94,29 +94,7 @@ impl Render for RootView {
             .font_family(theme::sans())
             .text_size(theme::text_size(16.0))
             .text_color(theme::bone())
-            .child(titlebar(
-                TitlebarParams {
-                    projection,
-                    conversation: &self.conversation,
-                    opening_thread: catalog.pending_session_file.is_some(),
-                    name_composer: &self.session_name_composer,
-                    rename_open: self.session_rename_open,
-                    rename_enabled: matches!(
-                        self.conversation.lifecycle,
-                        RuntimeLifecycle::Ready | RuntimeLifecycle::Settled
-                    ) && self.conversation.pending_operation.is_none()
-                        && catalog.current_session_file.is_some()
-                        && !catalog.switching,
-                    theme_menu_open: self.theme_menu_open,
-                    sidebar_open: layout.navigation,
-                    terminal_open: self.terminal_open,
-                    inspector_open: self.session_rail_visible(),
-                    workspace_diff_available: self.workspace_diff.is_some(),
-                    workspace_diff_open: self.workspace_diff_open,
-                    app_update: &self.app_update,
-                },
-                cx,
-            ))
+.child(native_titlebar(projection, cx))
             .when(matches!(self.model_panel, Some(ModelPanel::Settings(_))), |shell| {
                 shell.when_some(self.draft_feedback.as_deref(), |shell, feedback| {
                     shell.child(draft_storage_notice(feedback, cx))
@@ -128,6 +106,7 @@ impl Render for RootView {
                     .min_h_0()
                     .flex()
                     .flex_row()
+                    .child(navigation_rail(layout.navigation, matches!(self.model_panel, Some(ModelPanel::Settings(_))), cx))
                     .child(workspace_rail(
                         layout.navigation,
                         sessions_panel(
@@ -139,6 +118,7 @@ impl Render for RootView {
                                     hovered_thread_key: self.hovered_thread_key.as_deref(),
                                     project_feedback: self.project_feedback.as_deref(),
                                     project_picker_pending: self.project_picker_pending,
+                                    project_menu_open: self.project_menu_open,
                                     project_switch_enabled,
                                     conversation: &self.conversation,
                                     history_open: self.history_open,
@@ -196,6 +176,32 @@ impl Render for RootView {
                             .h_full()
                             .flex()
                             .flex_col()
+            .child(titlebar(
+                TitlebarParams {
+                    projection,
+                    branch: self.workspace_diff.as_ref().and_then(|diff| diff.branch.as_deref()),
+                    change_count: self.workspace_diff.as_ref().map_or(0, |diff| diff.files.len()),
+                    compact: layout.center_width < 900.0,
+                    conversation: &self.conversation,
+                    opening_thread: catalog.pending_session_file.is_some(),
+                    name_composer: &self.session_name_composer,
+                    rename_open: self.session_rename_open,
+                    rename_enabled: matches!(
+                        self.conversation.lifecycle,
+                        RuntimeLifecycle::Ready | RuntimeLifecycle::Settled
+                    ) && self.conversation.pending_operation.is_none()
+                        && catalog.current_session_file.is_some()
+                        && !catalog.switching,
+                    theme_menu_open: self.theme_menu_open,
+                    sidebar_open: layout.navigation,
+                    terminal_open: self.terminal_open,
+                    inspector_open: self.session_rail_visible(),
+                    workspace_diff_available: self.workspace_diff.as_ref().is_some_and(|diff| !diff.is_empty()),
+                    workspace_diff_open: self.workspace_diff_open,
+                    app_update: &self.app_update,
+                },
+                cx,
+            ))
                             .child(conversation_area(ConversationAreaParams {
                                 projection: Arc::clone(&self.conversation),
                                 list: Arc::clone(&self.conversation_list),
@@ -215,6 +221,8 @@ impl Render for RootView {
                             .child(composer_bar(
                                 ComposerBarParams {
                                     composer: &self.composer,
+                                    queue: self.conversation.queue.as_ref(),
+                                    queue_clear_pending: self.controller.read(cx).queue_clear_pending(),
                                     saved_input_count: self.saved_input_count(),
                                     draft_feedback: self.draft_feedback.as_deref(),
                                     attachment_picker_pending: self.attachment_picker_pending,

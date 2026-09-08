@@ -20,8 +20,6 @@ pub(super) fn workspace_rail(open: bool, body: impl IntoElement) -> AnyElement {
                 .w(px(theme::SIDE_W))
                 .h_full()
                 .bg(theme::floor())
-                .border_r_1()
-                .border_color(theme::edge_soft())
                 .child(body),
         )
         .into_any_element()
@@ -65,6 +63,9 @@ impl TitlebarStatus {
 
 pub(super) struct TitlebarParams<'a> {
     pub(super) projection: &'a ShellProjection,
+    pub(super) branch: Option<&'a str>,
+    pub(super) change_count: usize,
+    pub(super) compact: bool,
     pub(super) conversation: &'a ConversationProjection,
     pub(super) opening_thread: bool,
     pub(super) name_composer: &'a Entity<Composer>,
@@ -79,324 +80,192 @@ pub(super) struct TitlebarParams<'a> {
     pub(super) app_update: &'a PiDeckUpdateState,
 }
 
+/// The application frame is distinct from the session toolbar. Platform hit
+/// areas preserve native drag/maximise behaviour without a second OS titlebar.
+pub(super) fn native_titlebar(projection: &ShellProjection, cx: &mut Context<RootView>) -> impl IntoElement {
+    let project = std::path::Path::new(&projection.workspace)
+        .file_name().map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| projection.workspace.clone());
+    div().id("native-titlebar").h(px(theme::TITLE_H)).w_full().flex_shrink_0()
+        .flex().items_center().bg(theme::floor()).border_b_1().border_color(theme::edge())
+        .child(div().id("window-drag-region").flex_1().h_full().flex().items_center()
+            .pl(px(20.0)).gap(px(16.0))
+            .window_control_area(gpui::WindowControlArea::Drag)
+            .on_mouse_down(MouseButton::Left, |event, window, _| {
+                if !cfg!(target_os = "windows") {
+                    if event.click_count == 2 { window.titlebar_double_click(); }
+                    else { window.start_window_move(); }
+                }
+            })
+            .child(div().font_family(theme::serif()).text_size(theme::text_size(22.0)).line_height(px(28.0))
+                .text_color(theme::signal()).child("π"))
+            .child(div().font_family(theme::sans()).text_size(theme::text_size(12.0))
+                .font_weight(FontWeight::MEDIUM).child("Pideck"))
+            .child(div().w(px(1.0)).h(px(14.0)).bg(theme::edge()))
+            .child(div().text_size(theme::text_size(12.0)).text_color(theme::ash()).child(project)))
+        .child(window_button("window-minimise", "icons/window-min.svg", "Minimise", |_, window, _| window.minimize_window(), cx))
+        .child(window_button("window-maximise", "icons/window-max.svg", "Maximise / restore", |_, window, _| window.zoom_window(), cx))
+        .child(window_button("window-close", "icons/window-close.svg", "Close", |view, window, cx| {
+            // The same guard is used for Alt+F4 and the native close request.
+            if view.request_close(window, cx) { window.remove_window(); }
+        }, cx))
+}
+
+fn window_button(id: &'static str, icon: &'static str, label: &'static str, action: ChromeAction,
+    cx: &mut Context<RootView>) -> impl IntoElement {
+    div().id(id).w(px(46.0)).h(px(theme::TITLE_H)).flex_shrink_0()
+        .flex().items_center().justify_center().tab_index(0).cursor_pointer()
+        .hover(move |style| style.bg(if id == "window-close" { theme::error_wash() } else { theme::panel_hover() }))
+        .focus(|style| style.bg(theme::selection()))
+        .tooltip(controls::text_tooltip(label, None::<&str>))
+        .on_click(cx.listener(move |view, _, window, cx| action(view, window, cx)))
+        .child(svg().path(icon).size(px(16.0)).text_color(theme::ash()))
+}
+
+pub(super) fn navigation_rail(sidebar_open: bool, settings_open: bool, cx: &mut Context<RootView>) -> impl IntoElement {
+    div().id("navigation-rail").w(px(theme::RAIL_W)).h_full().flex_shrink_0()
+        .bg(theme::rail()).flex().flex_col().items_center().pt(px(12.0)).pb(px(26.0))
+        .child(div().w(px(40.0)).h(px(40.0)).rounded(px(6.0)).bg(theme::signal())
+            .flex().items_center().justify_center().font_family(theme::serif())
+            .text_size(theme::text_size(28.0)).line_height(px(34.0)).text_color(theme::on_accent()).child("p."))
+        .child(div().h(px(24.0)).flex_shrink_0())
+        .child(rail_button("nav-projects", "icons/folder.svg", "Projects", false,
+            |view, window, cx| {
+                if !view.sidebar_open { view.toggle_sidebar(window, cx); }
+                view.sidebar_tree_focus.focus(window);
+            }, cx))
+        .child(div().h(px(6.0)).flex_shrink_0())
+        .child(rail_button("nav-sessions", "icons/agent-diamond.svg", "Sessions", sidebar_open && !settings_open,
+            |view, window, cx| {
+                if matches!(view.model_panel, Some(ModelPanel::Settings(_))) { view.close_model_panel(window, cx); }
+                if !view.sidebar_open { view.toggle_sidebar(window, cx); }
+                view.sidebar_tree_focus.focus(window);
+            }, cx))
+        .child(div().flex_1())
+        .child(rail_button("nav-settings", "icons/cog.svg", "Settings", settings_open,
+            |view, window, cx| view.show_model_panel(ModelPanel::Settings(ModelSettingsTab::Providers), window, cx), cx))
+}
+
+fn rail_button(id: &'static str, icon: &'static str, label: &'static str, selected: bool,
+    action: ChromeAction, cx: &mut Context<RootView>) -> impl IntoElement {
+    div().id(id).w(px(48.0)).h(px(54.0)).flex_shrink_0().rounded(px(6.0))
+        .flex().flex_col().items_center().pt(px(11.0)).gap(px(6.0))
+        .bg(if selected { theme::signal() } else { gpui::rgba(0) })
+        .text_color(if selected { theme::on_accent() } else { theme::rail_muted() })
+        .tab_index(0).cursor_pointer().hover(|style| style.bg(gpui::rgba(0xffff_ff14)))
+        .focus(|style| style.bg(gpui::rgba(0xffff_ff20)))
+        .tooltip(controls::text_tooltip(label, None::<&str>))
+        .on_click(cx.listener(move |view, _, window, cx| action(view, window, cx)))
+        .child(svg().path(icon).size(px(16.0)).text_color(if selected { theme::on_accent() } else { theme::rail_muted() }))
+        .child(div().font_family(theme::sans()).text_size(theme::text_size(9.0)).line_height(px(12.0)).child(label))
+}
+
 pub(super) fn titlebar(params: TitlebarParams<'_>, cx: &mut Context<RootView>) -> impl IntoElement {
     let TitlebarParams {
-        projection,
-        conversation,
-        opening_thread,
-        name_composer,
-        rename_open,
-        rename_enabled,
-        theme_menu_open,
-        sidebar_open,
-        terminal_open,
-        inspector_open,
-        workspace_diff_available,
-        workspace_diff_open,
-        app_update,
+        projection, conversation, branch, change_count, compact, opening_thread,
+        name_composer, rename_open, rename_enabled, theme_menu_open, sidebar_open,
+        terminal_open, inspector_open, workspace_diff_available, workspace_diff_open, app_update,
     } = params;
-    let action = projection.action;
     let status = titlebar_status(projection, conversation, opening_thread);
     let status_color = status.color();
-    let active_theme = theme::active();
-    let update_version = app_update.available_version().map(str::to_owned);
-    div()
-        .h(px(theme::TITLE_H))
-        .px(px(theme::PAD_X))
-        .flex()
-        .flex_row()
-        .items_center()
-        .justify_between()
-        .gap(px(12.0))
-        .bg(theme::floor())
-        .border_b_1()
-        .border_color(theme::edge())
-        .child(
-            div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(12.0))
-                .min_w_0()
-                .flex_1()
-                .child(titlebar_icon_toggle(
-                    ChromeIconSpec {
-                        id: "toggle-sidebar",
-                        icon_path: "icons/sidebar.svg",
-                        tooltip_label: "Workspace sidebar",
-                        tooltip_hint: Some("Ctrl+B"),
-                        on: sidebar_open,
-                        enabled: true,
-                        action: |view, window, cx| view.toggle_sidebar(window, cx),
-                    },
-                    cx,
-                ))
-                .child(
-                    // One unit with the row: same chrome height as sidebar /
-                    // rename. No baseline tricks — keep πdeck locked together and
-                    // flex-center it with the neighboring controls.
-                    div()
-                        .h(px(theme::CHROME))
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(1.0))
-                        .flex_shrink_0()
-                        .font_family(theme::main())
-                        // Font metrics hang low vs the icon boxes; lift the whole mark.
-                        .mt(px(-1.0))
-                        .child(
-                            div()
-                                .text_size(theme::text_size(18.0))
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(theme::signal())
-                                .line_height(relative(1.0))
-                                .child("π"),
-                        )
-                        .child(
-                            div()
-                                .text_size(theme::text_size(theme::T_WORDMARK))
-                                .font_weight(FontWeight::MEDIUM)
-                                .text_color(theme::bone())
-                                .line_height(relative(1.0))
-                                .child("deck"),
-                        ),
-                )
-                .child(
-                    div()
-                        .w(px(1.0))
-                        .h(px(12.0))
-                        .bg(theme::edge())
-                        .flex_shrink_0(),
-                )
-                .child(
-                    div()
-                        .relative()
-                        .min_w_0()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(4.0))
-                        .child(
-                            div()
-                                .min_w_0()
-                                .font_family(theme::sans())
-                                .text_size(theme::text_size(theme::T_TITLE))
-                                .font_weight(FontWeight::MEDIUM)
-                                .text_color(theme::bone())
-                                .overflow_hidden()
-                                .text_ellipsis()
-                                .whitespace_nowrap()
-                                .child(projection.session.label()),
-                        )
-                        .child(titlebar_icon_toggle(
-                            ChromeIconSpec {
-                                id: "rename-session",
-                                icon_path: "icons/pencil.svg",
-                                tooltip_label: "Rename session",
-                                tooltip_hint: None,
-                                on: rename_open,
-                                enabled: rename_enabled,
-                                action: |view, window, cx| view.toggle_session_rename(window, cx),
-                            },
-                            cx,
-                        ))
-                        .when(rename_open, |title| {
-                            title.child(deferred(
-                                div()
-                                    .id("rename-session-popup")
-                                    .absolute()
-                                    .top(px(32.0))
-                                    .left_0()
-                                    .w(px(theme::SIDE_W))
-                                    .p(px(12.0))
-                                    .occlude()
-                                    .rounded(px(theme::RADIUS_LG))
-                                    .border_1()
-                                    .border_color(theme::edge())
-                                    .bg(theme::panel_lift())
-                                    .shadow(theme::dock_shadow())
-                                    .child(controls::section_label("Rename current session"))
-                                    .child(div().mt(px(7.0)).child(name_composer.clone())),
-                            ))
-                        }),
-                )
-                .when(projection.has_stale_values, |row| {
-                    row.child(
-                        div()
-                            .font_family(theme::mono())
-                            .text_size(theme::text_size(theme::T_TINY))
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(theme::smoke())
-                            .flex_shrink_0()
-                            .child("stale"),
-                    )
-                }),
-        )
-        .child(
-            div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .justify_end()
-                .gap(px(8.0))
-                .flex_shrink_0()
-                .when_some(update_version, |row, version| {
-                    row.child(update_notice_button(version, cx))
-                })
-                .child(titlebar_status_chip(&status, status_color))
-                .child(titlebar_icon_toggle(
-                    ChromeIconSpec {
-                        id: "toggle-terminal",
-                        icon_path: "icons/terminal.svg",
-                        tooltip_label: "Terminal",
-                        tooltip_hint: Some("Ctrl+`"),
-                        on: terminal_open,
-                        enabled: true,
-                        action: |view, window, cx| view.toggle_terminal(window, cx),
-                    },
-                    cx,
-                ))
-                .child(titlebar_icon_toggle(
-                    ChromeIconSpec {
-                        id: "toggle-workspace-diff",
-                        icon_path: "icons/diff.svg",
-                        tooltip_label: "Workspace changes",
-                        tooltip_hint: None,
-                        on: workspace_diff_open && workspace_diff_available,
-                        enabled: workspace_diff_available,
-                        action: |view, window, cx| view.toggle_workspace_diff_overlay(window, cx),
-                    },
-                    cx,
-                ))
-                .child(titlebar_icon_toggle(
-                    ChromeIconSpec {
-                        id: "toggle-inspector",
-                        icon_path: "icons/inspector.svg",
-                        tooltip_label: "Session inspector",
-                        tooltip_hint: Some("Ctrl+I"),
-                        on: inspector_open,
-                        enabled: true,
-                        action: |view, window, cx| view.toggle_inspector(window, cx),
-                    },
-                    cx,
-                ))
-                .child(
-                    div()
-                        .relative()
-                        .flex_shrink_0()
-                        .child(
-                            // Height/padding/type sit flush with the chrome
-                            // titlebar icon toggles beside it.
-                            div()
-                                .id("theme-switcher")
-                                .h(px(theme::CHROME))
-                                .px(px(10.0))
-                                .rounded(px(theme::RADIUS_MD))
-                                .flex()
-                                .flex_row()
-                                .items_center()
-                                .gap(px(6.0))
-                                .bg(if theme_menu_open {
-                                    theme::panel_lift()
-                                } else {
-                                    gpui::rgba(0x0000_0000)
-                                })
-                                .border_1()
-                                .border_color(if theme_menu_open {
-                                    theme::edge()
-                                } else {
-                                    gpui::rgba(0x0000_0000)
-                                })
-                                .font_family(theme::main())
-                                .text_size(theme::text_size(theme::T_LABEL))
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(if theme_menu_open {
-                                    theme::bone()
-                                } else {
-                                    theme::bone_dim()
-                                })
-                                .whitespace_nowrap()
-                                .cursor_pointer()
-                                .hover(|switcher| {
-                                    switcher.bg(theme::panel()).text_color(theme::bone())
-                                })
-                                .active(|switcher| switcher.bg(theme::panel_hover()))
-                                .focus(|switcher| switcher.border_color(theme::focus()))
-                                .tab_index(0)
-                                .on_click(cx.listener(|view, _, window, cx| {
-                                    view.toggle_theme_menu(window, cx)
-                                }))
-                                .on_key_down(cx.listener(
-                                    |view, event: &gpui::KeyDownEvent, window, cx| {
-                                        if matches!(event.keystroke.key.as_str(), "enter" | "space")
-                                        {
-                                            cx.stop_propagation();
-                                            view.toggle_theme_menu(window, cx);
-                                        }
-                                    },
-                                ))
-                                .child(
-                                    svg()
-                                        .path(match active_theme.mode() {
-                                            theme::ThemeMode::Dark => "icons/moon.svg",
-                                            theme::ThemeMode::Light => "icons/sun.svg",
-                                        })
-                                        .size(px(13.0))
-                                        .flex_shrink_0()
-                                        .text_color(
-                                            if active_theme.mode() == theme::ThemeMode::Light {
-                                                theme::data()
-                                            } else {
-                                                theme::smoke()
-                                            },
-                                        ),
-                                )
-                                .child(active_theme.label())
-                                .child(
-                                    svg()
-                                        .path(if theme_menu_open {
-                                            "icons/chevron-up.svg"
-                                        } else {
-                                            "icons/chevron-down.svg"
-                                        })
-                                        .size(px(12.0))
-                                        .text_color(if theme_menu_open {
-                                            theme::data()
-                                        } else {
-                                            theme::smoke()
-                                        })
-                                        .flex_shrink_0(),
-                                ),
-                        )
-                        .when(theme_menu_open, |host| {
-                            host.child(deferred(
-                                div()
-                                    .id("theme-select-host")
-                                    .absolute()
-                                    .top_full()
-                                    .right_0()
-                                    .mt(px(6.0))
-                                    .w(px(220.0))
-                                    .occlude()
-                                    .child(theme_select_sheet(active_theme, cx)),
-                            ))
-                        }),
-                )
-                .when(action.is_some(), |row| row.child(controls::meta_sep()))
-                .when_some(action, |row, action| {
-                    row.child(controls::recovery_button(
-                        action_id(action),
-                        action.label().to_owned(),
-                        action.shortcut(),
-                        true,
-                        Box::new(cx.listener(move |view, _, _, cx| {
-                            view.activate_recovery(action, cx);
-                        })),
-                    ))
-                }),
+    div().id("session-toolbar").h(px(theme::TOOLBAR_H)).w_full().flex_shrink_0()
+        .pl(px(if compact { 20.0 } else { 32.0 })).pr(px(28.0))
+        .flex().items_center().gap(px(16.0)).bg(theme::canvas())
+        .border_b_1().border_color(theme::edge_soft())
+        .child(div().flex_1().min_w_0().relative()
+            .child(div().id("session-title").h(px(36.0)).min_w_0()
+                .flex().items_center().font_family(theme::serif()).text_size(theme::text_size(24.0))
+                .line_height(px(32.0)).text_color(theme::bone()).overflow_hidden().text_ellipsis().whitespace_nowrap()
+                .when(rename_enabled, |title| title.tab_index(0).cursor_pointer()
+                    .tooltip(controls::text_tooltip("Rename conversation", None::<&str>))
+                    .focus(|style| style.bg(theme::selection()))
+                    .on_click(cx.listener(|view, _, window, cx| view.toggle_session_rename(window, cx))))
+                .child(projection.session.label()))
+            .when(rename_open, |title| title.child(deferred(div().id("rename-session-popup")
+                .absolute().top(px(42.0)).left_0().w(px(300.0)).p(px(12.0))
+                .occlude().rounded(px(6.0)).border_1().border_color(theme::edge()).bg(theme::panel())
+                .child(controls::section_label("Rename current session"))
+                .child(div().mt(px(7.0)).child(name_composer.clone()))))))
+        .child(div().flex().items_center().gap(px(8.0)).flex_shrink_0()
+            .when(!compact, |actions| actions.child(
+                div().id("current-git-branch").w(px(84.0)).h(px(36.0)).mr(px(4.0))
+                    .pl(px(10.0)).pr(px(5.0)).rounded(px(6.0)).bg(theme::floor())
+                    .flex().items_center().gap(px(6.0)).text_color(theme::ash())
+                    .tooltip(controls::text_tooltip("Current Git branch · open terminal", None::<&str>))
+                    .tab_index(0).cursor_pointer().focus(|style| style.bg(theme::selection()))
+                    .on_click(cx.listener(|view, _, window, cx| { if !view.terminal_open { view.toggle_terminal(window, cx); } }))
+                    .child(svg().path("icons/branch.svg").size(px(16.0)).text_color(theme::ash()).flex_shrink_0())
+                    .child(div().min_w_0().flex_1().overflow_hidden().text_ellipsis().whitespace_nowrap()
+                        .font_family(theme::mono()).text_size(theme::text_size(12.0)).child(branch.unwrap_or("No Git").to_owned()))
+                    .child(svg().path("icons/chevron-down.svg").size(px(12.0)).text_color(theme::ash()).flex_shrink_0())))
+            .child(toolbar_button(ChromeIconSpec {
+                id: "toggle-terminal", icon_path: "icons/terminal.svg", tooltip_label: "Terminal", tooltip_hint: Some("Ctrl+`"),
+                on: terminal_open, enabled: true, action: |view, window, cx| view.toggle_terminal(window, cx),
+            }, "Terminal", 108.0, compact, None, cx))
+            .child(toolbar_button(ChromeIconSpec {
+                id: "toggle-workspace-diff", icon_path: "icons/diff.svg", tooltip_label: "Workspace changes", tooltip_hint: None,
+                on: workspace_diff_available || workspace_diff_open, enabled: workspace_diff_available,
+                action: |view, window, cx| view.toggle_workspace_diff_overlay(window, cx),
+            }, "Changes", 128.0, compact, Some(change_count), cx))
+            .child(toolbar_button(ChromeIconSpec {
+                id: "toggle-inspector", icon_path: "icons/inspector.svg", tooltip_label: "Session inspector", tooltip_hint: Some("Ctrl+I"),
+                on: inspector_open, enabled: true, action: |view, window, cx| view.toggle_inspector(window, cx),
+            }, "Inspector", 108.0, compact, None, cx))
+            .child(div().relative()
+                .child(titlebar_icon_toggle(ChromeIconSpec {
+                    id: "session-more", icon_path: "icons/overflow.svg", tooltip_label: "Conversation actions and theme", tooltip_hint: None,
+                    on: theme_menu_open, enabled: true, action: |view, window, cx| view.toggle_theme_menu(window, cx),
+                }, cx))
+                .when(theme_menu_open, |host| host.child(deferred(
+                    div().id("session-more-menu").absolute().top_full().right_0().mt(px(8.0))
+                        .w(px(270.0)).p(px(8.0)).flex().flex_col().gap(px(6.0)).occlude()
+                        .rounded(px(7.0)).border_1().border_color(theme::edge()).bg(theme::panel())
+                        .child(titlebar_status_chip(&status, status_color))
+                        .when(projection.has_stale_values, |menu| menu.child(controls::section_label("Runtime data is stale")))
+                        .when_some(app_update.available_version(), |menu, version| menu.child(update_notice_button(version.to_owned(), cx)))
+                        .when_some(projection.action, |menu, action| menu.child(controls::recovery_button(
+                            action_id(action), action.label().to_owned(), action.shortcut(), true,
+                            Box::new(cx.listener(move |view, _, _, cx| view.activate_recovery(action, cx))))))
+                        .child(div().flex().flex_wrap().gap(px(4.0))
+                            .child(sidebar_text_link("more-history", "History", false, true, true,
+                                |view, window, cx| { let _ = view.execute_native_action(NativeAction::Tree, "", window, cx); }, cx))
+                            .child(sidebar_text_link("more-export", "Export", false, rename_enabled, true,
+                                |view, window, cx| view.export_session(window, cx), cx))
+                            .child(sidebar_header_icon_button(ChromeIconSpec {
+                                id: "more-refresh", icon_path: "icons/refresh.svg", tooltip_label: "Refresh conversations", tooltip_hint: None,
+                                on: false, enabled: true, action: |view, _, cx| view.refresh_sessions(cx),
+                            }, true, cx))
+                            .child(sidebar_header_icon_button(ChromeIconSpec {
+                                id: "more-sidebar", icon_path: "icons/sidebar.svg", tooltip_label: "Toggle sidebar", tooltip_hint: Some("Ctrl+B"),
+                                on: sidebar_open, enabled: true, action: |view, window, cx| view.toggle_sidebar(window, cx),
+                            }, true, cx)))
+                        .child(sidebar_text_link("more-enlarge-input", "Expand / shrink input", false, true, true,
+                            |view, window, cx| view.toggle_composer_enlarged(window, cx), cx))
+                        .child(theme_select_sheet(theme::active(), cx))
+                ))))
         )
 }
+
+fn toolbar_button(spec: ChromeIconSpec, label: &'static str, width: f32, compact: bool,
+    count: Option<usize>, cx: &mut Context<RootView>) -> impl IntoElement {
+    let ChromeIconSpec { id, icon_path, tooltip_label, tooltip_hint, on, enabled, action } = spec;
+    let color = if on { theme::signal() } else { theme::bone() };
+    div().id(id).h(px(36.0)).w(px(if compact { 36.0 } else { width })).flex_shrink_0()
+        .px(px(if compact { 7.0 } else { 12.0 })).flex().items_center().gap(px(7.0))
+        .rounded(px(6.0)).border_1().border_color(if on { theme::selection() } else { theme::edge() })
+        .bg(if on { theme::selection() } else { theme::canvas() }).text_color(color)
+        .font_family(theme::sans()).text_size(theme::text_size(13.0)).font_weight(FontWeight::MEDIUM)
+        .tooltip(controls::text_tooltip(tooltip_label, tooltip_hint))
+        .when(enabled, |button| button.tab_index(0).cursor_pointer()
+            .hover(|style| style.bg(theme::panel_hover())).focus(|style| style.border_color(theme::focus()))
+            .on_click(cx.listener(move |view, _, window, cx| action(view, window, cx))))
+        .child(svg().path(icon_path).size(px(20.0)).flex_shrink_0().text_color(color))
+        .when(!compact, |button| button.child(label).when_some(count, |button, count| button.child(
+            div().min_w(px(18.0)).h(px(20.0)).px(px(3.0)).rounded(px(4.0))
+                .bg(theme::panel()).flex().items_center().justify_center()
+                .font_family(theme::sans()).text_size(theme::text_size(11.0)).font_weight(FontWeight::SEMIBOLD).child(count.to_string()))))
+}
+
 
 fn titlebar_status_chip(status: &TitlebarStatus, color: gpui::Rgba) -> impl IntoElement {
     let wash = match status.tone {
@@ -862,6 +731,7 @@ fn resolve_project_catalog(
 
 /// Resolved per-project input for the flattened workspace rows.
 pub(super) struct SidebarProjectSlice {
+    active: bool,
     path: PathBuf,
     expanded: bool,
     status: CatalogStatus,
@@ -926,8 +796,9 @@ pub(super) fn sidebar_project_slices(
             let sessions =
                 sessions_with_live_threads(&project.path, &resolved.sessions, thread_statuses);
             SidebarProjectSlice {
+                active,
                 path: project.path.clone(),
-                expanded: project.expanded,
+                expanded: active || project.expanded,
                 status: resolved.status,
                 sessions,
                 error: resolved.error,
@@ -937,14 +808,43 @@ pub(super) fn sidebar_project_slices(
         .collect()
 }
 
+pub(super) fn session_search_entries(
+    projects: &ProjectRegistry, catalog: &CatalogProjection,
+    cached: &HashMap<String, ProjectCatalogCache>, statuses: &HashMap<String, ThreadRuntimeStatus>,
+    query: &str, enabled: bool,
+) -> Vec<CommandEntry> {
+    let query = query.trim().to_lowercase();
+    let slices = sidebar_project_slices(projects, catalog, cached, statuses);
+    let mut entries = Vec::new();
+    for slice in slices.iter().filter(|slice| slice.active).chain(slices.iter().filter(|slice| !slice.active)) {
+        for session in slice.sessions.iter() {
+            let name = sidebar_thread_title(session.name.as_deref(), session.first_user_summary.as_deref());
+            let project_name = slice.path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
+            let search_text = format!("{name} {project_name} {}", session.first_user_summary.as_deref().unwrap_or_default()).to_lowercase();
+            if !query.split_whitespace().all(|part| search_text.contains(part)) { continue; }
+            entries.push(CommandEntry {
+                id: format!("session:{}:{}", project_key(&slice.path), project_key(&session.path)),
+                name, description: format!("{project_name} · {}", compact_session_timestamp(&session.updated_at)),
+                group: crate::command_catalog::CommandGroup::Session,
+                argument_hint: None, provenance: None,
+                target: CommandTarget::Session { project: slice.path.clone(), session: session.path.clone() },
+                enabled, disabled_reason: (!enabled).then(|| "A project change is already pending.".to_owned()),
+            });
+        }
+    }
+    entries
+}
+
 /// Flattens projects and their expanded threads into painted row order.
 /// Notes are real scroll children, so they consume slots here as well.
 pub(super) fn sidebar_rows(slices: &[SidebarProjectSlice]) -> Vec<SidebarRow> {
     let mut rows = Vec::new();
-    for slice in slices {
+    // The active project already has a fixed header above the list. Omitting
+    // that node here keeps painted child indexes and roving-keyboard indexes identical.
+    for slice in slices.iter().filter(|slice| slice.active).chain(slices.iter().filter(|slice| !slice.active)) {
         let project = slice.path.clone();
-        rows.push(SidebarRow::Node(SidebarNode::Project(project.clone())));
-        if !slice.expanded {
+        if !slice.active { rows.push(SidebarRow::Node(SidebarNode::Project(project.clone()))); }
+        if !slice.expanded && !slice.active {
             continue;
         }
         if slice.sessions.is_empty() {
@@ -1027,6 +927,7 @@ pub(super) struct SessionsPanelParams<'a> {
     pub(super) hovered_thread_key: Option<&'a str>,
     pub(super) project_feedback: Option<&'a str>,
     pub(super) project_picker_pending: bool,
+    pub(super) project_menu_open: bool,
     pub(super) project_switch_enabled: bool,
     pub(super) conversation: &'a ConversationProjection,
     pub(super) history_open: bool,
@@ -1049,6 +950,7 @@ pub(super) fn sessions_panel(
         hovered_thread_key,
         project_feedback,
         project_picker_pending,
+        project_menu_open,
         project_switch_enabled,
         conversation,
         history_open,
@@ -1071,7 +973,7 @@ pub(super) fn sessions_panel(
     let active_path = projects.active_path().to_path_buf();
     let can_remove_active = project_count > 1 && project_switch_enabled;
     let export_enabled = session_actions_enabled && catalog.current_session_file.is_some();
-    const SIDE_PAD: f32 = 10.0;
+    const SIDE_PAD: f32 = theme::SIDEBAR_PAD;
 
     // Painted rows and keyboard navigation share this flattened order.
     let slices = sidebar_project_slices(projects, catalog, project_catalogs, thread_statuses);
@@ -1142,17 +1044,22 @@ pub(super) fn sessions_panel(
                 let summary = slices[index]
                     .sessions
                     .iter()
-                    .find(|entry| project_key(&entry.path) == project_key(session));
-                let Some(summary) = summary else {
+                    .enumerate()
+                    .find(|(_, entry)| project_key(&entry.path) == project_key(session));
+                let Some((thread_index, summary)) = summary else {
                     continue;
                 };
                 let active_project = projects.is_active(project);
                 let thread_key = format!("{}::{}", key, project_key(&summary.path));
                 tree_children.push(project_thread_row(
                     ProjectThreadRowParams {
+                        ordinal: thread_index + 1,
                         project_path: project.clone(),
                         session: summary,
                         active_project,
+                        completed: active_project
+                            && conversation.lifecycle == RuntimeLifecycle::Settled
+                            && latest_completed_response_key(conversation).is_some_and(|key| conversation.messages.last().is_some_and(|message| message.key.0 == key)),
                         selected: active_project
                             && pending_path
                                 .or(current_path)
@@ -1191,111 +1098,71 @@ pub(super) fn sessions_panel(
         }
     }
 
-    div()
-        .id("sessions-panel")
-        .size_full()
-        .flex()
-        .flex_col()
-        .relative()
-        .child(
-            div()
-                .px(px(SIDE_PAD))
-                .pt(px(10.0))
-                .pb(px(4.0))
-                .flex_shrink_0()
-                .flex()
-                .flex_col()
-                .gap(px(6.0))
-                .child(sidebar_new_thread_button(
-                    new_thread_enabled,
-                    sidebar_open,
-                    cx,
-                ))
-                .child(
-                    div()
-                        .h(px(24.0))
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(2.0))
-                        .child(sidebar_text_link(
-                            "toggle-history-inline",
-                            "History",
-                            history_open,
-                            true,
-                            sidebar_open,
-                            |view, window, cx| {
-                                let _ =
-                                    view.execute_native_action(NativeAction::Tree, "", window, cx);
-                            },
-                            cx,
-                        ))
-                        .child(sidebar_text_link(
-                            "export-session",
-                            "Export",
-                            false,
-                            export_enabled,
-                            sidebar_open,
-                            |view, window, cx| view.export_session(window, cx),
-                            cx,
-                        ))
-                        .child(div().flex_1())
-                        .child(sidebar_header_icon_button(
-                            ChromeIconSpec {
-                                id: "add-project",
-                                icon_path: "icons/folder.svg",
-                                tooltip_label: "Add project folders",
-                                tooltip_hint: None,
-                                on: false,
-                                enabled: !project_picker_pending,
-                                action: |view, _window, cx| view.choose_projects(cx),
-                            },
-                            sidebar_open,
-                            cx,
-                        ))
-                        .child(sidebar_header_icon_button(
-                            ChromeIconSpec {
-                                id: "refresh-projects",
-                                icon_path: "icons/refresh.svg",
-                                tooltip_label: "Refresh threads",
-                                tooltip_hint: None,
-                                on: false,
-                                enabled: catalog.status != CatalogStatus::Loading,
-                                action: |view, _window, cx| view.refresh_sessions(cx),
-                            },
-                            sidebar_open,
-                            cx,
-                        ))
-                        .child(sidebar_header_icon_button(
-                            ChromeIconSpec {
-                                id: "collapse-sidebar",
-                                icon_path: "icons/chevron-left.svg",
-                                tooltip_label: "Collapse rail",
-                                tooltip_hint: Some("Ctrl+B"),
-                                on: false,
-                                enabled: true,
-                                action: |view, window, cx| view.toggle_sidebar(window, cx),
-                            },
-                            sidebar_open,
-                            cx,
-                        )),
-                ),
-        )
-        .when_some(
-            project_feedback.map(ToOwned::to_owned),
-            |panel, feedback| {
-                panel.child(
-                    div()
-                        .px(px(SIDE_PAD))
-                        .py(px(6.0))
-                        .font_family(theme::sans())
-                        .text_size(theme::text_size(theme::T_TINY))
-                        .line_height(gpui::relative(1.35))
-                        .text_color(theme::bone_dim())
-                        .child(feedback),
-                )
-            },
-        )
+
+    let connected = matches!(conversation.lifecycle, RuntimeLifecycle::Ready | RuntimeLifecycle::Settled
+        | RuntimeLifecycle::Running | RuntimeLifecycle::Cancelling);
+    let connection_label = if connected { "Pi connected" } else { "Pi disconnected" };
+    let recent_label = if slices.iter().filter(|slice| slice.active).any(|slice| slice.sessions.iter().any(|session| crate::views::time_labels::relative_session_day(&session.updated_at) == Some("Today"))) { "TODAY" } else { "RECENT" };
+    let active_count = slices.iter().find(|slice| slice.active).map_or(0, |slice| slice.sessions.len());
+    let project_choices: Vec<AnyElement> = projects.projects().iter().map(|entry| {
+        let path = entry.path.clone();
+        let active = projects.is_active(&path);
+        div().id(SharedString::from(format!("project-choice-{}", project_key(&path))))
+            .h(px(36.0)).px(px(10.0)).flex().items_center().gap(px(8.0)).rounded(px(5.0))
+            .bg(if active { theme::selection() } else { gpui::rgba(0) })
+            .text_size(theme::text_size(13.0)).text_color(theme::bone())
+            .when(project_switch_enabled, |row| row.tab_index(0).cursor_pointer()
+                .hover(|style| style.bg(theme::panel_hover()))
+                .focus(|style| style.bg(theme::selection()))
+                .on_click(cx.listener(move |view, _, window, cx| {
+                    view.project_menu_open = false;
+                    view.activate_project(path.clone(), None, window, cx);
+                })))
+            .child(svg().path("icons/folder.svg").size(px(16.0)).text_color(theme::ash()))
+            .child(div().min_w_0().overflow_hidden().text_ellipsis().whitespace_nowrap().child(entry.name()))
+            .into_any_element()
+    }).collect();
+
+    div().id("sessions-panel").size_full().flex().flex_col().relative()
+        .child(div().px(px(SIDE_PAD)).pt(px(21.0)).flex_shrink_0().flex().flex_col()
+            .child(div().h(px(34.0)).font_family(theme::sans()).text_size(theme::text_size(25.0))
+                .font_weight(FontWeight::SEMIBOLD).line_height(px(34.0)).child("Pideck"))
+            .child(div().mt(px(25.0)).relative()
+                .child(div().id("active-project-picker").h(px(24.0)).w_full().flex().items_center().justify_between()
+                    .tab_index(0).cursor_pointer().font_family(theme::sans()).text_size(theme::text_size(16.0))
+                    .font_weight(FontWeight::SEMIBOLD).line_height(px(24.0))
+                    .focus(|style| style.bg(theme::selection()))
+                    .on_click(cx.listener(|view, _, _, cx| { view.project_menu_open = !view.project_menu_open; cx.notify(); }))
+                    .child(div().min_w_0().overflow_hidden().text_ellipsis().whitespace_nowrap().child(projects.active_project().name()))
+                    .child(svg().path("icons/chevron-down.svg").size(px(16.0)).mr(px(8.0)).text_color(theme::ash())))
+                .when(project_menu_open, |host| host.child(deferred(div().id("project-menu")
+                    .absolute().top_full().left_0().mt(px(8.0)).w(px(240.0)).p(px(8.0)).occlude()
+                    .rounded(px(7.0)).border_1().border_color(theme::edge()).bg(theme::panel())
+                    .on_mouse_down_out(cx.listener(|view, _, _, cx| { view.project_menu_open = false; cx.notify(); }))
+                    .children(project_choices)
+                    .child(div().mt(px(6.0)).flex().items_center().justify_between()
+                        .child(sidebar_text_link("project-history", "History", history_open, true, true,
+                            |view, window, cx| { let _ = view.execute_native_action(NativeAction::Tree, "", window, cx); }, cx))
+                        .child(sidebar_text_link("project-export", "Export", false, export_enabled, true,
+                            |view, window, cx| view.export_session(window, cx), cx))
+                        .child(sidebar_remove_project_button(can_remove_active, active_path.clone(), sidebar_open, cx)))))))
+            .child(div().mt(px(4.0)).h(px(16.0)).font_family(theme::mono()).text_size(theme::text_size(10.0))
+                .line_height(px(16.0)).text_color(theme::ash()).child("LOCAL WORKSPACE"))
+            .child(div().mt(px(27.0)).child(sidebar_new_thread_button(new_thread_enabled, sidebar_open, cx)))
+            .child(div().id("search-sessions").mt(px(18.0)).h(px(36.0)).px(px(10.0))
+                .rounded(px(6.0)).bg(theme::search_surface()).flex().items_center().gap(px(9.0))
+                .tab_index(0).cursor_pointer().focus(|style| style.bg(theme::selection()))
+                .tooltip(controls::text_tooltip("Search conversations and commands", Some("Ctrl+K")))
+                .on_click(cx.listener(|view, _, window, cx| view.open_command_palette(window, cx)))
+                .child(svg().path("icons/search.svg").size(px(16.0)).text_color(theme::ash()))
+                .child(div().min_w_0().flex_1().text_size(theme::text_size(11.0)).text_color(theme::ash()).child("Search sessions"))
+                .child(div().font_family(theme::mono()).text_size(theme::text_size(10.0)).text_color(theme::ash()).child("Ctrl K")))
+            .child(div().mt(px(38.0)).h(px(16.0)).mb(px(13.0)).flex().items_center().justify_between()
+                .font_family(theme::sans()).text_size(theme::text_size(10.0)).font_weight(FontWeight::MEDIUM).line_height(px(16.0)).text_color(theme::ash())
+                .child(recent_label)
+                .child(div().font_family(theme::mono()).child(format!("{active_count:02}")))))
+        .when_some(project_feedback.map(ToOwned::to_owned), |panel, feedback| panel.child(
+            div().px(px(SIDE_PAD)).py(px(6.0)).text_size(theme::text_size(11.0)).text_color(theme::error()).child(feedback)))
         .child(
             // The tree owns one tab stop and a roving cursor. Focus
             // indication lives on the cursor ROW and follows web
@@ -1308,7 +1175,7 @@ pub(super) fn sessions_panel(
                 .flex_1()
                 .min_h_0()
                 .relative()
-                .mt(px(2.0))
+                .mt(px(0.0))
                 .on_key_down(cx.listener(
                     |view: &mut RootView, event: &gpui::KeyDownEvent, window, cx| {
                         view.on_workspace_tree_key(event, window, cx);
@@ -1356,11 +1223,11 @@ pub(super) fn sessions_panel(
                         // Same reserved gutter as every other panel, always:
                         // Taffy deducts it unconditionally for Scroll, so row
                         // width cannot change when the list starts overflowing.
-                        .scrollbar_width(px(theme::SCROLLBAR))
+                        .scrollbar_width(px(0.0))
                         .track_scroll(scroll)
                         .w_full()
-                        .px(px(8.0))
-                        .pt(px(4.0))
+                        .px(px(SIDE_PAD))
+                        .pt(px(0.0))
                         .pb(px(10.0))
                         .flex()
                         .flex_col()
@@ -1370,44 +1237,25 @@ pub(super) fn sessions_panel(
                         .children(tree_children),
                 ),
         )
-        .child(
-            // Bottom zone as an inset plate: the surface edge separates it
-            // from the scrolling list instead of another hairline rule.
-            div()
-                .px(px(SIDE_PAD))
-                .pt(px(4.0))
-                .pb(px(8.0))
-                .flex_shrink_0()
-                .child(
-                    div()
-                        .h(px(34.0))
-                        .px(px(10.0))
-                        .rounded(px(theme::RADIUS_MD))
-                        .bg(theme::panel())
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(8.0))
-                        .child(
-                            div()
-                                .min_w_0()
-                                .flex_1()
-                                .font_family(theme::mono())
-                                .text_size(theme::text_size(theme::T_TINY))
-                                .text_color(theme::smoke())
-                                .overflow_hidden()
-                                .text_ellipsis()
-                                .whitespace_nowrap()
-                                .child(short_path(&active_path.to_string_lossy())),
-                        )
-                        .child(sidebar_remove_project_button(
-                            can_remove_active,
-                            active_path,
-                            sidebar_open,
-                            cx,
-                        )),
-                ),
-        )
+
+        .child(div().px(px(SIDE_PAD)).pb(px(28.0)).flex_shrink_0().flex().flex_col()
+            .child(div().id("add-project").h(px(40.0)).mb(px(12.0)).flex().items_center().gap(px(8.0))
+                .font_family(theme::sans()).text_size(theme::text_size(12.0)).text_color(theme::ash())
+                .when(!project_picker_pending, |button| button.tab_index(0).cursor_pointer()
+                    .hover(|style| style.text_color(theme::bone())).focus(|style| style.bg(theme::selection()))
+                    .on_click(cx.listener(|view, _, _, cx| view.choose_projects(cx))))
+                .child(svg().path("icons/plus.svg").size(px(16.0)).text_color(theme::ash()))
+                .child(if project_picker_pending { "Choosing folders…" } else { "Add project" }))
+            .child(div().h(px(1.0)).w_full().bg(theme::edge_soft()))
+            .child(div().id("sidebar-settings").mt(px(14.0)).h(px(32.0)).flex().items_center()
+                .tab_index(0).cursor_pointer().text_size(theme::text_size(12.0)).text_color(theme::bone())
+                .focus(|style| style.bg(theme::selection()))
+                .on_click(cx.listener(|view, _, window, cx| view.show_model_panel(ModelPanel::Settings(ModelSettingsTab::Providers), window, cx)))
+                .child("Settings & providers"))
+            .child(div().mt(px(20.0)).h(px(24.0)).flex().items_center().gap(px(8.0))
+                .text_size(theme::text_size(11.0)).text_color(if connected { theme::live() } else { theme::ash() })
+                .child(div().size(px(6.0)).rounded_full().bg(if connected { theme::live() } else { theme::ash() }))
+                .child(connection_label)))
 }
 
 /// View-method action shared by chrome buttons so click and Enter/Space can
@@ -1447,7 +1295,7 @@ fn titlebar_icon_toggle(spec: ChromeIconSpec, cx: &mut Context<RootView>) -> imp
     div()
         .id(id)
         .size(px(theme::CHROME))
-        .rounded(px(theme::RADIUS_MD))
+        .rounded(px(6.0))
         .flex()
         .items_center()
         .justify_center()
@@ -1458,11 +1306,7 @@ fn titlebar_icon_toggle(spec: ChromeIconSpec, cx: &mut Context<RootView>) -> imp
             gpui::rgba(0x0000_0000)
         })
         .border_1()
-        .border_color(if on {
-            theme::edge()
-        } else {
-            gpui::rgba(0x0000_0000)
-        })
+        .border_color(theme::edge())
         .text_color(icon_color)
         .when(enabled, |button| {
             button
@@ -1473,16 +1317,9 @@ fn titlebar_icon_toggle(spec: ChromeIconSpec, cx: &mut Context<RootView>) -> imp
                 .active(|button| button.bg(theme::panel_lift()))
                 .tooltip(controls::text_tooltip(tooltip_label, tooltip_hint))
                 .on_click(cx.listener(move |view, _, window, cx| action(view, window, cx)))
-                .on_key_down(
-                    cx.listener(move |view, event: &gpui::KeyDownEvent, window, cx| {
-                        if matches!(event.keystroke.key.as_str(), "enter" | "space") {
-                            cx.stop_propagation();
-                            action(view, window, cx);
-                        }
-                    }),
-                )
+
         })
-        .child(svg().path(icon_path).size(px(14.0)).text_color(icon_color))
+        .child(svg().path(icon_path).size(px(16.0)).text_color(icon_color))
 }
 
 /// Icon-only sidebar header action; drops out of the tab order while the
@@ -1525,85 +1362,24 @@ fn sidebar_header_icon_button(
                 .active(|button| button.bg(theme::panel_lift()))
                 .tooltip(controls::text_tooltip(tooltip_label, tooltip_hint))
                 .on_click(cx.listener(move |view, _, window, cx| action(view, window, cx)))
-                .on_key_down(
-                    cx.listener(move |view, event: &gpui::KeyDownEvent, window, cx| {
-                        if matches!(event.keystroke.key.as_str(), "enter" | "space") {
-                            cx.stop_propagation();
-                            action(view, window, cx);
-                        }
-                    }),
-                )
+
         })
         .child(svg().path(icon_path).size(px(13.0)))
 }
 
 /// First line of the rail: the workhorse secondary pill. Flat surface fill,
 /// hover lifts one step; the accent stays out of chrome.
-fn sidebar_new_thread_button(
-    enabled: bool,
-    sidebar_open: bool,
-    cx: &mut Context<RootView>,
-) -> impl IntoElement {
-    div()
-        .id("new-session")
-        .h(px(30.0))
-        .w_full()
-        .flex()
-        .flex_row()
-        .items_center()
-        .justify_center()
-        .gap(px(7.0))
-        .rounded_full()
-        .border_1()
-        .border_color(gpui::rgba(0x0000_0000))
-        .bg(if enabled {
-            theme::panel()
-        } else {
-            gpui::rgba(0x0000_0000)
-        })
-        .text_color(if enabled {
-            theme::bone()
-        } else {
-            theme::smoke()
-        })
-        .when(enabled, |button| {
-            button
-                .when(sidebar_open, |button| button.tab_index(0))
-                .cursor_pointer()
-                .hover(|button| button.bg(theme::panel_lift()))
-                .focus(|button| button.border_color(theme::focus()))
-                .active(|button| button.bg(theme::panel_hover()))
-                .tooltip(controls::text_tooltip("New thread", Some("/new")))
-                .on_click(cx.listener(|view, _, window, cx| {
-                    let _ = view.execute_native_action(NativeAction::NewSession, "", window, cx);
-                }))
-                .on_key_down(cx.listener(|view, event: &gpui::KeyDownEvent, window, cx| {
-                    if matches!(event.keystroke.key.as_str(), "enter" | "space") {
-                        cx.stop_propagation();
-                        let _ =
-                            view.execute_native_action(NativeAction::NewSession, "", window, cx);
-                    }
-                }))
-        })
-        .child(
-            svg()
-                .path("icons/plus.svg")
-                .size(px(12.0))
-                .flex_shrink_0()
-                .text_color(if enabled {
-                    theme::ash()
-                } else {
-                    theme::smoke()
-                }),
-        )
-        .child(
-            div()
-                .font_family(theme::sans())
-                .text_size(theme::text_size(theme::T_UI_SM))
-                .font_weight(FontWeight::MEDIUM)
-                .child("New thread"),
-        )
+fn sidebar_new_thread_button(enabled: bool, sidebar_open: bool, cx: &mut Context<RootView>) -> impl IntoElement {
+    div().id("new-session").h(px(40.0)).w_full().px(px(12.0)).flex().items_center().gap(px(12.0))
+        .rounded(px(6.0)).bg(theme::signal()).text_color(theme::on_accent())
+        .when(enabled, |button| button.when(sidebar_open, |button| button.tab_index(0)).cursor_pointer()
+            .hover(|style| style.bg(theme::signal_hot())).focus(|style| style.border_2().border_color(theme::focus()))
+            .tooltip(controls::text_tooltip("New conversation", Some("/new")))
+            .on_click(cx.listener(|view, _, window, cx| { let _ = view.execute_native_action(NativeAction::NewSession, "", window, cx); })))
+        .child(svg().path("icons/plus.svg").size(px(16.0)).flex_shrink_0().text_color(theme::on_accent()))
+        .child(div().font_family(theme::sans()).text_size(theme::text_size(13.0)).font_weight(FontWeight::MEDIUM).child("New conversation"))
 }
+
 
 fn sidebar_text_link(
     id: impl Into<SharedString>,
@@ -1651,14 +1427,7 @@ fn sidebar_text_link(
                 .focus(|button| button.border_color(theme::focus()))
                 .active(|button| button.bg(theme::panel_hover()))
                 .on_click(cx.listener(move |view, _, window, cx| action(view, window, cx)))
-                .on_key_down(
-                    cx.listener(move |view, event: &gpui::KeyDownEvent, window, cx| {
-                        if matches!(event.keystroke.key.as_str(), "enter" | "space") {
-                            cx.stop_propagation();
-                            action(view, window, cx);
-                        }
-                    }),
-                )
+
         })
         .child(
             div()
@@ -1672,8 +1441,8 @@ fn sidebar_text_link(
 /// Row metrics for the flattened workspace tree. Siblings sit 2px apart so
 /// each rounded row reads as its own surface; project groups get a wider beat.
 const PROJECT_ROW_H: f32 = 30.0;
-const TREE_ROW_H: f32 = 30.0;
-const TREE_ROW_GAP: f32 = 2.0;
+const TREE_ROW_H: f32 = 78.0;
+const TREE_ROW_GAP: f32 = 0.0;
 const TREE_GROUP_GAP: f32 = 12.0;
 /// Left inset where thread/child content starts, past the chevron column.
 const TREE_INDENT: f32 = 20.0;
@@ -2130,10 +1899,12 @@ fn sidebar_remove_project_button(
 }
 
 struct ProjectThreadRowParams<'a> {
+    ordinal: usize,
     project_path: PathBuf,
     session: &'a SessionSummary,
     active_project: bool,
     selected: bool,
+    completed: bool,
     switching: bool,
     enabled: bool,
     runtime_status: Option<&'a ThreadRuntimeStatus>,
@@ -2149,10 +1920,12 @@ fn project_thread_row(
     cx: &mut Context<RootView>,
 ) -> AnyElement {
     let ProjectThreadRowParams {
+        ordinal,
         project_path,
         session,
         active_project,
         selected,
+        completed,
         switching,
         enabled,
         runtime_status,
@@ -2174,7 +1947,6 @@ fn project_thread_row(
         session.name.as_deref(),
         session.first_user_summary.as_deref(),
     );
-    let activity_key = list_animation_key(&session.id);
     let selected = selected || runtime_status.is_some_and(|status| status.active);
     let runtime_activity = runtime_status.map(|status| status.activity);
     let switching = switching || runtime_activity == Some(ThreadActivity::Opening);
@@ -2196,29 +1968,16 @@ fn project_thread_row(
         session.id
     ));
 
-    let row_bg = if selected || hovered {
-        theme::panel()
-    } else {
-        gpui::rgba(0x0000_0000)
-    };
-    let row_border = cursor_border(cursored, tree_focused, selected);
 
-    div()
-        .id(row_id)
-        .h(px(TREE_ROW_H))
-        .flex_shrink_0()
-        .mt(px(top_gap))
-        .pl(px(TREE_INDENT))
-        .pr(px(8.0))
-        .relative()
-        .rounded(px(theme::RADIUS_MD))
-        .border_1()
-        .border_color(row_border)
-        .bg(row_bg)
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap(px(8.0))
+    let count = session.counts.user_messages + session.counts.assistant_messages;
+    let metadata = if show_activity { trailing.label.clone() }
+        else if selected && completed { "Completed".to_owned() }
+        else { format!("{} · {count} message{}", compact_session_day(&session.updated_at), if count == 1 { "" } else { "s" }) };
+    div().id(row_id).h(px(if selected { 90.0 } else { TREE_ROW_H })).flex_shrink_0()
+        .mt(px(top_gap)).px(px(11.0)).pt(px(if selected { 12.0 } else { 29.0 }))
+        .relative().rounded(px(6.0)).border_1().border_color(cursor_border(cursored, tree_focused, selected))
+        .bg(if selected { theme::selection() } else if hovered { theme::panel() } else { gpui::rgba(0) })
+        .flex().flex_col().min_w_0()
         .on_hover(move |hovered, _, cx| {
             let key = hover_key.clone();
             hover_root.update(cx, |view, cx| {
@@ -2247,70 +2006,18 @@ fn project_thread_row(
                     });
                 })
         })
-        .child(
-            div()
-                .min_w_0()
-                .flex_1()
-                .overflow_hidden()
-                .text_ellipsis()
-                .whitespace_nowrap()
-                .font_family(theme::sans())
-                .text_size(theme::text_size(theme::T_UI_SM))
-                .font_weight(FontWeight::MEDIUM)
-                .text_color(if selected {
-                    theme::bone()
-                } else if enabled {
-                    theme::bone_dim()
-                } else {
-                    theme::ash()
-                })
-                .child(title),
-        )
-        // Stable activity slot: title truncation never moves when a thread
-        // flips Working/Opening — the indicator occupies the same 8px whether
-        // it is painted or not.
-        .child(
-            div()
-                .w(px(8.0))
-                .h(px(8.0))
-                .flex_shrink_0()
-                .flex()
-                .items_center()
-                .justify_center()
-                .when(show_activity, |slot| {
-                    slot.child(controls::square_status_indicator(
-                        activity_key,
-                        true,
-                        Duration::from_millis(720),
-                        match runtime_activity {
-                            Some(ThreadActivity::Cancelling) => theme::data(),
-                            Some(ThreadActivity::Attention) => theme::error(),
-                            _ => theme::working(),
-                        },
-                    ))
-                }),
-        )
-        .child(
-            div()
-                .flex_shrink_0()
-                .h(px(22.0))
-                // Fixed gutter for the trailing date/delete slot: the title
-                // ellipsis point never moves when the list starts scrolling
-                // or when a row swaps the date for the trash control.
-                .w(px(48.0))
-                .flex()
-                .items_center()
-                .justify_end()
-                .when(!show_delete, |slot| {
-                    slot.child(
-                        div()
-                            .font_family(theme::mono())
-                            .text_size(theme::text_size(theme::T_TINY))
-                            .whitespace_nowrap()
-                            .text_color(trailing.color)
-                            .child(trailing.label),
-                    )
-                })
+
+        .when(selected, |row| row.child(div().h(px(16.0)).mb(px(4.0))
+            .font_family(theme::mono()).text_size(theme::text_size(10.0)).line_height(px(16.0))
+            .text_color(theme::signal()).child(format!("{ordinal:02} / CONVERSATION"))))
+        .child(div().h(px(20.0)).min_w_0().overflow_hidden().text_ellipsis().whitespace_nowrap()
+            .font_family(theme::sans()).text_size(theme::text_size(13.0)).line_height(px(20.0))
+            .font_weight(FontWeight::MEDIUM).text_color(theme::bone()).child(title))
+        .child(div().mt(px(if selected { 3.0 } else { 5.0 })).h(px(18.0))
+            .font_family(theme::sans()).text_size(theme::text_size(11.0)).line_height(px(18.0))
+            .text_color(if show_activity { trailing.color } else if selected && completed { theme::live() } else { theme::ash() })
+            .overflow_hidden().text_ellipsis().whitespace_nowrap().child(metadata))
+        .child(div().absolute().right(px(6.0)).top(px(6.0))
                 .when(show_delete, |slot| {
                     let trash_id = SharedString::from(format!(
                         "project-thread-trash-{}-{}",
@@ -2347,7 +2054,7 @@ fn project_thread_row(
                             .on_key_down(move |event: &gpui::KeyDownEvent, _, cx| {
                                 if matches!(
                                     event.keystroke.key.as_str(),
-                                    "enter" | "space" | "delete" | "backspace"
+                                    "delete" | "backspace"
                                 ) {
                                     cx.stop_propagation();
                                     key_trash_root.update(cx, |view, cx| {
@@ -2379,8 +2086,7 @@ fn project_thread_row(
                                     }),
                             ),
                     )
-                }),
-        )
+                }))
         .into_any_element()
 }
 
@@ -2462,6 +2168,9 @@ fn list_animation_key(value: &str) -> usize {
 }
 
 fn compact_session_day(timestamp: &str) -> String {
+    if let Some(label) = crate::views::time_labels::relative_session_day(timestamp) {
+        return label.to_owned();
+    }
     let bytes = timestamp.as_bytes();
     let iso_shape = bytes.len() >= 10 && bytes.get(4) == Some(&b'-') && bytes.get(7) == Some(&b'-');
     if !iso_shape {
@@ -2925,6 +2634,7 @@ mod tests {
         status: CatalogStatus,
     ) -> SidebarProjectSlice {
         SidebarProjectSlice {
+            active: false,
             path: PathBuf::from(path),
             expanded,
             status,
@@ -3047,6 +2757,21 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn active_project_sessions_are_first_and_do_not_duplicate_the_fixed_header() {
+        let other = project_slice("other", true, vec![("a", "other/a.jsonl")], None, 0, CatalogStatus::Ready);
+        let mut active = project_slice("active", false, vec![("b", "active/b.jsonl")], None, 0, CatalogStatus::Ready);
+        active.active = true;
+        let rows = sidebar_rows(&[other, active]);
+        assert_eq!(rows.len(), 3);
+        assert!(matches!(&rows[0], SidebarRow::Node(SidebarNode::Thread { project, .. }) if project == &PathBuf::from("active")));
+        assert!(matches!(&rows[1], SidebarRow::Node(SidebarNode::Project(project)) if project == &PathBuf::from("other")));
+        assert!(!rows.iter().any(|row| matches!(row, SidebarRow::Node(SidebarNode::Project(project)) if project == &PathBuf::from("active"))));
+        let (node, slot) = sidebar_moved_cursor(&rows, None, SidebarCursorMove::First).unwrap();
+        assert_eq!(slot, 0);
+        assert!(matches!(node, SidebarNode::Thread { .. }));
     }
 
     #[test]

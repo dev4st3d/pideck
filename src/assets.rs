@@ -7,6 +7,18 @@ pub struct Assets;
 impl AssetSource for Assets {
     fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
         let bytes = match path {
+            "icons/branch.svg" => &include_bytes!("../assets/icons/branch.svg")[..],
+            "icons/search.svg" => &include_bytes!("../assets/icons/search.svg")[..],
+            "icons/overflow.svg" => &include_bytes!("../assets/icons/overflow.svg")[..],
+            "icons/stop-square.svg" => &include_bytes!("../assets/icons/stop-square.svg")[..],
+            "icons/queue-return.svg" => &include_bytes!("../assets/icons/queue-return.svg")[..],
+            "icons/external.svg" => &include_bytes!("../assets/icons/external.svg")[..],
+            "icons/window-min.svg" => &include_bytes!("../assets/icons/window-min.svg")[..],
+            "icons/window-max.svg" => &include_bytes!("../assets/icons/window-max.svg")[..],
+            "icons/window-close.svg" => &include_bytes!("../assets/icons/window-close.svg")[..],
+            "icons/projects.svg" => &include_bytes!("../assets/icons/projects.svg")[..],
+            "icons/sessions.svg" => &include_bytes!("../assets/icons/sessions.svg")[..],
+
             "icons/agent-diamond.svg" => &include_bytes!("../assets/icons/agent-diamond.svg")[..],
             "icons/agent-nodes.svg" => &include_bytes!("../assets/icons/agent-nodes.svg")[..],
             "icons/agent-ring.svg" => &include_bytes!("../assets/icons/agent-ring.svg")[..],
@@ -46,6 +58,18 @@ impl AssetSource for Assets {
     fn list(&self, path: &str) -> Result<Vec<SharedString>> {
         Ok(match path {
             "icons" => vec![
+                "branch.svg".into(),
+                "search.svg".into(),
+                "overflow.svg".into(),
+                "stop-square.svg".into(),
+                "queue-return.svg".into(),
+                "external.svg".into(),
+                "window-min.svg".into(),
+                "window-max.svg".into(),
+                "window-close.svg".into(),
+                "projects.svg".into(),
+                "sessions.svg".into(),
+
                 "agent-diamond.svg".into(),
                 "agent-nodes.svg".into(),
                 "agent-ring.svg".into(),

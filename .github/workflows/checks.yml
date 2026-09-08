@@ -47,7 +47,7 @@ jobs:
 
       - name: Test bridge
         shell: pwsh
-        run: node --test (Get-ChildItem -Path bridge -Filter *.test.mjs).FullName
+        run: node --test (Get-ChildItem -Path bridge,scripts -Filter *.test.mjs).FullName
 
   clippy:
     name: Clippy
@@ -66,6 +66,15 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: checks-clippy
+
+      - name: Setup Node for exact font preparation
+        uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+          check-latest: true
+
+      - name: Prepare SHA-256-verified design fonts
+        run: node scripts/prepare-fonts.mjs
 
       - name: Clippy
         run: cargo clippy --locked --all-targets --all-features -- -D warnings
@@ -91,6 +100,9 @@ jobs:
         with:
           node-version: "22"
           check-latest: true
+
+      - name: Prepare SHA-256-verified design fonts
+        run: node scripts/prepare-fonts.mjs
 
       - name: Check all targets
         run: cargo check --locked --all-targets
