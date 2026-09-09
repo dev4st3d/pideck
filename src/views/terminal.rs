@@ -1155,12 +1155,16 @@ fn workspace_tab(
         .id(SharedString::from(format!("terminal-tab-{id}")))
         .h_full()
         .max_w(px(250.0))
-        .mr(px(24.0))
+        .mr(px(chrome::TAB_GAP))
+        .px(px(chrome::TAB_INSET))
         .flex_shrink_0()
         .flex()
         .flex_row()
         .items_center()
-        .gap(px(14.0))
+        .gap(px(chrome::COMPACT_GAP))
+        .font_family(chrome::CHROME_FONT)
+        .text_size(px(chrome::CHROME_TEXT_SIZE))
+        .line_height(px(chrome::CHROME_LINE_HEIGHT))
         .bg(if selected {
             theme::canvas()
         } else {
@@ -1183,7 +1187,7 @@ fn workspace_tab(
             if selected {
                 tab
             } else {
-                tab.bg(theme::panel()).text_color(theme::bone())
+                tab.bg(theme::panel_hover()).text_color(theme::bone())
             }
         })
         .focus(|tab| tab.border_color(theme::focus()).text_color(theme::focus()))
@@ -1245,7 +1249,7 @@ fn workspace_tab(
         .child(
             div()
                 .id(SharedString::from(format!("close-terminal-tab-{id}")))
-                .size(px(16.0))
+                .size(px(chrome::CONTROL_HEIGHT))
                 .flex_shrink_0()
                 .flex()
                 .items_center()

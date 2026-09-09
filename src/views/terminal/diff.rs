@@ -519,7 +519,9 @@ impl Render for DiffView {
             .pb(px(20.0))
             .bg(theme::canvas())
             .font_family(chrome::CHROME_FONT)
-            .text_size(px(13.0))
+            .font_weight(FontWeight::NORMAL)
+            .text_size(px(chrome::CONTROL_TEXT_SIZE))
+            .line_height(px(chrome::CONTROL_LINE_HEIGHT))
             .text_color(theme::bone())
             .on_key_down(cx.listener(Self::on_key))
             .child(
@@ -594,6 +596,8 @@ impl Render for DiffView {
                     .child(
                         div()
                             .font_family(theme::mono())
+                            .text_size(px(chrome::TECH_TEXT_SIZE))
+                            .line_height(px(chrome::TECH_LINE_HEIGHT))
                             .text_color(theme::ash())
                             .child(
                                 self.path
@@ -618,15 +622,22 @@ impl Render for DiffView {
                     .child(
                         div()
                             .id("diff-comparison")
+                            .h(px(chrome::CONTROL_HEIGHT))
                             .flex_shrink_0()
-                            .px(px(8.0))
-                            .py(px(6.0))
+                            .px(px(chrome::CONTROL_INSET))
+                            .flex()
+                            .items_center()
+                            .rounded(px(chrome::CONTROL_RADIUS))
+                            .border_1()
+                            .border_color(gpui::rgba(0))
                             .when(self.sections.len() > 1, |button| {
                                 button
                                     .tab_index(0)
                                     .cursor_pointer()
-                                    .hover(|b| b.bg(theme::panel()))
-                                    .focus(|b| b.bg(theme::selection()))
+                                    .hover(|b| b.bg(theme::panel_hover()))
+                                    .focus(|b| {
+                                        b.bg(theme::selection()).border_color(theme::focus())
+                                    })
                                     .tooltip(text_tooltip(
                                         "Switch between staged and working tree changes",
                                     ))
@@ -646,13 +657,19 @@ impl Render for DiffView {
                     .child(
                         div()
                             .id("diff-open-file")
+                            .h(px(chrome::CONTROL_HEIGHT))
                             .flex_shrink_0()
-                            .py(px(6.0))
+                            .px(px(chrome::CONTROL_INSET))
+                            .flex()
+                            .items_center()
+                            .rounded(px(chrome::CONTROL_RADIUS))
+                            .border_1()
+                            .border_color(gpui::rgba(0))
                             .tab_index(0)
                             .cursor_pointer()
                             .text_color(theme::focus())
-                            .hover(|b| b.bg(theme::panel()))
-                            .focus(|b| b.bg(theme::selection()))
+                            .hover(|b| b.bg(theme::panel_hover()))
+                            .focus(|b| b.bg(theme::selection()).border_color(theme::focus()))
                             .tooltip(text_tooltip("Open file · Ctrl+O"))
                             .on_click(cx.listener(|view, _, _, cx| cx.emit(view.path.clone())))
                             .child("Open file ↗"),

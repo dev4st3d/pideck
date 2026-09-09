@@ -3,9 +3,9 @@
 use std::path::PathBuf;
 
 use gpui::{
-    App, Context, Entity, FocusHandle, FontWeight, IntoElement, KeyBinding, KeyDownEvent,
-    PathPromptOptions, PromptLevel, Render, SharedString, Subscription, Window, WindowControlArea,
-    actions, div, prelude::*, px, svg,
+    App, Bounds, Context, Entity, FocusHandle, FontWeight, IntoElement, KeyBinding, KeyDownEvent,
+    PathPromptOptions, Pixels, PromptLevel, Render, ScrollHandle, SharedString, Subscription,
+    Window, WindowControlArea, actions, anchored, deferred, div, prelude::*, px, svg,
 };
 
 use super::project_panels::{FilesPanel, GitPanel, ProjectPanelEvent};
@@ -75,9 +75,14 @@ pub(crate) struct TerminalManager {
     close_after_save: bool,
     selector_open: bool,
     selector_focus: FocusHandle,
+    selector_trigger_focus: FocusHandle,
+    selector_bounds: Option<Bounds<Pixels>>,
+    selector_scroll: ScrollHandle,
     selector_selected: usize,
     appearance_menu_open: bool,
     appearance_focus: FocusHandle,
+    appearance_trigger_focus: FocusHandle,
+    appearance_bounds: Option<Bounds<Pixels>>,
     appearance_selected: usize,
     appearance_revision: u64,
     appearance_saving: bool,
@@ -160,9 +165,14 @@ impl TerminalManager {
             close_after_save: false,
             selector_open: false,
             selector_focus: cx.focus_handle(),
+            selector_trigger_focus: cx.focus_handle(),
+            selector_bounds: None,
+            selector_scroll: ScrollHandle::new(),
             selector_selected: 0,
             appearance_menu_open: false,
             appearance_focus: cx.focus_handle(),
+            appearance_trigger_focus: cx.focus_handle(),
+            appearance_bounds: None,
             appearance_selected: 0,
             appearance_revision: 0,
             appearance_saving: false,
@@ -259,23 +269,36 @@ impl TerminalManager {
         div()
             .id("appearance-menu")
             .track_focus(&self.appearance_focus)
+            .debug_selector(|| "appearance-menu".into())
             .occlude()
-            .absolute()
-            .top(px(chrome::TITLEBAR_HEIGHT + chrome::TOOLBAR_HEIGHT))
-            .right(px(chrome::TOOLBAR_INSET))
-            .w(px(220.0))
-            .p(px(6.0))
+            .w(px(chrome::MENU_WIDTH))
+            .max_h(px(chrome::MENU_MAX_HEIGHT))
+            .overflow_y_scroll()
+            .p(px(chrome::SMALL_GAP))
+            .font_family(chrome::CHROME_FONT)
+            .font_weight(FontWeight::NORMAL)
+            .text_size(px(chrome::CONTROL_TEXT_SIZE))
+            .line_height(px(chrome::CONTROL_LINE_HEIGHT))
+            .text_color(theme::bone())
             .bg(theme::panel_lift())
             .border_1()
             .border_color(theme::edge_hard())
             .rounded(px(chrome::CONTROL_RADIUS))
-            .on_mouse_down_out(cx.listener(|view, _, window, cx| {
-                view.appearance_menu_open = false;
-                if view.appearance_focus.is_focused(window) {
-                    view.focus_active(window, cx);
-                }
-                cx.notify();
-            }))
+            .on_mouse_down_out(
+                cx.listener(|view, event: &gpui::MouseDownEvent, window, cx| {
+                    if view
+                        .appearance_bounds
+                        .is_some_and(|bounds| bounds.contains(&event.position))
+                    {
+                        return;
+                    }
+                    view.appearance_menu_open = false;
+                    if view.appearance_focus.is_focused(window) {
+                        view.focus_active(window, cx);
+                    }
+                    cx.notify();
+                }),
+            )
             .on_key_down(cx.listener(|view, event: &KeyDownEvent, window, cx| {
                 let count = theme::Appearance::ALL.len();
                 match event.keystroke.key.as_str() {
@@ -299,7 +322,7 @@ impl TerminalManager {
                     ),
                     "escape" => {
                         view.appearance_menu_open = false;
-                        view.focus_active(window, cx);
+                        window.focus(&view.appearance_trigger_focus);
                     }
                     _ => return,
                 }
@@ -313,8 +336,8 @@ impl TerminalManager {
                     .map(|(index, appearance)| {
                         div()
                             .id(("appearance-choice", index))
-                            .h(px(36.0))
-                            .px(px(10.0))
+                            .h(px(chrome::MENU_ROW_HEIGHT))
+                            .px(px(chrome::COMPACT_GAP))
                             .flex()
                             .items_center()
                             .justify_between()
@@ -887,6 +910,114 @@ impl TerminalManager {
             )
     }
 
+    fn project_picker(
+        &self,
+        title: String,
+        path: String,
+        available: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        div()
+            .relative()
+            .min_w(px(100.0))
+            .max_w(px(220.0))
+            .h(px(chrome::MAIN_CONTROL_HEIGHT))
+            .on_children_prepainted(cx.processor(|view, bounds: Vec<Bounds<Pixels>>, _, _| {
+                view.selector_bounds = bounds.first().copied();
+            }))
+            .child(
+                picker_trigger("project-selector", self.selector_open)
+                    .debug_selector(|| "project-selector".into())
+                    .track_focus(&self.selector_trigger_focus)
+                    .tooltip(text_tooltip(path))
+                    .when(!available, |button| button.opacity(0.55))
+                    .when(available, |button| {
+                        button.tab_index(0).cursor_pointer().on_click(cx.listener(
+                            |view, _, window, cx| {
+                                view.appearance_menu_open = false;
+                                view.selector_open = !view.selector_open;
+                                view.selector_selected = view
+                                    .workspace
+                                    .as_ref()
+                                    .map_or(0, |workspace| workspace.active);
+                                if view.selector_open {
+                                    view.selector_scroll.scroll_to_item(view.selector_selected);
+                                    window.focus(&view.selector_focus);
+                                } else {
+                                    window.focus(&view.selector_trigger_focus);
+                                }
+                                cx.notify();
+                            },
+                        ))
+                    })
+                    .child(
+                        svg()
+                            .path("icons/folder.svg")
+                            .size(px(chrome::ICON_SIZE))
+                            .flex_shrink_0()
+                            .text_color(theme::ash()),
+                    )
+                    .child(
+                        div()
+                            .id("project-selector-label")
+                            .debug_selector(|| "project-selector-label".into())
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .child(SharedString::from(title)),
+                    )
+                    .child(picker_chevron(self.selector_open)),
+            )
+            .when(self.selector_open, |wrapper| {
+                wrapper.child(picker_popup(self.project_selector(cx)))
+            })
+    }
+
+    fn appearance_picker(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .relative()
+            .w(px(chrome::APPEARANCE_CONTROL_WIDTH))
+            .h(px(chrome::MAIN_CONTROL_HEIGHT))
+            .flex_shrink_0()
+            .on_children_prepainted(cx.processor(|view, bounds: Vec<Bounds<Pixels>>, _, _| {
+                view.appearance_bounds = bounds.first().copied();
+            }))
+            .child(
+                picker_trigger("appearance-picker", self.appearance_menu_open)
+                    .debug_selector(|| "appearance-picker".into())
+                    .track_focus(&self.appearance_trigger_focus)
+                    .w_full()
+                    .tab_index(0)
+                    .cursor_pointer()
+                    .tooltip(text_tooltip("Choose appearance"))
+                    .on_click(cx.listener(|view, _, window, cx| {
+                        view.selector_open = false;
+                        view.appearance_menu_open = !view.appearance_menu_open;
+                        if view.appearance_menu_open {
+                            view.appearance_selected = theme::Appearance::ALL
+                                .iter()
+                                .position(|appearance| *appearance == theme::appearance())
+                                .unwrap_or(0);
+                            window.focus(&view.appearance_focus);
+                        } else {
+                            window.focus(&view.appearance_trigger_focus);
+                        }
+                        cx.notify();
+                    }))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .child(theme::appearance().label()),
+                    )
+                    .child(picker_chevron(self.appearance_menu_open)),
+            )
+            .when(self.appearance_menu_open, |wrapper| {
+                wrapper.child(picker_popup(self.appearance_menu(cx)))
+            })
+    }
+
     fn workbench_toolbar(
         &self,
         title: String,
@@ -934,65 +1065,11 @@ impl TerminalManager {
                     .px(px(chrome::TOOLBAR_INSET))
                     .flex()
                     .items_center()
-                    .gap(px(20.0))
+                    .gap(px(chrome::GAP))
                     .when(!sidebar_visible, |toolbar| {
                         toolbar.child(sidebar_toggle(available, cx))
                     })
-                    .child(
-                        div()
-                            .id("project-selector")
-                            .h(px(chrome::MAIN_CONTROL_HEIGHT))
-                            .min_w_0()
-                            .max_w(px(220.0))
-                            .flex()
-                            .items_center()
-                            .gap(px(10.0))
-                            .border_1()
-                            .border_color(gpui::rgba(0x00000000))
-                            .rounded(px(chrome::CONTROL_RADIUS))
-                            .tab_index(0)
-                            .cursor_pointer()
-                            .hover(|style| style.bg(theme::panel_hover()))
-                            .focus(|style| style.border_color(theme::focus()))
-                            .tooltip(text_tooltip(path.clone()))
-                            .on_click(cx.listener(|view, _, window, cx| {
-                                view.appearance_menu_open = false;
-                                view.selector_open = !view.selector_open;
-                                view.selector_selected = view
-                                    .workspace
-                                    .as_ref()
-                                    .map_or(0, |workspace| workspace.active);
-                                if view.selector_open {
-                                    window.focus(&view.selector_focus);
-                                } else {
-                                    view.focus_active(window, cx);
-                                }
-                                cx.notify();
-                            }))
-                            .child(
-                                svg()
-                                    .path("icons/folder.svg")
-                                    .size(px(16.0))
-                                    .flex_shrink_0()
-                                    .text_color(theme::ash()),
-                            )
-                            .child(
-                                div()
-                                    .min_w_0()
-                                    .truncate()
-                                    .text_size(px(14.0))
-                                    .line_height(px(20.0))
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .child(SharedString::from(title)),
-                            )
-                            .child(
-                                svg()
-                                    .path("icons/chevron-down.svg")
-                                    .size(px(12.0))
-                                    .flex_shrink_0()
-                                    .text_color(theme::ash()),
-                            ),
-                    )
+                    .child(self.project_picker(title, path.clone(), available, cx))
                     .when(wide, |toolbar| {
                         toolbar
                             .child(
@@ -1008,63 +1085,18 @@ impl TerminalManager {
                                     .min_w_0()
                                     .truncate()
                                     .font_family(theme::mono())
-                                    .text_size(px(11.0))
-                                    .line_height(px(16.0))
+                                    .text_size(px(chrome::DETAIL_TEXT_SIZE))
+                                    .line_height(px(chrome::DETAIL_LINE_HEIGHT))
                                     .text_color(theme::ash())
                                     .child(path),
                             )
                     })
                     .when(!wide, |toolbar| toolbar.child(div().flex_1().min_w_0()))
-                    .child(
-                        div()
-                            .id("appearance-picker")
-                            .h(px(chrome::MAIN_CONTROL_HEIGHT))
-                            .px(px(8.0))
-                            .flex_shrink_0()
-                            .flex()
-                            .items_center()
-                            .gap(px(8.0))
-                            .rounded(px(chrome::CONTROL_RADIUS))
-                            .border_1()
-                            .border_color(gpui::rgba(0))
-                            .text_size(px(12.0))
-                            .text_color(theme::ash())
-                            .tab_index(0)
-                            .cursor_pointer()
-                            .hover(|button| {
-                                button.bg(theme::panel_hover()).text_color(theme::bone())
-                            })
-                            .focus(|button| {
-                                button
-                                    .border_color(theme::focus())
-                                    .text_color(theme::bone())
-                            })
-                            .tooltip(text_tooltip("Choose appearance"))
-                            .on_click(cx.listener(|view, _, window, cx| {
-                                view.selector_open = false;
-                                view.appearance_menu_open = !view.appearance_menu_open;
-                                if view.appearance_menu_open {
-                                    view.appearance_selected = theme::Appearance::ALL
-                                        .iter()
-                                        .position(|appearance| *appearance == theme::appearance())
-                                        .unwrap_or(0);
-                                    window.focus(&view.appearance_focus);
-                                } else {
-                                    view.focus_active(window, cx);
-                                }
-                                cx.notify();
-                            }))
-                            .child(theme::appearance().label())
-                            .child(
-                                svg()
-                                    .path("icons/chevron-down.svg")
-                                    .size(px(12.0))
-                                    .text_color(theme::ash()),
-                            ),
-                    )
+                    .child(self.appearance_picker(cx))
                     .child(
                         div()
                             .id("new-terminal")
+                            .debug_selector(|| "new-terminal".into())
                             .h(px(chrome::MAIN_CONTROL_HEIGHT))
                             .px(px(12.0))
                             .flex_shrink_0()
@@ -1076,8 +1108,8 @@ impl TerminalManager {
                             .border_color(theme::focus())
                             .bg(theme::focus())
                             .text_color(theme::on_accent())
-                            .text_size(px(12.0))
-                            .line_height(px(16.0))
+                            .text_size(px(chrome::CONTROL_TEXT_SIZE))
+                            .line_height(px(chrome::CONTROL_LINE_HEIGHT))
                             .font_weight(FontWeight::MEDIUM)
                             .tooltip(text_tooltip(if can_add_terminal {
                                 "Open a terminal in this project · Ctrl+Shift+T"
@@ -1106,7 +1138,7 @@ impl TerminalManager {
                                 div()
                                     .flex()
                                     .items_center()
-                                    .gap(px(6.0))
+                                    .gap(px(chrome::SMALL_GAP))
                                     .child(
                                         svg()
                                             .path("icons/plus.svg")
@@ -1119,7 +1151,7 @@ impl TerminalManager {
                                 button.child(
                                     div()
                                         .font_family(theme::mono())
-                                        .text_size(px(10.0))
+                                        .text_size(px(chrome::DETAIL_TEXT_SIZE))
                                         .child("Ctrl ⇧ T"),
                                 )
                             }),
@@ -1168,24 +1200,20 @@ impl TerminalManager {
                         .map(|(item, label)| {
                             div()
                                 .id(SharedString::from(format!("sidebar-{label}")))
-                                .w(px(if item == SidebarTab::Projects {
-                                    84.0
-                                } else {
-                                    74.0
-                                }))
-                                .flex_shrink_0()
+                                .flex_1()
+                                .min_w_0()
                                 .h_full()
                                 .flex()
                                 .items_center()
                                 .justify_center()
-                                .gap(px(6.0))
+                                .gap(px(chrome::SMALL_GAP))
                                 .border_t_2()
                                 .border_color(if tab == item {
                                     theme::focus()
                                 } else {
                                     gpui::rgba(0x00000000)
                                 })
-                                .text_size(px(12.0))
+                                .text_size(px(chrome::CONTROL_TEXT_SIZE))
                                 .text_color(if tab == item {
                                     theme::bone()
                                 } else {
@@ -1213,7 +1241,7 @@ impl TerminalManager {
                                         item.child(
                                             div()
                                                 .font_family(theme::mono())
-                                                .text_size(px(10.0))
+                                                .text_size(px(chrome::DETAIL_TEXT_SIZE))
                                                 .text_color(theme::focus())
                                                 .child(count.to_string()),
                                         )
@@ -1241,10 +1269,17 @@ impl TerminalManager {
                     .map_or(0, |workspace| workspace.projects.len());
                 match event.keystroke.key.as_str() {
                     "up" => view.selector_selected = (view.selector_selected + count) % (count + 1),
-                    "down" | "tab" => {
-                        view.selector_selected = (view.selector_selected + 1) % (count + 1)
+                    "down" => view.selector_selected = (view.selector_selected + 1) % (count + 1),
+                    "tab" => {
+                        view.selector_selected = (view.selector_selected
+                            + if event.keystroke.modifiers.shift {
+                                count
+                            } else {
+                                1
+                            })
+                            % (count + 1);
                     }
-                    "enter" => {
+                    "enter" | "space" => {
                         if view.selector_selected < count {
                             view.select_project(view.selector_selected, window, cx);
                         } else {
@@ -1253,69 +1288,113 @@ impl TerminalManager {
                     }
                     "escape" => {
                         view.selector_open = false;
-                        view.focus_active(window, cx);
+                        window.focus(&view.selector_trigger_focus);
                     }
                     _ => return,
                 }
+                view.selector_scroll.scroll_to_item(view.selector_selected);
                 cx.stop_propagation();
                 cx.notify();
             }))
-            .absolute()
-            .top(px(chrome::TITLEBAR_HEIGHT + chrome::TOOLBAR_HEIGHT))
-            .left(px(chrome::TOOLBAR_INSET
-                + if self
-                    .workspace
-                    .as_ref()
-                    .is_some_and(|workspace| workspace.sidebar_visible)
-                {
-                    chrome::SIDEBAR_WIDTH
-                } else {
-                    chrome::COLLAPSED_BRAND_WIDTH
-                }))
+            .debug_selector(|| "project-selector-menu".into())
             .w(px(300.0))
-            .max_h(px(360.0))
+            .max_h(px(chrome::MENU_MAX_HEIGHT))
             .overflow_y_scroll()
-            .p(px(6.0))
+            .track_scroll(&self.selector_scroll)
+            .p(px(chrome::SMALL_GAP))
+            .rounded(px(chrome::CONTROL_RADIUS))
+            .font_family(chrome::CHROME_FONT)
+            .font_weight(FontWeight::NORMAL)
+            .text_size(px(chrome::CONTROL_TEXT_SIZE))
+            .line_height(px(chrome::CONTROL_LINE_HEIGHT))
+            .text_color(theme::bone())
             .bg(theme::panel_lift())
             .border_1()
             .border_color(theme::edge_hard())
-            .on_mouse_down_out(cx.listener(|view, _, _, cx| {
-                view.selector_open = false;
-                cx.notify();
-            }))
+            .on_mouse_down_out(
+                cx.listener(|view, event: &gpui::MouseDownEvent, window, cx| {
+                    if view
+                        .selector_bounds
+                        .is_some_and(|bounds| bounds.contains(&event.position))
+                    {
+                        return;
+                    }
+                    view.selector_open = false;
+                    if view.selector_focus.is_focused(window) {
+                        view.focus_active(window, cx);
+                    }
+                    cx.notify();
+                }),
+            )
             .children(entries.into_iter().enumerate().map(|(index, project)| {
+                let active = self
+                    .workspace
+                    .as_ref()
+                    .is_some_and(|workspace| workspace.active == index);
                 div()
                     .id(("choose-project", index))
-                    .px(px(10.0))
-                    .py(px(8.0))
+                    .h(px(chrome::MENU_ROW_HEIGHT))
+                    .px(px(chrome::COMPACT_GAP))
+                    .flex()
+                    .items_center()
+                    .gap(px(chrome::COMPACT_GAP))
                     .rounded(px(chrome::CONTROL_RADIUS))
+                    .border_1()
+                    .border_color(if self.selector_selected == index {
+                        theme::focus()
+                    } else {
+                        gpui::rgba(0)
+                    })
                     .cursor_pointer()
                     .when(self.selector_selected == index, |row| {
                         row.bg(theme::selection())
                     })
                     .hover(|style| style.bg(theme::panel_hover()))
-                    .focus(|style| style.bg(theme::selection()))
                     .tooltip(text_tooltip(project.path.to_string_lossy().into_owned()))
                     .on_click(cx.listener(move |view, _, window, cx| {
                         view.select_project(index, window, cx)
                     }))
-                    .child(div().truncate().child(project_name(&project.path)))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .child(project_name(&project.path)),
+                    )
+                    .child(
+                        div()
+                            .w(px(chrome::ICON_SIZE))
+                            .flex_shrink_0()
+                            .when(active, |mark| mark.child("✓")),
+                    )
             }))
             .child(
-                button(
-                    "selector-add-project",
-                    "Add project folder…",
-                    !self.picker_pending,
-                )
-                .when(
-                    self.selector_selected
-                        == self
-                            .workspace
-                            .as_ref()
-                            .map_or(0, |workspace| workspace.projects.len()),
-                    |row| row.bg(theme::selection()),
-                )
-                .on_click(cx.listener(|view, _, window, cx| view.choose_project(window, cx))),
+                div()
+                    .id("selector-add-project")
+                    .h(px(chrome::MENU_ROW_HEIGHT))
+                    .px(px(chrome::COMPACT_GAP))
+                    .flex()
+                    .items_center()
+                    .rounded(px(chrome::CONTROL_RADIUS))
+                    .border_1()
+                    .border_color(gpui::rgba(0))
+                    .when(
+                        self.selector_selected
+                            == self
+                                .workspace
+                                .as_ref()
+                                .map_or(0, |workspace| workspace.projects.len()),
+                        |row| row.bg(theme::selection()).border_color(theme::focus()),
+                    )
+                    .when(!self.picker_pending, |row| {
+                        row.cursor_pointer()
+                            .hover(|style| style.bg(theme::panel_hover()))
+                            .on_click(
+                                cx.listener(|view, _, window, cx| view.choose_project(window, cx)),
+                            )
+                    })
+                    .when(self.picker_pending, |row| row.opacity(0.55))
+                    .child("Add project folder…"),
             )
     }
 
@@ -1507,9 +1586,15 @@ impl TerminalManager {
                             theme::floor()
                         })
                         .cursor_pointer()
-                        .hover(|style| style.bg(theme::panel_hover()))
-                        .active(|style| style.bg(theme::panel_lift()))
-                        .focus(|style| style.border_color(theme::focus()).bg(theme::panel_lift()))
+                        .hover(move |style| {
+                            style.bg(if selected {
+                                theme::selection()
+                            } else {
+                                theme::panel_hover()
+                            })
+                        })
+                        .active(|style| style.bg(theme::selection()))
+                        .focus(|style| style.border_color(theme::focus()))
                         .tooltip(text_tooltip(project.path.to_string_lossy().into_owned()))
                         .on_click(cx.listener(move |view, _, window, cx| {
                             view.select_project(index, window, cx)
@@ -1538,9 +1623,9 @@ impl TerminalManager {
                                         .overflow_hidden()
                                         .whitespace_nowrap()
                                         .font_weight(if selected {
-                                            FontWeight::SEMIBOLD
-                                        } else {
                                             FontWeight::MEDIUM
+                                        } else {
+                                            FontWeight::NORMAL
                                         })
                                         .child(project_name(&project.path)),
                                 )
@@ -1548,7 +1633,7 @@ impl TerminalManager {
                                     div()
                                         .text_size(px(chrome::DETAIL_TEXT_SIZE))
                                         .font_family(theme::mono())
-                                        .line_height(px(16.0))
+                                        .line_height(px(chrome::DETAIL_LINE_HEIGHT))
                                         .text_color(theme::ash())
                                         .child(format!(
                                             "{} terminal{}",
@@ -1686,6 +1771,64 @@ fn project_name(path: &std::path::Path) -> String {
         .unwrap_or_else(|| path.to_string_lossy().into_owned())
 }
 
+fn picker_trigger(id: &'static str, open: bool) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(id)
+        .h(px(chrome::MAIN_CONTROL_HEIGHT))
+        .min_w_0()
+        .px(px(chrome::CONTROL_INSET))
+        .flex()
+        .items_center()
+        .gap(px(chrome::COMPACT_GAP))
+        .rounded(px(chrome::CONTROL_RADIUS))
+        .border_1()
+        .border_color(if open {
+            theme::edge_hard()
+        } else {
+            gpui::rgba(0)
+        })
+        .bg(if open {
+            theme::selection()
+        } else {
+            gpui::rgba(0)
+        })
+        .font_family(chrome::CHROME_FONT)
+        .font_weight(FontWeight::MEDIUM)
+        .text_size(px(chrome::CONTROL_TEXT_SIZE))
+        .line_height(px(chrome::CONTROL_LINE_HEIGHT))
+        .text_color(theme::bone())
+        .hover(move |style| {
+            style.bg(if open {
+                theme::selection()
+            } else {
+                theme::panel_hover()
+            })
+        })
+        .active(|style| style.bg(theme::selection()))
+        .focus(|style| style.border_color(theme::focus()))
+}
+
+fn picker_chevron(open: bool) -> impl IntoElement {
+    svg()
+        .path(if open {
+            "icons/chevron-up.svg"
+        } else {
+            "icons/chevron-down.svg"
+        })
+        .size(px(chrome::CONTROL_INSET))
+        .flex_shrink_0()
+        .text_color(theme::ash())
+}
+
+fn picker_popup(menu: impl IntoElement) -> impl IntoElement {
+    // A separate absolute sibling keeps the popup out of trigger sizing and click bubbling.
+    div()
+        .absolute()
+        .top(px(chrome::MAIN_CONTROL_HEIGHT + chrome::MENU_GAP))
+        .left_0()
+        .child(deferred(anchored().snap_to_window().child(menu)).with_priority(1))
+}
+
 fn button(id: &'static str, label: &'static str, enabled: bool) -> gpui::Stateful<gpui::Div> {
     div()
         .id(id)
@@ -1699,7 +1842,10 @@ fn button(id: &'static str, label: &'static str, enabled: bool) -> gpui::Statefu
         .rounded(px(chrome::CONTROL_RADIUS))
         .border_1()
         .border_color(theme::edge())
+        .font_family(chrome::CHROME_FONT)
         .font_weight(FontWeight::MEDIUM)
+        .text_size(px(chrome::CONTROL_TEXT_SIZE))
+        .line_height(px(chrome::CONTROL_LINE_HEIGHT))
         .whitespace_nowrap()
         .text_color(if enabled {
             theme::bone_dim()
@@ -1804,7 +1950,9 @@ impl Render for WorkbenchTooltip {
         div()
             .max_w(px(chrome::TOOLTIP_MAX_WIDTH))
             .px(px(chrome::INSET))
-            .py(px(chrome::CONTROL_INSET))
+            .py(px(chrome::COMPACT_GAP))
+            .rounded(px(chrome::CONTROL_RADIUS))
+            .font_weight(FontWeight::NORMAL)
             .bg(theme::panel_lift())
             .border_1()
             .border_color(theme::edge_hard())
@@ -2084,7 +2232,7 @@ impl Render for TerminalManager {
                     .border_t_1()
                     .border_color(theme::edge())
                     .text_size(px(chrome::DETAIL_TEXT_SIZE))
-                    .line_height(px(16.0))
+                    .line_height(px(chrome::DETAIL_LINE_HEIGHT))
                     .text_color(theme::ash())
                     .tooltip(text_tooltip(save_status))
                     .child(
@@ -2098,7 +2246,7 @@ impl Render for TerminalManager {
                             .px(px(chrome::SIDEBAR_INSET))
                             .flex()
                             .items_center()
-                            .gap(px(8.0))
+                            .gap(px(chrome::COMPACT_GAP))
                             .child(
                                 svg()
                                     .path("icons/branch.svg")
@@ -2131,12 +2279,6 @@ impl Render for TerminalManager {
                             ))),
                     ),
             )
-            .when(self.selector_open, |view| {
-                view.child(self.project_selector(cx))
-            })
-            .when(self.appearance_menu_open, |view| {
-                view.child(self.appearance_menu(cx))
-            })
     }
 }
 
@@ -2162,9 +2304,14 @@ mod tests {
             close_after_save: false,
             selector_open: false,
             selector_focus: cx.focus_handle(),
+            selector_trigger_focus: cx.focus_handle(),
+            selector_bounds: None,
+            selector_scroll: ScrollHandle::new(),
             selector_selected: 0,
             appearance_menu_open: false,
             appearance_focus: cx.focus_handle(),
+            appearance_trigger_focus: cx.focus_handle(),
+            appearance_bounds: None,
             appearance_selected: 0,
             appearance_revision: 0,
             appearance_saving: false,
@@ -2172,6 +2319,108 @@ mod tests {
             pending_close: None,
             _bounds_subscription: Subscription::new(|| {}),
         }
+    }
+
+    #[gpui::test]
+    fn selectors_keep_their_rendered_geometry_across_themes_and_open_states(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            crate::fonts::initialize(cx);
+            super::super::file_editor::FileEditor::initialize(cx);
+        });
+        let (view, cx) = cx.add_window_view(|_, cx| {
+            let mut view = fixture(cx);
+            view.appearance_saving = true;
+            view.workspace.as_mut().unwrap().projects[0].path =
+                "a-project-with-a-name-that-must-truncate-in-the-toolbar".into();
+            view
+        });
+        let original = theme::appearance();
+        for width in [800.0, 960.0, 1280.0] {
+            cx.simulate_resize(gpui::size(px(width), px(540.0)));
+            for sidebar_visible in [true, false] {
+                view.update(cx, |view, cx| {
+                    view.workspace.as_mut().unwrap().sidebar_visible = sidebar_visible;
+                    cx.notify();
+                });
+                cx.refresh().unwrap();
+                cx.run_until_parked();
+                let picker = cx.debug_bounds("appearance-picker").unwrap();
+                let project = cx.debug_bounds("project-selector").unwrap();
+                let action = cx.debug_bounds("new-terminal").unwrap();
+                let label = cx.debug_bounds("project-selector-label").unwrap();
+                assert!(label.left() > project.left() + px(chrome::CONTROL_INSET));
+                assert!(label.right() < project.right() - px(chrome::CONTROL_INSET));
+                assert!(project.right() <= picker.left());
+                assert!(picker.right() <= action.left());
+                assert!(action.right() <= px(width));
+                for appearance in theme::Appearance::ALL {
+                    cx.update(|window, cx| {
+                        view.update(cx, |view, cx| {
+                            view.choose_appearance(appearance, window, cx)
+                        });
+                    });
+                    cx.run_until_parked();
+                    assert_eq!(cx.debug_bounds("appearance-picker").unwrap(), picker);
+                    assert_eq!(cx.debug_bounds("project-selector").unwrap(), project);
+                    assert_eq!(cx.debug_bounds("new-terminal").unwrap(), action);
+                    cx.simulate_click(picker.center(), gpui::Modifiers::none());
+                    assert!(view.read_with(cx, |view, _| view.appearance_menu_open));
+                    assert_eq!(cx.debug_bounds("appearance-picker").unwrap(), picker);
+                    assert_eq!(cx.debug_bounds("new-terminal").unwrap(), action);
+                    let menu = cx.debug_bounds("appearance-menu").unwrap();
+                    assert!(menu.top() >= picker.bottom() + px(chrome::MENU_GAP - 1.0));
+                    assert!(menu.left() >= px(0.0) && menu.right() <= px(width));
+                    assert!(menu.bottom() <= px(540.0));
+                    cx.simulate_click(picker.center(), gpui::Modifiers::none());
+                    assert!(!view.read_with(cx, |view, _| view.appearance_menu_open));
+                }
+            }
+        }
+        cx.update(|_, cx| {
+            theme::set_appearance(original);
+            super::super::file_editor::FileEditor::apply_appearance(cx);
+        });
+    }
+
+    #[gpui::test]
+    fn selector_keyboard_navigation_dismissal_and_mutual_exclusion(cx: &mut gpui::TestAppContext) {
+        cx.update(super::super::file_editor::FileEditor::initialize);
+        let (view, cx) = cx.add_window_view(|_, cx| fixture(cx));
+        let project = cx.debug_bounds("project-selector").unwrap();
+        let picker = cx.debug_bounds("appearance-picker").unwrap();
+        cx.simulate_click(project.center(), gpui::Modifiers::none());
+        assert!(view.read_with(cx, |view, _| view.selector_open));
+        let menu = cx.debug_bounds("project-selector-menu").unwrap();
+        assert_eq!(menu.left(), project.left());
+        assert!(menu.top() >= project.bottom());
+        cx.simulate_keystrokes("shift-tab");
+        assert_eq!(view.read_with(cx, |view, _| view.selector_selected), 1);
+        cx.simulate_keystrokes("tab");
+        assert_eq!(view.read_with(cx, |view, _| view.selector_selected), 0);
+        cx.simulate_click(picker.center(), gpui::Modifiers::none());
+        assert!(view.read_with(cx, |view, _| view.appearance_menu_open
+            && !view.selector_open));
+        cx.simulate_keystrokes("escape");
+        cx.update(|window, cx| {
+            view.read_with(cx, |view, _| {
+                assert!(!view.appearance_menu_open);
+                assert!(view.appearance_trigger_focus.is_focused(window));
+            });
+        });
+        // GPUI's keystroke helper sends only key-down; buttons activate on key-up.
+        cx.simulate_keystrokes("enter");
+        assert!(!view.read_with(cx, |view, _| view.appearance_menu_open));
+        cx.simulate_event(gpui::KeyUpEvent {
+            keystroke: gpui::Keystroke::parse("enter").unwrap(),
+        });
+        assert!(view.read_with(cx, |view, _| view.appearance_menu_open));
+        cx.simulate_click(gpui::point(px(400.0), px(450.0)), gpui::Modifiers::none());
+        assert!(!view.read_with(cx, |view, _| view.appearance_menu_open));
+        cx.simulate_click(project.center(), gpui::Modifiers::none());
+        cx.simulate_click(project.center(), gpui::Modifiers::none());
+        assert!(!view.read_with(cx, |view, _| view.selector_open));
     }
 
     #[gpui::test]

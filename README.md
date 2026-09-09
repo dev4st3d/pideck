@@ -70,7 +70,15 @@ The terminal supports native Unicode/IME composition, bracketed paste, applicati
 
 ## Appearance
 
-Choose **Paper**, **Linen**, **Graphite**, or **Midnight** from the appearance picker beside **New terminal**. Paper matches the supplied design; Linen is warm and light, Graphite is charcoal with sage accents, and Midnight uses a dark blue palette.
+Choose a theme from the appearance picker beside **New terminal**:
+
+- **Paper** — the supplied light editorial design.
+- **Linen** — warm, soft neutrals.
+- **Graphite** — charcoal with sage accents.
+- **Midnight** — deep blue with cool highlights.
+- **Ember** — warm charcoal with copper accents.
+- **Evergreen** — deep pine with soft sage highlights.
+- **Dusk** — violet slate with muted lavender accents.
 
 Theme changes apply to open files, diffs, and terminals without restarting shells or clearing their history. The preference stays local in `appearance.json` beside the workspace layout. A malformed preference is preserved until you explicitly choose a theme. The picker supports Tab, arrow keys, Enter, and Escape.
 

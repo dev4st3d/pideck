@@ -16,7 +16,6 @@ use crate::theme::{self, terminal_manager as chrome};
 
 const FILE_ROW_HEIGHT: f32 = 28.0;
 const GIT_ROW_HEIGHT: f32 = 48.0;
-const PATH_LINE_HEIGHT: f32 = 18.0;
 const ROW_RADIUS: f32 = 4.0;
 const PANEL_ICON_SIZE: f32 = 14.0;
 
@@ -268,7 +267,7 @@ impl FilesPanel {
                     .font_family(chrome::CHROME_FONT)
                     .font_weight(FontWeight::NORMAL)
                     .text_size(px(chrome::CHROME_TEXT_SIZE))
-                    .line_height(px(PATH_LINE_HEIGHT))
+                    .line_height(px(chrome::CONTROL_LINE_HEIGHT))
                     .text_color(theme::bone())
                     .rounded(px(ROW_RADIUS))
                     .border_1()
@@ -639,7 +638,7 @@ impl GitPanel {
                     .font_family(chrome::CHROME_FONT)
                     .font_weight(FontWeight::NORMAL)
                     .text_size(px(chrome::CHROME_TEXT_SIZE))
-                    .line_height(px(PATH_LINE_HEIGHT))
+                    .line_height(px(chrome::CONTROL_LINE_HEIGHT))
                     .text_color(theme::bone())
                     .rounded(px(ROW_RADIUS))
                     .border_1()
@@ -674,7 +673,8 @@ impl GitPanel {
                             div()
                                 .flex_shrink_0()
                                 .font_family(theme::mono())
-                                .text_size(px(11.0))
+                                .text_size(px(chrome::DETAIL_TEXT_SIZE))
+                                .line_height(px(chrome::DETAIL_LINE_HEIGHT))
                                 .text_color(theme::focus())
                                 .child(format!("+{} -{}", stats.additions, stats.deletions)),
                         )
@@ -684,7 +684,8 @@ impl GitPanel {
                             div()
                                 .flex_shrink_0()
                                 .font_family(theme::mono())
-                                .text_size(px(11.0))
+                                .text_size(px(chrome::DETAIL_TEXT_SIZE))
+                                .line_height(px(chrome::DETAIL_LINE_HEIGHT))
                                 .text_color(theme::focus())
                                 .child(marker),
                         )
@@ -784,6 +785,7 @@ fn message(text: impl Into<SharedString>) -> impl IntoElement {
         .text_color(theme::ash())
         .font_weight(FontWeight::NORMAL)
         .text_size(px(chrome::DETAIL_TEXT_SIZE))
+        .line_height(px(chrome::DETAIL_LINE_HEIGHT))
         .whitespace_normal()
         .child(text.into())
 }
@@ -802,6 +804,7 @@ fn row_metadata(text: &'static str, selected: bool) -> impl IntoElement {
         .font_family(theme::mono())
         .font_weight(FontWeight::NORMAL)
         .text_size(px(chrome::DETAIL_TEXT_SIZE))
+        .line_height(px(chrome::DETAIL_LINE_HEIGHT))
         .text_color(if selected {
             theme::bone()
         } else {
@@ -822,7 +825,8 @@ fn file_marker(path: &std::path::Path) -> impl IntoElement {
     };
     div()
         .font_family(theme::mono())
-        .text_size(px(11.0))
+        .text_size(px(chrome::DETAIL_TEXT_SIZE))
+        .line_height(px(chrome::DETAIL_LINE_HEIGHT))
         .font_weight(FontWeight::NORMAL)
         .text_color(theme::ash())
         .child(marker)
