@@ -1,4 +1,5 @@
 pub(crate) mod accessibility;
+pub(crate) mod app_update;
 pub(crate) mod appearance;
 pub mod atomic_file;
 pub(crate) mod file_operations;
