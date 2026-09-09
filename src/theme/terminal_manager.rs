@@ -1,6 +1,9 @@
 //! Shared logical-pixel geometry for the native terminal workbench chrome.
 
 pub(crate) const CHROME_FONT: &str = "Geist";
+pub(crate) const TREE_ROW_HEIGHT: f32 = 24.0;
+pub(crate) const TREE_INDENT: f32 = 14.0;
+pub(crate) const TREE_INSET: f32 = 6.0;
 pub(crate) const CHROME_TEXT_SIZE: f32 = 13.0;
 pub(crate) const HEADING_FONT: &str = "Newsreader 16pt";
 pub(crate) const HEADING_SIZE: f32 = 36.0;

@@ -296,6 +296,7 @@ pub(crate) struct TerminalView {
     next_id: u64,
     fallback_focus: FocusHandle,
     close_pending: bool,
+    files_locked: bool,
 }
 
 impl TerminalView {
@@ -315,6 +316,7 @@ impl TerminalView {
             next_id: 2,
             fallback_focus: cx.focus_handle(),
             close_pending: false,
+            files_locked: false,
         }
     }
 
@@ -441,6 +443,82 @@ impl TerminalView {
             .any(|editor| editor.read(cx).is_saving())
     }
 
+    pub(crate) fn paths_busy(&self, paths: &[PathBuf], deleting: bool, cx: &gpui::App) -> bool {
+        self.tabs.iter().any(|tab| match &tab.content {
+            TabContent::File { path, editor }
+                if paths.iter().any(|parent| path.starts_with(parent)) =>
+            {
+                let editor = editor.read(cx);
+                editor.is_busy() || (deleting && editor.is_dirty())
+            }
+            _ => false,
+        })
+    }
+
+    pub(crate) fn begin_file_change(&mut self, allow_dirty: bool, cx: &mut Context<Self>) -> bool {
+        if self.files_locked
+            || self
+                .tabs
+                .iter()
+                .filter_map(|tab| tab.content.editor())
+                .any(|editor| {
+                    let editor = editor.read(cx);
+                    editor.is_busy() || (!allow_dirty && editor.is_dirty())
+                })
+        {
+            return false;
+        }
+        self.files_locked = true;
+        for tab in &self.tabs {
+            if let Some(editor) = tab.content.editor() {
+                editor.update(cx, |editor, cx| editor.lock_saves(true, cx));
+            }
+        }
+        true
+    }
+
+    pub(crate) fn end_file_change(&mut self, cx: &mut Context<Self>) {
+        self.files_locked = false;
+        for tab in &self.tabs {
+            if let Some(editor) = tab.content.editor() {
+                editor.update(cx, |editor, cx| editor.lock_saves(false, cx));
+            }
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn files_moved(&mut self, moves: &[(PathBuf, PathBuf)], cx: &mut Context<Self>) {
+        for tab in &mut self.tabs {
+            if let TabContent::File { path, editor } = &mut tab.content {
+                for (from, to) in moves {
+                    if let Ok(relative) = path.strip_prefix(from) {
+                        *path = to.join(relative);
+                        editor.update(cx, |editor, cx| editor.retarget(path.clone(), cx));
+                        break;
+                    }
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn reload_clean_files(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let stale_diffs: Vec<_> = self
+            .tabs
+            .iter()
+            .filter(|tab| matches!(tab.content, TabContent::Diff { .. }))
+            .map(|tab| tab.id)
+            .collect();
+        for id in stale_diffs {
+            self.remove_tab(id, window, cx);
+        }
+        for tab in &self.tabs {
+            if let Some(editor) = tab.content.editor() {
+                editor.update(cx, |editor, cx| editor.reload_clean(window, cx));
+            }
+        }
+    }
+
     #[cfg(test)]
     fn active_file(&self) -> Option<PathBuf> {
         match self.tabs.get(self.active).map(|tab| &tab.content) {
@@ -479,6 +557,9 @@ impl TerminalView {
     }
 
     pub(crate) fn open_file(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        if self.files_locked {
+            return;
+        }
         let path = if path.is_absolute() {
             path
         } else {

@@ -1,6 +1,7 @@
 pub(crate) mod accessibility;
 pub(crate) mod appearance;
 pub mod atomic_file;
+pub(crate) mod file_operations;
 pub(crate) mod paths;
 pub(crate) mod project_files;
 pub(crate) mod project_git;
