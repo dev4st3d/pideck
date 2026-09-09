@@ -442,7 +442,9 @@ impl Render for FileEditor {
                         .items_center()
                         .p(px(chrome::CONTENT_INSET))
                         .font_family(chrome::CHROME_FONT)
-                        .text_size(px(chrome::CHROME_TEXT_SIZE))
+                        .font_weight(FontWeight::NORMAL)
+                        .text_size(px(chrome::CONTROL_TEXT_SIZE))
+                        .line_height(px(chrome::CONTROL_LINE_HEIGHT))
                         .text_color(theme::ash())
                         .child(if self.loading {
                             "Opening file…"
@@ -463,7 +465,9 @@ impl Render for FileEditor {
                         .gap(px(chrome::GAP))
                         .bg(theme::error_wash())
                         .font_family(chrome::CHROME_FONT)
-                        .text_size(px(chrome::CHROME_TEXT_SIZE))
+                        .font_weight(FontWeight::NORMAL)
+                        .text_size(px(chrome::CONTROL_TEXT_SIZE))
+                        .line_height(px(chrome::CONTROL_LINE_HEIGHT))
                         .text_color(theme::error())
                         .child(div().flex_1().min_w_0().child(error.to_string()))
                         .child(
@@ -480,6 +484,8 @@ impl Render for FileEditor {
                                 .border_1()
                                 .border_color(theme::edge_soft())
                                 .font_weight(FontWeight::MEDIUM)
+                                .text_size(px(chrome::CONTROL_TEXT_SIZE))
+                                .line_height(px(chrome::CONTROL_LINE_HEIGHT))
                                 .text_color(theme::bone())
                                 .hover(|button| button.bg(theme::panel_hover()))
                                 .focus(|button| {
@@ -516,7 +522,9 @@ impl Render for FileEditor {
                     .border_color(theme::edge_soft())
                     .bg(theme::floor())
                     .font_family(theme::mono())
+                    .font_weight(FontWeight::NORMAL)
                     .text_size(px(chrome::DETAIL_TEXT_SIZE))
+                    .line_height(px(chrome::DETAIL_LINE_HEIGHT))
                     .text_color(theme::ash())
                     .child(div().flex_1().min_w_0().truncate().child(self.status()))
                     .when(ready, |bar| {
@@ -547,10 +555,11 @@ impl Render for FileEditor {
                                 theme::canvas()
                             })
                             .font_family(chrome::CHROME_FONT)
-                            .text_size(px(chrome::CHROME_TEXT_SIZE))
+                            .text_size(px(chrome::CONTROL_TEXT_SIZE))
+                            .line_height(px(chrome::CONTROL_LINE_HEIGHT))
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(if can_save {
-                                theme::canvas()
+                                theme::on_accent()
                             } else {
                                 theme::ash()
                             })
@@ -558,12 +567,16 @@ impl Render for FileEditor {
                                 button
                                     .tab_index(0)
                                     .cursor_pointer()
-                                    .hover(|button| button.border_color(theme::bone()))
+                                    .hover(|button| {
+                                        button
+                                            .border_color(theme::accent_hover())
+                                            .bg(theme::accent_hover())
+                                    })
                                     .focus(|button| {
                                         button
                                             .border_color(theme::bone())
-                                            .bg(theme::bone())
-                                            .text_color(theme::canvas())
+                                            .bg(theme::accent_pressed())
+                                            .text_color(theme::on_accent())
                                     })
                                     .on_click(
                                         cx.listener(|editor, _, window, cx| {

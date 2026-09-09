@@ -13,10 +13,21 @@ pub(crate) enum Appearance {
     Linen,
     Graphite,
     Midnight,
+    Ember,
+    Evergreen,
+    Dusk,
 }
 
 impl Appearance {
-    pub(crate) const ALL: [Self; 4] = [Self::Paper, Self::Linen, Self::Graphite, Self::Midnight];
+    pub(crate) const ALL: [Self; 7] = [
+        Self::Paper,
+        Self::Linen,
+        Self::Graphite,
+        Self::Midnight,
+        Self::Ember,
+        Self::Evergreen,
+        Self::Dusk,
+    ];
 
     pub(crate) const fn id(self) -> &'static str {
         match self {
@@ -24,6 +35,9 @@ impl Appearance {
             Self::Linen => "linen",
             Self::Graphite => "graphite",
             Self::Midnight => "midnight",
+            Self::Ember => "ember",
+            Self::Evergreen => "evergreen",
+            Self::Dusk => "dusk",
         }
     }
 
@@ -33,6 +47,9 @@ impl Appearance {
             Self::Linen => "Linen",
             Self::Graphite => "Graphite",
             Self::Midnight => "Midnight",
+            Self::Ember => "Ember",
+            Self::Evergreen => "Evergreen",
+            Self::Dusk => "Dusk",
         }
     }
 
@@ -43,7 +60,10 @@ impl Appearance {
     }
 
     pub(crate) const fn is_dark(self) -> bool {
-        matches!(self, Self::Graphite | Self::Midnight)
+        matches!(
+            self,
+            Self::Graphite | Self::Midnight | Self::Ember | Self::Evergreen | Self::Dusk
+        )
     }
 
     fn palette(self) -> &'static Palette {
@@ -52,6 +72,9 @@ impl Appearance {
             Self::Linen => &LINEN,
             Self::Graphite => &GRAPHITE,
             Self::Midnight => &MIDNIGHT,
+            Self::Ember => &EMBER,
+            Self::Evergreen => &EVERGREEN,
+            Self::Dusk => &DUSK,
         }
     }
 }
@@ -173,6 +196,69 @@ const MIDNIGHT: Palette = Palette {
     diff_added: 0x1d3b37ff,
     diff_removed: 0x422d40ff,
     diff_empty: 0x1c293aff,
+};
+
+const EMBER: Palette = Palette {
+    canvas: 0x1d1918ff,
+    floor: 0x171312ff,
+    panel_hover: 0x302521ff,
+    edge: 0x4a3b35ff,
+    edge_hard: 0x8a7061ff,
+    bone: 0xf4ece4ff,
+    ash: 0xc5b8adff,
+    focus: 0xe7a86fff,
+    accent_hover: 0xf0ba82ff,
+    accent_pressed: 0xc98652ff,
+    on_accent: 0x2a1710ff,
+    error: 0xffafa0ff,
+    error_wash: 0x492b28ff,
+    selection: 0x473329ff,
+    working: 0xe4bd7bff,
+    diff_added: 0x243b31ff,
+    diff_removed: 0x492b28ff,
+    diff_empty: 0x261f1dff,
+};
+
+const EVERGREEN: Palette = Palette {
+    canvas: 0x13201bff,
+    floor: 0x0e1915ff,
+    panel_hover: 0x20362cff,
+    edge: 0x365043ff,
+    edge_hard: 0x668777ff,
+    bone: 0xe7f1e9ff,
+    ash: 0xb1c3b7ff,
+    focus: 0x9ed2adff,
+    accent_hover: 0xc0e6bdff,
+    accent_pressed: 0x7fb98fff,
+    on_accent: 0x102219ff,
+    error: 0xffb0a4ff,
+    error_wash: 0x472c31ff,
+    selection: 0x234a38ff,
+    working: 0xdec783ff,
+    diff_added: 0x173c2dff,
+    diff_removed: 0x472c31ff,
+    diff_empty: 0x172820ff,
+};
+
+const DUSK: Palette = Palette {
+    canvas: 0x1c1a29ff,
+    floor: 0x161522ff,
+    panel_hover: 0x302c45ff,
+    edge: 0x49435fff,
+    edge_hard: 0x81789fff,
+    bone: 0xefedf7ff,
+    ash: 0xb9b5cdff,
+    focus: 0xbdb2efff,
+    accent_hover: 0xd5ccffff,
+    accent_pressed: 0x9589cbff,
+    on_accent: 0x211c3bff,
+    error: 0xffadbdff,
+    error_wash: 0x4b2a3bff,
+    selection: 0x40375fff,
+    working: 0xe0c18dff,
+    diff_added: 0x203b38ff,
+    diff_removed: 0x4b2a3bff,
+    diff_empty: 0x242238ff,
 };
 
 fn palette() -> &'static Palette {
@@ -304,18 +390,33 @@ mod tests {
         for appearance in Appearance::ALL {
             let p = appearance.palette();
             for background in [p.canvas, p.floor] {
-                for foreground in [p.bone, p.ash] {
-                    assert!(contrast(foreground, background) >= 4.5, "{appearance:?}");
-                }
+                assert!(contrast(p.bone, background) >= 4.5, "{appearance:?}");
+                assert!(contrast(p.ash, background) >= 4.5, "{appearance:?}");
                 assert!(contrast(p.focus, background) >= 3.0, "{appearance:?}");
             }
-            assert!(contrast(p.bone, p.selection) >= 4.5, "{appearance:?}");
-            // Selected labels use ink; muted file icons need non-text contrast.
-            assert!(contrast(p.ash, p.selection) >= 3.0, "{appearance:?}");
-            assert!(contrast(p.focus, p.selection) >= 3.0, "{appearance:?}");
+            let muted_surface_minimum = if appearance.is_dark() { 4.5 } else { 4.0 };
+            // Paper and Linen retain their established muted contrast on interactive
+            // surfaces; all dark palettes meet the normal-text 4.5:1 threshold.
+            for background in [p.panel_hover, p.selection] {
+                assert!(contrast(p.bone, background) >= 4.5, "{appearance:?}");
+                assert!(
+                    contrast(p.ash, background) >= muted_surface_minimum,
+                    "{appearance:?}"
+                );
+                assert!(contrast(p.focus, background) >= 3.0, "{appearance:?}");
+            }
             for accent in [p.focus, p.accent_hover, p.accent_pressed] {
                 assert!(contrast(p.on_accent, accent) >= 4.5, "{appearance:?}");
             }
+            let muted_diff_minimum = if appearance.is_dark() { 4.5 } else { 3.0 };
+            for background in [p.diff_added, p.diff_removed, p.diff_empty] {
+                assert!(contrast(p.bone, background) >= 4.5, "{appearance:?}");
+                assert!(
+                    contrast(p.ash, background) >= muted_diff_minimum,
+                    "{appearance:?}"
+                );
+            }
+            assert!(contrast(p.error, p.error_wash) >= 4.5, "{appearance:?}");
             assert!(contrast(p.error, p.diff_removed) >= 4.5, "{appearance:?}");
             assert!(contrast(p.focus, p.diff_added) >= 4.5, "{appearance:?}");
             let ansi = if appearance.is_dark() {
@@ -329,6 +430,26 @@ mod tests {
                     "{appearance:?}: {color:08x}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn appearance_ids_are_stable_and_unique() {
+        let ids = Appearance::ALL.map(Appearance::id);
+        assert_eq!(
+            ids,
+            [
+                "paper",
+                "linen",
+                "graphite",
+                "midnight",
+                "ember",
+                "evergreen",
+                "dusk",
+            ]
+        );
+        for (index, id) in ids.iter().enumerate() {
+            assert!(!ids[..index].contains(id), "duplicate appearance ID: {id}");
         }
     }
 
