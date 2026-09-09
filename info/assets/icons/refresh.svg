@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="none">
+  <!-- Soft arrowhead wash -->
+  <path d="M15.3 2.6v4.1h-4.1Z" fill="currentColor" opacity="0.14"/>
+  <!-- Arc -->
+  <path d="M13.7 10A6 6 0 1 1 12.3 3.7L15.3 6.7" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>
+  <!-- Crisp arrowhead -->
+  <path d="M15.3 2.6v4.1h-4.1" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

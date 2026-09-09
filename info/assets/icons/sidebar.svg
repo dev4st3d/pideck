@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="none">
+  <!-- Soft panel plane -->
+  <rect x="2" y="2.5" width="12" height="11" rx="2" fill="currentColor" opacity="0.12"/>
+  <!-- Soft left rail -->
+  <path d="M2 4.5A2 2 0 0 1 4 2.5h1.75v11H4A2 2 0 0 1 2 11.5v-7Z" fill="currentColor" opacity="0.22"/>
+  <!-- Crisp frame -->
+  <rect x="2" y="2.5" width="12" height="11" rx="2" stroke="currentColor" stroke-width="1.2"/>
+  <!-- Rail divider -->
+  <path d="M5.75 3.1v9.8" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>
+</svg>
