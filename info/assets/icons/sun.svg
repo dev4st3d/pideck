@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="none">
+  <!-- Soft core -->
+  <circle cx="8" cy="8" r="2.6" fill="currentColor" opacity="0.18"/>
+  <!-- Soft rays -->
+  <path d="M8 1.6v1.5M8 12.9v1.5M1.6 8h1.5M12.9 8h1.5M3.35 3.35l1.05 1.05M11.6 11.6l1.05 1.05M12.65 3.35l-1.05 1.05M4.4 11.6l-1.05 1.05" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" opacity="0.22"/>
+  <!-- Crisp rays -->
+  <path d="M8 1.6v1.5M8 12.9v1.5M1.6 8h1.5M12.9 8h1.5M3.35 3.35l1.05 1.05M11.6 11.6l1.05 1.05M12.65 3.35l-1.05 1.05M4.4 11.6l-1.05 1.05" stroke="currentColor" stroke-width="1.25" stroke-linecap="round"/>
+  <!-- Crisp core -->
+  <circle cx="8" cy="8" r="2.55" stroke="currentColor" stroke-width="1.2"/>
+</svg>

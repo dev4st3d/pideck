@@ -6,7 +6,7 @@ use gpui::{
     ClipboardItem, Entity, ExternalPaths, MouseButton, Subscription, Task, WeakEntity, img,
 };
 use gpui_component::input::InputState;
-use gpui_component::menu::{ContextMenuExt, PopupMenu, PopupMenuItem};
+use gpui_component::menu::{PopupMenu, PopupMenuItem};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, atomic::AtomicBool};
@@ -78,6 +78,7 @@ pub(super) struct FilesPanel {
     watch_task: Option<Task<()>>,
     watching: bool,
     hide_hidden: bool,
+    context_menu: Option<(Entity<PopupMenu>, gpui::Point<gpui::Pixels>, Subscription)>,
 }
 
 impl FilesPanel {
@@ -106,6 +107,7 @@ impl FilesPanel {
             watch_task: None,
             watching: false,
             hide_hidden: false,
+            context_menu: None,
         }
     }
 
@@ -337,7 +339,6 @@ impl FilesPanel {
             row.entry.path.parent().unwrap_or(&self.root).to_path_buf()
         };
         let external_destination = destination.clone();
-        let menu_view = cx.weak_entity();
         div()
             .h(px(FILE_ROW_HEIGHT))
             .w_full()
@@ -345,6 +346,14 @@ impl FilesPanel {
             .child(
                 div()
                     .id(("file-row", index))
+                    .debug_selector(move || format!("explorer-row-{index}"))
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(move |view, event: &gpui::MouseDownEvent, window, cx| {
+                            view.open_context_menu(index, event.position, window, cx);
+                            cx.stop_propagation();
+                        }),
+                    )
                     .size_full()
                     .min_w_0()
                     .overflow_hidden()
@@ -485,17 +494,6 @@ impl FilesPanel {
                         item.child(row_metadata("Loading", selected))
                     }),
             )
-            .context_menu(move |menu, window, cx| {
-                let Some(menu_view) = menu_view.upgrade() else {
-                    return menu;
-                };
-                menu_view.update(cx, |view, cx| {
-                    if !view.marked.contains(&view.rows[index].entry.path) {
-                        view.select(index, false, false, index);
-                    }
-                    view.menu(menu, window, cx)
-                })
-            })
     }
 }
 
@@ -613,6 +611,22 @@ impl Render for FilesPanel {
             })
             .when(truncated, |panel| {
                 panel.child(message("Large folder: showing the first 2,000 entries."))
+            })
+            .when_some(self.context_menu.as_ref(), |panel, (menu, position, _)| {
+                panel.child(
+                    gpui::deferred(
+                        gpui::anchored()
+                            .position(*position)
+                            .snap_to_window_with_margin(px(8.0))
+                            .child(
+                                div()
+                                    .id("explorer-context-menu")
+                                    .debug_selector(|| "explorer-context-menu".into())
+                                    .child(menu.clone()),
+                            ),
+                    )
+                    .with_priority(1),
+                )
             })
     }
 }

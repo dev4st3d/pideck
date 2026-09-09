@@ -467,13 +467,36 @@ impl FilesPanel {
         cx.notify();
         true
     }
-    pub(super) fn menu(
-        &self,
-        mut menu: PopupMenu,
-        _: &mut Window,
+    pub(super) fn open_context_menu(
+        &mut self,
+        index: usize,
+        position: gpui::Point<gpui::Pixels>,
+        window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> PopupMenu {
-        menu = menu.action_context(self.focus.clone());
+    ) {
+        let Some(row) = self.rows.get(index) else {
+            return;
+        };
+        if !self.marked.contains(&row.entry.path) {
+            self.select(index, false, false, index);
+        }
+        self.selection_visible = true;
+        let owner = cx.weak_entity();
+        let focus = self.focus.clone();
+        let menu = PopupMenu::build(window, cx, move |menu, _, _| {
+            Self::menu(menu.action_context(focus), owner)
+        });
+        let subscription = cx.subscribe(&menu, |view, _, _: &gpui::DismissEvent, cx| {
+            view.context_menu = None;
+            cx.notify();
+        });
+        use gpui::Focusable;
+        window.focus(&menu.read(cx).focus_handle(cx));
+        self.context_menu = Some((menu, position, subscription));
+        cx.notify();
+    }
+
+    fn menu(mut menu: PopupMenu, owner: WeakEntity<Self>) -> PopupMenu {
         for (label, action) in [
             ("New file   Ctrl+N", FileAction::NewFile),
             ("New folder   Ctrl+Shift+N", FileAction::NewFolder),
@@ -490,10 +513,15 @@ impl FilesPanel {
             ("Toggle hidden files", FileAction::Hidden),
             ("Refresh   F5", FileAction::Refresh),
         ] {
-            menu =
-                menu.item(PopupMenuItem::new(label).on_click(
-                    cx.listener(move |view, _, window, cx| view.action(action, window, cx)),
-                ));
+            let owner = owner.clone();
+            menu = menu.item(PopupMenuItem::new(label).on_click(move |_, window, cx| {
+                let owner = owner.clone();
+                // PopupMenu restores focus after invoking handlers. Run after dismissal
+                // so inline naming and native prompts retain their intended focus.
+                window.defer(cx, move |window, cx| {
+                    let _ = owner.update(cx, |view, cx| view.action(action, window, cx));
+                });
+            }));
         }
         menu
     }
@@ -592,6 +620,129 @@ impl Drop for FilesPanel {
         if let Some(cancel) = &self.operation {
             cancel.store(true, Ordering::Release);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::{Focusable, TestAppContext, VisualTestContext};
+
+    struct ExplorerWindow {
+        files: Entity<FilesPanel>,
+        _terminal: Entity<TerminalView>,
+    }
+
+    impl Render for ExplorerWindow {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .size_full()
+                .flex()
+                .child(div().w(px(256.0)).h_full().child(self.files.clone()))
+                .child(div().flex_1().h_full().child(self._terminal.clone()))
+        }
+    }
+
+    fn open_menu(cx: &mut VisualTestContext, row: usize) -> gpui::Bounds<gpui::Pixels> {
+        let row = cx
+            .debug_bounds(["explorer-row-0", "explorer-row-1"][row])
+            .unwrap();
+        let position = gpui::point(row.right() - px(8.0), row.center().y);
+        cx.simulate_mouse_down(position, MouseButton::Right, gpui::Modifiers::none());
+        cx.simulate_mouse_up(position, MouseButton::Right, gpui::Modifiers::none());
+        cx.run_until_parked();
+        cx.debug_bounds("explorer-context-menu").unwrap()
+    }
+
+    fn click_item(cx: &mut VisualTestContext, bounds: gpui::Bounds<gpui::Pixels>, index: usize) {
+        // GPUI Component 0.5.1 uses 26px menu items, a 2px gap and 4px padding.
+        cx.simulate_click(
+            gpui::point(
+                bounds.right() - px(20.0),
+                bounds.top() + px(18.0 + index as f32 * 28.0),
+            ),
+            gpui::Modifiers::none(),
+        );
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn context_menu_clicks_outside_sidebar_dispatch_and_keep_name_focus(cx: &mut TestAppContext) {
+        cx.update(super::super::super::file_editor::FileEditor::initialize);
+        let root = std::env::temp_dir().join(format!("pideck-menu-test-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("folder")).unwrap();
+        std::fs::write(root.join("a.txt"), "fixture").unwrap();
+        let entries = project_files::list_directory(&root, &root).unwrap().entries;
+        let (window_root, cx) = cx.add_window_view(|window, cx| {
+            let terminal = cx.new(|cx| TerminalView::new(root.clone(), cx));
+            let files = cx.new(|cx| {
+                let mut files = FilesPanel::new(root.clone(), terminal.downgrade(), cx);
+                files.directories.insert(
+                    root.clone(),
+                    DirectoryState {
+                        entries,
+                        ..Default::default()
+                    },
+                );
+                files.rebuild_rows();
+                files
+            });
+            let host = cx.new(|_| ExplorerWindow {
+                files,
+                _terminal: terminal,
+            });
+            gpui_component::Root::new(host, window, cx)
+        });
+        let host = window_root.read_with(cx, |root, _| {
+            root.view()
+                .clone()
+                .downcast::<ExplorerWindow>()
+                .ok()
+                .unwrap()
+        });
+        cx.simulate_resize(gpui::size(px(800.0), px(600.0)));
+        let files = host.read_with(cx, |host, _| host.files.clone());
+        for index in [0, 1, 2] {
+            let menu = open_menu(cx, 0);
+            assert!(menu.right() > px(256.0));
+            click_item(cx, menu, index);
+            cx.update(|window, cx| {
+                files.update(cx, |files, cx| {
+                    assert!(files.context_menu.is_none());
+                    let edit = files
+                        .edit
+                        .as_ref()
+                        .expect("menu click must open naming input");
+                    assert!(edit.input.read(cx).focus_handle(cx).is_focused(window));
+                    assert_eq!(edit.source.is_some(), index == 2);
+                    assert_eq!(edit.directory, index == 1);
+                    files.edit = None;
+                    cx.notify();
+                });
+            });
+        }
+        let menu = open_menu(cx, 0);
+        click_item(cx, menu, 9);
+        cx.update(|_, cx| {
+            assert_eq!(
+                cx.read_from_clipboard().and_then(|item| item.text()),
+                Some("folder".into())
+            )
+        });
+        let menu = open_menu(cx, 1);
+        click_item(cx, menu, 6);
+        assert_eq!(
+            std::fs::read_to_string(root.join("a copy.txt")).unwrap(),
+            "fixture"
+        );
+        assert!(files.read_with(cx, |files, _| files.operation_error.is_none()));
+        open_menu(cx, 0);
+        cx.simulate_keystrokes("escape");
+        assert!(files.read_with(cx, |files, _| files.context_menu.is_none()));
+        open_menu(cx, 0);
+        cx.simulate_click(gpui::point(px(750.0), px(550.0)), gpui::Modifiers::none());
+        assert!(files.read_with(cx, |files, _| files.context_menu.is_none()));
+        std::fs::remove_dir_all(root).unwrap();
     }
 }
 
