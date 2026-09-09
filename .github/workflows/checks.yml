@@ -21,7 +21,7 @@ env:
 
 jobs:
   source:
-    name: Format and bridge
+    name: Format
     runs-on: windows-latest
     timeout-minutes: 10
     steps:
@@ -35,19 +35,6 @@ jobs:
 
       - name: Format
         run: cargo fmt --all -- --check
-
-      - name: Setup Node
-        uses: actions/setup-node@v7
-        with:
-          node-version: "22"
-          check-latest: true
-
-      - name: Verify source package and palette contracts
-        run: node scripts/verify-source.mjs
-
-      - name: Test bridge
-        shell: pwsh
-        run: node --test (Get-ChildItem -Path bridge,scripts -Filter *.test.mjs).FullName
 
   clippy:
     name: Clippy
@@ -67,15 +54,6 @@ jobs:
         with:
           shared-key: checks-clippy
 
-      - name: Setup Node for exact font preparation
-        uses: actions/setup-node@v7
-        with:
-          node-version: "22"
-          check-latest: true
-
-      - name: Prepare SHA-256-verified design fonts
-        run: node scripts/prepare-fonts.mjs
-
       - name: Clippy
         run: cargo clippy --locked --all-targets --all-features -- -D warnings
 
@@ -94,15 +72,6 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: checks-tests
-
-      - name: Setup Node for bridge integration fixtures
-        uses: actions/setup-node@v7
-        with:
-          node-version: "22"
-          check-latest: true
-
-      - name: Prepare SHA-256-verified design fonts
-        run: node scripts/prepare-fonts.mjs
 
       - name: Check all targets
         run: cargo check --locked --all-targets

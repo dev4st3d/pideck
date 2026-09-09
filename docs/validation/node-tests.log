@@ -1,0 +1,352 @@
+TAP version 13
+# Subtest: a slow consumer cannot grow the write queue beyond the budget
+ok 1 - a slow consumer cannot grow the write queue beyond the budget
+  ---
+  duration_ms: 2.510813
+  type: 'test'
+  ...
+# Subtest: drained writes preserve response ordering without a second queue
+ok 2 - drained writes preserve response ordering without a second queue
+  ---
+  duration_ms: 4.411238
+  type: 'test'
+  ...
+# Subtest: record limits count encoded bytes and failure contains no payload
+ok 3 - record limits count encoded bytes and failure contains no payload
+  ---
+  duration_ms: 0.223366
+  type: 'test'
+  ...
+# Subtest: broken output reports once instead of throwing an uncaught EPIPE
+ok 4 - broken output reports once instead of throwing an uncaught EPIPE
+  ---
+  duration_ms: 1.623029
+  type: 'test'
+  ...
+# Subtest: strict JSONL preserves Unicode line and paragraph separators
+ok 5 - strict JSONL preserves Unicode line and paragraph separators
+  ---
+  duration_ms: 3.875193
+  type: 'test'
+  ...
+# Subtest: strict JSONL reconstructs UTF-8 split across stream chunks
+ok 6 - strict JSONL reconstructs UTF-8 split across stream chunks
+  ---
+  duration_ms: 0.703297
+  type: 'test'
+  ...
+# Subtest: strict JSONL accepts CRLF and a final unterminated record
+ok 7 - strict JSONL accepts CRLF and a final unterminated record
+  ---
+  duration_ms: 1.581206
+  type: 'test'
+  ...
+# Subtest: oversized records are discarded without losing the following record
+ok 8 - oversized records are discarded without losing the following record
+  ---
+  duration_ms: 0.463106
+  type: 'test'
+  ...
+# Subtest: every UTF-8 byte boundary and mixed CRLF framing produce the same records
+ok 9 - every UTF-8 byte boundary and mixed CRLF framing produce the same records
+  ---
+  duration_ms: 1.921116
+  type: 'test'
+  ...
+# Subtest: the byte limit excludes CRLF and is independent of fragmentation
+ok 10 - the byte limit excludes CRLF and is independent of fragmentation
+  ---
+  duration_ms: 0.534533
+  type: 'test'
+  ...
+# Subtest: an oversized record is reported once even across many fragments
+ok 11 - an oversized record is reported once even across many fragments
+  ---
+  duration_ms: 17.411983
+  type: 'test'
+  ...
+# Subtest: detach inside a callback prevents delivery of the rest of the chunk
+ok 12 - detach inside a callback prevents delivery of the rest of the chunk
+  ---
+  duration_ms: 0.187873
+  type: 'test'
+  ...
+# Subtest: abrupt close discards a partial record, while EOF emits it exactly once
+ok 13 - abrupt close discards a partial record, while EOF emits it exactly once
+  ---
+  duration_ms: 0.976027
+  type: 'test'
+  ...
+# Subtest: empty lines, zero limits, and a final CR are handled consistently
+ok 14 - empty lines, zero limits, and a final CR are handled consistently
+  ---
+  duration_ms: 0.98525
+  type: 'test'
+  ...
+# Subtest: invalid framing limits fail immediately
+ok 15 - invalid framing limits fail immediately
+  ---
+  duration_ms: 0.534212
+  type: 'test'
+  ...
+# Subtest: session lifecycle preserves live task agents and recovers orphaned runs
+ok 16 - session lifecycle preserves live task agents and recovers orphaned runs
+  ---
+  duration_ms: 533.65394
+  type: 'test'
+  ...
+# Subtest: reconnect delay backs off quickly and remains bounded
+ok 17 - reconnect delay backs off quickly and remains bounded
+  ---
+  duration_ms: 1.472322
+  type: 'test'
+  ...
+# Subtest: only successful subagent completion unlocks dependent tasks
+ok 18 - only successful subagent completion unlocks dependent tasks
+  ---
+  duration_ms: 0.251097
+  type: 'test'
+  ...
+# Subtest: task runtime metadata clears stale execution state between retries
+ok 19 - task runtime metadata clears stale execution state between retries
+  ---
+  duration_ms: 0.205609
+  type: 'test'
+  ...
+# Subtest: task DAG guards blockers, detects cycles, and cascades only newly ready tasks
+ok 20 - task DAG guards blockers, detects cycles, and cascades only newly ready tasks
+  ---
+  duration_ms: 0.400592
+  type: 'test'
+  ...
+# Subtest: concurrent agent records preserve queue order and terminal lifecycle states
+ok 21 - concurrent agent records preserve queue order and terminal lifecycle states
+  ---
+  duration_ms: 0.223226
+  type: 'test'
+  ...
+# Subtest: schedule restoration normalizes persisted jobs without inventing state
+ok 22 - schedule restoration normalizes persisted jobs without inventing state
+  ---
+  duration_ms: 0.241002
+  type: 'test'
+  ...
+# Subtest: goal snapshots retain current safety, queue, and accounting state
+ok 23 - goal snapshots retain current safety, queue, and accounting state
+  ---
+  duration_ms: 0.736677
+  type: 'test'
+  ...
+# Subtest: live subagent transcript keeps conversation roles, failures, and a bounded tail
+ok 24 - live subagent transcript keeps conversation roles, failures, and a bounded tail
+  ---
+  duration_ms: 0.617728
+  type: 'test'
+  ...
+# Subtest: oversized snapshots shed old transcript payloads instead of breaking the connection
+ok 25 - oversized snapshots shed old transcript payloads instead of breaking the connection
+  ---
+  duration_ms: 10.125374
+  type: 'test'
+  ...
+# Subtest: SDK console output is diagnostics, never a JSONL protocol record
+ok 26 - SDK console output is diagnostics, never a JSONL protocol record
+  ---
+  duration_ms: 42.57325
+  type: 'test'
+  ...
+# Subtest: late success after cancellation is discarded exactly once without replay
+ok 27 - late success after cancellation is discarded exactly once without replay
+  ---
+  duration_ms: 70.597127
+  type: 'test'
+  ...
+# Subtest: duplicate active identities close the transport rather than executing twice
+ok 28 - duplicate active identities close the transport rather than executing twice
+  ---
+  duration_ms: 1044.681654
+  type: 'test'
+  ...
+# Subtest: request admission is bounded while cancellation and auth replies retain access
+ok 29 - request admission is bounded while cancellation and auth replies retain access
+  ---
+  duration_ms: 71.27696
+  type: 'test'
+  ...
+# Subtest: failed model initialization can be retried without retaining the rejected promise
+ok 30 - failed model initialization can be retried without retaining the rejected promise
+  ---
+  duration_ms: 50.00727
+  type: 'test'
+  ...
+# Subtest: JSONL exports are exclusive and cannot overwrite a session or previous export
+ok 31 - JSONL exports are exclusive and cannot overwrite a session or previous export
+  ---
+  duration_ms: 54.597727
+  type: 'test'
+  ...
+# Subtest: stdin EOF closes unhandshaken sockets and removes the owned endpoint
+ok 32 - stdin EOF closes unhandshaken sockets and removes the owned endpoint
+  ---
+  duration_ms: 39.546361
+  type: 'test'
+  ...
+# Subtest: model bridge snapshots and validates Pi settings end to end
+ok 33 - model bridge snapshots and validates Pi settings end to end
+  ---
+  duration_ms: 69.971478
+  type: 'test'
+  ...
+# Subtest: cancelled and failed reloads retain the last valid resource plane and project trust
+ok 34 - cancelled and failed reloads retain the last valid resource plane and project trust
+  ---
+  duration_ms: 85.581754
+  type: 'test'
+  ...
+# Subtest: inventory preserves all tools and providers exported from the same extension
+ok 35 - inventory preserves all tools and providers exported from the same extension
+  ---
+  duration_ms: 54.398744
+  type: 'test'
+  ...
+# Subtest: orchestration reconnect grace hides quick adapter replacement
+ok 36 - orchestration reconnect grace hides quick adapter replacement
+  ---
+  duration_ms: 5562.644694
+  type: 'test'
+  ...
+# Subtest: public SDK identity, exact version and package export are checked together
+ok 37 - public SDK identity, exact version and package export are checked together
+  ---
+  duration_ms: 4.247752
+  type: 'test'
+  ...
+# Subtest: a public export symlink cannot escape its package
+ok 38 - a public export symlink cannot escape its package
+  ---
+  duration_ms: 0.975095
+  type: 'test'
+  ...
+# Subtest: incompatible package code is never evaluated
+ok 39 - incompatible package code is never evaluated
+  ---
+  duration_ms: 35.460783
+  type: 'test'
+  ...
+# Subtest: Pi setting snapshot exposes typed effective values
+ok 40 - Pi setting snapshot exposes typed effective values
+  ---
+  duration_ms: 1.24465
+  type: 'test'
+  ...
+# Subtest: Pi setting writer validates booleans, enums, and bounded integers
+ok 41 - Pi setting writer validates booleans, enums, and bounded integers
+  ---
+  duration_ms: 1.153463
+  type: 'test'
+  ...
+# Subtest: resource ancestry respects boundaries and filesystem roots
+ok 42 - resource ancestry respects boundaries and filesystem roots
+  ---
+  duration_ms: 1.51036
+  type: 'test'
+  ...
+# Subtest: several tools and providers from one extension remain independently visible
+ok 43 - several tools and providers from one extension remain independently visible
+  ---
+  duration_ms: 0.75922
+  type: 'test'
+  ...
+# Subtest: upsert merges a declared directory with its first loaded file, not sibling exports
+ok 44 - upsert merges a declared directory with its first loaded file, not sibling exports
+  ---
+  duration_ms: 0.521103
+  type: 'test'
+  ...
+# Subtest: path replacement removes old trie membership and keeps kind isolation
+ok 45 - path replacement removes old trie membership and keeps kind isolation
+  ---
+  duration_ms: 0.603767
+  type: 'test'
+  ...
+# Subtest: source provenance prefers exact, then package, then original order
+ok 46 - source provenance prefers exact, then package, then original order
+  ---
+  duration_ms: 0.564849
+  type: 'test'
+  ...
+# Subtest: indexed upsert matches the original linear semantics across deterministic path changes
+ok 47 - indexed upsert matches the original linear semantics across deterministic path changes
+  ---
+  duration_ms: 251.81574
+  type: 'test'
+  ...
+# Subtest: partial updates retain the merged path index
+ok 48 - partial updates retain the merged path index
+  ---
+  duration_ms: 0.497958
+  type: 'test'
+  ...
+# Subtest: colliding identities still choose the earliest surviving row after a move
+ok 49 - colliding identities still choose the earliest surviving row after a move
+  ---
+  duration_ms: 0.330026
+  type: 'test'
+  ...
+# Subtest: extracts exact bytes from stored design/fonts entry
+ok 50 - extracts exact bytes from stored design/fonts entry
+  ---
+  duration_ms: 1.41783
+  type: 'test'
+  ...
+# Subtest: extracts exact bytes from deflated design/fonts entry
+ok 51 - extracts exact bytes from deflated design/fonts entry
+  ---
+  duration_ms: 0.879031
+  type: 'test'
+  ...
+# Subtest: accepts a root font entry and ignores unrelated names
+ok 52 - accepts a root font entry and ignores unrelated names
+  ---
+  duration_ms: 0.384017
+  type: 'test'
+  ...
+# Subtest: rejects missing, truncated and out-of-bounds directories
+ok 53 - rejects missing, truncated and out-of-bounds directories
+  ---
+  duration_ms: 0.245238
+  type: 'test'
+  ...
+# Subtest: rejects encrypted, oversized and unsupported-method entries
+ok 54 - rejects encrypted, oversized and unsupported-method entries
+  ---
+  duration_ms: 0.376106
+  type: 'test'
+  ...
+# Subtest: rejects incorrect expanded lengths
+ok 55 - rejects incorrect expanded lengths
+  ---
+  duration_ms: 0.906031
+  type: 'test'
+  ...
+# Subtest: SHA verification accepts only the exact manifest bytes
+ok 56 - SHA verification accepts only the exact manifest bytes
+  ---
+  duration_ms: 0.53233
+  type: 'test'
+  ...
+# Subtest: unknown command line flags fail without downloading or writing
+ok 57 - unknown command line flags fail without downloading or writing
+  ---
+  duration_ms: 0.367402
+  type: 'test'
+  ...
+1..57
+# tests 57
+# suites 0
+# pass 57
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 8380.438413

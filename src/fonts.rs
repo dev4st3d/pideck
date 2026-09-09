@@ -1,208 +1,35 @@
-//! Embedded design fonts, system-font discovery, and local typography settings.
+//! Embedded typography from the supplied Pideck design references.
 
 use std::borrow::Cow;
-use std::collections::HashSet;
 use std::env;
-use std::fs;
-use std::io;
-use std::path::{Path, PathBuf};
-use std::sync::{OnceLock, RwLock};
+use std::path::PathBuf;
 
 use gpui::{App, SharedString};
-use serde::{Deserialize, Serialize};
 
-const SETTINGS_FILE: &str = "settings.json";
-const DEFAULT_MAIN: &str = "DM Sans";
-const DEFAULT_SANS: &str = "DM Sans";
-const DEFAULT_MONO: &str = "IBM Plex Mono";
-
-static ACTIVE: OnceLock<RwLock<FontPreferences>> = OnceLock::new();
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FontRole {
-    Main,
-    Sans,
-    Mono,
+const DEFAULT_MONO: &str = "JetBrains Mono";
+pub(crate) struct FontCatalog {
+    pub(crate) settings_path: PathBuf,
 }
 
-impl FontRole {
-    pub const ALL: [Self; 3] = [Self::Main, Self::Sans, Self::Mono];
-
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::Main => "Main",
-            Self::Sans => "Sans",
-            Self::Mono => "Mono",
-        }
-    }
-
-    pub const fn description(self) -> &'static str {
-        match self {
-            Self::Main => "Wordmark, controls, and display text",
-            Self::Sans => "Conversation and interface text",
-            Self::Mono => "Code, commands, and technical data",
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FontPreferences {
-    pub main: String,
-    pub sans: String,
-    pub mono: String,
-}
-
-impl Default for FontPreferences {
-    fn default() -> Self {
-        Self {
-            main: DEFAULT_MAIN.to_owned(),
-            sans: DEFAULT_SANS.to_owned(),
-            mono: DEFAULT_MONO.to_owned(),
-        }
-    }
-}
-
-impl FontPreferences {
-    pub fn family(&self, role: FontRole) -> &str {
-        match role {
-            FontRole::Main => &self.main,
-            FontRole::Sans => &self.sans,
-            FontRole::Mono => &self.mono,
-        }
-    }
-
-    pub fn set(&mut self, role: FontRole, family: impl Into<String>) {
-        let family = family.into();
-        match role {
-            FontRole::Main => self.main = family,
-            FontRole::Sans => self.sans = family,
-            FontRole::Mono => self.mono = family,
-        }
-    }
-}
-
-/// On-disk Pideck settings. Fonts and shell theme share one file so either
-/// preference can be updated without clobbering the other.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-struct SettingsDocument {
-    main: String,
-    sans: String,
-    mono: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    theme: Option<String>,
-}
-
-impl Default for SettingsDocument {
-    fn default() -> Self {
-        let fonts = FontPreferences::default();
-        Self {
-            main: fonts.main,
-            sans: fonts.sans,
-            mono: fonts.mono,
-            theme: None,
-        }
-    }
-}
-
-impl SettingsDocument {
-    fn from_parts(preferences: &FontPreferences, theme: Option<&str>) -> Self {
-        Self {
-            main: preferences.main.clone(),
-            sans: preferences.sans.clone(),
-            mono: preferences.mono.clone(),
-            theme: theme.map(str::to_owned),
-        }
-    }
-
-    fn preferences(&self) -> FontPreferences {
-        FontPreferences {
-            main: self.main.clone(),
-            sans: self.sans.clone(),
-            mono: self.mono.clone(),
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct FontCatalog {
-    pub families: Vec<String>,
-    pub preferences: FontPreferences,
-    /// Stable theme key from settings (`ThemeId::key`), when present.
-    pub theme_key: Option<String>,
-    pub settings_path: PathBuf,
-    pub load_warning: Option<String>,
-}
-
-pub fn initialize(cx: &App) -> FontCatalog {
-    // Register before resolving even the first text run. These are the four
-    // exact files from the supplied design, not similarly named OS substitutes.
-    let embedded: Vec<Cow<'static, [u8]>> = vec![
-        Cow::Borrowed(include_bytes!(concat!(env!("OUT_DIR"), "/fonts/DMSans-Variable.ttf"))),
-        Cow::Borrowed(include_bytes!(concat!(env!("OUT_DIR"), "/fonts/InstrumentSerif-Regular.ttf"))),
-        Cow::Borrowed(include_bytes!(concat!(env!("OUT_DIR"), "/fonts/IBMPlexMono-Regular.ttf"))),
-        Cow::Borrowed(include_bytes!(concat!(env!("OUT_DIR"), "/fonts/IBMPlexMono-Medium.ttf"))),
+pub(crate) fn initialize(cx: &App) -> FontCatalog {
+    let fonts: Vec<Cow<'static, [u8]>> = vec![
+        Cow::Borrowed(include_bytes!("../design/fonts/Geist-Regular.ttf")),
+        Cow::Borrowed(include_bytes!("../design/fonts/Geist-Medium.ttf")),
+        Cow::Borrowed(include_bytes!("../design/fonts/Newsreader16pt-Regular.ttf")),
+        Cow::Borrowed(include_bytes!("../design/fonts/Newsreader16pt-Medium.ttf")),
+        Cow::Borrowed(include_bytes!("../design/fonts/JetBrainsMono-Regular.ttf")),
+        Cow::Borrowed(include_bytes!("../design/fonts/JetBrainsMono-Medium.ttf")),
     ];
-    cx.text_system().add_fonts(embedded).expect("register PiDeck design fonts");
-    let mut families = cx.text_system().all_font_names();
-    // Some backends enumerate OS families only; the embedded families remain
-    // valid for font selection and must not be replaced by fallback defaults.
-    families.extend(["DM Sans", "Instrument Serif", "IBM Plex Mono"].map(str::to_owned));
-    sort_and_deduplicate(&mut families);
-
+    if let Err(error) = cx.text_system().add_fonts(fonts) {
+        eprintln!("Pideck design fonts could not be registered: {error}");
+    }
     let settings_path = settings_path();
-    let (document, load_warning) = match load(&settings_path) {
-        Ok(document) => (document, None),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            (SettingsDocument::default(), None)
-        }
-        Err(error) => (
-            SettingsDocument::default(),
-            Some(format!("Settings could not be loaded: {error}")),
-        ),
-    };
-    let mut preferences = document.preferences();
-    if preferences.main == "Segoe UI" { preferences.main = DEFAULT_MAIN.to_owned(); }
-    if preferences.sans == "Segoe UI" { preferences.sans = DEFAULT_SANS.to_owned(); }
-    if preferences.mono == "Cascadia Mono" { preferences.mono = DEFAULT_MONO.to_owned(); }
-    apply_available_defaults(&mut preferences, &families);
-    install(preferences.clone());
-
-    FontCatalog {
-        families,
-        preferences,
-        theme_key: document.theme,
-        settings_path,
-        load_warning,
-    }
+    FontCatalog { settings_path }
 }
 
-pub fn install(preferences: FontPreferences) {
-    let lock = ACTIVE.get_or_init(|| RwLock::new(FontPreferences::default()));
-    if let Ok(mut active) = lock.write() {
-        *active = preferences;
-    }
-}
-
-pub fn family(role: FontRole) -> SharedString {
-    ACTIVE
-        .get_or_init(|| RwLock::new(FontPreferences::default()))
-        .read()
-        .map(|preferences| SharedString::from(preferences.family(role).to_owned()))
-        .unwrap_or_else(|_| SharedString::from(FontPreferences::default().family(role).to_owned()))
-}
-
-pub fn save(path: &Path, preferences: &FontPreferences, theme: Option<&str>) -> io::Result<()> {
-    let document = SettingsDocument::from_parts(preferences, theme);
-    let bytes = serde_json::to_vec_pretty(&document)
-        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-    crate::services::atomic_file::write(path, &bytes)
-}
-
-fn load(path: &Path) -> io::Result<SettingsDocument> {
-    let bytes = fs::read(path)?;
-    serde_json::from_slice(&bytes)
-        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+pub(crate) fn mono() -> SharedString {
+    // Legacy font overrides must not replace the supplied design faces.
+    DEFAULT_MONO.into()
 }
 
 fn settings_path() -> PathBuf {
@@ -210,120 +37,16 @@ fn settings_path() -> PathBuf {
         return PathBuf::from(path);
     }
     if let Some(root) = env::var_os("APPDATA") {
-        return PathBuf::from(root).join("Pideck").join(SETTINGS_FILE);
+        return PathBuf::from(root).join("Pideck").join("settings.json");
     }
     if let Some(root) = env::var_os("XDG_CONFIG_HOME") {
-        return PathBuf::from(root).join("pideck").join(SETTINGS_FILE);
+        return PathBuf::from(root).join("pideck").join("settings.json");
     }
     if let Some(root) = env::var_os("HOME") {
         return PathBuf::from(root)
             .join(".config")
             .join("pideck")
-            .join(SETTINGS_FILE);
+            .join("settings.json");
     }
-    PathBuf::from(SETTINGS_FILE)
-}
-
-fn sort_and_deduplicate(families: &mut Vec<String>) {
-    families.sort_by_key(|family| family.to_lowercase());
-    let mut seen = HashSet::new();
-    families.retain(|family| seen.insert(family.to_lowercase()));
-}
-
-fn apply_available_defaults(preferences: &mut FontPreferences, families: &[String]) {
-    let first = families
-        .first()
-        .map(String::as_str)
-        .unwrap_or(".SystemUIFont");
-    for role in FontRole::ALL {
-        let available = families
-            .iter()
-            .any(|family| family.eq_ignore_ascii_case(preferences.family(role)));
-        if !available {
-            preferences.set(role, default_for(role, families).unwrap_or(first));
-        }
-    }
-}
-
-fn default_for(role: FontRole, families: &[String]) -> Option<&str> {
-    let preferred = match role {
-        FontRole::Main | FontRole::Sans => ["DM Sans", "Segoe UI", "SF Pro Text", "Noto Sans", "Arial"],
-        FontRole::Mono => ["IBM Plex Mono", "Cascadia Mono", "SF Mono", "Noto Sans Mono", "Consolas"],
-    };
-    preferred.into_iter().find_map(|candidate| {
-        families
-            .iter()
-            .find(|family| family.eq_ignore_ascii_case(candidate))
-            .map(String::as_str)
-    })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn preferences_round_trip() {
-        let root = env::temp_dir().join(format!("pideck-fonts-{}", std::process::id()));
-        let path = root.join("settings.json");
-        let preferences = FontPreferences {
-            main: "Georgia".to_owned(),
-            sans: "Segoe UI".to_owned(),
-            mono: "Consolas".to_owned(),
-        };
-
-        save(&path, &preferences, Some("moss-foundry")).unwrap();
-        let loaded = load(&path).unwrap();
-        assert_eq!(loaded.preferences(), preferences);
-        assert_eq!(loaded.theme.as_deref(), Some("moss-foundry"));
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn fonts_only_settings_remain_compatible() {
-        let root = env::temp_dir().join(format!("pideck-fonts-legacy-{}", std::process::id()));
-        let path = root.join("settings.json");
-        fs::create_dir_all(&root).unwrap();
-        fs::write(
-            &path,
-            r#"{
-  "main": "Georgia",
-  "sans": "Segoe UI",
-  "mono": "Consolas"
-}"#,
-        )
-        .unwrap();
-
-        let loaded = load(&path).unwrap();
-        assert_eq!(loaded.main, "Georgia");
-        assert_eq!(loaded.theme, None);
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn catalog_names_are_case_insensitively_unique() {
-        let mut names = vec![
-            "Segoe UI".to_owned(),
-            "consolas".to_owned(),
-            "Consolas".to_owned(),
-        ];
-        sort_and_deduplicate(&mut names);
-        assert_eq!(names, ["consolas", "Segoe UI"]);
-    }
-
-    #[test]
-    fn blank_values_receive_available_defaults() {
-        let mut preferences = FontPreferences {
-            main: String::new(),
-            sans: String::new(),
-            mono: String::new(),
-        };
-        apply_available_defaults(
-            &mut preferences,
-            &["Consolas".to_owned(), "Segoe UI".to_owned()],
-        );
-        assert_eq!(preferences.main, "Segoe UI");
-        assert_eq!(preferences.sans, "Segoe UI");
-        assert_eq!(preferences.mono, "Consolas");
-    }
+    PathBuf::from("settings.json")
 }

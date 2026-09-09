@@ -3,24 +3,20 @@ name = "pi-gui"
 version = "0.1.7"
 edition = "2024"
 rust-version = "1.88"
-description = "Pideck — a native desktop shell for the Pi coding agent (GPUI)"
+description = "Pideck — a native multi-project terminal manager (GPUI)"
 license = "MIT"
 repository = "https://github.com/dev4st3d/pideck"
 readme = "README.md"
 
 [dependencies]
 async-channel = "2.5.0"
-base64 = "0.23.1"
+alacritty_terminal = "0.26.0"
 gpui = "0.2.2"
-image = "0.25.9"
+gpui-component = { version = "=0.5.1", default-features = false }
 portable-pty = "0.9.0"
-pulldown-cmark = { version = "0.13.4", default-features = false }
-serde = { version = "1.0.229", features = ["derive", "rc"] }
+serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
-unicode-segmentation = "1.13.3"
-unicode-width = "0.2.2"
 velopack = "0.0.1298"
-vt100 = "0.16.2"
 
 [build-dependencies]
 embed-resource = "3.0.11"
@@ -30,16 +26,11 @@ gpui = { version = "0.2.2", features = ["test-support"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61.2", features = [
-    "Win32_Foundation",
-    "Win32_Security",
-    "Win32_System_JobObjects",
-    "Win32_System_Pipes",
-    "Win32_System_Threading",
-    "Win32_UI_Shell",
+    "Win32_Storage_FileSystem",
     "Win32_UI_WindowsAndMessaging",
 ] }
 
-# GPUI, layout, markdown, and image work are hot enough that an entirely
+# GPUI and terminal rendering are hot enough that an entirely
 # unoptimized `cargo run` gives a misleadingly sluggish development build.
 # Keep the application debuggable while compiling the renderer-facing path
 # similarly to Zed's development profile.
@@ -53,12 +44,6 @@ codegen-units = 16
 opt-level = 3
 
 [profile.dev.package.serde_json]
-opt-level = 3
-
-[profile.dev.package."pulldown-cmark"]
-opt-level = 3
-
-[profile.dev.package.image]
 opt-level = 3
 
 [profile.release]

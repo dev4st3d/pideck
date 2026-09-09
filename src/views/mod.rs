@@ -1,11 +1,4 @@
-pub mod composer;
-mod controls;
-mod conversation;
-mod diff_summary;
-mod markdown;
-mod root;
+pub(crate) mod file_editor;
+mod project_panels;
 mod terminal;
-mod tool_card;
-mod time_labels;
-
-pub use root::RootView;
+pub(crate) mod terminal_manager;

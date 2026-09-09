@@ -1,0 +1,78 @@
+{
+  "scope": "Static source/package contract and opaque palette checks. No compilation, SDK certification, or rendered UI.",
+  "rust_files_inspected": 83,
+  "literal_includes_verified": 52,
+  "embedded_runtime_modules": [
+    "jsonl.mjs",
+    "orchestration-adapter.mjs",
+    "orchestration-core.mjs",
+    "pi-bridge.mjs",
+    "pi-contract.mjs",
+    "pi-settings.mjs",
+    "resource-index.mjs"
+  ],
+  "contract": {
+    "package": "@earendil-works/pi-coding-agent",
+    "version": "0.85.1",
+    "minimum_node": "22.19.0"
+  },
+  "geometry": {
+    "TITLE_H": 40,
+    "TOOLBAR_H": 60,
+    "READING_W": 840,
+    "STREAM_PAD_X": 24
+  },
+  "fonts": [
+    "DMSans-Variable.ttf",
+    "InstrumentSerif-Regular.ttf",
+    "IBMPlexMono-Regular.ttf",
+    "IBMPlexMono-Medium.ttf"
+  ],
+  "palettes": [
+    {
+      "name": "ORIGINAL",
+      "text_pairs": 23,
+      "minimum": {
+        "foreground": "ash",
+        "background": "floor",
+        "ratio": 4.508882858956649
+      },
+      "minimum_focus_ratio": 5.716185154605858,
+      "reference_muted_on_selection_ratio": 4.434573112828388
+    },
+    {
+      "name": "LINEN",
+      "text_pairs": 23,
+      "minimum": {
+        "foreground": "ash",
+        "background": "floor",
+        "ratio": 4.87472079040969
+      },
+      "minimum_focus_ratio": 6.184763180286472,
+      "reference_muted_on_selection_ratio": 4.567237437667484
+    },
+    {
+      "name": "GRAPHITE",
+      "text_pairs": 23,
+      "minimum": {
+        "foreground": "ash",
+        "background": "panel_lift",
+        "ratio": 5.7947694383540576
+      },
+      "minimum_focus_ratio": 8.23435629311631,
+      "reference_muted_on_selection_ratio": 4.9155975266816245
+    },
+    {
+      "name": "MIDNIGHT",
+      "text_pairs": 23,
+      "minimum": {
+        "foreground": "ash",
+        "background": "panel_lift",
+        "ratio": 6.14575665477761
+      },
+      "minimum_focus_ratio": 7.481382772518825,
+      "reference_muted_on_selection_ratio": 5.109076388504997
+    }
+  ],
+  "result": "passed"
+}

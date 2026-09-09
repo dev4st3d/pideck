@@ -23,9 +23,12 @@ fn platform_motion_enabled() -> bool {
     // pointer. The pointer is not retained and no system setting is modified.
     unsafe {
         SystemParametersInfoW(
-            SPI_GETCLIENTAREAANIMATION, 0,
-            (&mut enabled as *mut i32).cast(), 0,
-        ) != 0 && enabled != 0
+            SPI_GETCLIENTAREAANIMATION,
+            0,
+            (&mut enabled as *mut i32).cast(),
+            0,
+        ) != 0
+            && enabled != 0
     }
 }
 

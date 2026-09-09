@@ -2,7 +2,6 @@
 //!
 //! The worker owns the PTY, shell process, and blocking I/O threads. GPUI only
 //! exchanges bounded events and non-blocking control messages with it.
-
 use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -92,14 +91,12 @@ impl TerminalWorker {
         if thread::Builder::new()
             .name("pideck-terminal".to_owned())
             .spawn({
-                let protocol_commands = commands.clone();
                 let shutdown_requested = Arc::clone(&shutdown_requested);
                 move || {
                     run_terminal(
                         working_directory,
                         size,
                         command_rx,
-                        protocol_commands,
                         shutdown_requested,
                         worker_events,
                     )
@@ -133,7 +130,8 @@ impl TerminalWorker {
     }
 
     /// Writes a command exactly as typed, followed by a carriage return.
-    pub fn write_line(&self, line: &str) -> bool {
+    #[cfg(test)]
+    fn write_line(&self, line: &str) -> bool {
         let mut bytes = Vec::with_capacity(line.len() + 1);
         bytes.extend_from_slice(line.as_bytes());
         bytes.push(b'\r');
@@ -145,12 +143,6 @@ impl TerminalWorker {
             .try_send(TerminalCommand::Resize(size))
             .is_ok()
     }
-
-    pub fn shutdown(&self) -> bool {
-        let first = !self.shutdown_requested.swap(true, Ordering::AcqRel);
-        let _ = self.commands.try_send(TerminalCommand::Shutdown);
-        first
-    }
 }
 
 impl Drop for TerminalWorker {
@@ -160,60 +152,10 @@ impl Drop for TerminalWorker {
     }
 }
 
-#[derive(Default)]
-struct TerminalQueryResponder {
-    pending: Vec<u8>,
-}
-
-impl TerminalQueryResponder {
-    const QUERIES: [(&'static [u8], &'static [u8]); 4] = [
-        (b"\x1b[5n", b"\x1b[0n"),
-        (b"\x1b[6n", b"\x1b[1;1R"),
-        (b"\x1b[c", b"\x1b[?1;2c"),
-        (b"\x1b[>c", b"\x1b[>0;0;0c"),
-    ];
-
-    fn process(&mut self, bytes: &[u8]) -> Vec<u8> {
-        let mut responses = Vec::new();
-        for byte in bytes {
-            if self.pending.is_empty() {
-                if *byte == 0x1b {
-                    self.pending.push(*byte);
-                }
-                continue;
-            }
-
-            self.pending.push(*byte);
-            if let Some((_, response)) = Self::QUERIES
-                .iter()
-                .find(|(query, _)| *query == self.pending.as_slice())
-            {
-                responses.extend_from_slice(response);
-                self.pending.clear();
-                continue;
-            }
-            if Self::QUERIES
-                .iter()
-                .any(|(query, _)| query.starts_with(&self.pending))
-            {
-                continue;
-            }
-
-            let restart = *byte == 0x1b;
-            self.pending.clear();
-            if restart {
-                self.pending.push(0x1b);
-            }
-        }
-        responses
-    }
-}
-
 fn run_terminal(
     working_directory: PathBuf,
     size: TerminalSize,
     commands: mpsc::Receiver<TerminalCommand>,
-    protocol_commands: mpsc::SyncSender<TerminalCommand>,
     shutdown_requested: Arc<AtomicBool>,
     events: Sender<TerminalEvent>,
 ) {
@@ -285,15 +227,10 @@ fn run_terminal(
         .name("pideck-terminal-output".to_owned())
         .spawn(move || {
             let mut buffer = [0_u8; READ_BUFFER_BYTES];
-            let mut responder = TerminalQueryResponder::default();
             loop {
                 match reader.read(&mut buffer) {
                     Ok(0) => break,
                     Ok(count) => {
-                        let response = responder.process(&buffer[..count]);
-                        if !response.is_empty() {
-                            let _ = protocol_commands.try_send(TerminalCommand::Write(response));
-                        }
                         send_event(
                             &reader_events,
                             TerminalEvent::Output(buffer[..count].to_vec()),
@@ -431,7 +368,6 @@ mod tests {
             PathBuf::from("definitely-missing-terminal-workspace"),
             TerminalSize::default(),
             command_rx,
-            mpsc::sync_channel(1).0,
             Arc::new(AtomicBool::new(false)),
             event_tx,
         );
@@ -443,24 +379,26 @@ mod tests {
         );
     }
 
-    #[test]
-    fn terminal_query_responses_survive_split_reads() {
-        let mut responder = TerminalQueryResponder::default();
-        assert!(responder.process(b"prompt\x1b[").is_empty());
-        assert_eq!(responder.process(b"6n"), b"\x1b[1;1R");
-        assert_eq!(responder.process(b"\x1b[5n\x1b[c"), b"\x1b[0n\x1b[?1;2c");
-    }
-
     #[cfg(windows)]
     fn wait_for_terminal_marker(
-        events: &Receiver<TerminalEvent>,
+        worker: &TerminalWorker,
+        engine: &mut super::super::terminal_engine::TerminalEngine,
         marker: &str,
         deadline: Instant,
-    ) -> Vec<u8> {
-        let mut output = Vec::new();
-        while Instant::now() < deadline && !String::from_utf8_lossy(&output).contains(marker) {
+    ) -> String {
+        let events = worker.events();
+        while Instant::now() < deadline {
             match events.try_recv() {
-                Ok(TerminalEvent::Output(bytes)) => output.extend(bytes),
+                Ok(TerminalEvent::Output(bytes)) => {
+                    let response = engine.feed(&bytes);
+                    if !response.is_empty() {
+                        assert!(worker.write_bytes(response));
+                    }
+                    let text = engine.visible_text();
+                    if text.lines().any(|line| line.trim() == marker) {
+                        return text;
+                    }
+                }
                 Ok(TerminalEvent::Error { summary }) => panic!("terminal failed: {summary}"),
                 Ok(TerminalEvent::Started { .. } | TerminalEvent::Exited { .. }) => {}
                 Err(async_channel::TryRecvError::Empty) => {
@@ -469,7 +407,7 @@ mod tests {
                 Err(async_channel::TryRecvError::Closed) => break,
             }
         }
-        output
+        panic!("The terminal did not render the expected output line: {marker}");
     }
 
     #[cfg(windows)]
@@ -477,45 +415,25 @@ mod tests {
     fn real_conpty_shell_accepts_input_and_streams_output() {
         let workspace = std::env::current_dir().unwrap();
         let worker = TerminalWorker::spawn(workspace, TerminalSize::new(8, 80));
-        let events = worker.events();
-        let deadline = Instant::now() + Duration::from_secs(10);
-        let mut started = false;
-        let mut output = Vec::new();
-
-        while Instant::now() < deadline && !started {
-            match events.try_recv() {
-                Ok(TerminalEvent::Started { .. }) => started = true,
-                Ok(TerminalEvent::Error { summary }) => panic!("terminal start failed: {summary}"),
-                Ok(TerminalEvent::Output(bytes)) => output.extend(bytes),
-                Ok(TerminalEvent::Exited { code }) => panic!("terminal exited early: {code}"),
-                Err(async_channel::TryRecvError::Empty) => {
-                    std::thread::sleep(Duration::from_millis(10));
-                }
-                Err(async_channel::TryRecvError::Closed) => break,
-            }
-        }
-        assert!(started, "ConPTY shell did not report readiness");
+        let mut engine = super::super::terminal_engine::TerminalEngine::new(8, 80);
         assert!(worker.write_line("echo PIDECK_TERMINAL_READY"));
-
-        while Instant::now() < deadline
-            && !String::from_utf8_lossy(&output).contains("PIDECK_TERMINAL_READY")
-        {
-            match events.try_recv() {
-                Ok(TerminalEvent::Output(bytes)) => output.extend(bytes),
-                Ok(TerminalEvent::Error { summary }) => panic!("terminal output failed: {summary}"),
-                Ok(TerminalEvent::Started { .. } | TerminalEvent::Exited { .. }) => {}
-                Err(async_channel::TryRecvError::Empty) => {
-                    std::thread::sleep(Duration::from_millis(10));
-                }
-                Err(async_channel::TryRecvError::Closed) => break,
-            }
-        }
-        assert!(
-            String::from_utf8_lossy(&output).contains("PIDECK_TERMINAL_READY"),
-            "shell output did not contain the command marker: {:?}",
-            String::from_utf8_lossy(&output)
+        wait_for_terminal_marker(
+            &worker,
+            &mut engine,
+            "PIDECK_TERMINAL_READY",
+            Instant::now() + Duration::from_secs(15),
         );
-        let _ = worker.write_line("exit");
+        // Exercise a real PTY resize and subsequent output, using the same process.
+        assert!(worker.resize(TerminalSize::new(12, 96)));
+        engine.resize(12, 96);
+        assert!(worker.write_line("echo PIDECK_TERMINAL_RESIZED"));
+        wait_for_terminal_marker(
+            &worker,
+            &mut engine,
+            "PIDECK_TERMINAL_RESIZED",
+            Instant::now() + Duration::from_secs(15),
+        );
+        assert!(worker.write_line("exit"));
     }
 
     #[cfg(windows)]
@@ -524,22 +442,32 @@ mod tests {
         let workspace = std::env::current_dir().unwrap();
         let first = TerminalWorker::spawn(workspace.clone(), TerminalSize::new(8, 80));
         let second = TerminalWorker::spawn(workspace, TerminalSize::new(8, 80));
-        let first_events = first.events();
-        let second_events = second.events();
+        let mut first_engine = super::super::terminal_engine::TerminalEngine::new(8, 80);
+        let mut second_engine = super::super::terminal_engine::TerminalEngine::new(8, 80);
         assert!(first.write_line("echo PIDECK_FIRST_TERMINAL"));
         assert!(second.write_line("echo PIDECK_SECOND_TERMINAL"));
-        let deadline = Instant::now() + Duration::from_secs(10);
-        let first_output =
-            wait_for_terminal_marker(&first_events, "PIDECK_FIRST_TERMINAL", deadline);
-        let second_output =
-            wait_for_terminal_marker(&second_events, "PIDECK_SECOND_TERMINAL", deadline);
-        let first_text = String::from_utf8_lossy(&first_output);
-        let second_text = String::from_utf8_lossy(&second_output);
-        assert!(first_text.contains("PIDECK_FIRST_TERMINAL"));
+        let first_text = wait_for_terminal_marker(
+            &first,
+            &mut first_engine,
+            "PIDECK_FIRST_TERMINAL",
+            Instant::now() + Duration::from_secs(15),
+        );
+        let second_text = wait_for_terminal_marker(
+            &second,
+            &mut second_engine,
+            "PIDECK_SECOND_TERMINAL",
+            Instant::now() + Duration::from_secs(15),
+        );
         assert!(!first_text.contains("PIDECK_SECOND_TERMINAL"));
-        assert!(second_text.contains("PIDECK_SECOND_TERMINAL"));
         assert!(!second_text.contains("PIDECK_FIRST_TERMINAL"));
-        let _ = first.write_line("exit");
-        let _ = second.write_line("exit");
+        assert!(first.write_line("exit"));
+        assert!(second.write_line("echo PIDECK_SECOND_STILL_RUNNING"));
+        wait_for_terminal_marker(
+            &second,
+            &mut second_engine,
+            "PIDECK_SECOND_STILL_RUNNING",
+            Instant::now() + Duration::from_secs(15),
+        );
+        assert!(second.write_line("exit"));
     }
 }

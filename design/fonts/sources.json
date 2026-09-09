@@ -18,5 +18,62 @@
     "file": "IBMPlexMono-Medium.ttf",
     "source": "https://raw.githubusercontent.com/google/fonts/main/ofl/ibmplexmono/IBMPlexMono-Medium.ttf",
     "sha256": "a9b4c49bb299e05b5f6c481e7fb5e78943d2793249a0c8874ab574a2d1ea6755"
+  },
+  {
+    "file": "Geist-Regular.ttf",
+    "source": "https://raw.githubusercontent.com/vercel/geist-font/main/fonts/Geist/ttf/Geist-Regular.ttf",
+    "sha256": "85a1c6b18a6b0a06dfe9fd4f6d6a5d4979f74ec861eaef4bc7868b5492b8a117",
+    "family": "Geist",
+    "license": "Geist-OFL.txt"
+  },
+  {
+    "file": "Geist-Medium.ttf",
+    "source": "https://raw.githubusercontent.com/vercel/geist-font/main/fonts/Geist/ttf/Geist-Medium.ttf",
+    "sha256": "3a3b36f0d0b981f4857f7f00eeef4a5ee123605575d362ab31ee7c19e3d11f2f",
+    "family": "Geist",
+    "license": "Geist-OFL.txt"
+  },
+  {
+    "file": "Newsreader16pt-Regular.ttf",
+    "source": "https://raw.githubusercontent.com/productiontype/Newsreader/master/fonts/static/ttf/Newsreader16pt-Regular.ttf",
+    "sha256": "0636887c9f72f77ce188f0b31029be58e65adae5a47e6d2887ad5020c2c75036",
+    "family": "Newsreader 16pt",
+    "license": "Newsreader-OFL.txt"
+  },
+  {
+    "file": "Newsreader16pt-Medium.ttf",
+    "source": "https://raw.githubusercontent.com/productiontype/Newsreader/master/fonts/static/ttf/Newsreader16pt-Medium.ttf",
+    "sha256": "ee2f66ee4c6c313acf211c952211f8c6c0c0d9fa6a17cd0ec0ceba13418b1aed",
+    "family": "Newsreader 16pt",
+    "license": "Newsreader-OFL.txt"
+  },
+  {
+    "file": "JetBrainsMono-Regular.ttf",
+    "source": "https://raw.githubusercontent.com/JetBrains/JetBrainsMono/master/fonts/ttf/JetBrainsMono-Regular.ttf",
+    "sha256": "e6fd0d7e91550b3ed2b735d4312474362c4716edc4fc0577a0f61ed782d5aed1",
+    "family": "JetBrains Mono",
+    "license": "JetBrains-Mono-OFL.txt"
+  },
+  {
+    "file": "JetBrainsMono-Medium.ttf",
+    "source": "https://raw.githubusercontent.com/JetBrains/JetBrainsMono/master/fonts/ttf/JetBrainsMono-Medium.ttf",
+    "sha256": "d16e6dc99672734698d629705f617c79f6eb6040f5113efe3a145204dc988109",
+    "family": "JetBrains Mono",
+    "license": "JetBrains-Mono-OFL.txt"
+  },
+  {
+    "file": "Geist-OFL.txt",
+    "source": "https://raw.githubusercontent.com/vercel/geist-font/main/OFL.txt",
+    "sha256": "2b2da563e79400b61818402ca9f26a73d52468268b7fc715e92143c1e799737e"
+  },
+  {
+    "file": "Newsreader-OFL.txt",
+    "source": "https://raw.githubusercontent.com/productiontype/Newsreader/master/OFL.txt",
+    "sha256": "806bdd7d159dc2965b41a80078851b8a549b97103f0b64519849aa662b371297"
+  },
+  {
+    "file": "JetBrains-Mono-OFL.txt",
+    "source": "https://raw.githubusercontent.com/JetBrains/JetBrainsMono/master/OFL.txt",
+    "sha256": "a76abf002c49097d146e86740a3105a5d00450b1592e820a1109a8c5680cd697"
   }
 ]

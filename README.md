@@ -1,124 +1,89 @@
 # Pideck
 
-A native Windows workspace for the Pi coding agent, built with Rust and GPUI 0.2.2. Pi owns agent execution, sessions, provider credentials and extension semantics.
+A native Windows project and terminal workspace, built with Rust and GPUI 0.2.2. Its light editorial workbench follows the [final Paper references](design/paper/README.md).
 
-## Workspace
+Switch projects with the top project selector. The sidebar has **Projects**, **Files**, and **Git** tabs; the main pane combines editable files, terminals, and read-only diffs in one tab strip.
 
-The reference layout has a 40-pixel custom native titlebar, 64-pixel navigation rail, 240-pixel project sidebar, a shared 60-pixel conversation toolbar, and an 840-pixel reading/composer measure. History, the inspector, terminal and settings remain functional native views. Narrow windows retain the conversation and collapse secondary columns.
+Each terminal starts in its project's directory. Run `codex`, `claude`, or another command after installing that CLI independently. Terminals continue running when their tab or project is hidden.
 
-Original, Linen, Graphite and Midnight share the same geometry. Midnight uses the normal toolbar position, not the displaced position in its supplied export. Typography uses the exact DM Sans, Instrument Serif and IBM Plex Mono design files, imported before building. User-selected font families remain configurable; the old default Segoe UI/Cascadia Mono preferences migrate to the design defaults.
+## Files and Git
 
-This is a source implementation, **not a certified 1:1 native match**. Rust compilation, rustfmt, Rust tests and native screenshot verification were not executable in the delivery environment. See [the rebuild record](docs/REBUILD.md) for completed checks and outstanding validation.
+Open files from the tree, edit them, and choose **Save** or press `Ctrl+S`. Changed tabs show a dirty marker. Closing changed files offers Save, Discard, or Cancel; closing a project or window offers **Save all and close**. Saves check for external changes and report conflicts while keeping your edits open.
 
-- Multiline composer with grapheme navigation, IME, clipboard, undo/redo, file/image attachments, `@` files and `/` commands.
-- Separate Send, Steer, Queue and Stop behavior. Input stays editable while acceptance is pending; a late acknowledgement cannot clear a newer revision or newly changed attachments.
-- Session-owned local draft checkpoints retain text, selection, undo/redo, attachments, saved inputs and transcript position across normal application closure. Recovery never sends a prompt automatically.
-- Streaming Markdown, selectable transcript text, tool details, image previews and read-only Git changes/diffs.
-- Searchable model selection, thinking controls, provider authentication, command palette, settings, history, resources and task/subagent/goal inspector integrations.
-- Embedded multi-tab PTY terminal and a bounded pool of supervised background session runtimes.
-- No telemetry, analytics or remote reporting. Authentication fields are not draft-checkpointed.
+The Git sidebar shows the branch and changed files, with read-only staged and working-tree diffs. Untracked files open in the editor. It does not stage, commit, or modify Git history.
 
-## Requirements
-
-| Component | Requirement |
-|---|---|
-| OS | Windows; native application validation remains outstanding |
-| Rust | Stable MSVC toolchain, Windows SDK/build tools, rustfmt and Clippy; declared syntax floor 1.88 |
-| GPUI | 0.2.2 in the included Cargo.lock |
-| Pi | `@earendil-works/pi-coding-agent@0.85.1` |
-| Node | Stable 22.19.0 or newer |
-
-There is no application `package.json` or frontend npm build. Node is used for Pi, its SDK sidecar, bridge tests and the optional source checks/benchmark. Dependencies and runtimes are not included in this source ZIP.
+The editor accepts UTF-8 text files up to 2 MiB. Each directory listing is capped at 2,000 entries; the sidebar reports truncation.
 
 ## Run from source
 
-Install the prerequisites, then run from the extracted repository:
+Use Windows with the stable Rust MSVC toolchain and Windows SDK/build tools. The declared Rust syntax floor is 1.88. Cargo.lock pins GPUI 0.2.2.
+
+From the repository, launch with:
 
 ```powershell
-node scripts/prepare-fonts.mjs --zip "C:\path\to\pideck-design.zip"
-npm install -g @earendil-works/pi-coding-agent@0.85.1
-cargo fmt --all
 cargo run --locked
 ```
 
-Font binaries are not redistributed in this ZIP. The first command extracts the four files from your original design ZIP and verifies their exact SHA-256 hashes. It does not substitute system fonts. An extracted design/fonts directory also works with `--dir`; without arguments, the script verifies existing files or downloads the manifest sources and rejects a changed hash. `build.rs` embeds the prepared bytes in the executable, so end users do not need to install the fonts.
+Pideck embeds Geist interface text, Newsreader headings, and JetBrains Mono technical text. The paper, linen and evergreen palette follows the [final Paper design](design/paper/README.md). No font preparation step, Node.js, or Pi installation is required to build or launch the app. Tools you run inside its terminals have their own installation requirements.
 
-A release-mode source build uses:
+A release build uses:
 
 ```powershell
 cargo build --release --locked
 ```
 
-The launch directory joins the project sidebar. Existing Pi sessions and credentials remain Pi-owned. Open a project, select or create a session, then use **Settings → Providers** to authenticate and **Models** to choose an available model.
+## Project state and restoration
 
-The supplied source retains the existing executable discovery, strict version checks, rejected-project-trust launch policy, queue cancellation and process supervision. It does not install extensions automatically or modify a user's project to demonstrate a feature.
+While the app stays open, each project retains its sidebar selection, expanded directories and scroll position, open file buffers and cursor positions, active tab, and terminal sessions. Switching projects reuses those views and processes.
 
-## Local drafts and recovery
+Across app restarts, only project folders, terminal layout, selected terminal/project, and sidebar visibility are restored. This layout is stored in `terminal-workspace.json` beside the settings file, normally under `%APPDATA%\Pideck`. `PI_GUI_SETTINGS_PATH` relocates the settings file and adjacent layout file.
 
-Drafts are stored beside the app settings file, normally under `%APPDATA%\Pideck\drafts-v1`. `PI_GUI_SETTINGS_PATH` changes the settings location and therefore the adjacent drafts directory. These are app-owned checkpoints, not Pi session files.
+Restarting creates fresh shells. Open files, file buffers and cursor positions, expanded directories, terminal output, running processes, and CLI conversations are not restored from disk. Save files before closing; use each CLI's own session features when available.
 
-The contents are **local plaintext**, including draft text, undo history, attachment snapshots/base64 image data and source paths. Protect this directory like your Pi session directory. No credential input fields are saved by this mechanism. No file in a user project is created for draft storage.
+If a saved layout cannot be read or restored, automatic saving pauses to preserve it. Repair the file and reopen the app, or choose **Replace saved layout** to save the current workspace instead. Closing without saving keeps the previous file.
 
-Every two seconds, changed session drafts are offered to a bounded background writer; unchanged drafts are not reserialized. Normal close waits asynchronously for queued writes and checks for intervening edits. Failures keep the window open with recovery feedback. A forced process/OS termination can lose changes after the last completed checkpoint; this is not a crash-proof or encrypted vault.
+Workspace settings stay local. Pideck adds no telemetry, analytics, or remote reporting; commands you run have their own network and privacy behavior.
 
-An unreadable, mismatched-owner or unsupported-version checkpoint is retained rather than overwritten. The feedback identifies a corrupt checkpoint when available. Back it up and repair or move that file, then select **Retry storage**. Never delete a Pi session as part of local draft recovery. Restored uncertain submissions require inspecting the conversation before deciding whether to send again.
+## Terminal input
 
-While an attachment picker/read is active, session switching is temporarily blocked so the result cannot land in a different session. Cleared Pi queue messages remain available under **Restore next**, which appends instead of replacing a current draft.
+Drag to select text, double-click to select a word, or triple-click to select a line. Hold `Alt` while dragging for a rectangular selection. When a terminal application captures the mouse, hold `Shift` to select text or scroll the terminal history instead.
 
-## Keyboard essentials
+The terminal supports native Unicode/IME composition, bracketed paste, application mouse input, and scrollback. Copy uses the selected text, or the visible screen when nothing is selected.
+
+## Keyboard
 
 | Action | Keys |
 |---|---|
-| Search conversations / command palette | `Ctrl+K` or `Ctrl+Shift+P` |
-| Project navigation / inspector | `Ctrl+B` / `Ctrl+I` |
-| Connect / Retry / Stop | `Ctrl+Alt+C` / `Ctrl+Alt+R` / `Ctrl+Alt+S` |
-| Workspace terminal | `` Ctrl+` `` |
-| Attach files | `Ctrl+O`, or drag onto the composer |
-| Send or steer / newline / queue | `Enter` / `Shift+Enter` / `Alt+Enter` |
-| Restore a saved input | `Ctrl+Shift+R` |
-| Direct Bash / Bash excluded from context | `!command` / `!!command` |
-| Abort current run | `Escape` |
-| Hotkey help | `Ctrl+/` |
+| Add project folder | `Ctrl+Shift+O` |
+| New terminal | `Ctrl+Shift+T` |
+| Close active tab | `Ctrl+Shift+W` |
+| Next / previous tab | `Ctrl+Tab` / `Ctrl+Shift+Tab` |
+| Save active file | `Ctrl+S` |
+| Previous / next project | `Ctrl+Alt+Up` / `Ctrl+Alt+Down` |
+| Toggle project sidebar | `Ctrl+Shift+B` |
+| Focus terminal | `` Ctrl+` `` |
+| Focus project sidebar | `F6` |
+| Copy terminal selection or visible screen | `Ctrl+Shift+C` |
+| Select all terminal history | `Ctrl+Shift+A` |
+| Paste into terminal | `Ctrl+Shift+V` |
+| Scroll terminal history up / down | `Shift+PageUp` / `Shift+PageDown` |
 
-The full keyboard and launch-policy map is in [info/README.md](info/README.md).
+## Appearance
 
-## Extension integrations
+Choose **Paper**, **Linen**, **Graphite**, or **Midnight** from the appearance picker beside **New terminal**. Paper matches the supplied design; Linen is warm and light, Graphite is charcoal with sage accents, and Midnight uses a dark blue palette.
 
-Supported Pi extension UI requests use native dialogs, status lines, widgets, title updates and palette commands. Custom TUI components remain unsupported rather than appearing as dead native controls.
+Theme changes apply to open files, diffs, and terminals without restarting shells or clearing their history. The preference stays local in `appearance.json` beside the workspace layout. A malformed preference is preserved until you explicitly choose a theme. The picker supports Tab, arrow keys, Enter, and Escape.
 
-The snapshot's reference versions are retained, **not live-certified in this delivery**:
+## Development
 
-| Extension | Snapshot reference | Integration |
-|---|---:|---|
-| `@tintinweb/pi-tasks` | 0.7.2 | Dependencies, blockers, outputs, guarded execute/stop |
-| `@tintinweb/pi-subagents` | 0.15.2 | Lifecycle, queue, concurrency, schedules, worktrees, memory, steer/stop/resume |
-| `@narumitw/pi-goal` | 0.51.0 | Objective, limits, budget, queue and guarded goal actions |
-| `@juicesharp/rpiv-ask-user-question` | 2.5.1 | Native multi-question, choice, note and multi-select flows |
+The app reuses [GPUI 0.2.2](https://docs.rs/crate/gpui/0.2.2/source/) for native rendering, [GPUI Component 0.5.1](https://docs.rs/crate/gpui-component/0.5.1/source/) for the editor, and [Alacritty Terminal 0.26.0](https://docs.rs/crate/alacritty_terminal/0.26.0/source/) with `portable-pty` for terminals. GPUI Component brings in Zed's [sum-tree 0.2.0](https://docs.rs/crate/zed-sum-tree/0.2.0/source/) transitively. These linked crates are Apache-2.0 licensed; no GPL-licensed Zed editor source was copied for this integration.
 
-`pi-bar` 0.3.39 is the snapshot reference for GUI-session exclusion; TUI packages remain installed. Public SDK compatibility checks and synthetic fixtures are not a substitute for exercising those installed extensions.
-
-## Validation
-
-On a configured Windows machine:
+For code changes, finish implementation before running the relevant final checks:
 
 ```powershell
-.\scripts\validate.ps1
+cargo fmt --all -- --check
+cargo check --all-targets
+cargo test --all-targets
 ```
 
-The script prepares/verifies design fonts, checks source/asset contracts, formatting, all Rust targets/tests, bridge/font-import tests and Clippy, using the included lockfile. It does not install Rust/Pi dependencies or publish anything. Run `cargo fmt --all` before the first validation; formatting could not be normalized with rustfmt in the delivery environment.
-
-Bridge tests and isolated catalog benchmark can also run directly:
-
-```powershell
-node --test (Get-ChildItem -Path bridge,scripts -Filter *.test.mjs).FullName
-node scripts/verify-source.mjs
-node scripts/bench-resource-index.mjs
-```
-
-The benchmark excludes Pi startup, filesystem loading, networking and native rendering.
-
-## Documentation
-
-- [info/README.md](info/README.md): runtime policy and architecture map.
-- [bridge/README.md](bridge/README.md): public SDK bridge, IPC, trust and resource indexing.
-- [AGENTS.md](AGENTS.md): contributor instructions. The bundled `GPUI.md` is the native UI development reference.
+See [AGENTS.md](AGENTS.md) for contributor rules and [GPUI.md](GPUI.md) for the version-specific native UI reference.

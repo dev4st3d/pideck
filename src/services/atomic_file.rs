@@ -20,10 +20,16 @@ impl Drop for TemporaryFile {
 }
 
 pub fn write(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    let parent = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
     fs::create_dir_all(parent)?;
     let name = path.file_name().ok_or_else(|| {
-        io::Error::new(io::ErrorKind::InvalidInput, "A file destination is required")
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "A file destination is required",
+        )
     })?;
 
     let (temporary, mut file) = loop {
@@ -61,7 +67,8 @@ mod tests {
     fn directory(label: &str) -> PathBuf {
         let root = std::env::temp_dir().join(format!(
             "pideck-atomic-{label}-{}-{}",
-            std::process::id(), NEXT_TEMP.fetch_add(1, Ordering::Relaxed),
+            std::process::id(),
+            NEXT_TEMP.fetch_add(1, Ordering::Relaxed),
         ));
         fs::create_dir_all(&root).unwrap();
         root

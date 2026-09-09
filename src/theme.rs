@@ -1,621 +1,350 @@
-//! Semantic colors and measured geometry from the six supplied PiDeck reference images.
+//! Shared workbench palettes; Paper preserves the supplied design reference.
 
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::cell::Cell;
 
-use gpui::{BoxShadow, Pixels, Rems, Rgba, SharedString, px, rems, rgba};
+use gpui::{Rems, Rgba, SharedString, rems, rgba};
 
-use crate::fonts::{self, FontRole};
+pub(crate) mod terminal_manager;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ThemeMode {
-    Dark,
-    Light,
-}
-
-impl ThemeMode {
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::Dark => "Dark",
-            Self::Light => "Light",
-        }
-    }
-}
-
-/// Existing keys retain their meaning. Each appearance shares identical geometry.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ThemeId {
-    PiDeckDark,
-    ParchmentDesk,
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum Appearance {
+    #[default]
+    Paper,
     Linen,
+    Graphite,
     Midnight,
 }
 
-impl ThemeId {
-    pub const ALL: [Self; 4] = [Self::ParchmentDesk, Self::Linen, Self::PiDeckDark, Self::Midnight];
-    pub const DARK: [Self; 2] = [Self::PiDeckDark, Self::Midnight];
-    pub const LIGHT: [Self; 2] = [Self::ParchmentDesk, Self::Linen];
+impl Appearance {
+    pub(crate) const ALL: [Self; 4] = [Self::Paper, Self::Linen, Self::Graphite, Self::Midnight];
 
-    pub const fn label(self) -> &'static str {
+    pub(crate) const fn id(self) -> &'static str {
         match self {
-            Self::PiDeckDark => "Graphite",
-            Self::ParchmentDesk => "Original",
-            Self::Linen => "Linen",
-            Self::Midnight => "Midnight",
-        }
-    }
-
-    pub const fn key(self) -> &'static str {
-        match self {
-            Self::PiDeckDark => "pideck-dark",
-            Self::ParchmentDesk => "pideck-light",
+            Self::Paper => "paper",
             Self::Linen => "linen",
+            Self::Graphite => "graphite",
             Self::Midnight => "midnight",
         }
     }
 
-    pub fn from_key(key: &str) -> Option<Self> {
-        match key {
-            "linen" => Some(Self::Linen),
-            "midnight" => Some(Self::Midnight),
-            "original" => Some(Self::ParchmentDesk),
-            "graphite" => Some(Self::PiDeckDark),
-            "pideck-dark" | "cursor-dark" | "moss-foundry" | "ink-harbor"
-            | "volt-workshop" | "plum-archive" | "salt-flat" | "saffron-loom"
-            | "juniper-coil" | "smoke-library" | "pewter-hall" | "olive-study" => Some(Self::PiDeckDark),
-            "pideck-light" | "parchment-desk" | "mist-orchard" | "coral-ledger"
-            | "chalk-blueprint" | "honey-comb" | "porcelain-lab" | "citrus-grove"
-            | "letterpress" | "linen-gallery" | "rice-paper" | "bone-china" => Some(Self::ParchmentDesk),
-            _ => None,
-        }
-    }
-
-    pub const fn mode(self) -> ThemeMode {
+    pub(crate) const fn label(self) -> &'static str {
         match self {
-            Self::PiDeckDark | Self::Midnight => ThemeMode::Dark,
-            Self::ParchmentDesk | Self::Linen => ThemeMode::Light,
+            Self::Paper => "Paper",
+            Self::Linen => "Linen",
+            Self::Graphite => "Graphite",
+            Self::Midnight => "Midnight",
         }
     }
 
-    pub fn for_mode(mode: ThemeMode) -> &'static [Self] {
-        match mode { ThemeMode::Dark => &Self::DARK, ThemeMode::Light => &Self::LIGHT }
+    pub(crate) fn from_id(id: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|appearance| appearance.id() == id)
     }
 
-    pub const fn next(self) -> Self {
+    pub(crate) const fn is_dark(self) -> bool {
+        matches!(self, Self::Graphite | Self::Midnight)
+    }
+
+    fn palette(self) -> &'static Palette {
         match self {
-            Self::ParchmentDesk => Self::Linen,
-            Self::Linen => Self::PiDeckDark,
-            Self::PiDeckDark => Self::Midnight,
-            Self::Midnight => Self::ParchmentDesk,
+            Self::Paper => &PAPER,
+            Self::Linen => &LINEN,
+            Self::Graphite => &GRAPHITE,
+            Self::Midnight => &MIDNIGHT,
         }
     }
-
-    const fn index(self) -> u8 {
-        match self { Self::PiDeckDark => 0, Self::ParchmentDesk => 1, Self::Linen => 2, Self::Midnight => 3 }
-    }
-    const fn from_index(index: u8) -> Self {
-        match index { 0 => Self::PiDeckDark, 2 => Self::Linen, 3 => Self::Midnight, _ => Self::ParchmentDesk }
-    }
-    const fn palette(self) -> &'static Palette {
-        match self { Self::PiDeckDark => &GRAPHITE, Self::ParchmentDesk => &ORIGINAL, Self::Linen => &LINEN, Self::Midnight => &MIDNIGHT }
-    }
 }
 
-static ACTIVE_THEME: AtomicU8 = AtomicU8::new(ThemeId::ParchmentDesk.index());
-
-pub fn active() -> ThemeId {
-    ThemeId::from_index(ACTIVE_THEME.load(Ordering::Relaxed))
+thread_local! {
+    // Rendering and theme changes stay on GPUI's UI thread. Workers receive
+    // resolved colors or an explicit Appearance, never ambient theme state.
+    static APPEARANCE: Cell<Appearance> = const { Cell::new(Appearance::Paper) };
 }
 
-pub fn set_active(theme: ThemeId) {
-    ACTIVE_THEME.store(theme.index(), Ordering::Relaxed);
+pub(crate) fn appearance() -> Appearance {
+    APPEARANCE.get()
 }
 
-pub(crate) use crate::services::accessibility::motion_enabled;
-
-pub fn main() -> SharedString {
-    fonts::family(FontRole::Main)
+pub(crate) fn set_appearance(appearance: Appearance) {
+    APPEARANCE.set(appearance);
 }
-
-pub fn sans() -> SharedString {
-    fonts::family(FontRole::Sans)
-}
-
-pub fn serif() -> SharedString {
-    "Instrument Serif".into()
-}
-
-pub fn mono() -> SharedString {
-    fonts::family(FontRole::Mono)
-}
-
-// Layout. 4px rhythm. Chrome recedes; the transcript and prompt dock
-// keep the widest measure and the softest corners.
-pub const SIDE_W: f32 = crate::state::workspace_layout::NAVIGATION_WIDTH;
-pub const HISTORY_W: f32 = crate::state::workspace_layout::HISTORY_WIDTH;
-pub const INSPECT_W: f32 = crate::state::workspace_layout::INSPECTOR_WIDTH;
-pub const TITLE_H: f32 = 40.0;
-pub const TOOLBAR_H: f32 = 60.0;
-pub const RAIL_W: f32 = crate::state::workspace_layout::RAIL_WIDTH;
-pub const SIDEBAR_PAD: f32 = 24.0;
-pub const COMPOSER_H: f32 = 112.0;
-pub const COMPOSER_BOTTOM: f32 = 43.0;
-/// Default hit target for titlebar and rail icon buttons (Fitts).
-pub const CHROME: f32 = 36.0;
-pub const RADIUS: f32 = 6.0;
-pub const RADIUS_SM: f32 = 4.0;
-/// Nested controls inside a dock or sheet.
-pub const RADIUS_MD: f32 = 8.0;
-/// Floating sheets and the inspector companion.
-pub const RADIUS_LG: f32 = 8.0;
-/// Prompt dock — the largest surface, so it owns the softest corner.
-pub const RADIUS_XL: f32 = 11.0;
-pub const PAD_X: f32 = 16.0;
-pub const STREAM_PAD_X: f32 = 24.0;
-pub const READING_W: f32 = 840.0;
-pub const SCROLLBAR: f32 = 6.0;
-
-// Type scale
-const DEFAULT_REM_SIZE: f32 = 16.0;
-const MIN_FONT_SCALE_LEVEL: i8 = -2;
-const MAX_FONT_SCALE_LEVEL: i8 = 3;
-const FONT_SCALE_STEP_PERCENT: i8 = 10;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct FontScale {
-    level: i8,
-}
-
-impl FontScale {
-    pub fn increase(&mut self) -> bool {
-        self.adjust(1)
-    }
-
-    pub fn decrease(&mut self) -> bool {
-        self.adjust(-1)
-    }
-
-    pub fn rem_size(self) -> Pixels {
-        px(DEFAULT_REM_SIZE * self.factor())
-    }
-
-    pub fn percent(self) -> u16 {
-        (100 + i16::from(self.level) * i16::from(FONT_SCALE_STEP_PERCENT)) as u16
-    }
-
-    fn factor(self) -> f32 {
-        self.percent() as f32 / 100.0
-    }
-
-    fn adjust(&mut self, delta: i8) -> bool {
-        let next = (self.level + delta).clamp(MIN_FONT_SCALE_LEVEL, MAX_FONT_SCALE_LEVEL);
-        if next == self.level {
-            return false;
-        }
-        self.level = next;
-        true
-    }
-}
-
-/// Converts a pixel-based type token into a window-relative text size.
-///
-/// Keeping typography in rems lets `Window::set_rem_size` scale all text while
-/// preserving the existing type hierarchy.
-pub fn text_size(base_pixels: f32) -> Rems {
-    rems(base_pixels / DEFAULT_REM_SIZE)
-}
-
-pub const T_WORDMARK: f32 = 25.0;
-pub const T_TITLE: f32 = 24.0;
-pub const T_BODY: f32 = 16.0;
-pub const T_BODY_SM: f32 = 15.0;
-pub const T_UI: f32 = 13.0;
-pub const T_UI_SM: f32 = 12.0;
-pub const T_LABEL: f32 = 12.0;
-pub const T_MONO: f32 = 12.0;
-pub const T_MONO_SM: f32 = 12.0;
-pub const T_TINY: f32 = 11.0;
 
 struct Palette {
     canvas: u32,
     floor: u32,
-    panel: u32,
-    panel_lift: u32,
     panel_hover: u32,
-    user_message: u32,
-    user_message_edge: u32,
     edge: u32,
     edge_hard: u32,
-    edge_soft: u32,
     bone: u32,
-    bone_dim: u32,
     ash: u32,
-    smoke: u32,
-    signal: u32,
-    signal_deep: u32,
-    signal_hot: u32,
     focus: u32,
+    accent_hover: u32,
+    accent_pressed: u32,
+    on_accent: u32,
     error: u32,
     error_wash: u32,
-    live: u32,
-    live_wash: u32,
-    working: u32,
-    data: u32,
-    data_wash: u32,
-    rail: u32,
-    rail_muted: u32,
     selection: u32,
-    on_accent: u32,
-    tool_branch: u32,
-    search_surface: u32,
+    working: u32,
+    diff_added: u32,
+    diff_removed: u32,
+    diff_empty: u32,
 }
 
-// Flat colors sampled from the PNGs. Working subtitles are amber in the
-// themed exports, despite the conflicting historical prose in design.md.
-const ORIGINAL: Palette = Palette {
-    canvas: 0xfaf9f6ff,
-    floor: 0xf0efebff,
-    panel: 0xffffffff,
-    panel_lift: 0xf0efebff,
-    panel_hover: 0xe8edfcff,
-    user_message: 0xf0efebff,
-    user_message_edge: 0xf0efebff,
-    edge: 0xddded9ff,
-    edge_hard: 0xddded9ff,
-    edge_soft: 0xddded980,
-    bone: 0x24272cff,
-    bone_dim: 0x24272cff,
-    ash: 0x6a6d73ff,
-    smoke: 0x6a6d73ff,
-    signal: 0x304cdcff,
-    signal_deep: 0x304cdcff,
-    signal_hot: 0x304cdcff,
-    focus: 0x304cdcff,
-    error: 0x9a3f37ff,
-    error_wash: 0x9a3f3716,
-    live: 0x326c52ff,
-    live_wash: 0x326c5216,
-    working: 0x304cdcff,
-    data: 0x62518eff,
-    data_wash: 0x62518e16,
-    rail: 0x24272cff,
-    rail_muted: 0xd4d7ddff,
-    selection: 0xe8edfcff,
+const PAPER: Palette = Palette {
+    canvas: 0xf6f5f0ff,
+    floor: 0xecebe4ff,
+    panel_hover: 0xe2e6dcff,
+    edge: 0xd5d8cfff,
+    edge_hard: 0xb4bbaeff,
+    bone: 0x242824ff,
+    ash: 0x646a62ff,
+    focus: 0x315c49ff,
+    accent_hover: 0x284e3dff,
+    accent_pressed: 0x234334ff,
     on_accent: 0xffffffff,
-    tool_branch: 0xb7bab6ff,
-    search_surface: 0xfaf9f6ff,
+    error: 0x875346ff,
+    error_wash: 0xf0e3dcff,
+    selection: 0xdbe3d8ff,
+    working: 0x756025ff,
+    diff_added: 0xe1ebdcff,
+    diff_removed: 0xf0e3dcff,
+    diff_empty: 0xeeefe8ff,
 };
 
 const LINEN: Palette = Palette {
-    canvas: 0xf7f4edff,
-    floor: 0xefebe2ff,
-    panel: 0xfffefaff,
-    panel_lift: 0xf0f0e8ff,
-    panel_hover: 0xdde7dcff,
-    user_message: 0xf0f0e8ff,
-    user_message_edge: 0xf0f0e8ff,
-    edge: 0xd8d8ceff,
-    edge_hard: 0xd8d8ceff,
-    edge_soft: 0xd8d8ce80,
-    bone: 0x242823ff,
-    bone_dim: 0x242823ff,
-    ash: 0x62675eff,
-    smoke: 0x62675eff,
-    signal: 0x355e4bff,
-    signal_deep: 0x355e4bff,
-    signal_hot: 0x355e4bff,
-    focus: 0x355e4bff,
-    error: 0x9a3f37ff,
-    error_wash: 0x9a3f3716,
-    live: 0x2f664aff,
-    live_wash: 0x2f664a16,
-    working: 0x795817ff,
-    data: 0x5f557fff,
-    data_wash: 0x5f557f16,
-    rail: 0x202521ff,
-    rail_muted: 0xb2baaeff,
-    selection: 0xdde7dcff,
+    canvas: 0xf7f3ebff,
+    floor: 0xede6daff,
+    panel_hover: 0xe6ddcdff,
+    edge: 0xd8cfbfff,
+    edge_hard: 0xb6a58fff,
+    bone: 0x302b25ff,
+    ash: 0x6c6255ff,
+    focus: 0x6b4b34ff,
+    accent_hover: 0x593d2aff,
+    accent_pressed: 0x493122ff,
     on_accent: 0xffffffff,
-    tool_branch: 0x62675eff,
-    search_surface: 0xfffefaff,
+    error: 0x8a453aff,
+    error_wash: 0xf0ddd2ff,
+    selection: 0xe5d8c5ff,
+    working: 0x765923ff,
+    diff_added: 0xe0e8d7ff,
+    diff_removed: 0xf0ddd2ff,
+    diff_empty: 0xeee9deff,
 };
 
 const GRAPHITE: Palette = Palette {
     canvas: 0x20211fff,
-    floor: 0x1c1e1bff,
-    panel: 0x282a27ff,
-    panel_lift: 0x30332cff,
-    panel_hover: 0x36402dff,
-    user_message: 0x30332cff,
-    user_message_edge: 0x30332cff,
-    edge: 0x41453dff,
-    edge_hard: 0x41453dff,
-    edge_soft: 0x41453d80,
+    floor: 0x191c19ff,
+    panel_hover: 0x30382cff,
+    edge: 0x3c4338ff,
+    edge_hard: 0x737e69ff,
     bone: 0xeeefe8ff,
-    bone_dim: 0xeeefe8ff,
-    ash: 0xabb0a4ff,
-    smoke: 0xabb0a4ff,
-    signal: 0xc3d6a3ff,
-    signal_deep: 0xc3d6a3ff,
-    signal_hot: 0xc3d6a3ff,
+    ash: 0xabb3a4ff,
     focus: 0xc3d6a3ff,
-    error: 0xedaaa1ff,
-    error_wash: 0xedaaa116,
-    live: 0xabd4adff,
-    live_wash: 0xabd4ad16,
-    working: 0xddc28dff,
-    data: 0xc3bde1ff,
-    data_wash: 0xc3bde116,
-    rail: 0x141613ff,
-    rail_muted: 0xabb5a4ff,
-    selection: 0x36402dff,
-    on_accent: 0x202521ff,
-    tool_branch: 0xabb0a4ff,
-    search_surface: 0x282a27ff,
+    accent_hover: 0xd1e2b6ff,
+    accent_pressed: 0xb1c78fff,
+    on_accent: 0x20251bff,
+    error: 0xf0b1a2ff,
+    error_wash: 0x422c28ff,
+    selection: 0x39482fff,
+    working: 0xdec48cff,
+    diff_added: 0x293d28ff,
+    diff_removed: 0x422c28ff,
+    diff_empty: 0x242922ff,
 };
 
 const MIDNIGHT: Palette = Palette {
     canvas: 0x141d2bff,
-    floor: 0x111a28ff,
-    panel: 0x1a2638ff,
-    panel_lift: 0x23334aff,
-    panel_hover: 0x263f64ff,
-    user_message: 0x23334aff,
-    user_message_edge: 0x23334aff,
-    edge: 0x34465fff,
-    edge_hard: 0x34465fff,
-    edge_soft: 0x34465f80,
+    floor: 0x101925ff,
+    panel_hover: 0x23364fff,
+    edge: 0x30445eff,
+    edge_hard: 0x647f9eff,
     bone: 0xeaf0faff,
-    bone_dim: 0xeaf0faff,
-    ash: 0xa6b5ccff,
-    smoke: 0xa6b5ccff,
-    signal: 0xadc6ffff,
-    signal_deep: 0xadc6ffff,
-    signal_hot: 0xadc6ffff,
+    ash: 0xa6b7ccff,
     focus: 0xadc6ffff,
-    error: 0xf0a8b1ff,
-    error_wash: 0xf0a8b116,
-    live: 0x9cd7c2ff,
-    live_wash: 0x9cd7c216,
+    accent_hover: 0xc4d6ffff,
+    accent_pressed: 0x96b5f5ff,
+    on_accent: 0x142037ff,
+    error: 0xf0adbaff,
+    error_wash: 0x422d40ff,
+    selection: 0x2a4264ff,
     working: 0xe7c69bff,
-    data: 0xc6b8e8ff,
-    data_wash: 0xc6b8e816,
-    rail: 0x0b121dff,
-    rail_muted: 0xa6b5ccff,
-    selection: 0x263f64ff,
-    on_accent: 0x152033ff,
-    tool_branch: 0xa6b5ccff,
-    search_surface: 0x1a2638ff,
+    diff_added: 0x1d3b37ff,
+    diff_removed: 0x422d40ff,
+    diff_empty: 0x1c293aff,
 };
 
-fn color(select: impl FnOnce(&Palette) -> u32) -> Rgba {
-    rgba(select(active().palette()))
+fn palette() -> &'static Palette {
+    appearance().palette()
 }
 
-pub fn canvas() -> Rgba {
-    color(|palette| palette.canvas)
+pub(crate) fn mono() -> SharedString {
+    crate::fonts::mono()
 }
 
-pub fn floor() -> Rgba {
-    color(|palette| palette.floor)
+pub(crate) fn text_size(pixels: f32) -> Rems {
+    rems(pixels / 16.0)
 }
 
-pub fn panel() -> Rgba {
-    color(|palette| palette.panel)
+pub(crate) const T_MONO: f32 = 13.0;
+
+pub(crate) fn canvas() -> Rgba {
+    rgba(palette().canvas)
+}
+pub(crate) fn floor() -> Rgba {
+    rgba(palette().floor)
+}
+pub(crate) fn panel() -> Rgba {
+    floor()
+}
+pub(crate) fn panel_lift() -> Rgba {
+    canvas()
+}
+pub(crate) fn panel_hover() -> Rgba {
+    rgba(palette().panel_hover)
+}
+pub(crate) fn edge() -> Rgba {
+    rgba(palette().edge)
+}
+pub(crate) fn edge_hard() -> Rgba {
+    rgba(palette().edge_hard)
+}
+pub(crate) fn edge_soft() -> Rgba {
+    edge()
+}
+pub(crate) fn bone() -> Rgba {
+    rgba(palette().bone)
+}
+pub(crate) fn bone_dim() -> Rgba {
+    bone()
+}
+pub(crate) fn ash() -> Rgba {
+    rgba(palette().ash)
+}
+pub(crate) fn smoke() -> Rgba {
+    ash()
+}
+pub(crate) fn focus() -> Rgba {
+    rgba(palette().focus)
+}
+pub(crate) fn accent_hover() -> Rgba {
+    rgba(palette().accent_hover)
+}
+pub(crate) fn accent_pressed() -> Rgba {
+    rgba(palette().accent_pressed)
+}
+pub(crate) fn error() -> Rgba {
+    rgba(palette().error)
+}
+pub(crate) fn error_wash() -> Rgba {
+    rgba(palette().error_wash)
+}
+pub(crate) fn selection() -> Rgba {
+    rgba(palette().selection)
+}
+pub(crate) fn on_accent() -> Rgba {
+    rgba(palette().on_accent)
+}
+pub(crate) fn working() -> Rgba {
+    rgba(palette().working)
+}
+pub(crate) fn diff_added() -> Rgba {
+    rgba(palette().diff_added)
+}
+pub(crate) fn diff_removed() -> Rgba {
+    rgba(palette().diff_removed)
+}
+pub(crate) fn diff_empty() -> Rgba {
+    rgba(palette().diff_empty)
 }
 
-pub fn panel_lift() -> Rgba {
-    color(|palette| palette.panel_lift)
-}
+const ANSI_LIGHT: [u32; 16] = [
+    0x242824ff, 0x9e3238ff, 0x2f6843ff, 0x765b00ff, 0x315ea3ff, 0x854080ff, 0x226d70ff, 0x646a62ff,
+    0x646a62ff, 0xb13c40ff, 0x316c45ff, 0x7d6000ff, 0x395f9bff, 0x90518aff, 0x267076ff, 0x495048ff,
+];
 
-pub fn panel_hover() -> Rgba {
-    color(|palette| palette.panel_hover)
-}
+const ANSI_DARK: [u32; 16] = [
+    0x8d9785ff, 0xf09085ff, 0x9dc88fff, 0xd9bf83ff, 0x91b6e8ff, 0xc5a0dcff, 0x89c8caff, 0xe0e7d8ff,
+    0x9ba88eff, 0xffaca0ff, 0xb7de9fff, 0xead59bff, 0xb0caffff, 0xdcbce8ff, 0xa1dee0ff, 0xf6f7efff,
+];
 
-pub fn user_message() -> Rgba {
-    color(|palette| palette.user_message)
+pub(crate) fn terminal_ansi(index: u8) -> Option<Rgba> {
+    let colors = if appearance().is_dark() {
+        &ANSI_DARK
+    } else {
+        &ANSI_LIGHT
+    };
+    colors.get(usize::from(index)).copied().map(rgba)
 }
-
-pub fn user_message_edge() -> Rgba {
-    color(|palette| palette.user_message_edge)
-}
-
-pub fn edge() -> Rgba {
-    color(|palette| palette.edge)
-}
-
-pub fn edge_hard() -> Rgba {
-    color(|palette| palette.edge_hard)
-}
-
-pub fn edge_soft() -> Rgba {
-    color(|palette| palette.edge_soft)
-}
-
-pub fn bone() -> Rgba {
-    color(|palette| palette.bone)
-}
-
-pub fn bone_dim() -> Rgba {
-    color(|palette| palette.bone_dim)
-}
-
-pub fn ash() -> Rgba {
-    color(|palette| palette.ash)
-}
-
-pub fn smoke() -> Rgba {
-    color(|palette| palette.smoke)
-}
-
-pub fn signal() -> Rgba {
-    color(|palette| palette.signal)
-}
-
-pub fn signal_deep() -> Rgba {
-    color(|palette| palette.signal_deep)
-}
-
-pub fn signal_hot() -> Rgba {
-    color(|palette| palette.signal_hot)
-}
-
-pub fn focus() -> Rgba {
-    color(|palette| palette.focus)
-}
-
-pub fn error() -> Rgba {
-    color(|palette| palette.error)
-}
-
-pub fn error_wash() -> Rgba {
-    color(|palette| palette.error_wash)
-}
-
-pub fn live() -> Rgba {
-    color(|palette| palette.live)
-}
-
-pub fn live_wash() -> Rgba {
-    color(|palette| palette.live_wash)
-}
-
-pub fn working() -> Rgba {
-    color(|palette| palette.working)
-}
-
-pub fn data() -> Rgba {
-    color(|palette| palette.data)
-}
-
-pub fn data_wash() -> Rgba {
-    color(|palette| palette.data_wash)
-}
-
-/// Recognition swatch for the theme picker: paper + signal accent.
-pub fn preview_swatch(theme: ThemeId) -> (Rgba, Rgba) {
-    let palette = theme.palette();
-    (rgba(palette.canvas), rgba(palette.signal))
-}
-
-/// Reference surfaces are flat. Popovers use an opaque fill and outline.
-pub fn dock_shadow() -> Vec<BoxShadow> { Vec::new() }
-pub fn sheet_shadow() -> Vec<BoxShadow> { Vec::new() }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn channel(component: f32) -> f32 {
-        if component <= 0.03928 {
-            component / 12.92
-        } else {
-            ((component + 0.055) / 1.055).powf(2.4)
-        }
-    }
-
-    fn relative_luminance(color: u32) -> f32 {
-        let r = channel(((color >> 24) & 0xff) as f32 / 255.0);
-        let g = channel(((color >> 16) & 0xff) as f32 / 255.0);
-        let b = channel(((color >> 8) & 0xff) as f32 / 255.0);
-        0.2126 * r + 0.7152 * g + 0.0722 * b
-    }
-
-    fn contrast_ratio(foreground: u32, background: u32) -> f32 {
-        let light = relative_luminance(foreground);
-        let dark = relative_luminance(background);
-        let (hi, lo) = if light > dark {
-            (light, dark)
-        } else {
-            (dark, light)
-        };
-        (hi + 0.05) / (lo + 0.05)
-    }
-
-    #[test]
-    fn font_scale_is_bounded_and_keeps_default_typography_unchanged() {
-        let mut scale = FontScale::default();
-        assert_eq!(scale.percent(), 100);
-        assert_eq!(scale.rem_size(), px(16.0));
-        assert_eq!(text_size(T_BODY), rems(T_BODY / 16.0));
-
-        for _ in 0..10 {
-            scale.increase();
-        }
-        assert_eq!(scale.percent(), 130);
-        assert!(!scale.increase());
-
-        for _ in 0..10 {
-            scale.decrease();
-        }
-        assert_eq!(scale.percent(), 80);
-        assert!(!scale.decrease());
-    }
-
-    #[test]
-    fn theme_keys_round_trip_and_are_unique() {
-        let mut keys = std::collections::HashSet::new();
-        for theme in ThemeId::ALL {
-            assert!(
-                keys.insert(theme.key()),
-                "duplicate theme key {}",
-                theme.key()
-            );
-            assert_eq!(ThemeId::from_key(theme.key()), Some(theme));
-        }
-        assert_eq!(ThemeId::from_key("not-a-theme"), None);
-        assert_eq!(ThemeId::from_key("Pideck Dark"), None);
-    }
-
-    #[test]
-    fn legacy_appearances_migrate_with_their_original_brightness() {
-        for key in [
-            "cursor-dark", "moss-foundry", "ink-harbor", "volt-workshop",
-            "plum-archive", "salt-flat", "saffron-loom", "juniper-coil",
-            "smoke-library", "pewter-hall", "olive-study",
-        ] {
-            assert_eq!(ThemeId::from_key(key), Some(ThemeId::PiDeckDark));
-        }
-        for key in [
-            "parchment-desk", "mist-orchard", "coral-ledger", "chalk-blueprint",
-            "honey-comb", "porcelain-lab", "citrus-grove", "letterpress",
-            "linen-gallery", "rice-paper", "bone-china",
-        ] {
-            assert_eq!(ThemeId::from_key(key), Some(ThemeId::ParchmentDesk));
-        }
-        assert_eq!(ThemeId::PiDeckDark.next().next().next().next(), ThemeId::PiDeckDark);
-    }
-
-    #[test]
-    fn readable_primary_text_and_unselected_metadata() {
-        for theme in ThemeId::ALL {
-            let p = theme.palette();
-            for background in [p.canvas, p.floor, p.panel, p.panel_lift, p.user_message] {
-                for foreground in [p.bone, p.bone_dim, p.ash, p.smoke] {
-                    assert!(
-                        contrast_ratio(foreground, background) >= 4.5,
-                        "{}: {foreground:08x} on {background:08x}", theme.label(),
-                    );
-                }
-                assert!(contrast_ratio(p.focus, background) >= 3.0);
+    fn luminance(color: u32) -> f32 {
+        let color = rgba(color);
+        let linear = |component: f32| {
+            if component <= 0.04045 {
+                component / 12.92
+            } else {
+                ((component + 0.055) / 1.055).powf(2.4)
             }
-            assert!(contrast_ratio(p.bone, p.selection) >= 4.5);
-            assert!(contrast_ratio(p.on_accent, p.signal) >= 4.5);
-            assert!(contrast_ratio(p.rail_muted, p.rail) >= 4.5);
-            // Original's exact reference muted ink on selection is 4.43:1,
-            // so do not assert that every possible palette combination is AA.
+        };
+        0.2126 * linear(color.r) + 0.7152 * linear(color.g) + 0.0722 * linear(color.b)
+    }
+
+    #[test]
+    fn workbench_text_and_focus_remain_readable_in_every_appearance() {
+        let contrast = |a, b| {
+            let a = luminance(a);
+            let b = luminance(b);
+            (a.max(b) + 0.05) / (a.min(b) + 0.05)
+        };
+        for appearance in Appearance::ALL {
+            let p = appearance.palette();
+            for background in [p.canvas, p.floor] {
+                for foreground in [p.bone, p.ash] {
+                    assert!(contrast(foreground, background) >= 4.5, "{appearance:?}");
+                }
+                assert!(contrast(p.focus, background) >= 3.0, "{appearance:?}");
+            }
+            assert!(contrast(p.bone, p.selection) >= 4.5, "{appearance:?}");
+            // Selected labels use ink; muted file icons need non-text contrast.
+            assert!(contrast(p.ash, p.selection) >= 3.0, "{appearance:?}");
+            assert!(contrast(p.focus, p.selection) >= 3.0, "{appearance:?}");
+            for accent in [p.focus, p.accent_hover, p.accent_pressed] {
+                assert!(contrast(p.on_accent, accent) >= 4.5, "{appearance:?}");
+            }
+            assert!(contrast(p.error, p.diff_removed) >= 4.5, "{appearance:?}");
+            assert!(contrast(p.focus, p.diff_added) >= 4.5, "{appearance:?}");
+            let ansi = if appearance.is_dark() {
+                ANSI_DARK
+            } else {
+                ANSI_LIGHT
+            };
+            for color in ansi {
+                assert!(
+                    contrast(color, p.canvas) >= 4.5,
+                    "{appearance:?}: {color:08x}"
+                );
+            }
         }
+    }
+
+    #[test]
+    fn appearance_names_roundtrip_and_state_is_thread_local() {
+        for appearance in Appearance::ALL {
+            assert_eq!(Appearance::from_id(appearance.id()), Some(appearance));
+        }
+        assert_eq!(Appearance::from_id("unknown"), None);
+        let original = appearance();
+        set_appearance(Appearance::Midnight);
+        assert_eq!(appearance(), Appearance::Midnight);
+        assert_eq!(
+            std::thread::spawn(appearance).join().unwrap(),
+            Appearance::Paper
+        );
+        set_appearance(original);
     }
 }
-
-pub fn rail() -> Rgba { color(|palette| palette.rail) }
-
-pub fn rail_muted() -> Rgba { color(|palette| palette.rail_muted) }
-
-pub fn selection() -> Rgba { color(|palette| palette.selection) }
-
-pub fn on_accent() -> Rgba { color(|palette| palette.on_accent) }
-
-pub fn tool_branch() -> Rgba { color(|palette| palette.tool_branch) }
-
-/// The Original search surface is canvas-colored; the other references use panel.
-pub fn search_surface() -> Rgba { color(|palette| palette.search_surface) }

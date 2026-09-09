@@ -1,0 +1,588 @@
+{
+  "scope": "Flat reference pixels versus source constants. NOT a native screenshot comparison.",
+  "screens": [
+    {
+      "name": "01-original-completed.png",
+      "theme": "ORIGINAL",
+      "reference_sha256": "81147050c6cedbf8d27d5ce10183b8018a277c29e2cbe54c46b212962c5c6b21",
+      "samples": [
+        {
+          "role": "canvas",
+          "point": [
+            1300,
+            600
+          ],
+          "reference_rgb": "faf9f6",
+          "source_rgb": "faf9f6",
+          "equal": true
+        },
+        {
+          "role": "floor",
+          "point": [
+            280,
+            700
+          ],
+          "reference_rgb": "f0efeb",
+          "source_rgb": "f0efeb",
+          "equal": true
+        },
+        {
+          "role": "rail",
+          "point": [
+            20,
+            700
+          ],
+          "reference_rgb": "24272c",
+          "source_rgb": "24272c",
+          "equal": true
+        },
+        {
+          "role": "panel",
+          "point": [
+            1250,
+            850
+          ],
+          "reference_rgb": "ffffff",
+          "source_rgb": "ffffff",
+          "equal": true
+        },
+        {
+          "role": "user_message",
+          "point": [
+            460,
+            210
+          ],
+          "reference_rgb": "f0efeb",
+          "source_rgb": "f0efeb",
+          "equal": true
+        },
+        {
+          "role": "selection",
+          "point": [
+            95,
+            428
+          ],
+          "reference_rgb": "e8edfc",
+          "source_rgb": "e8edfc",
+          "equal": true
+        },
+        {
+          "role": "signal",
+          "point": [
+            95,
+            225
+          ],
+          "reference_rgb": "304cdc",
+          "source_rgb": "304cdc",
+          "equal": true
+        },
+        {
+          "role": "edge",
+          "point": [
+            600,
+            39
+          ],
+          "reference_rgb": "ddded9",
+          "source_rgb": "ddded9",
+          "equal": true
+        },
+        {
+          "role": "search_surface",
+          "point": [
+            95,
+            255
+          ],
+          "reference_rgb": "faf9f6",
+          "source_rgb": "faf9f6",
+          "equal": true
+        }
+      ]
+    },
+    {
+      "name": "02-original-ongoing-compact.png",
+      "theme": "ORIGINAL",
+      "reference_sha256": "76eba90052b1263d0c961e727f93aa23afdc938eff1b0c12b9b987f85dbf4f20",
+      "samples": [
+        {
+          "role": "canvas",
+          "point": [
+            1300,
+            600
+          ],
+          "reference_rgb": "faf9f6",
+          "source_rgb": "faf9f6",
+          "equal": true
+        },
+        {
+          "role": "floor",
+          "point": [
+            280,
+            700
+          ],
+          "reference_rgb": "f0efeb",
+          "source_rgb": "f0efeb",
+          "equal": true
+        },
+        {
+          "role": "rail",
+          "point": [
+            20,
+            700
+          ],
+          "reference_rgb": "24272c",
+          "source_rgb": "24272c",
+          "equal": true
+        },
+        {
+          "role": "panel",
+          "point": [
+            1250,
+            850
+          ],
+          "reference_rgb": "ffffff",
+          "source_rgb": "ffffff",
+          "equal": true
+        },
+        {
+          "role": "user_message",
+          "point": [
+            460,
+            210
+          ],
+          "reference_rgb": "f0efeb",
+          "source_rgb": "f0efeb",
+          "equal": true
+        },
+        {
+          "role": "selection",
+          "point": [
+            95,
+            428
+          ],
+          "reference_rgb": "e8edfc",
+          "source_rgb": "e8edfc",
+          "equal": true
+        },
+        {
+          "role": "signal",
+          "point": [
+            95,
+            225
+          ],
+          "reference_rgb": "304cdc",
+          "source_rgb": "304cdc",
+          "equal": true
+        },
+        {
+          "role": "edge",
+          "point": [
+            600,
+            39
+          ],
+          "reference_rgb": "ddded9",
+          "source_rgb": "ddded9",
+          "equal": true
+        },
+        {
+          "role": "search_surface",
+          "point": [
+            95,
+            255
+          ],
+          "reference_rgb": "faf9f6",
+          "source_rgb": "faf9f6",
+          "equal": true
+        }
+      ]
+    },
+    {
+      "name": "03-original-ongoing-expanded.png",
+      "theme": "ORIGINAL",
+      "reference_sha256": "f0e6d73d90e4829c32403527086332a26c59ce6be1b8758f930b253b671bb671",
+      "samples": [
+        {
+          "role": "canvas",
+          "point": [
+            1300,
+            600
+          ],
+          "reference_rgb": "faf9f6",
+          "source_rgb": "faf9f6",
+          "equal": true
+        },
+        {
+          "role": "floor",
+          "point": [
+            280,
+            700
+          ],
+          "reference_rgb": "f0efeb",
+          "source_rgb": "f0efeb",
+          "equal": true
+        },
+        {
+          "role": "rail",
+          "point": [
+            20,
+            700
+          ],
+          "reference_rgb": "24272c",
+          "source_rgb": "24272c",
+          "equal": true
+        },
+        {
+          "role": "panel",
+          "point": [
+            1250,
+            850
+          ],
+          "reference_rgb": "ffffff",
+          "source_rgb": "ffffff",
+          "equal": true
+        },
+        {
+          "role": "user_message",
+          "point": [
+            460,
+            210
+          ],
+          "reference_rgb": "f0efeb",
+          "source_rgb": "f0efeb",
+          "equal": true
+        },
+        {
+          "role": "selection",
+          "point": [
+            95,
+            428
+          ],
+          "reference_rgb": "e8edfc",
+          "source_rgb": "e8edfc",
+          "equal": true
+        },
+        {
+          "role": "signal",
+          "point": [
+            95,
+            225
+          ],
+          "reference_rgb": "304cdc",
+          "source_rgb": "304cdc",
+          "equal": true
+        },
+        {
+          "role": "edge",
+          "point": [
+            600,
+            39
+          ],
+          "reference_rgb": "ddded9",
+          "source_rgb": "ddded9",
+          "equal": true
+        },
+        {
+          "role": "search_surface",
+          "point": [
+            95,
+            255
+          ],
+          "reference_rgb": "faf9f6",
+          "source_rgb": "faf9f6",
+          "equal": true
+        }
+      ]
+    },
+    {
+      "name": "04-linen-light-ongoing-expanded.png",
+      "theme": "LINEN",
+      "reference_sha256": "a790b92b8d8156b55abdb64d97947a47498e935edc5d199d0cdcaec532527332",
+      "samples": [
+        {
+          "role": "canvas",
+          "point": [
+            1300,
+            600
+          ],
+          "reference_rgb": "f7f4ed",
+          "source_rgb": "f7f4ed",
+          "equal": true
+        },
+        {
+          "role": "floor",
+          "point": [
+            280,
+            700
+          ],
+          "reference_rgb": "efebe2",
+          "source_rgb": "efebe2",
+          "equal": true
+        },
+        {
+          "role": "rail",
+          "point": [
+            20,
+            700
+          ],
+          "reference_rgb": "202521",
+          "source_rgb": "202521",
+          "equal": true
+        },
+        {
+          "role": "panel",
+          "point": [
+            1250,
+            850
+          ],
+          "reference_rgb": "fffefa",
+          "source_rgb": "fffefa",
+          "equal": true
+        },
+        {
+          "role": "user_message",
+          "point": [
+            460,
+            210
+          ],
+          "reference_rgb": "f0f0e8",
+          "source_rgb": "f0f0e8",
+          "equal": true
+        },
+        {
+          "role": "selection",
+          "point": [
+            95,
+            428
+          ],
+          "reference_rgb": "dde7dc",
+          "source_rgb": "dde7dc",
+          "equal": true
+        },
+        {
+          "role": "signal",
+          "point": [
+            95,
+            225
+          ],
+          "reference_rgb": "355e4b",
+          "source_rgb": "355e4b",
+          "equal": true
+        },
+        {
+          "role": "edge",
+          "point": [
+            600,
+            39
+          ],
+          "reference_rgb": "d8d8ce",
+          "source_rgb": "d8d8ce",
+          "equal": true
+        },
+        {
+          "role": "search_surface",
+          "point": [
+            95,
+            255
+          ],
+          "reference_rgb": "fffefa",
+          "source_rgb": "fffefa",
+          "equal": true
+        }
+      ]
+    },
+    {
+      "name": "05-graphite-dark-ongoing-expanded.png",
+      "theme": "GRAPHITE",
+      "reference_sha256": "4e5d9ac7a22ba14cf3bb4aa859b4be0c7d651877b7acc424b5ef30f5dbb86edd",
+      "samples": [
+        {
+          "role": "canvas",
+          "point": [
+            1300,
+            600
+          ],
+          "reference_rgb": "20211f",
+          "source_rgb": "20211f",
+          "equal": true
+        },
+        {
+          "role": "floor",
+          "point": [
+            280,
+            700
+          ],
+          "reference_rgb": "1c1e1b",
+          "source_rgb": "1c1e1b",
+          "equal": true
+        },
+        {
+          "role": "rail",
+          "point": [
+            20,
+            700
+          ],
+          "reference_rgb": "141613",
+          "source_rgb": "141613",
+          "equal": true
+        },
+        {
+          "role": "panel",
+          "point": [
+            1250,
+            850
+          ],
+          "reference_rgb": "282a27",
+          "source_rgb": "282a27",
+          "equal": true
+        },
+        {
+          "role": "user_message",
+          "point": [
+            460,
+            210
+          ],
+          "reference_rgb": "30332c",
+          "source_rgb": "30332c",
+          "equal": true
+        },
+        {
+          "role": "selection",
+          "point": [
+            95,
+            428
+          ],
+          "reference_rgb": "36402d",
+          "source_rgb": "36402d",
+          "equal": true
+        },
+        {
+          "role": "signal",
+          "point": [
+            95,
+            225
+          ],
+          "reference_rgb": "c3d6a3",
+          "source_rgb": "c3d6a3",
+          "equal": true
+        },
+        {
+          "role": "edge",
+          "point": [
+            600,
+            39
+          ],
+          "reference_rgb": "41453d",
+          "source_rgb": "41453d",
+          "equal": true
+        },
+        {
+          "role": "search_surface",
+          "point": [
+            95,
+            255
+          ],
+          "reference_rgb": "282a27",
+          "source_rgb": "282a27",
+          "equal": true
+        }
+      ]
+    },
+    {
+      "name": "06-midnight-dark-ongoing-expanded.png",
+      "theme": "MIDNIGHT",
+      "reference_sha256": "337b16bc8f42bc45fb8fd94c8ed3fd450b0ea9cb058919e645fac2d364a19f22",
+      "samples": [
+        {
+          "role": "canvas",
+          "point": [
+            1300,
+            600
+          ],
+          "reference_rgb": "141d2b",
+          "source_rgb": "141d2b",
+          "equal": true
+        },
+        {
+          "role": "floor",
+          "point": [
+            280,
+            700
+          ],
+          "reference_rgb": "111a28",
+          "source_rgb": "111a28",
+          "equal": true
+        },
+        {
+          "role": "rail",
+          "point": [
+            20,
+            700
+          ],
+          "reference_rgb": "0b121d",
+          "source_rgb": "0b121d",
+          "equal": true
+        },
+        {
+          "role": "panel",
+          "point": [
+            1250,
+            850
+          ],
+          "reference_rgb": "1a2638",
+          "source_rgb": "1a2638",
+          "equal": true
+        },
+        {
+          "role": "user_message",
+          "point": [
+            460,
+            210
+          ],
+          "reference_rgb": "23334a",
+          "source_rgb": "23334a",
+          "equal": true
+        },
+        {
+          "role": "selection",
+          "point": [
+            95,
+            428
+          ],
+          "reference_rgb": "263f64",
+          "source_rgb": "263f64",
+          "equal": true
+        },
+        {
+          "role": "signal",
+          "point": [
+            95,
+            225
+          ],
+          "reference_rgb": "adc6ff",
+          "source_rgb": "adc6ff",
+          "equal": true
+        },
+        {
+          "role": "edge",
+          "point": [
+            600,
+            39
+          ],
+          "reference_rgb": "34465f",
+          "source_rgb": "34465f",
+          "equal": true
+        },
+        {
+          "role": "search_surface",
+          "point": [
+            95,
+            255
+          ],
+          "reference_rgb": "1a2638",
+          "source_rgb": "1a2638",
+          "equal": true
+        }
+      ]
+    }
+  ],
+  "all_flat_samples_equal": true
+}

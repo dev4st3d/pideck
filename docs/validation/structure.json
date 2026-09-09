@@ -1,0 +1,8 @@
+{
+  "scope": "File structure only, no Rust parsing/type check or workflow execution",
+  "svg_files_parsed": 41,
+  "workflow_files_parsed": 2,
+  "literal_icon_paths_verified": 41,
+  "preserved_crlf_files": 28,
+  "result": "passed"
+}

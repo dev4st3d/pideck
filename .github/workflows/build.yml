@@ -29,15 +29,6 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Setup Node for exact font preparation
-        uses: actions/setup-node@v7
-        with:
-          node-version: "22"
-          check-latest: true
-
-      - name: Prepare SHA-256-verified design fonts
-        run: node scripts/prepare-fonts.mjs
-
       - name: Cache Cargo
         uses: Swatinem/rust-cache@v2
         with:
@@ -73,7 +64,7 @@ jobs:
           Write-Host "Publishing $tag"
 
       - name: Build release
-        run: cargo build --release
+        run: cargo build --release --locked
 
       - name: Install Velopack CLI
         run: dotnet tool update --global vpk --version 0.0.1298

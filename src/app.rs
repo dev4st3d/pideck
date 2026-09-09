@@ -1,126 +1,74 @@
 use gpui::{
-    App, Application, Bounds, KeyBinding, WindowBounds,
-    WindowOptions, prelude::*, px, size,
+    App, Application, Bounds, TitlebarOptions, WindowBounds, WindowOptions, prelude::*, px, size,
 };
 
-use crate::actions::{
-    APP_UPDATE_BUTTON_CONTEXT, APP_UPDATE_NOTICE_CONTEXT, ActivateAppUpdate, ActivateRecovery,
-    Connect, DecreaseFontSize, FocusNext, FocusPrevious, IncreaseFontSize, OpenAppUpdates,
-    OpenCommandPalette, RECOVERY_BUTTON_CONTEXT, Retry, ShowHotkeys, Stop, ToggleInspector,
-    ToggleSidebar, ToggleTerminal, composer_key_bindings, history_key_bindings,
-    image_preview_key_bindings, orchestration_key_bindings, transcript_key_bindings,
-};
 use crate::assets::Assets;
-use crate::controller::RuntimeController;
-use crate::services::projects::ProjectRegistry;
-use crate::services::session_catalog::{SessionCatalogConfig, without_windows_verbatim_prefix};
-use crate::{fonts, views::RootView};
-
-const WINDOW_WIDTH: f32 = 1440.0;
-const WINDOW_HEIGHT: f32 = 960.0;
+use crate::fonts;
+use crate::views::terminal_manager::TerminalManager;
 
 pub fn run() {
-    let working_directory = std::env::current_dir()
-        .map(|path| without_windows_verbatim_prefix(&path))
-        .unwrap_or_else(|_| std::path::PathBuf::from("."));
-    let catalog_config = SessionCatalogConfig::from_environment(working_directory.clone());
-    let project_load = ProjectRegistry::load(
-        catalog_config.agent_dir.join("pideck-projects.json"),
-        working_directory,
-    );
-    let workspace = project_load.registry.active_path().to_path_buf();
-    let preferred_session = project_load
-        .registry
-        .active_project()
-        .last_session
-        .clone()
-        .filter(|path| path.is_file());
-
-    let application = Application::new().with_assets(Assets);
-    application.run(move |cx: &mut App| {
-        crate::services::accessibility::refresh_motion_preference();
-        let font_catalog = fonts::initialize(cx);
-        cx.bind_keys([
-            KeyBinding::new("ctrl-alt-c", Connect, None),
-            KeyBinding::new("ctrl-alt-r", Retry, None),
-            KeyBinding::new("ctrl-alt-s", Stop, None),
-            KeyBinding::new("ctrl-shift-p", OpenCommandPalette, None),
-            KeyBinding::new("ctrl-k", OpenCommandPalette, None),
-            KeyBinding::new("ctrl-/", ShowHotkeys, None),
-            KeyBinding::new("ctrl-b", ToggleSidebar, None),
-            KeyBinding::new("ctrl-`", ToggleTerminal, None),
-            KeyBinding::new("ctrl-i", ToggleInspector, None),
-            KeyBinding::new("ctrl-+", IncreaseFontSize, None),
-            KeyBinding::new("ctrl-=", IncreaseFontSize, None),
-            KeyBinding::new("ctrl--", DecreaseFontSize, None),
-            KeyBinding::new("enter", ActivateRecovery, Some(RECOVERY_BUTTON_CONTEXT)),
-            KeyBinding::new("space", ActivateRecovery, Some(RECOVERY_BUTTON_CONTEXT)),
-            KeyBinding::new("enter", ActivateAppUpdate, Some(APP_UPDATE_BUTTON_CONTEXT)),
-            KeyBinding::new("space", ActivateAppUpdate, Some(APP_UPDATE_BUTTON_CONTEXT)),
-            KeyBinding::new("enter", OpenAppUpdates, Some(APP_UPDATE_NOTICE_CONTEXT)),
-            KeyBinding::new("space", OpenAppUpdates, Some(APP_UPDATE_NOTICE_CONTEXT)),
-            KeyBinding::new("tab", FocusNext, None),
-            KeyBinding::new("shift-tab", FocusPrevious, None),
-        ]);
-        cx.bind_keys(composer_key_bindings());
-        cx.bind_keys(transcript_key_bindings());
-        cx.bind_keys(history_key_bindings());
-        cx.bind_keys(orchestration_key_bindings());
-        cx.bind_keys(image_preview_key_bindings());
-
-        let bounds = Bounds::centered(None, size(px(WINDOW_WIDTH), px(WINDOW_HEIGHT)), cx);
-        let workspace = workspace.clone();
-        let preferred_session = preferred_session.clone();
-        let projects = project_load.registry.clone();
-        let projects_warning = project_load.warning.clone();
-        let projects_need_save = project_load.needs_save;
-        let font_catalog = font_catalog.clone();
-
-        cx.open_window(
-            WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
-                window_min_size: Some(size(px(800.0), px(540.0))),
-                titlebar: None,
-                app_id: Some("pideck".into()),
-                ..Default::default()
-            },
-            move |window, cx| {
-                let controller =
-                    cx.new(|cx| RuntimeController::for_workspace(workspace.clone(), cx));
-                let weak_controller = controller.downgrade();
-                cx.on_window_closed(move |cx| {
-                    weak_controller
-                        .update(cx, |controller, _| controller.shutdown())
-                        .ok();
-                    if cx.windows().is_empty() {
-                        cx.quit();
-                    }
-                })
-                .detach();
-
-                let root = cx.new(|cx| {
-                    RootView::new(
-                        window,
-                        controller.clone(),
-                        projects.clone(),
-                        projects_warning.clone(),
-                        projects_need_save,
-                        font_catalog.clone(),
-                        cx,
-                    )
-                });
-                let weak_root = root.downgrade();
-                window.on_window_should_close(cx, move |window, cx| {
-                    weak_root.update(cx, |root, cx| root.request_close(window, cx)).unwrap_or(true)
-                });
-                controller.update(cx, |controller, cx| {
-                    controller.connect_to_session(preferred_session.clone(), cx)
-                });
-                root
-            },
-        )
-        .expect("failed to open the main window");
-
-        cx.activate(true);
-    });
+    let working_directory = std::env::current_dir().unwrap_or_else(|_| ".".into());
+    Application::new()
+        .with_assets(Assets)
+        .run(move |cx: &mut App| {
+            crate::services::accessibility::refresh_motion_preference();
+            let font_catalog = fonts::initialize(cx);
+            crate::views::file_editor::FileEditor::initialize(cx);
+            TerminalManager::bind_keys(cx);
+            let storage_path = font_catalog
+                .settings_path
+                .with_file_name("terminal-workspace.json");
+            // Leave room for the taskbar and resize borders on smaller displays.
+            let initial_size =
+                cx.primary_display()
+                    .map_or(size(px(1440.0), px(900.0)), |display| {
+                        let available = display.bounds().size;
+                        size(
+                            px(1440.0_f32.min((f32::from(available.width) - 48.0).max(640.0))),
+                            px(900.0_f32.min((f32::from(available.height) - 80.0).max(480.0))),
+                        )
+                    });
+            let bounds = Bounds::centered(None, initial_size, cx);
+            cx.on_window_closed(|cx| {
+                if cx.windows().is_empty() {
+                    cx.quit();
+                }
+            })
+            .detach();
+            let opened = cx.open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(bounds)),
+                    window_min_size: Some(size(px(800.0), px(540.0))),
+                    titlebar: Some(TitlebarOptions {
+                        title: Some("Pideck — Terminals".into()),
+                        appears_transparent: true,
+                        ..Default::default()
+                    }),
+                    app_id: Some("pideck".into()),
+                    ..Default::default()
+                },
+                move |window, cx| {
+                    let root = cx.new(|cx| {
+                        TerminalManager::new(
+                            working_directory.clone(),
+                            storage_path.clone(),
+                            window,
+                            cx,
+                        )
+                    });
+                    let weak = root.downgrade();
+                    window.on_window_should_close(cx, move |window, cx| {
+                        weak.update(cx, |root, cx| root.request_close(window, cx))
+                            .unwrap_or(true)
+                    });
+                    cx.new(|cx| gpui_component::Root::new(root, window, cx))
+                },
+            );
+            if let Err(error) = opened {
+                eprintln!("The terminal window could not be opened: {error}");
+                cx.quit();
+                return;
+            }
+            cx.activate(true);
+        });
 }
