@@ -52,6 +52,12 @@ The terminal supports native Unicode/IME composition, bracketed paste, applicati
 
 ## Keyboard
 
+The explorer uses the selected **Catppuccin Latte** icons (Catppuccin Icons 1.23.1, MIT). Click to select a file; double-click or Enter to open. Ctrl-click toggles selection and Shift-click selects a range. Right-click for file operations, path copying, hidden files, and reveal in Windows Explorer. New file/folder naming stays inside the panel.
+
+With explorer focus: `Ctrl+C/X/V` copies/cuts/pastes files, `Ctrl+A` selects visible entries, `Ctrl+D` duplicates, `F2` renames, `Delete` asks to move items to the Recycle Bin, `Ctrl+N` creates a file, and `Ctrl+Shift+N` creates a folder. Drag within the tree to move; hold Ctrl to copy. External drops and Windows file-clipboard pastes copy into the selected folder. Cut is internal to Pideck. Existing destinations are never intentionally overwritten; interrupted copies may leave completed or partial destination files, with the source retained. Directory links are not recursively copied. Cross-drive moves require copying first.
+
+Filesystem changes refresh the explorer and Git status automatically; `F5` refreshes manually. The compact Git tree separates unstaged and staged changes. Click the branch name (or press `B` with Git-panel focus) to choose a local branch, then use Tab/Enter to select it. Switching preserves Git's conflict checks and never forces, stashes, or fetches. Save dirty editor buffers first. Git hooks are disabled for this operation.
+
 | Action | Keys |
 |---|---|
 | Add project folder | `Ctrl+Shift+O` |

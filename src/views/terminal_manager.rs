@@ -411,8 +411,8 @@ impl TerminalManager {
                 cx.notify();
             },
         );
-        let files = cx.new(|cx| FilesPanel::new(project_path.clone(), cx));
-        let git = cx.new(|cx| GitPanel::new(project_path, cx));
+        let files = cx.new(|cx| FilesPanel::new(project_path.clone(), terminal.downgrade(), cx));
+        let git = cx.new(|cx| GitPanel::new(project_path, terminal.downgrade(), cx));
         let file_pane = terminal.clone();
         let file_subscription =
             cx.subscribe_in(&files, window, move |view, _, event, window, cx| {
@@ -764,6 +764,23 @@ impl TerminalManager {
             self.toggle_sidebar(window, cx);
             return;
         }
+        if matches!(
+            event,
+            ProjectPanelEvent::FilesChanged | ProjectPanelEvent::BranchChanged
+        ) {
+            if let Some(project) = self
+                .projects
+                .iter()
+                .find(|project| project.terminal.entity_id() == pane.entity_id())
+            {
+                project.git.update(cx, |git, cx| git.refresh(cx));
+                if matches!(event, ProjectPanelEvent::BranchChanged) {
+                    project.files.update(cx, |files, cx| files.refresh(cx));
+                    pane.update(cx, |pane, cx| pane.reload_clean_files(window, cx));
+                }
+            }
+            return;
+        }
         let active = self
             .active_terminal()
             .is_some_and(|active| active.entity_id() == pane.entity_id());
@@ -785,7 +802,9 @@ impl TerminalManager {
                 window,
                 cx,
             ),
-            ProjectPanelEvent::ToggleSidebar => {}
+            ProjectPanelEvent::ToggleSidebar
+            | ProjectPanelEvent::FilesChanged
+            | ProjectPanelEvent::BranchChanged => {}
         });
         if !active && let Some(focus) = focus {
             window.focus(&focus);

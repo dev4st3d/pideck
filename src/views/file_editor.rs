@@ -36,6 +36,7 @@ pub(crate) struct FileEditor {
     dirty: bool,
     loading: bool,
     saving: bool,
+    saves_locked: bool,
     error: Option<FileError>,
     error_during_load: bool,
     prompt_pending: bool,
@@ -148,6 +149,7 @@ impl FileEditor {
             dirty: false,
             loading: false,
             saving: false,
+            saves_locked: false,
             error: None,
             error_during_load: false,
             prompt_pending: false,
@@ -178,6 +180,29 @@ impl FileEditor {
     }
     pub(crate) fn is_saving(&self) -> bool {
         self.saving
+    }
+
+    pub(crate) fn is_busy(&self) -> bool {
+        self.loading || self.saving
+    }
+
+    pub(crate) fn lock_saves(&mut self, locked: bool, cx: &mut Context<Self>) {
+        self.saves_locked = locked;
+        cx.notify();
+    }
+
+    pub(crate) fn retarget(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        self.source.path = path.clone();
+        if let Some(snapshot) = &mut self.snapshot {
+            snapshot.path = path;
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn reload_clean(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.dirty {
+            self.load(window, cx);
+        }
     }
 
     fn load(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -225,7 +250,7 @@ impl FileEditor {
     }
 
     pub(crate) fn save(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.loading || self.saving || !self.dirty {
+        if self.saves_locked || self.loading || self.saving || !self.dirty {
             return;
         }
         let Some(snapshot) = self.snapshot.clone() else {
@@ -368,6 +393,9 @@ impl FileEditor {
     }
 
     fn status(&self) -> String {
+        if self.saves_locked {
+            return "File operation in progress…".to_owned();
+        }
         if self.loading {
             return "Opening file…".to_owned();
         }
@@ -396,7 +424,7 @@ impl EventEmitter<FileEditorEvent> for FileEditor {}
 impl Render for FileEditor {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let ready = self.snapshot.is_some();
-        let can_save = self.dirty && !self.loading && !self.saving;
+        let can_save = self.dirty && !self.loading && !self.saving && !self.saves_locked;
         let position = self.cursor_position;
         div()
             .id("file-editor")
@@ -423,7 +451,7 @@ impl Render for FileEditor {
                                 .appearance(false)
                                 .bordered(false)
                                 .focus_bordered(false)
-                                .disabled(self.loading)
+                                .disabled(self.loading || self.saves_locked)
                                 .p(px(chrome::CONTENT_INSET))
                                 .font_family(theme::mono())
                                 .text_size(px(theme::T_MONO))

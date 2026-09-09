@@ -1,4 +1,4 @@
-//! Read-only, bounded Git inspection for project sidebars and diff tabs.
+//! Bounded Git inspection and explicit, non-forced local branch switching.
 
 use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
@@ -67,7 +67,7 @@ impl GitStatus {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum DiffKind {
     Staged,
     WorkingTree,
@@ -87,6 +87,7 @@ pub(crate) enum GitError {
     TimedOut,
     InvalidPath,
     InvalidOutput,
+    SwitchFailed,
 }
 
 impl fmt::Display for GitError {
@@ -102,8 +103,126 @@ impl fmt::Display for GitError {
             Self::InvalidOutput => {
                 "Git returned an unreadable status. Try refreshing this project."
             }
+            Self::SwitchFailed => "Could not switch branches. Commit or stash conflicting changes and check whether the branch is open in another worktree.",
         })
     }
+}
+
+pub(crate) fn branches(root: &Path) -> Result<Vec<String>, GitError> {
+    let output = checked_output(run_git(
+        root,
+        &args(&["for-each-ref", "--format=%(refname:short)", "refs/heads/"]),
+    )?)?;
+    if output.truncated {
+        return Err(GitError::InvalidOutput);
+    }
+    Ok(String::from_utf8(output.bytes)
+        .map_err(|_| GitError::InvalidOutput)?
+        .lines()
+        .map(str::to_owned)
+        .collect())
+}
+
+pub(crate) fn switch_branch(root: &Path, branch: &str) -> Result<(), GitError> {
+    if !branches(root)?.iter().any(|name| name == branch) {
+        return Err(GitError::InvalidPath);
+    }
+    // Explicit local branches only. No force, auto-stash, remote guessing or hooks.
+    let output = run_git(
+        root,
+        &args(&[
+            "-c",
+            "core.hooksPath=/dev/null",
+            "switch",
+            "--no-guess",
+            "--",
+            branch,
+        ]),
+    )?;
+    if output.success {
+        Ok(())
+    } else {
+        Err(GitError::SwitchFailed)
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct ChangeRow {
+    pub(crate) path: PathBuf,
+    pub(crate) depth: usize,
+    pub(crate) kind: DiffKind,
+    pub(crate) entry: Option<usize>,
+}
+
+pub(crate) fn change_rows(
+    status: &GitStatus,
+    collapsed: &std::collections::HashSet<(DiffKind, PathBuf)>,
+) -> Vec<ChangeRow> {
+    #[derive(Default)]
+    struct Node {
+        children: std::collections::BTreeMap<std::ffi::OsString, Node>,
+        entry: Option<usize>,
+    }
+    fn append(
+        node: &Node,
+        path: &Path,
+        depth: usize,
+        kind: DiffKind,
+        collapsed: &std::collections::HashSet<(DiffKind, PathBuf)>,
+        rows: &mut Vec<ChangeRow>,
+    ) {
+        for directory in [true, false] {
+            for (name, child) in &node.children {
+                if child.entry.is_none() != directory {
+                    continue;
+                }
+                let path = path.join(name);
+                rows.push(ChangeRow {
+                    path: path.clone(),
+                    depth,
+                    kind,
+                    entry: child.entry,
+                });
+                if directory && !collapsed.contains(&(kind, path.clone())) {
+                    append(child, &path, depth + 1, kind, collapsed, rows);
+                }
+            }
+        }
+    }
+    let mut rows = Vec::new();
+    for kind in [DiffKind::WorkingTree, DiffKind::Staged] {
+        let mut root = Node::default();
+        for (index, entry) in status.entries.iter().enumerate() {
+            if !(if kind == DiffKind::Staged {
+                entry.staged()
+            } else {
+                entry.unstaged()
+            }) {
+                continue;
+            }
+            let mut node = &mut root;
+            for component in entry.relative_path.components() {
+                node = node
+                    .children
+                    .entry(component.as_os_str().to_owned())
+                    .or_default();
+            }
+            node.entry = Some(index);
+        }
+        if root.children.is_empty() {
+            continue;
+        }
+        rows.push(ChangeRow {
+            path: PathBuf::new(),
+            depth: 0,
+            kind,
+            entry: None,
+        });
+        if !collapsed.contains(&(kind, PathBuf::new())) {
+            append(&root, Path::new(""), 1, kind, collapsed, &mut rows);
+        }
+    }
+    rows
 }
 
 impl std::error::Error for GitError {}
@@ -555,6 +674,27 @@ mod tests {
     static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(1);
 
     #[test]
+    fn tree_groups_staging_and_preserves_deleted_paths() {
+        let status = parse_status(
+            Path::new("project"),
+            b"## main\0MM src/a.rs\0 D src/gone.rs\0?? new.txt\0",
+            false,
+        )
+        .unwrap();
+        let mut collapsed = std::collections::HashSet::new();
+        let rows = change_rows(&status, &collapsed);
+        assert_eq!(rows.iter().filter(|row| row.entry == Some(0)).count(), 2);
+        assert!(rows.iter().any(|row| row.path == Path::new("src/gone.rs")));
+        collapsed.insert((DiffKind::WorkingTree, PathBuf::from("src")));
+        let rows = change_rows(&status, &collapsed);
+        assert!(!rows.iter().any(|row| row.path == Path::new("src/gone.rs")));
+        assert!(
+            rows.iter()
+                .any(|row| row.kind == DiffKind::Staged && row.path == Path::new("src/a.rs"))
+        );
+    }
+
+    #[test]
     fn project_totals_require_counts_for_every_changed_file() {
         let mut status =
             parse_status(Path::new("project"), b"## main\0 M a.rs\0 M b.rs\0", false).unwrap();
@@ -608,6 +748,79 @@ mod tests {
     }
 
     struct TestRepository(PathBuf);
+
+    #[test]
+    fn branch_switch_preserves_conflicting_local_changes() {
+        let root = std::env::temp_dir().join(format!(
+            "pideck-branches-{}-{}",
+            std::process::id(),
+            NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let root = TestRepository(root);
+        let init = run_git(
+            &root.0,
+            &args(&["init", "--quiet", "--initial-branch=main", "--template="]),
+        );
+        if matches!(init, Err(GitError::Unavailable)) {
+            return;
+        }
+        assert!(init.unwrap().success);
+        std::fs::write(root.0.join("file.txt"), "main\n").unwrap();
+        assert!(
+            run_git(&root.0, &args(&["add", "file.txt"]))
+                .unwrap()
+                .success
+        );
+        let commit = [
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "core.hooksPath=/dev/null",
+            "commit",
+            "--quiet",
+            "-m",
+            "fixture",
+        ];
+        assert!(run_git(&root.0, &args(&commit)).unwrap().success);
+        assert!(
+            run_git(&root.0, &args(&["branch", "feature/nested"]))
+                .unwrap()
+                .success
+        );
+        assert!(
+            branches(&root.0)
+                .unwrap()
+                .contains(&"feature/nested".to_owned())
+        );
+        switch_branch(&root.0, "feature/nested").unwrap();
+        std::fs::write(root.0.join("file.txt"), "feature\n").unwrap();
+        assert!(
+            run_git(&root.0, &args(&["add", "file.txt"]))
+                .unwrap()
+                .success
+        );
+        assert!(run_git(&root.0, &args(&commit)).unwrap().success);
+        switch_branch(&root.0, "main").unwrap();
+        std::fs::write(root.0.join("file.txt"), "unsaved on disk\n").unwrap();
+        assert_eq!(
+            switch_branch(&root.0, "feature/nested"),
+            Err(GitError::SwitchFailed)
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.0.join("file.txt")).unwrap(),
+            "unsaved on disk\n"
+        );
+        assert_eq!(read_status(&root.0).unwrap().branch, "main");
+        assert_eq!(
+            switch_branch(&root.0, "--discard-changes"),
+            Err(GitError::InvalidPath)
+        );
+    }
 
     impl Drop for TestRepository {
         fn drop(&mut self) {
