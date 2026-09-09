@@ -32,6 +32,14 @@ A release build uses:
 cargo build --release --locked
 ```
 
+## App updates
+
+Windows copies installed with **PiDeck Setup** check GitHub Releases for updates on startup. Use **Check for updates** in the footer to check manually, then **Update and restart** to download and verify a new version.
+
+Before restarting, Pideck asks about unsaved files and stopping running terminals, then saves the workspace layout. Cancelling keeps the app open; a downloaded update can be applied later with **Restart to update**. File or layout save failures must be resolved before the update can restart the app. Restarting creates fresh shells, not resumed commands or terminal history.
+
+Source builds and unpackaged executables do not support in-app updates. Downloading an update does not silently apply it on the next launch; restarting to apply it remains an explicit action.
+
 ## Project state and restoration
 
 While the app stays open, each project retains its sidebar selection, expanded directories and scroll position, open file buffers and cursor positions, active tab, and terminal sessions. Switching projects reuses those views and processes.

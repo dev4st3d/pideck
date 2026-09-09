@@ -4,6 +4,10 @@ The user approved this exact cleanup, and all 96 listed deletions have been appl
 
 Automatic approval review initially rejected removal of the module declarations because it considered the public API and legacy test dependencies a potential compilation or behavior risk. The user then explicitly approved the listed cleanup. Module and dependency pruning is complete; Cargo lockfile refresh and final validation remain part of the parent task.
 
+## Subsequent updater restoration
+
+This manifest records the historical terminal-pivot cleanup, not the current module inventory. The app updater has since been restored in `src/services/app_update.rs` and integrated with `TerminalManager`, without restoring the legacy Pi runtime or update panel. Installed Windows builds check on startup and expose manual check/update controls in the footer. Downloading is separate from scheduling replacement: file-save decisions, terminal-close consent, and workspace persistence finish before Velopack is asked to apply and relaunch. See [App updates](../README.md#app-updates) for current behavior.
+
 ## Exact deletions
 
 Removed only the following 96 tracked files. All 10 integration test and fixture files concern the removed Pi runtime; terminal engine, terminal worker, workspace, path, accessibility, and rendering tests remain in their live source modules.

@@ -10,7 +10,10 @@ use gpui::{
 
 use super::project_panels::{FilesPanel, GitPanel, ProjectPanelEvent};
 use super::terminal::{TerminalPanelEvent, TerminalView};
-use crate::services::terminal_workspace::{MAX_TERMINAL_TABS, TerminalWorkspace};
+use crate::services::{
+    app_update::{self, CheckOutcome, PrepareOutcome, ScheduleOutcome},
+    terminal_workspace::{MAX_TERMINAL_TABS, TerminalWorkspace},
+};
 use crate::theme;
 use crate::theme::terminal_manager as chrome;
 
@@ -47,6 +50,19 @@ enum SidebarTab {
 enum PendingClose {
     Window,
     Project(PathBuf),
+    UpdateRestart,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum UpdateState {
+    Checking,
+    Current,
+    Available(String),
+    Downloading,
+    Prepared(String),
+    Scheduling,
+    Unavailable,
+    Error(String),
 }
 
 struct ProjectTerminals {
@@ -88,6 +104,10 @@ pub(crate) struct TerminalManager {
     appearance_saving: bool,
     discard_on_close: bool,
     pending_close: Option<PendingClose>,
+    update_state: UpdateState,
+    update_generation: u64,
+    update_restart_pending: bool,
+    update_scheduling: bool,
     _bounds_subscription: Subscription,
 }
 
@@ -148,7 +168,7 @@ impl TerminalManager {
         .detach();
         let focus_handle = cx.focus_handle();
         window.focus(&focus_handle);
-        Self {
+        let mut manager = Self {
             workspace: None,
             projects: Vec::new(),
             storage_path,
@@ -178,9 +198,198 @@ impl TerminalManager {
             appearance_saving: false,
             discard_on_close: false,
             pending_close: None,
+            update_state: UpdateState::Unavailable,
+            update_generation: 0,
+            update_restart_pending: false,
+            update_scheduling: false,
             _bounds_subscription: cx
                 .observe_window_bounds(window, |view, window, cx| view.resize(window, cx)),
+        };
+        manager.check_for_updates(window, cx);
+        manager
+    }
+
+    fn check_for_updates(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if matches!(
+            self.update_state,
+            UpdateState::Checking | UpdateState::Downloading | UpdateState::Scheduling
+        ) {
+            return;
         }
+        self.update_generation = self.update_generation.wrapping_add(1);
+        let generation = self.update_generation;
+        self.update_state = UpdateState::Checking;
+        let check = cx
+            .background_executor()
+            .spawn(async { app_update::check_for_update() });
+        cx.spawn_in(window, async move |view, cx| {
+            let result = check.await;
+            let _ = cx.update(|_, cx| {
+                let _ = view.update(cx, |view, cx| {
+                    if view.update_generation != generation {
+                        return;
+                    }
+                    view.update_state = match result {
+                        Ok(CheckOutcome::Current) => UpdateState::Current,
+                        Ok(CheckOutcome::Available { version }) => UpdateState::Available(version),
+                        Ok(CheckOutcome::Prepared { version }) => UpdateState::Prepared(version),
+                        Ok(CheckOutcome::Unavailable) => UpdateState::Unavailable,
+                        Err(error) => UpdateState::Error(error.message().into()),
+                    };
+                    cx.notify();
+                });
+            });
+        })
+        .detach();
+    }
+
+    fn prepare_and_restart(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.update_scheduling || self.prompt_pending || self.picker_pending {
+            return;
+        }
+        if matches!(self.update_state, UpdateState::Prepared(_)) {
+            self.request_update_restart(window, cx);
+            return;
+        }
+        if !matches!(
+            self.update_state,
+            UpdateState::Available(_) | UpdateState::Error(_)
+        ) {
+            return;
+        }
+        self.update_generation = self.update_generation.wrapping_add(1);
+        let generation = self.update_generation;
+        self.update_state = UpdateState::Downloading;
+        let prepare = cx
+            .background_executor()
+            .spawn(async { app_update::prepare_update() });
+        cx.spawn_in(window, async move |view, cx| {
+            let result = prepare.await;
+            let _ = cx.update(|window, cx| {
+                let _ = view.update(cx, |view, cx| {
+                    if view.update_generation != generation {
+                        return;
+                    }
+                    match result {
+                        Ok(PrepareOutcome::Prepared { version }) => {
+                            view.update_state = UpdateState::Prepared(version);
+                            view.request_update_restart(window, cx);
+                        }
+                        Ok(PrepareOutcome::Current) => view.update_state = UpdateState::Current,
+                        Ok(PrepareOutcome::Unavailable) => {
+                            view.update_state = UpdateState::Unavailable
+                        }
+                        Err(error) => {
+                            view.update_state = UpdateState::Error(error.message().into())
+                        }
+                    }
+                    cx.notify();
+                });
+            });
+        })
+        .detach();
+    }
+
+    fn request_update_restart(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.workspace.is_none()
+            || self.update_scheduling
+            || self.prompt_pending
+            || self.picker_pending
+            || self.close_after_save
+            || self.pending_close.is_some()
+            || !matches!(self.update_state, UpdateState::Prepared(_))
+        {
+            return;
+        }
+        self.discard_on_close = false;
+        if self.projects.iter().any(|project| {
+            project.terminal.read(cx).has_dirty_files(cx)
+                || project.terminal.read(cx).has_saving_files(cx)
+        }) {
+            self.confirm_dirty_close(PendingClose::UpdateRestart, window, cx);
+        } else {
+            self.finish_close_intent(PendingClose::UpdateRestart, window, cx);
+        }
+    }
+
+    fn begin_update_persistence(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.restore_warning.is_some() || self.save_failed {
+            self.notice = Some(
+                "Pideck needs to save the latest layout before restarting. Resolve the layout warning and try again."
+                    .into(),
+            );
+            return;
+        }
+        self.update_restart_pending = true;
+        self.close_after_save = true;
+        self.persist(window, cx);
+    }
+
+    fn schedule_prepared_update(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let UpdateState::Prepared(version) = &self.update_state else {
+            self.update_restart_pending = false;
+            self.close_after_save = false;
+            return;
+        };
+        let version = version.clone();
+        self.update_scheduling = true;
+        self.update_state = UpdateState::Scheduling;
+        self.selector_open = false;
+        self.appearance_menu_open = false;
+        window.focus(&self.focus_handle);
+        cx.notify();
+        let schedule_version = version.clone();
+        let schedule = cx
+            .background_executor()
+            .spawn(async move { app_update::schedule_prepared_update(&schedule_version) });
+        cx.spawn_in(window, async move |view, cx| {
+            let result = schedule.await;
+            let _ = cx.update(|window, cx| {
+                let _ = view.update(cx, |view, cx| {
+                    match result {
+                        Ok(ScheduleOutcome::Scheduled) => {
+                            window.remove_window();
+                            return;
+                        }
+                        Ok(ScheduleOutcome::Unavailable) => {
+                            view.release_update_schedule(UpdateState::Unavailable, None);
+                        }
+                        Ok(ScheduleOutcome::NotPrepared) => {
+                            view.release_update_schedule(
+                                UpdateState::Error(
+                                    "The prepared update is no longer available. Check for updates and try again."
+                                        .into(),
+                                ),
+                                None,
+                            );
+                        }
+                        Err(error) => {
+                            // The cached package stays ready for the next explicit restart.
+                            view.release_update_schedule(
+                                UpdateState::Prepared(version.clone()),
+                                Some(error.message().into()),
+                            );
+                        }
+                    }
+                    cx.notify();
+                });
+            });
+        })
+        .detach();
+    }
+
+    fn release_update_schedule(&mut self, state: UpdateState, notice: Option<String>) {
+        self.update_state = state;
+        self.notice = notice;
+        self.update_scheduling = false;
+        self.update_restart_pending = false;
+        self.close_after_save = false;
+        self.discard_on_close = false;
+        self.pending_close = None;
+    }
+
+    fn interaction_locked(&self) -> bool {
+        self.update_scheduling
     }
 
     fn restore_terminals(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -207,6 +416,9 @@ impl TerminalManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.interaction_locked() {
+            return;
+        }
         theme::set_appearance(appearance);
         super::file_editor::FileEditor::apply_appearance(cx);
         for project in &self.projects {
@@ -467,6 +679,9 @@ impl TerminalManager {
     }
 
     fn select_project(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if self.interaction_locked() {
+            return;
+        }
         let Some(workspace) = &mut self.workspace else {
             return;
         };
@@ -493,7 +708,8 @@ impl TerminalManager {
     }
 
     fn choose_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.picker_pending
+        if self.interaction_locked()
+            || self.picker_pending
             || self.prompt_pending
             || self.close_after_save
             || self.workspace.is_none()
@@ -561,6 +777,9 @@ impl TerminalManager {
     }
 
     fn remove_project(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if self.interaction_locked() {
+            return;
+        }
         let Some(workspace) = &self.workspace else {
             return;
         };
@@ -644,6 +863,7 @@ impl TerminalManager {
                             eprintln!("Terminal layout save failed: {error}");
                             view.save_failed = true;
                             view.close_after_save = false;
+                            view.update_restart_pending = false;
                         }
                     }
                     cx.notify();
@@ -655,6 +875,9 @@ impl TerminalManager {
     }
 
     pub(crate) fn request_close(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if self.update_scheduling {
+            return false;
+        }
         if self.workspace.is_none() {
             return true;
         }
@@ -745,6 +968,9 @@ impl TerminalManager {
     }
 
     fn toggle_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.interaction_locked() {
+            return;
+        }
         if let Some(workspace) = &mut self.workspace {
             workspace.sidebar_visible = !workspace.sidebar_visible;
             self.resize(window, cx);
@@ -760,6 +986,9 @@ impl TerminalManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.interaction_locked() {
+            return;
+        }
         if matches!(event, ProjectPanelEvent::ToggleSidebar) {
             self.toggle_sidebar(window, cx);
             return;
@@ -1178,6 +1407,81 @@ impl TerminalManager {
             )
     }
 
+    fn update_footer(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        let (status, action, enabled) = match &self.update_state {
+            UpdateState::Unavailable => return None,
+            UpdateState::Checking => ("Checking for updates…".to_owned(), None, false),
+            UpdateState::Current => (
+                "Pideck is up to date".to_owned(),
+                Some("Check for updates"),
+                true,
+            ),
+            UpdateState::Available(version) => (
+                format!("Update {version} available"),
+                Some("Update and restart"),
+                true,
+            ),
+            UpdateState::Downloading => ("Preparing update…".to_owned(), None, false),
+            UpdateState::Prepared(version) => (
+                format!("Update {version} ready"),
+                Some("Restart to update"),
+                true,
+            ),
+            UpdateState::Scheduling => ("Starting update…".to_owned(), None, false),
+            UpdateState::Error(message) => (message.clone(), Some("Retry update"), true),
+        };
+        let control = match action {
+            Some("Check for updates") => button("check-for-updates", "Check for updates", enabled)
+                .when(enabled, |button| {
+                    button.on_click(
+                        cx.listener(|view, _, window, cx| view.check_for_updates(window, cx)),
+                    )
+                })
+                .into_any_element(),
+            Some("Update and restart") => {
+                button("update-and-restart", "Update and restart", enabled)
+                    .when(enabled, |button| {
+                        button.on_click(
+                            cx.listener(|view, _, window, cx| view.prepare_and_restart(window, cx)),
+                        )
+                    })
+                    .into_any_element()
+            }
+            Some("Restart to update") => button("restart-to-update", "Restart to update", enabled)
+                .when(enabled, |button| {
+                    button.on_click(
+                        cx.listener(|view, _, window, cx| view.request_update_restart(window, cx)),
+                    )
+                })
+                .into_any_element(),
+            Some("Retry update") => button("retry-update", "Retry update", enabled)
+                .when(enabled, |button| {
+                    button.on_click(cx.listener(|view, _, window, cx| {
+                        if matches!(view.update_state, UpdateState::Error(_)) {
+                            view.check_for_updates(window, cx);
+                        }
+                    }))
+                })
+                .into_any_element(),
+            _ => div().into_any_element(),
+        };
+        Some(
+            div()
+                .id("app-update-status")
+                .flex_1()
+                .min_w_0()
+                .px(px(chrome::COMPACT_GAP))
+                .flex()
+                .items_center()
+                .gap(px(chrome::COMPACT_GAP))
+                .border_l_1()
+                .border_color(theme::edge())
+                .child(div().min_w_0().truncate().child(status.to_owned()))
+                .child(control)
+                .into_any_element(),
+        )
+    }
+
     fn sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let tab = self
             .active_project()
@@ -1444,8 +1748,11 @@ impl TerminalManager {
                             view.continue_pending_close(window, cx);
                         }
                         2 => {
+                            // A discard decision still waits for any already-running saves so
+                            // restart never races an editor write.
                             view.discard_on_close = true;
-                            view.finish_close_intent(intent, window, cx);
+                            view.pending_close = Some(intent);
+                            view.continue_pending_close(window, cx);
                         }
                         _ => {}
                     }
@@ -1458,7 +1765,7 @@ impl TerminalManager {
 
     fn close_panes(&self, intent: &PendingClose) -> Vec<Entity<TerminalView>> {
         match intent {
-            PendingClose::Window => self
+            PendingClose::Window | PendingClose::UpdateRestart => self
                 .projects
                 .iter()
                 .map(|project| project.terminal.clone())
@@ -1481,6 +1788,7 @@ impl TerminalManager {
     fn on_content_changed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.close_after_save {
             self.close_after_save = false;
+            self.update_restart_pending = false;
             self.discard_on_close = false;
             self.notice =
                 Some("Files changed while closing. Review the changes and close again.".into());
@@ -1489,6 +1797,9 @@ impl TerminalManager {
     }
 
     fn complete_window_close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.update_scheduling || self.saving || self.revision != self.saved_revision {
+            return;
+        }
         if self.appearance_saving {
             return;
         }
@@ -1499,6 +1810,7 @@ impl TerminalManager {
             })
         {
             self.close_after_save = false;
+            self.update_restart_pending = false;
             self.notice = Some(
                 "Files changed while closing. Save them or close again to review the changes."
                     .into(),
@@ -1506,7 +1818,11 @@ impl TerminalManager {
             cx.notify();
             return;
         }
-        window.remove_window();
+        if self.update_restart_pending {
+            self.schedule_prepared_update(window, cx);
+        } else {
+            window.remove_window();
+        }
     }
 
     fn continue_pending_close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1518,10 +1834,11 @@ impl TerminalManager {
             return;
         }
         self.pending_close = None;
-        if let Some(pane) = panes
-            .iter()
-            .find(|pane| pane.read(cx).has_dirty_files(cx))
-            .cloned()
+        if !self.discard_on_close
+            && let Some(pane) = panes
+                .iter()
+                .find(|pane| pane.read(cx).has_dirty_files(cx))
+                .cloned()
         {
             if let Some(index) = self
                 .projects
@@ -1567,12 +1884,56 @@ impl TerminalManager {
                     self.persist(window, cx);
                 }
             }
+            PendingClose::UpdateRestart => {
+                if self.restore_warning.is_some() || self.save_failed {
+                    self.notice = Some(
+                        "Pideck needs to save the latest layout before restarting. Resolve the layout warning and try again."
+                            .into(),
+                    );
+                    self.discard_on_close = false;
+                    return;
+                }
+                let running = self
+                    .projects
+                    .iter()
+                    .any(|project| project.terminal.read(cx).has_running_sessions(cx));
+                if !running {
+                    self.begin_update_persistence(window, cx);
+                    return;
+                }
+                self.prompt_pending = true;
+                let prompt = window.prompt(
+                    PromptLevel::Warning,
+                    "Restart Pideck to install the update?",
+                    Some("Running shells and commands will stop after the latest workspace layout is saved."),
+                    &["Cancel", "Restart to update"],
+                    cx,
+                );
+                cx.spawn_in(window, async move |view, cx| {
+                    let accepted = prompt.await == Ok(1);
+                    let _ = cx.update(|window, cx| {
+                        let _ = view.update(cx, |view, cx| {
+                            view.prompt_pending = false;
+                            if accepted {
+                                view.begin_update_persistence(window, cx);
+                            } else {
+                                view.discard_on_close = false;
+                            }
+                            cx.notify();
+                        });
+                    });
+                })
+                .detach();
+            }
         }
     }
 
     fn projects_panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let mut rows = Vec::new();
-        let available = self.workspace.is_some() && !self.prompt_pending && !self.close_after_save;
+        let available = self.workspace.is_some()
+            && !self.prompt_pending
+            && !self.close_after_save
+            && !self.interaction_locked();
         let can_add = available && !self.picker_pending;
         let project_count = self
             .workspace
@@ -2013,7 +2374,10 @@ impl Render for TerminalManager {
             .map(|workspace| project_name(&workspace.projects[workspace.active].path))
             .unwrap_or_else(|| "Terminal workspace".into());
         let terminal = self.active_terminal();
-        let available = self.workspace.is_some() && !self.prompt_pending && !self.close_after_save;
+        let available = self.workspace.is_some()
+            && !self.prompt_pending
+            && !self.close_after_save
+            && !self.interaction_locked();
         let can_add_terminal = available
             && terminal
                 .as_ref()
@@ -2042,6 +2406,7 @@ impl Render for TerminalManager {
                 })
             })
             .or_else(|| self.notice.clone());
+        let update_footer = self.update_footer(cx);
         let save_status = if self.workspace.is_none() {
             "Loading layout…"
         } else if self.restore_warning.is_some() {
@@ -2068,6 +2433,10 @@ impl Render for TerminalManager {
             .text_size(px(chrome::CHROME_TEXT_SIZE))
             .line_height(px(chrome::CHROME_LINE_HEIGHT))
             .on_key_down(cx.listener(|view, event: &KeyDownEvent, window, cx| {
+                if view.interaction_locked() {
+                    cx.stop_propagation();
+                    return;
+                }
                 if event.keystroke.key == "escape" && view.selector_open {
                     view.selector_open = false;
                     cx.stop_propagation();
@@ -2093,22 +2462,30 @@ impl Render for TerminalManager {
                 cx.listener(|view, _: &AddProject, window, cx| view.choose_project(window, cx)),
             )
             .on_action(cx.listener(|view, _: &NewTerminal, window, cx| {
-                if let Some(terminal) = view.active_terminal() {
+                if !view.interaction_locked()
+                    && let Some(terminal) = view.active_terminal()
+                {
                     terminal.update(cx, |terminal, cx| terminal.add_tab(window, cx));
                 }
             }))
             .on_action(cx.listener(|view, _: &CloseTerminal, window, cx| {
-                if let Some(terminal) = view.active_terminal() {
+                if !view.interaction_locked()
+                    && let Some(terminal) = view.active_terminal()
+                {
                     terminal.update(cx, |terminal, cx| terminal.close_active_tab(window, cx));
                 }
             }))
             .on_action(cx.listener(|view, _: &NextTerminal, window, cx| {
-                if let Some(terminal) = view.active_terminal() {
+                if !view.interaction_locked()
+                    && let Some(terminal) = view.active_terminal()
+                {
                     terminal.update(cx, |terminal, cx| terminal.cycle_tab(false, window, cx));
                 }
             }))
             .on_action(cx.listener(|view, _: &PreviousTerminal, window, cx| {
-                if let Some(terminal) = view.active_terminal() {
+                if !view.interaction_locked()
+                    && let Some(terminal) = view.active_terminal()
+                {
                     terminal.update(cx, |terminal, cx| terminal.cycle_tab(true, window, cx));
                 }
             }))
@@ -2127,7 +2504,9 @@ impl Render for TerminalManager {
                 }
             }))
             .on_action(cx.listener(|view, _: &FocusProjects, window, cx| {
-                if let Some(workspace) = &mut view.workspace {
+                if !view.interaction_locked()
+                    && let Some(workspace) = &mut view.workspace
+                {
                     workspace.sidebar_visible = true;
                     view.resize(window, cx);
                     view.persist(window, cx);
@@ -2135,45 +2514,63 @@ impl Render for TerminalManager {
                 }
             }))
             .child(self.titlebar(window, cx))
-            .child(self.workbench_toolbar(
-                title.clone(),
-                path,
-                sidebar_visible,
-                available,
-                can_add_terminal,
-                wide_toolbar,
-                cx,
-            ))
+            .when(!self.update_scheduling, |workbench| {
+                workbench.child(self.workbench_toolbar(
+                    title.clone(),
+                    path,
+                    sidebar_visible,
+                    available,
+                    can_add_terminal,
+                    wide_toolbar,
+                    cx,
+                ))
+            })
             .child(
                 div()
                     .flex_1()
                     .min_h_0()
                     .min_w_0()
                     .flex()
-                    .when(sidebar_visible, |body| body.child(self.sidebar(cx)))
+                    .when(sidebar_visible && !self.update_scheduling, |body| {
+                        body.child(self.sidebar(cx))
+                    })
                     .child(
                         div()
                             .flex_1()
                             .min_w_0()
                             .min_h_0()
                             .h_full()
-                            .when_some(terminal, |body, terminal| body.child(terminal))
-                            .when(self.workspace.is_none(), |body| {
+                            .when(!self.update_scheduling, |body| {
+                                body.when_some(terminal, |body, terminal| body.child(terminal))
+                            })
+                            .when(self.update_scheduling, |body| {
                                 body.flex()
-                                    .flex_col()
                                     .items_center()
                                     .justify_center()
-                                    .gap(px(chrome::GAP))
-                                    .child(
-                                        svg()
-                                            .path("icons/terminal.svg")
-                                            .size(px(chrome::ICON_SIZE))
-                                            .text_color(theme::ash()),
-                                    )
-                                    .child(
-                                        div().text_color(theme::ash()).child("Opening projects…"),
-                                    )
-                            }),
+                                    .text_color(theme::ash())
+                                    .child("Starting the update…")
+                            })
+                            .when(
+                                self.workspace.is_none() && !self.update_scheduling,
+                                |body| {
+                                    body.flex()
+                                        .flex_col()
+                                        .items_center()
+                                        .justify_center()
+                                        .gap(px(chrome::GAP))
+                                        .child(
+                                            svg()
+                                                .path("icons/terminal.svg")
+                                                .size(px(chrome::ICON_SIZE))
+                                                .text_color(theme::ash()),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_color(theme::ash())
+                                                .child("Opening projects…"),
+                                        )
+                                },
+                            ),
                     ),
             )
             .when_some(warning, |workbench, warning| {
@@ -2292,10 +2689,16 @@ impl Render for TerminalManager {
                             .items_center()
                             .justify_between()
                             .child(div().min_w_0().truncate().child(title))
+                            .child(
+                                div()
+                                    .flex_shrink_0()
+                                    .child(format!("Pideck v{}", app_update::CURRENT_VERSION)),
+                            )
                             .child(div().flex_shrink_0().child(format!(
                                 "{terminal_count} terminal{} open",
                                 if terminal_count == 1 { "" } else { "s" }
-                            ))),
+                            )))
+                            .when_some(update_footer, |footer, update| footer.child(update)),
                     ),
             )
     }
@@ -2336,6 +2739,10 @@ mod tests {
             appearance_saving: false,
             discard_on_close: false,
             pending_close: None,
+            update_state: UpdateState::Unavailable,
+            update_generation: 0,
+            update_restart_pending: false,
+            update_scheduling: false,
             _bounds_subscription: Subscription::new(|| {}),
         }
     }
@@ -2497,6 +2904,102 @@ mod tests {
                 assert_eq!(second.read(cx).layout_snapshot(), (2, 0));
                 assert!(!first.read(cx).has_running_sessions(cx));
                 assert!(!second.read(cx).has_running_sessions(cx));
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn update_footer_exposes_installed_states_without_starting_update_work(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (view, cx) = cx.add_window_view(|_, cx| fixture(cx));
+        for (state, control) in [
+            (UpdateState::Current, "check-for-updates"),
+            (UpdateState::Available("1.2.3".into()), "update-and-restart"),
+            (UpdateState::Prepared("1.2.3".into()), "restart-to-update"),
+            (UpdateState::Error("Try again.".into()), "retry-update"),
+        ] {
+            view.update(cx, |view, cx| {
+                view.update_state = state;
+                cx.notify();
+            });
+            cx.refresh().unwrap();
+            assert!(cx.debug_bounds(control).is_some(), "missing {control}");
+        }
+        view.update(cx, |view, cx| {
+            view.update_state = UpdateState::Unavailable;
+            cx.notify();
+        });
+        cx.refresh().unwrap();
+        assert!(cx.debug_bounds("app-update-status").is_none());
+    }
+
+    #[gpui::test]
+    fn scheduling_failure_releases_close_state_and_keeps_prepared_retry(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let window = cx.add_window(|_, cx| fixture(cx));
+        window
+            .update(cx, |view, _, _| {
+                view.update_scheduling = true;
+                view.update_restart_pending = true;
+                view.close_after_save = true;
+                view.discard_on_close = true;
+                view.pending_close = Some(PendingClose::UpdateRestart);
+                view.release_update_schedule(
+                    UpdateState::Prepared("1.2.3".into()),
+                    Some("Scheduler did not start.".into()),
+                );
+                assert_eq!(view.update_state, UpdateState::Prepared("1.2.3".into()));
+                assert!(!view.update_scheduling);
+                assert!(!view.update_restart_pending);
+                assert!(!view.close_after_save);
+                assert!(!view.discard_on_close);
+                assert!(view.pending_close.is_none());
+                assert!(view.notice.is_some());
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn update_restart_close_panes_matches_window_scope(cx: &mut gpui::TestAppContext) {
+        let window = cx.add_window(|_, cx| fixture(cx));
+        window
+            .update(cx, |view, _, _cx| {
+                assert_eq!(
+                    view.close_panes(&PendingClose::UpdateRestart).len(),
+                    view.close_panes(&PendingClose::Window).len()
+                );
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn update_restart_requires_workspace_and_prepared_package(cx: &mut gpui::TestAppContext) {
+        let window = cx.add_window(|_, cx| fixture(cx));
+        window
+            .update(cx, |view, window, cx| {
+                view.workspace = None;
+                view.update_state = UpdateState::Prepared("1.2.3".into());
+                view.request_update_restart(window, cx);
+                assert!(!view.update_restart_pending);
+                assert!(!view.prompt_pending);
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn final_update_scheduling_blocks_native_close_and_workspace_mutation(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let window = cx.add_window(|_, cx| fixture(cx));
+        window
+            .update(cx, |view, window, cx| {
+                view.update_scheduling = true;
+                let before = view.workspace.as_ref().unwrap().sidebar_visible;
+                view.toggle_sidebar(window, cx);
+                assert_eq!(view.workspace.as_ref().unwrap().sidebar_visible, before);
+                assert!(!view.request_close(window, cx));
             })
             .unwrap();
     }
