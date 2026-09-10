@@ -1,6 +1,3 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="none">
-  <!-- Soft paperclip fill -->
-  <path d="M4.85 8.4 9.2 4.05a2.55 2.55 0 0 1 3.6 3.6l-5.45 5.45a3.55 3.55 0 0 1-5.02-5.02l5.2-5.2a1.6 1.6 0 0 1 2.26 2.26L5.2 9.75" fill="currentColor" opacity="0.12"/>
-  <!-- Crisp paperclip stroke -->
-  <path d="M4.85 8.4 9.2 4.05a2.55 2.55 0 0 1 3.6 3.6l-5.45 5.45a3.55 3.55 0 0 1-5.02-5.02l5.2-5.2a1.6 1.6 0 0 1 2.26 2.26L5.2 9.75" stroke="currentColor" stroke-width="1.25" stroke-linecap="round" stroke-linejoin="round"/>
+<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M13 7.5 7.5 13A3.18 3.18 0 0 1 3 8.5l6-6a2.12 2.12 0 0 1 3 3l-6 6a1.06 1.06 0 0 1-1.5-1.5L10 4.5"/>
 </svg>

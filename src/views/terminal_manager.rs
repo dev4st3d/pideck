@@ -1411,11 +1411,7 @@ impl TerminalManager {
         let (status, action, enabled) = match &self.update_state {
             UpdateState::Unavailable => return None,
             UpdateState::Checking => ("Checking for updates…".to_owned(), None, false),
-            UpdateState::Current => (
-                "Pideck is up to date".to_owned(),
-                Some("Check for updates"),
-                true,
-            ),
+            UpdateState::Current => ("Up to date".to_owned(), Some("Check for updates"), true),
             UpdateState::Available(version) => (
                 format!("Update {version} available"),
                 Some("Update and restart"),
@@ -1431,15 +1427,17 @@ impl TerminalManager {
             UpdateState::Error(message) => (message.clone(), Some("Retry update"), true),
         };
         let control = match action {
-            Some("Check for updates") => button("check-for-updates", "Check for updates", enabled)
-                .when(enabled, |button| {
-                    button.on_click(
-                        cx.listener(|view, _, window, cx| view.check_for_updates(window, cx)),
-                    )
-                })
-                .into_any_element(),
+            Some("Check for updates") => {
+                status_button("check-for-updates", "Check for updates", enabled)
+                    .when(enabled, |button| {
+                        button.on_click(
+                            cx.listener(|view, _, window, cx| view.check_for_updates(window, cx)),
+                        )
+                    })
+                    .into_any_element()
+            }
             Some("Update and restart") => {
-                button("update-and-restart", "Update and restart", enabled)
+                status_button("update-and-restart", "Update and restart", enabled)
                     .when(enabled, |button| {
                         button.on_click(
                             cx.listener(|view, _, window, cx| view.prepare_and_restart(window, cx)),
@@ -1447,14 +1445,16 @@ impl TerminalManager {
                     })
                     .into_any_element()
             }
-            Some("Restart to update") => button("restart-to-update", "Restart to update", enabled)
-                .when(enabled, |button| {
-                    button.on_click(
-                        cx.listener(|view, _, window, cx| view.request_update_restart(window, cx)),
-                    )
-                })
-                .into_any_element(),
-            Some("Retry update") => button("retry-update", "Retry update", enabled)
+            Some("Restart to update") => {
+                status_button("restart-to-update", "Restart to update", enabled)
+                    .when(enabled, |button| {
+                        button.on_click(cx.listener(|view, _, window, cx| {
+                            view.request_update_restart(window, cx)
+                        }))
+                    })
+                    .into_any_element()
+            }
+            Some("Retry update") => status_button("retry-update", "Retry update", enabled)
                 .when(enabled, |button| {
                     button.on_click(cx.listener(|view, _, window, cx| {
                         if matches!(view.update_state, UpdateState::Error(_)) {
@@ -1468,15 +1468,21 @@ impl TerminalManager {
         Some(
             div()
                 .id("app-update-status")
-                .flex_1()
                 .min_w_0()
-                .px(px(chrome::COMPACT_GAP))
+                .pl(px(chrome::GAP))
                 .flex()
                 .items_center()
                 .gap(px(chrome::COMPACT_GAP))
                 .border_l_1()
                 .border_color(theme::edge())
-                .child(div().min_w_0().truncate().child(status.to_owned()))
+                .child(
+                    div()
+                        .id("update-message")
+                        .min_w_0()
+                        .truncate()
+                        .tooltip(text_tooltip(status.clone()))
+                        .child(status),
+                )
                 .child(control)
                 .into_any_element(),
         )
@@ -2209,6 +2215,21 @@ fn picker_popup(menu: impl IntoElement) -> impl IntoElement {
         .child(deferred(anchored().snap_to_window().child(menu)).with_priority(1))
 }
 
+fn status_button(
+    id: &'static str,
+    label: &'static str,
+    enabled: bool,
+) -> gpui::Stateful<gpui::Div> {
+    button(id, label, enabled)
+        .debug_selector(move || id.into())
+        .h(px(22.0))
+        .px(px(chrome::SMALL_GAP))
+        .border_color(gpui::rgba(0))
+        .text_size(px(chrome::DETAIL_TEXT_SIZE))
+        .line_height(px(chrome::DETAIL_LINE_HEIGHT))
+        .text_color(theme::focus())
+}
+
 fn button(id: &'static str, label: &'static str, enabled: bool) -> gpui::Stateful<gpui::Div> {
     div()
         .id(id)
@@ -2659,6 +2680,9 @@ impl Render for TerminalManager {
                                 chrome::COLLAPSED_BRAND_WIDTH
                             }))
                             .flex_shrink_0()
+                            .h_full()
+                            .border_r_1()
+                            .border_color(theme::edge())
                             .px(px(chrome::SIDEBAR_INSET))
                             .flex()
                             .items_center()
@@ -2687,13 +2711,15 @@ impl Render for TerminalManager {
                             .px(px(chrome::TOOLBAR_INSET))
                             .flex()
                             .items_center()
-                            .justify_between()
-                            .child(div().min_w_0().truncate().child(title))
-                            .child(
-                                div()
-                                    .flex_shrink_0()
-                                    .child(format!("Pideck v{}", app_update::CURRENT_VERSION)),
-                            )
+                            .gap(px(chrome::GAP))
+                            .child(div().flex_1().min_w_0().truncate().child(title))
+                            .when(wide_toolbar, |footer| {
+                                footer.child(
+                                    div()
+                                        .flex_shrink_0()
+                                        .child(format!("v{}", app_update::CURRENT_VERSION)),
+                                )
+                            })
                             .child(div().flex_shrink_0().child(format!(
                                 "{terminal_count} terminal{} open",
                                 if terminal_count == 1 { "" } else { "s" }
@@ -2913,6 +2939,7 @@ mod tests {
         cx: &mut gpui::TestAppContext,
     ) {
         let (view, cx) = cx.add_window_view(|_, cx| fixture(cx));
+        cx.simulate_resize(gpui::size(px(800.0), px(540.0)));
         for (state, control) in [
             (UpdateState::Current, "check-for-updates"),
             (UpdateState::Available("1.2.3".into()), "update-and-restart"),
@@ -2924,7 +2951,14 @@ mod tests {
                 cx.notify();
             });
             cx.refresh().unwrap();
-            assert!(cx.debug_bounds(control).is_some(), "missing {control}");
+            let bounds = cx
+                .debug_bounds(control)
+                .unwrap_or_else(|| panic!("missing {control}"));
+            assert!(
+                bounds.right() <= px(800.0),
+                "{control} overflows the footer"
+            );
+            assert!(bounds.size.height <= px(chrome::FOOTER_HEIGHT));
         }
         view.update(cx, |view, cx| {
             view.update_state = UpdateState::Unavailable;

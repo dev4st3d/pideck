@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Pideck — UI icon specimen</title>
+  <link rel="icon" href="../assets/app.ico">
+  <style>
+    :root { color-scheme: light; font-family: "Segoe UI", sans-serif; color: #242824; background: #f6f5f0; }
+    * { box-sizing: border-box; }
+    body { margin: 0; padding: 40px clamp(16px, 4vw, 64px); }
+    main { max-width: 1440px; margin: auto; }
+    header { border-bottom: 1px solid #d5d8cf; padding-bottom: 24px; margin-bottom: 24px; }
+    h1 { font-size: 32px; font-weight: 600; letter-spacing: -.03em; margin: 0 0 12px; }
+    p { color: #646a62; line-height: 1.6; margin: 0; max-width: 72ch; }
+    #status { margin-bottom: 24px; }
+    #icons { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr)); gap: 24px; list-style: none; padding: 0; margin: 0; }
+    .specimen { min-width: 0; border-top: 1px solid #d5d8cf; padding-top: 12px; }
+    h2 { font: 500 12px "Cascadia Mono", monospace; margin: 0 0 12px; }
+    .samples { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); align-items: center; justify-items: center; gap: 8px; min-height: 48px; padding: 8px; }
+    .dark { color: #eeefe8; background: #20211f; }
+    .icon { display: inline-block; flex-shrink: 0; width: var(--size); height: var(--size); background: currentColor; mask: var(--icon) center / contain no-repeat; }
+    .sizes { min-height: 24px; padding-block: 0; font: 10px "Cascadia Mono", monospace; color: #646a62; }
+    footer { border-top: 1px solid #d5d8cf; margin-top: 32px; padding-top: 20px; }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <h1>A quieter, clearer icon set.</h1>
+      <p>Pideck's custom 16px outlines. Each icon is shown at five sizes on Paper and Graphite, using the original SVG as a tinted alpha mask.</p>
+    </header>
+    <p id="status" role="status">Loading the embedded icon inventory…</p>
+    <noscript><p>Enable JavaScript to load the local SVG specimen.</p></noscript>
+    <ul id="icons" aria-label="UI icon specimens"></ul>
+    <footer><p>1.5px round outlines · 1px square-ended Windows caption strokes · currentColor · no external dependencies</p></footer>
+  </main>
+  <script type="module">
+    const status = document.querySelector("#status");
+    const sizes = [12, 16, 20, 24, 32];
+    try {
+      const response = await fetch("../src/assets.rs");
+      if (!response.ok) throw new Error("Inventory unavailable");
+      const source = await response.text();
+      const names = [...source.matchAll(/include_bytes!\("\.\.\/assets\/icons\/([^"/]+)\.svg"\)/g)]
+        .map(match => match[1]).sort();
+      if (!names.length) throw new Error("Inventory empty");
+      const files = await Promise.all(names.map(async name => {
+        const url = new URL(`../assets/icons/${name}.svg`, location.href);
+        const response = await fetch(url);
+        if (!response.ok) throw new Error("Icon unavailable");
+        const svg = new DOMParser().parseFromString(await response.text(), "image/svg+xml");
+        if (svg.querySelector("parsererror") || svg.documentElement.localName !== "svg") {
+          throw new Error("Invalid SVG");
+        }
+        return { name, url };
+      }));
+      const fragment = document.createDocumentFragment();
+      for (const { name, url } of files) {
+        const item = document.createElement("li");
+        item.className = "specimen";
+        const heading = document.createElement("h2");
+        heading.textContent = name;
+        item.append(heading);
+        for (const theme of ["light", "dark"]) {
+          const row = document.createElement("div");
+          row.className = `samples ${theme}`;
+          row.setAttribute("aria-label", theme === "light" ? "Paper" : "Graphite");
+          for (const size of sizes) {
+            const icon = document.createElement("span");
+            icon.className = "icon";
+            icon.style.setProperty("--size", `${size}px`);
+            icon.style.setProperty("--icon", `url("${url.href}")`);
+            icon.setAttribute("role", "img");
+            icon.setAttribute("aria-label", `${name}, ${size}px`);
+            row.append(icon);
+          }
+          item.append(row);
+        }
+        const labels = document.createElement("div");
+        labels.className = "samples sizes";
+        labels.setAttribute("aria-hidden", "true");
+        for (const size of sizes) {
+          const label = document.createElement("span");
+          label.textContent = size;
+          labels.append(label);
+        }
+        item.append(labels);
+        fragment.append(item);
+      }
+      document.querySelector("#icons").replaceChildren(fragment);
+      status.textContent = `${files.length} icons · 12 / 16 / 20 / 24 / 32px · Paper above, Graphite below`;
+    } catch {
+      status.textContent = "Could not load the icon files. Serve the repository root over HTTP, then reload this page.";
+    }
+  </script>
+</body>
+</html>
