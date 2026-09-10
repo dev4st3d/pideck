@@ -1,9 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="none">
-  <!-- Soft back tile -->
-  <rect x="2.75" y="2.75" width="6.5" height="6.5" rx="1.2" fill="currentColor" opacity="0.12"/>
-  <!-- Soft front tile -->
-  <rect x="6.75" y="6.75" width="6.5" height="6.5" rx="1.2" fill="currentColor" opacity="0.2"/>
-  <!-- Crisp tiles -->
-  <rect x="2.75" y="2.75" width="6.5" height="6.5" rx="1.2" stroke="currentColor" stroke-width="1.2"/>
-  <rect x="6.75" y="6.75" width="6.5" height="6.5" rx="1.2" stroke="currentColor" stroke-width="1.2"/>
+<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M4.5 9H3a.75.75 0 0 1-.75-.75V3A.75.75 0 0 1 3 2.25h5.25A.75.75 0 0 1 9 3v1.5"/>
+  <rect x="6.75" y="6.75" width="7" height="7" rx="1"/>
 </svg>

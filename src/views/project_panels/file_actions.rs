@@ -527,17 +527,17 @@ impl FilesPanel {
     }
     pub(super) fn toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         div()
-            .px(px(chrome::TREE_INSET))
-            .pb(px(4.0))
+            .px(px(chrome::COMPACT_GAP))
+            .pb(px(chrome::COMPACT_GAP))
             .flex()
             .flex_wrap()
-            .gap(px(4.0))
+            .gap(px(chrome::SMALL_GAP))
             .child(control(
-                "+ File",
+                "New file",
                 cx.listener(|view, _, window, cx| view.action(FileAction::NewFile, window, cx)),
             ))
             .child(control(
-                "+ Folder",
+                "New folder",
                 cx.listener(|view, _, window, cx| view.action(FileAction::NewFolder, window, cx)),
             ))
             .child(control(
@@ -757,11 +757,23 @@ pub(super) fn control(
         .h(px(24.0))
         .flex()
         .items_center()
+        .gap(px(4.0))
+        .font_weight(FontWeight::NORMAL)
         .text_size(px(chrome::DETAIL_TEXT_SIZE))
+        .text_color(theme::ash())
         .cursor_pointer()
         .rounded(px(3.0))
         .hover(|style| style.bg(theme::panel_hover()))
+        .active(|style| style.bg(theme::selection()))
         .focus(|style| style.bg(theme::selection()).text_color(theme::focus()))
         .on_click(listener)
+        .when(matches!(label, "New file" | "New folder"), |button| {
+            button.child(
+                svg()
+                    .path("icons/plus.svg")
+                    .size(px(10.0))
+                    .text_color(theme::ash()),
+            )
+        })
         .child(label)
 }

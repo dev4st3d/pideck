@@ -342,7 +342,7 @@ impl FilesPanel {
         div()
             .h(px(FILE_ROW_HEIGHT))
             .w_full()
-            .px(px(chrome::TREE_INSET))
+            .px(px(chrome::COMPACT_GAP))
             .child(
                 div()
                     .id(("file-row", index))
@@ -357,11 +357,13 @@ impl FilesPanel {
                     .size_full()
                     .min_w_0()
                     .overflow_hidden()
-                    .pl(px(row.depth as f32 * chrome::TREE_INDENT))
+                    .pl(px(
+                        chrome::SMALL_GAP + row.depth as f32 * chrome::TREE_INDENT
+                    ))
                     .pr(px(12.0))
                     .flex()
                     .items_center()
-                    .gap(px(4.0))
+                    .gap(px(chrome::SMALL_GAP))
                     .font_family(chrome::CHROME_FONT)
                     .font_weight(FontWeight::NORMAL)
                     .text_size(px(chrome::CHROME_TEXT_SIZE))
@@ -467,7 +469,24 @@ impl FilesPanel {
                                 }))
                             }),
                     )
-                    .child(project_icon(&row.entry.path, row.entry.is_dir, expanded))
+                    .child(if row.entry.is_dir {
+                        svg()
+                            .path("icons/folder.svg")
+                            .size(px(PANEL_ICON_SIZE))
+                            .flex_shrink_0()
+                            .text_color(if expanded {
+                                theme::focus()
+                            } else {
+                                theme::ash()
+                            })
+                            .into_any_element()
+                    } else {
+                        div()
+                            .flex_shrink_0()
+                            .opacity(0.8)
+                            .child(project_icon(&row.entry.path, false, false))
+                            .into_any_element()
+                    })
                     .child(
                         div()
                             .min_w_0()
@@ -567,13 +586,15 @@ impl Render for FilesPanel {
                         );
                         cx.stop_propagation();
                     }))
-                    .h(px(FILE_ROW_HEIGHT))
+                    .h(px(chrome::CONTROL_HEIGHT))
                     .flex_shrink_0()
                     .px(px(chrome::SIDEBAR_INSET))
                     .flex()
                     .items_center()
-                    .gap(px(10.0))
-                    .child(panel_icon("icons/chevron-down.svg"))
+                    .gap(px(chrome::SMALL_GAP))
+                    .text_size(px(chrome::DETAIL_TEXT_SIZE))
+                    .text_color(theme::ash())
+                    .child(panel_icon("icons/folder.svg"))
                     .child(
                         div().flex_1().min_w_0().truncate().child(
                             self.root
