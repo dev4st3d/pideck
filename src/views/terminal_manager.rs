@@ -579,6 +579,7 @@ impl TerminalManager {
                             .px(px(chrome::COMPACT_GAP))
                             .flex()
                             .items_center()
+                            .gap(px(chrome::SMALL_GAP))
                             .justify_between()
                             .rounded(px(chrome::CONTROL_RADIUS))
                             .border_1()
@@ -595,7 +596,16 @@ impl TerminalManager {
                             .on_click(cx.listener(move |view, _, window, cx| {
                                 view.choose_appearance(appearance, window, cx)
                             }))
-                            .child(appearance.label())
+                            .child(
+                                div()
+                                    .size(px(10.0))
+                                    .flex_shrink_0()
+                                    .rounded_full()
+                                    .bg(appearance.swatch())
+                                    .border_1()
+                                    .border_color(theme::edge()),
+                            )
+                            .child(div().flex_1().min_w_0().child(appearance.label()))
                             .when(appearance == theme::appearance(), |row| row.child("✓"))
                     }),
             )
@@ -1338,6 +1348,7 @@ impl TerminalManager {
                             .size(px(10.0))
                             .flex_shrink_0()
                             .rounded_full()
+                            .bg(theme::canvas())
                             .border_1()
                             .border_color(theme::bone()),
                     )

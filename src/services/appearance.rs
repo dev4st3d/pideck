@@ -77,7 +77,7 @@ mod tests {
         let path = root.0.join("appearance.json");
         let legacy = root.0.join("settings.json");
         fs::write(&legacy, b"legacy settings preserved").unwrap();
-        assert_eq!(load(&path).unwrap(), Appearance::Black);
+        assert_eq!(load(&path).unwrap(), Appearance::default());
         for appearance in Appearance::ALL {
             save(&path, appearance).unwrap();
             assert_eq!(load(&path).unwrap(), appearance);

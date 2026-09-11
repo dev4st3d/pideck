@@ -1,5 +1,7 @@
 use std::borrow::Cow;
+use std::collections::HashMap;
 use std::path::Path;
+use std::sync::LazyLock;
 
 use gpui::{AssetSource, Result, SharedString};
 
@@ -134,27 +136,87 @@ const ICONS: [(&str, &[u8]); 48] = [
 
 pub(crate) struct Assets;
 
-pub(crate) fn project_icon(path: &Path, directory: bool, expanded: bool) -> &'static str {
-    if directory {
-        if expanded {
-            "icons/folder-open.svg"
-        } else {
-            "icons/folder.svg"
-        }
-    } else if path.extension().is_some_and(|ext| {
-        matches!(
-            ext.to_str(),
-            Some("rs" | "tsx" | "ts" | "jsx" | "js" | "json" | "toml")
-        )
-    }) {
-        "icons/file-code.svg"
+#[derive(serde::Deserialize)]
+struct IconBundle {
+    theme: serde_json::Value,
+    icons: HashMap<String, String>,
+}
+
+static CATPPUCCIN: LazyLock<IconBundle> = LazyLock::new(|| {
+    serde_json::from_str(include_str!("../assets/catppuccin/latte.json"))
+        .expect("bundled Catppuccin icon data must be valid")
+});
+
+// Latte outlines are dark (`#4c4f69`). Remap those neutrals so the same
+// accent-colored glyphs stay visible on Black/Graphite/Charcoal surfaces.
+static CATPPUCCIN_DARK: LazyLock<HashMap<String, String>> = LazyLock::new(|| {
+    CATPPUCCIN
+        .icons
+        .iter()
+        .map(|(path, svg)| (path.clone(), remap_latte_for_dark(svg)))
+        .collect()
+});
+
+fn remap_latte_for_dark(svg: &str) -> String {
+    svg.replace("#4c4f69", "#c6c6c6")
+        .replace("#4C4F69", "#c6c6c6")
+        .replace("#8c8fa1", "#9a9a9a")
+        .replace("#8C8FA1", "#9a9a9a")
+}
+
+pub(crate) fn project_icon(path: &Path, directory: bool, expanded: bool) -> SharedString {
+    let theme = &CATPPUCCIN.theme;
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("");
+    let icon = if directory {
+        let state = if expanded { "expanded" } else { "collapsed" };
+        theme["named_directory_icons"][name][state]
+            .as_str()
+            .or_else(|| theme["directory_icons"][state].as_str())
     } else {
-        "icons/file.svg"
-    }
+        let stem = path
+            .file_stem()
+            .and_then(|name| name.to_str())
+            .unwrap_or(name);
+        let mut key = theme["file_stems"][name]
+            .as_str()
+            .or_else(|| theme["file_stems"][stem].as_str());
+        let mut suffix = name;
+        while key.is_none() {
+            key = theme["file_suffixes"][suffix].as_str();
+            let Some((_, rest)) = suffix.split_once('.') else {
+                break;
+            };
+            suffix = rest;
+        }
+        key.and_then(|key| theme["file_icons"][key]["path"].as_str())
+    };
+    icon.map(|icon| {
+        let prefix = if crate::theme::appearance().is_dark() {
+            "catppuccin-dark"
+        } else {
+            "catppuccin"
+        };
+        format!("{prefix}/{icon}").into()
+    })
+    .unwrap_or_else(|| "icons/file.svg".into())
 }
 
 impl AssetSource for Assets {
     fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
+        if let Some(path) = path.strip_prefix("catppuccin-dark/") {
+            return Ok(CATPPUCCIN_DARK
+                .get(path)
+                .map(|svg| Cow::Borrowed(svg.as_bytes())));
+        }
+        if let Some(path) = path.strip_prefix("catppuccin/") {
+            return Ok(CATPPUCCIN
+                .icons
+                .get(path)
+                .map(|svg| Cow::Borrowed(svg.as_bytes())));
+        }
         Ok(path.strip_prefix("icons/").and_then(|name| {
             ICONS
                 .iter()
@@ -228,6 +290,7 @@ mod tests {
 
     #[test]
     fn selected_theme_resolves_files_and_both_folder_states() {
+        crate::theme::set_appearance(crate::theme::Appearance::Black);
         for (name, directory) in [
             ("src", true),
             ("arbitrary-folder", true),
@@ -244,5 +307,27 @@ mod tests {
             project_icon(Path::new("src"), true, true),
             project_icon(Path::new("src"), true, false)
         );
+        assert_ne!(
+            project_icon(Path::new("src"), true, false),
+            project_icon(Path::new("docs"), true, false)
+        );
+        assert_ne!(
+            project_icon(Path::new("main.rs"), false, false),
+            project_icon(Path::new("README.md"), false, false)
+        );
+
+        crate::theme::set_appearance(crate::theme::Appearance::Light);
+        let light = project_icon(Path::new("src"), true, false);
+        assert!(light.starts_with("catppuccin/"), "{light}");
+        assert!(Assets.load(&light).unwrap().is_some(), "{light}");
+
+        crate::theme::set_appearance(crate::theme::Appearance::Black);
+        let dark = project_icon(Path::new("src"), true, false);
+        assert!(dark.starts_with("catppuccin-dark/"), "{dark}");
+        let dark_svg = Assets.load(&dark).unwrap().expect("dark src folder icon");
+        let dark_svg = std::str::from_utf8(&dark_svg).unwrap();
+        assert!(dark_svg.contains("#c6c6c6"), "{dark}");
+        assert!(!dark_svg.contains("#4c4f69"), "{dark}");
+        assert_ne!(light, dark);
     }
 }

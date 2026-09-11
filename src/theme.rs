@@ -1,4 +1,4 @@
-//! Neutral palettes from design/pideck-reimagined and its editable Pen master.
+//! Neutral palettes from design/pideck-reimagined, plus Stone and Flint as warmer darks.
 
 use std::cell::Cell;
 
@@ -8,15 +8,24 @@ pub(crate) mod terminal_manager;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum Appearance {
-    #[default]
     Black,
     Light,
     Graphite,
     Charcoal,
+    Flint,
+    #[default]
+    Stone,
 }
 
 impl Appearance {
-    pub(crate) const ALL: [Self; 4] = [Self::Black, Self::Light, Self::Graphite, Self::Charcoal];
+    pub(crate) const ALL: [Self; 6] = [
+        Self::Black,
+        Self::Light,
+        Self::Graphite,
+        Self::Charcoal,
+        Self::Flint,
+        Self::Stone,
+    ];
 
     pub(crate) const fn id(self) -> &'static str {
         match self {
@@ -24,6 +33,8 @@ impl Appearance {
             Self::Light => "light",
             Self::Graphite => "graphite",
             Self::Charcoal => "charcoal",
+            Self::Flint => "flint",
+            Self::Stone => "stone",
         }
     }
     pub(crate) const fn label(self) -> &'static str {
@@ -32,6 +43,8 @@ impl Appearance {
             Self::Light => "Light",
             Self::Graphite => "Graphite",
             Self::Charcoal => "Charcoal",
+            Self::Flint => "Flint",
+            Self::Stone => "Stone",
         }
     }
     pub(crate) fn from_id(id: &str) -> Option<Self> {
@@ -41,6 +54,8 @@ impl Appearance {
             "light" | "paper" | "linen" => Some(Self::Light),
             "graphite" | "evergreen" | "dusk" => Some(Self::Graphite),
             "charcoal" | "ember" => Some(Self::Charcoal),
+            "flint" => Some(Self::Flint),
+            "stone" => Some(Self::Stone),
             _ => None,
         }
     }
@@ -53,14 +68,19 @@ impl Appearance {
             Self::Light => &LIGHT,
             Self::Graphite => &GRAPHITE,
             Self::Charcoal => &CHARCOAL,
+            Self::Flint => &FLINT,
+            Self::Stone => &STONE,
         }
+    }
+    pub(crate) fn swatch(self) -> Rgba {
+        rgba(self.palette().canvas)
     }
 }
 
 thread_local! {
     // Rendering and theme changes stay on GPUI's UI thread. Workers receive
     // resolved colors or an explicit Appearance, never ambient theme state.
-    static APPEARANCE: Cell<Appearance> = const { Cell::new(Appearance::Black) };
+    static APPEARANCE: Cell<Appearance> = const { Cell::new(Appearance::Stone) };
 }
 
 pub(crate) fn appearance() -> Appearance {
@@ -89,6 +109,7 @@ struct Palette {
     error_wash: u32,
     selection: u32,
     working: u32,
+    modified: u32,
     diff_added: u32,
     diff_removed: u32,
     diff_empty: u32,
@@ -112,6 +133,7 @@ const BLACK: Palette = Palette {
     error_wash: 0x2b1e1eff,
     selection: 0x282828ff,
     working: 0xabababff,
+    modified: 0xe0b07aff,
     diff_added: 0x17251cff,
     diff_removed: 0x2b1e1eff,
     diff_empty: 0x141414ff,
@@ -135,6 +157,7 @@ const LIGHT: Palette = Palette {
     error_wash: 0xf6eaeaff,
     selection: 0xe4e4e4ff,
     working: 0x616161ff,
+    modified: 0x8a541cff,
     diff_added: 0xe8f1eaff,
     diff_removed: 0xf6eaeaff,
     diff_empty: 0xf7f7f7ff,
@@ -158,6 +181,7 @@ const GRAPHITE: Palette = Palette {
     error_wash: 0x332626ff,
     selection: 0x383838ff,
     working: 0xb3b3b3ff,
+    modified: 0xe0b07aff,
     diff_added: 0x223027ff,
     diff_removed: 0x332626ff,
     diff_empty: 0x232323ff,
@@ -181,10 +205,60 @@ const CHARCOAL: Palette = Palette {
     error_wash: 0x453232ff,
     selection: 0x494949ff,
     working: 0xbdbdbdff,
+    modified: 0xe8b888ff,
     diff_added: 0x2a3c30ff,
     diff_removed: 0x453232ff,
     diff_empty: 0x313131ff,
 };
+
+const FLINT: Palette = Palette {
+    canvas: 0x161310ff,
+    chrome: 0x211e1aff,
+    success: 0xadc4aaff,
+    floor: 0x1c1916ff,
+    panel_hover: 0x2a2622ff,
+    edge: 0x3e3934ff,
+    edge_hard: 0xc8c1b8ff,
+    bone: 0xf4efe8ff,
+    ash: 0xc8c1b8ff,
+    focus: 0xe2dbd2ff,
+    accent_hover: 0xf4efe8ff,
+    accent_pressed: 0xb8b1a8ff,
+    on_accent: 0x100e0cff,
+    error: 0xd4aea4ff,
+    error_wash: 0x2e2422ff,
+    selection: 0x322e2aff,
+    working: 0xc8c1b8ff,
+    modified: 0xe4be92ff,
+    diff_added: 0x1e2c20ff,
+    diff_removed: 0x2e2422ff,
+    diff_empty: 0x211e1aff,
+};
+
+const STONE: Palette = Palette {
+    canvas: 0x3a3632ff,
+    chrome: 0x46413cff,
+    success: 0xb3c9b0ff,
+    floor: 0x413c38ff,
+    panel_hover: 0x4e4944ff,
+    edge: 0x655f59ff,
+    edge_hard: 0xd0c9c0ff,
+    bone: 0xf4efe8ff,
+    ash: 0xd0c9c0ff,
+    focus: 0xe6dfd6ff,
+    accent_hover: 0xf4efe8ff,
+    accent_pressed: 0xc6bfb6ff,
+    on_accent: 0x2e2b28ff,
+    error: 0xd9b3a8ff,
+    error_wash: 0x4a3c38ff,
+    selection: 0x524c47ff,
+    working: 0xd0c9c0ff,
+    modified: 0xe8c49aff,
+    diff_added: 0x3a4a3cff,
+    diff_removed: 0x4a3c38ff,
+    diff_empty: 0x46413cff,
+};
+
 fn palette() -> &'static Palette {
     appearance().palette()
 }
@@ -264,6 +338,9 @@ pub(crate) fn on_accent() -> Rgba {
 }
 pub(crate) fn working() -> Rgba {
     rgba(palette().working)
+}
+pub(crate) fn modified() -> Rgba {
+    rgba(palette().modified)
 }
 pub(crate) fn diff_added() -> Rgba {
     rgba(palette().diff_added)
@@ -347,6 +424,12 @@ mod tests {
             assert!(contrast(p.error, p.error_wash) >= 4.5, "{appearance:?}");
             assert!(contrast(p.error, p.diff_removed) >= 4.5, "{appearance:?}");
             assert!(contrast(p.success, p.diff_added) >= 4.5, "{appearance:?}");
+            for background in [p.canvas, p.floor, p.panel_hover, p.selection] {
+                assert!(
+                    contrast(p.modified, background) >= 4.5,
+                    "{appearance:?}: modified on {background:08x}"
+                );
+            }
             let ansi = if appearance.is_dark() {
                 ANSI_DARK
             } else {
@@ -364,7 +447,10 @@ mod tests {
     #[test]
     fn appearance_ids_are_stable_and_unique() {
         let ids = Appearance::ALL.map(Appearance::id);
-        assert_eq!(ids, ["black", "light", "graphite", "charcoal"]);
+        assert_eq!(
+            ids,
+            ["black", "light", "graphite", "charcoal", "flint", "stone"]
+        );
         for (index, id) in ids.iter().enumerate() {
             assert!(!ids[..index].contains(id), "duplicate appearance ID: {id}");
         }
@@ -375,6 +461,8 @@ mod tests {
         assert_eq!(Appearance::from_id("paper"), Some(Appearance::Light));
         assert_eq!(Appearance::from_id("midnight"), Some(Appearance::Black));
         assert_eq!(Appearance::from_id("ember"), Some(Appearance::Charcoal));
+        assert_eq!(Appearance::from_id("flint"), Some(Appearance::Flint));
+        assert_eq!(Appearance::from_id("stone"), Some(Appearance::Stone));
         for appearance in Appearance::ALL {
             assert_eq!(Appearance::from_id(appearance.id()), Some(appearance));
         }
@@ -384,8 +472,23 @@ mod tests {
         assert_eq!(appearance(), Appearance::Black);
         assert_eq!(
             std::thread::spawn(appearance).join().unwrap(),
-            Appearance::Black
+            Appearance::default()
         );
         set_appearance(original);
+    }
+
+    #[test]
+    fn stone_is_a_lifted_warm_dark() {
+        assert!(Appearance::Stone.is_dark());
+        assert!(Appearance::Flint.is_dark());
+        assert!(
+            luminance(Appearance::Stone.palette().canvas)
+                > luminance(Appearance::Flint.palette().canvas)
+        );
+        assert!(
+            luminance(Appearance::Flint.palette().canvas)
+                > luminance(Appearance::Black.palette().canvas)
+        );
+        assert_ne!(Appearance::Stone.swatch(), Appearance::Flint.swatch());
     }
 }
