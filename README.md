@@ -97,6 +97,8 @@ Choose a theme from the appearance picker beside **New terminal**:
 - **Light** — neutral white surfaces.
 - **Graphite** — dark gray surfaces.
 - **Charcoal** — softer charcoal surfaces.
+- **Flint** — warm dark, a step below Stone.
+- **Stone** — warm, lifted dark (the default).
 
 Theme changes apply to open files, diffs, and terminals without restarting shells or clearing their history. The preference stays local in `appearance.json` beside the workspace layout. A malformed preference is preserved until you explicitly choose a theme. The picker supports Tab, arrow keys, Enter, and Escape.
 

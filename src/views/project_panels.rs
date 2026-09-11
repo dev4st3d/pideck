@@ -12,8 +12,8 @@ mod file_actions;
 
 use gpui::{
     Context, EventEmitter, FocusHandle, FontWeight, IntoElement, KeyDownEvent, Render,
-    ScrollStrategy, SharedString, UniformListScrollHandle, Window, div, prelude::*, px, rgba, svg,
-    uniform_list,
+    ScrollStrategy, SharedString, UniformListScrollHandle, Window, div, img, prelude::*, px, rgba,
+    svg, uniform_list,
 };
 
 use super::terminal_manager::text_tooltip;
@@ -533,6 +533,11 @@ impl FilesPanel {
                 .into_any_element();
         }
         let path = row.entry.path.to_string_lossy().into_owned();
+        let git_marker = self.git_markers.get(&row.entry.path).copied();
+        let tooltip = match git_marker {
+            Some(marker) => format!("{path} · {}", git_status_label(marker)),
+            None => path,
+        };
         let loading = self
             .directories
             .get(&row.entry.path)
@@ -582,7 +587,7 @@ impl FilesPanel {
                     .font_weight(FontWeight::NORMAL)
                     .text_size(px(chrome::CHROME_TEXT_SIZE))
                     .line_height(px(chrome::CONTROL_LINE_HEIGHT))
-                    .text_color(theme::bone())
+                    .text_color(git_marker.map_or(theme::bone(), marker_color))
                     .rounded(px(ROW_RADIUS))
                     .border_1()
                     .border_color(if focused && selected {
@@ -605,7 +610,7 @@ impl FilesPanel {
                             theme::panel_hover()
                         })
                     })
-                    .tooltip(text_tooltip(path))
+                    .tooltip(text_tooltip(tooltip))
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |view, event: &gpui::MouseDownEvent, window, cx| {
@@ -681,28 +686,7 @@ impl FilesPanel {
                                 }))
                             }),
                     )
-                    .child(if row.entry.is_dir {
-                        svg()
-                            .path(if expanded {
-                                "icons/folder-open.svg"
-                            } else {
-                                "icons/folder.svg"
-                            })
-                            .size(px(PANEL_ICON_SIZE))
-                            .flex_shrink_0()
-                            .text_color(if expanded {
-                                theme::focus()
-                            } else {
-                                theme::ash()
-                            })
-                            .into_any_element()
-                    } else {
-                        div()
-                            .flex_shrink_0()
-                            .opacity(0.8)
-                            .child(project_icon(&row.entry.path, false, false))
-                            .into_any_element()
-                    })
+                    .child(project_icon(&row.entry.path, row.entry.is_dir, expanded))
                     .child(
                         div()
                             .min_w_0()
@@ -713,18 +697,6 @@ impl FilesPanel {
                     .when(row.entry.is_symlink, |item| {
                         item.child(row_metadata("link", selected))
                     })
-                    .when_some(
-                        self.git_markers.get(&row.entry.path).copied(),
-                        |item, marker| {
-                            item.child(
-                                div()
-                                    .font_family(theme::mono())
-                                    .text_size(px(11.0))
-                                    .text_color(theme::focus())
-                                    .child(marker),
-                            )
-                        },
-                    )
                     .when(loading, |item| {
                         item.child(row_metadata("Refreshing…", selected))
                     }),
@@ -1696,11 +1668,30 @@ fn row_metadata(text: &'static str, selected: bool) -> impl IntoElement {
 }
 
 fn project_icon(path: &std::path::Path, directory: bool, expanded: bool) -> impl IntoElement {
-    svg()
-        .path(crate::assets::project_icon(path, directory, expanded))
+    // Catppuccin glyphs are multi-color; GPUI `svg()` tints an alpha mask.
+    img(crate::assets::project_icon(path, directory, expanded))
         .size(px(16.0))
         .flex_shrink_0()
-        .text_color(theme::ash())
+}
+
+fn marker_color(marker: &str) -> gpui::Rgba {
+    match marker {
+        "!" | "D" => theme::error(),
+        "A" | "U" => theme::success(),
+        _ => theme::modified(),
+    }
+}
+
+fn git_status_label(marker: &str) -> &'static str {
+    match marker {
+        "!" => "conflicted",
+        "U" => "untracked",
+        "A" => "added",
+        "D" => "deleted",
+        "R" => "renamed",
+        "M" => "modified",
+        _ => "changed",
+    }
 }
 
 fn git_marker(entry: &GitEntry) -> &'static str {
@@ -1856,5 +1847,30 @@ mod reimagined_tests {
                 assert_eq!(panel.rows[panel.selected].path, PathBuf::from("src"));
             })
             .unwrap();
+    }
+
+    #[test]
+    fn explorer_git_status_colors_modified_orange() {
+        theme::set_appearance(theme::Appearance::Black);
+        assert_eq!(marker_color("M"), theme::modified());
+        assert_eq!(marker_color("R"), theme::modified());
+        assert_eq!(marker_color("A"), theme::success());
+        assert_eq!(marker_color("U"), theme::success());
+        assert_eq!(marker_color("D"), theme::error());
+        assert_eq!(marker_color("!"), theme::error());
+        assert_eq!(git_status_label("M"), "modified");
+        let modified = GitEntry {
+            path: PathBuf::from("src/app.rs"),
+            relative_path: "src/app.rs".into(),
+            original_path: None,
+            index_status: 'M',
+            worktree_status: 'M',
+            untracked: false,
+            conflicted: false,
+            line_stats: None,
+            staged_stats: None,
+            working_stats: None,
+        };
+        assert_eq!(git_marker(&modified), "M");
     }
 }
