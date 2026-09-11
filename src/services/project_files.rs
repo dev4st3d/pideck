@@ -1,4 +1,4 @@
-//! Worker-side project browsing and explicit, conflict-checked text saves.
+//! Worker-side project browsing, image snapshots, and explicit, conflict-checked text saves.
 
 use std::fmt;
 use std::fs::{self, OpenOptions};
@@ -7,6 +7,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 pub(crate) const MAX_TEXT_BYTES: usize = 2 * 1024 * 1024;
+pub(crate) const MAX_IMAGE_BYTES: usize = 32 * 1024 * 1024;
+pub(crate) const MAX_IMAGE_PIXELS: u64 = 50_000_000;
 const MAX_DIRECTORY_ENTRIES: usize = 2_000;
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(1);
 
@@ -39,6 +41,54 @@ pub(crate) struct FileSnapshot {
     pub(crate) bom: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ImageKind {
+    Png,
+    Jpeg,
+    Gif,
+    Webp,
+    Bmp,
+    Tiff,
+}
+
+impl ImageKind {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Png => "PNG",
+            Self::Jpeg => "JPEG",
+            Self::Gif => "GIF",
+            Self::Webp => "WebP",
+            Self::Bmp => "BMP",
+            Self::Tiff => "TIFF",
+        }
+    }
+
+    fn from_extension(path: &Path) -> Option<Self> {
+        match path.extension()?.to_str()?.to_ascii_lowercase().as_str() {
+            "png" => Some(Self::Png),
+            "jpg" | "jpeg" => Some(Self::Jpeg),
+            "gif" => Some(Self::Gif),
+            "webp" => Some(Self::Webp),
+            "bmp" => Some(Self::Bmp),
+            "tif" | "tiff" => Some(Self::Tiff),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ImageSnapshot {
+    pub(crate) path: PathBuf,
+    pub(crate) bytes: Vec<u8>,
+    pub(crate) format: ImageKind,
+    pub(crate) width: Option<u32>,
+    pub(crate) height: Option<u32>,
+}
+
+pub(crate) fn is_image_path(path: &Path) -> bool {
+    ImageKind::from_extension(path).is_some()
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum FileError {
     Unavailable,
@@ -46,7 +96,9 @@ pub(crate) enum FileError {
     NotFile,
     NotDirectory,
     NotText,
+    NotImage,
     TooLarge,
+    ImageTooLarge,
     ReadOnly,
     Conflict,
     SaveFailed,
@@ -58,10 +110,16 @@ impl fmt::Display for FileError {
         formatter.write_str(match self {
             Self::Unavailable => "Could not open this path. Check that it is available and readable.",
             Self::OutsideProject => "This link points outside the project. Open its folder as a project first.",
-            Self::NotFile => "Choose a regular text file to edit.",
+            Self::NotFile => "This path is not a regular file.",
             Self::NotDirectory => "This folder cannot be expanded.",
             Self::NotText => "This file is binary or is not UTF-8 text.",
+            Self::NotImage => {
+                "This file is not a supported PNG, JPEG, GIF, WebP, BMP, or TIFF image."
+            }
             Self::TooLarge => "This file exceeds the 2 MiB editor limit. Open it in another editor.",
+            Self::ImageTooLarge => {
+                "This image exceeds the viewer limit (32 MiB, or 50 megapixels)."
+            }
             Self::ReadOnly => "This file is read-only. Change its permissions before saving.",
             Self::Conflict => "This file changed on disk. Reopen it before saving your changes.",
             Self::SaveFailed => "Could not save this file. Your edits are still open; check folder permissions and retry.",
@@ -231,6 +289,10 @@ pub(crate) fn filter_files(
 }
 
 fn read_bounded(path: &Path) -> Result<Vec<u8>, FileError> {
+    read_limited(path, MAX_TEXT_BYTES, FileError::TooLarge)
+}
+
+fn read_limited(path: &Path, max_bytes: usize, too_large: FileError) -> Result<Vec<u8>, FileError> {
     if !fs::metadata(path)
         .map_err(|_| FileError::Unavailable)?
         .is_file()
@@ -242,17 +304,183 @@ fn read_bounded(path: &Path) -> Result<Vec<u8>, FileError> {
     if !metadata.is_file() {
         return Err(FileError::NotFile);
     }
-    if metadata.len() > MAX_TEXT_BYTES as u64 {
-        return Err(FileError::TooLarge);
+    if metadata.len() > max_bytes as u64 {
+        return Err(too_large.clone());
     }
     let mut bytes = Vec::with_capacity(metadata.len() as usize);
-    file.take(MAX_TEXT_BYTES as u64 + 1)
+    file.take(max_bytes as u64 + 1)
         .read_to_end(&mut bytes)
         .map_err(|_| FileError::Unavailable)?;
-    if bytes.len() > MAX_TEXT_BYTES {
-        return Err(FileError::TooLarge);
+    if bytes.len() > max_bytes {
+        return Err(too_large);
     }
     Ok(bytes)
+}
+
+pub(crate) fn load_image_file(root: &Path, path: &Path) -> Result<ImageSnapshot, FileError> {
+    let path = confined_path(root, path)?;
+    let bytes = read_limited(&path, MAX_IMAGE_BYTES, FileError::ImageTooLarge)?;
+    if bytes.is_empty() {
+        return Err(FileError::NotImage);
+    }
+    let Some(format) = detect_image(&bytes) else {
+        return Err(FileError::NotImage);
+    };
+    let (width, height) = match image_dimensions(&bytes, format) {
+        Some((width, height)) => {
+            let pixels = u64::from(width).saturating_mul(u64::from(height));
+            if width == 0 || height == 0 || pixels > MAX_IMAGE_PIXELS {
+                return Err(FileError::ImageTooLarge);
+            }
+            (Some(width), Some(height))
+        }
+        None => (None, None),
+    };
+    Ok(ImageSnapshot {
+        path: super::paths::without_windows_verbatim_prefix(&path),
+        bytes,
+        format,
+        width,
+        height,
+    })
+}
+
+fn detect_image(bytes: &[u8]) -> Option<ImageKind> {
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        return Some(ImageKind::Png);
+    }
+    if bytes.len() >= 3 && bytes[0] == 0xFF && bytes[1] == 0xD8 && bytes[2] == 0xFF {
+        return Some(ImageKind::Jpeg);
+    }
+    if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        return Some(ImageKind::Gif);
+    }
+    if bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP" {
+        return Some(ImageKind::Webp);
+    }
+    if bytes.starts_with(b"BM") {
+        return Some(ImageKind::Bmp);
+    }
+    if bytes.starts_with(b"II*\0") || bytes.starts_with(b"MM\0*") {
+        return Some(ImageKind::Tiff);
+    }
+    None
+}
+
+fn image_dimensions(bytes: &[u8], format: ImageKind) -> Option<(u32, u32)> {
+    match format {
+        ImageKind::Png => png_dimensions(bytes),
+        ImageKind::Jpeg => jpeg_dimensions(bytes),
+        ImageKind::Gif => gif_dimensions(bytes),
+        ImageKind::Webp => webp_dimensions(bytes),
+        ImageKind::Bmp => bmp_dimensions(bytes),
+        ImageKind::Tiff => None,
+    }
+}
+
+fn png_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
+    if bytes.len() < 24 || &bytes[12..16] != b"IHDR" {
+        return None;
+    }
+    Some((
+        u32::from_be_bytes(bytes[16..20].try_into().ok()?),
+        u32::from_be_bytes(bytes[20..24].try_into().ok()?),
+    ))
+}
+
+fn jpeg_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
+    if bytes.len() < 4 || bytes[0] != 0xFF || bytes[1] != 0xD8 {
+        return None;
+    }
+    let mut index = 2;
+    while index + 1 < bytes.len() {
+        if bytes[index] != 0xFF {
+            return None;
+        }
+        while index < bytes.len() && bytes[index] == 0xFF {
+            index += 1;
+        }
+        if index >= bytes.len() {
+            return None;
+        }
+        let marker = bytes[index];
+        index += 1;
+        if marker == 0xD8 || marker == 0xD9 || (0xD0..=0xD7).contains(&marker) {
+            continue;
+        }
+        if index + 1 >= bytes.len() {
+            return None;
+        }
+        let length = u16::from_be_bytes([bytes[index], bytes[index + 1]]) as usize;
+        if length < 2 || index + length > bytes.len() {
+            return None;
+        }
+        if matches!(
+            marker,
+            0xC0 | 0xC1
+                | 0xC2
+                | 0xC3
+                | 0xC5
+                | 0xC6
+                | 0xC7
+                | 0xC9
+                | 0xCA
+                | 0xCB
+                | 0xCD
+                | 0xCE
+                | 0xCF
+        ) && length >= 7
+        {
+            let height = u16::from_be_bytes([bytes[index + 3], bytes[index + 4]]) as u32;
+            let width = u16::from_be_bytes([bytes[index + 5], bytes[index + 6]]) as u32;
+            return Some((width, height));
+        }
+        index += length;
+    }
+    None
+}
+
+fn gif_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
+    if bytes.len() < 10 {
+        return None;
+    }
+    Some((
+        u16::from_le_bytes(bytes[6..8].try_into().ok()?) as u32,
+        u16::from_le_bytes(bytes[8..10].try_into().ok()?) as u32,
+    ))
+}
+
+fn webp_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
+    if bytes.len() < 30 || !bytes.starts_with(b"RIFF") || &bytes[8..12] != b"WEBP" {
+        return None;
+    }
+    match &bytes[12..16] {
+        b"VP8X" => Some((
+            1 + u32::from_le_bytes([bytes[24], bytes[25], bytes[26], 0]),
+            1 + u32::from_le_bytes([bytes[27], bytes[28], bytes[29], 0]),
+        )),
+        b"VP8 " if bytes[23..26] == [0x9D, 0x01, 0x2A] => Some((
+            u16::from_le_bytes([bytes[26], bytes[27]]) as u32 & 0x3FFF,
+            u16::from_le_bytes([bytes[28], bytes[29]]) as u32 & 0x3FFF,
+        )),
+        b"VP8L" if bytes[20] == 0x2F => {
+            let bits = u32::from_le_bytes(bytes[21..25].try_into().ok()?);
+            Some(((bits & 0x3FFF) + 1, ((bits >> 14) & 0x3FFF) + 1))
+        }
+        _ => None,
+    }
+}
+
+fn bmp_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
+    if bytes.len() < 26 {
+        return None;
+    }
+    let width = i32::from_le_bytes(bytes[18..22].try_into().ok()?);
+    let height = i32::from_le_bytes(bytes[22..26].try_into().ok()?);
+    if width <= 0 {
+        return None;
+    }
+    Some((width as u32, height.unsigned_abs()))
 }
 
 fn snapshot(path: PathBuf, bytes: Vec<u8>) -> Result<FileSnapshot, FileError> {
@@ -615,6 +843,91 @@ mod tests {
         let file = fs::File::create(&path).unwrap();
         file.set_len(MAX_TEXT_BYTES as u64 + 1).unwrap();
         assert_eq!(load_text_file(&root.0, &path), Err(FileError::TooLarge));
+    }
+
+    #[test]
+    fn image_paths_cover_supported_raster_extensions() {
+        assert!(is_image_path(Path::new("photo.PNG")));
+        assert!(is_image_path(Path::new("a.JPEG")));
+        assert!(is_image_path(Path::new(r"C:\assets\icon.webp")));
+        assert!(is_image_path(Path::new("tile.tif")));
+        assert!(!is_image_path(Path::new("icon.svg")));
+        assert!(!is_image_path(Path::new("notes.txt")));
+        assert!(!is_image_path(Path::new("archive.tar.gz")));
+    }
+
+    #[test]
+    fn image_loader_reads_headers_and_rejects_unsupported_or_oversized_files() {
+        let root = TestDirectory::new();
+        let png = root.0.join("pixel.png");
+        fs::write(&png, TINY_PNG).unwrap();
+        let loaded = load_image_file(&root.0, &png).unwrap();
+        assert_eq!(loaded.format, ImageKind::Png);
+        assert_eq!(loaded.width, Some(1));
+        assert_eq!(loaded.height, Some(1));
+        assert_eq!(loaded.bytes, TINY_PNG);
+
+        let jpeg = root.0.join("photo.jpg");
+        fs::write(&jpeg, jpeg_sof0(1920, 1080)).unwrap();
+        let loaded = load_image_file(&root.0, &jpeg).unwrap();
+        assert_eq!(loaded.format, ImageKind::Jpeg);
+        assert_eq!(loaded.width, Some(1920));
+        assert_eq!(loaded.height, Some(1080));
+
+        let gif = root.0.join("loop.gif");
+        let mut gif_bytes = b"GIF89a".to_vec();
+        gif_bytes.extend_from_slice(&320u16.to_le_bytes());
+        gif_bytes.extend_from_slice(&240u16.to_le_bytes());
+        gif_bytes.extend_from_slice(&[0, 0, 0]);
+        fs::write(&gif, &gif_bytes).unwrap();
+        let loaded = load_image_file(&root.0, &gif).unwrap();
+        assert_eq!(loaded.format, ImageKind::Gif);
+        assert_eq!((loaded.width, loaded.height), (Some(320), Some(240)));
+
+        fs::write(root.0.join("notes.png"), b"not an image").unwrap();
+        assert_eq!(
+            load_image_file(&root.0, &root.0.join("notes.png")),
+            Err(FileError::NotImage)
+        );
+
+        let huge = root.0.join("huge.jpg");
+        fs::write(&huge, jpeg_sof0(10_000, 10_000)).unwrap();
+        assert_eq!(
+            load_image_file(&root.0, &huge),
+            Err(FileError::ImageTooLarge)
+        );
+
+        let oversized = root.0.join("oversized.png");
+        let file = fs::File::create(&oversized).unwrap();
+        file.set_len(MAX_IMAGE_BYTES as u64 + 1).unwrap();
+        assert_eq!(
+            load_image_file(&root.0, &oversized),
+            Err(FileError::ImageTooLarge)
+        );
+
+        let outside = TestDirectory::new();
+        let foreign = outside.0.join("pixel.png");
+        fs::write(&foreign, TINY_PNG).unwrap();
+        assert_eq!(
+            load_image_file(&root.0, &foreign),
+            Err(FileError::OutsideProject)
+        );
+    }
+
+    const TINY_PNG: &[u8] = &[
+        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44,
+        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x00, 0x00, 0x00, 0x90,
+        0x77, 0x53, 0xDE, 0x00, 0x00, 0x00, 0x0C, 0x49, 0x44, 0x41, 0x54, 0x08, 0xD7, 0x63, 0xF8,
+        0xCF, 0xC0, 0x00, 0x00, 0x00, 0x03, 0x00, 0x01, 0x18, 0xDD, 0x8D, 0xB4, 0x00, 0x00, 0x00,
+        0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+    ];
+
+    fn jpeg_sof0(width: u16, height: u16) -> Vec<u8> {
+        let mut bytes = vec![0xFF, 0xD8, 0xFF, 0xC0, 0x00, 0x0B, 0x08];
+        bytes.extend_from_slice(&height.to_be_bytes());
+        bytes.extend_from_slice(&width.to_be_bytes());
+        bytes.extend_from_slice(&[0x01, 0x01, 0x11, 0x00, 0xFF, 0xD9]);
+        bytes
     }
 
     #[test]

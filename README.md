@@ -12,7 +12,7 @@ Open files from the tree, edit them, and choose **Save** or press `Ctrl+S`. Chan
 
 The Git sidebar shows the branch and changed files, with read-only staged and working-tree diffs. Untracked text files also have a diff preview. Choose Unified or Split, move between changes with Alt+Up/Down, and use Open file to edit. It does not stage, commit, or modify Git history.
 
-The editor accepts UTF-8 text files up to 2 MiB. Each directory listing is capped at 2,000 entries; the sidebar reports truncation.
+The editor accepts UTF-8 text files up to 2 MiB. PNG, JPEG, GIF, WebP, BMP, and TIFF files open in a read-only viewer (32 MiB or 50 megapixels). Each directory listing is capped at 2,000 entries; the sidebar reports truncation.
 
 ## Run from source
 
