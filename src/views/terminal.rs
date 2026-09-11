@@ -13,6 +13,7 @@ use gpui::{
 };
 
 use super::file_editor::{FileEditor, FileEditorEvent};
+use super::image_viewer::{ImageViewer, ImageViewerEvent};
 use super::terminal_manager::text_tooltip;
 use crate::services::terminal::{TerminalEvent, TerminalSize, TerminalWorker};
 use crate::services::terminal_engine::TerminalEngine;
@@ -266,11 +267,16 @@ fn apply_engine_appearance(engine: &mut TerminalEngine) {
     engine.set_default_colors(rgb(theme::bone_dim()), rgb(theme::canvas()));
 }
 
+enum FileTab {
+    Editor(Entity<FileEditor>),
+    Image(Entity<ImageViewer>),
+}
+
 enum TabContent {
     Terminal(Entity<TerminalSession>),
     File {
         path: PathBuf,
-        editor: Entity<FileEditor>,
+        tab: FileTab,
     },
     Diff {
         title: String,
@@ -278,11 +284,76 @@ enum TabContent {
     },
 }
 
+impl FileTab {
+    fn editor(&self) -> Option<&Entity<FileEditor>> {
+        match self {
+            Self::Editor(editor) => Some(editor),
+            Self::Image(_) => None,
+        }
+    }
+
+    fn title(&self, cx: &gpui::App) -> String {
+        match self {
+            Self::Editor(editor) => editor.read(cx).title(),
+            Self::Image(viewer) => viewer.read(cx).title(),
+        }
+    }
+
+    fn is_busy(&self, cx: &gpui::App) -> bool {
+        match self {
+            Self::Editor(editor) => editor.read(cx).is_busy(),
+            Self::Image(viewer) => viewer.read(cx).is_busy(),
+        }
+    }
+
+    fn is_dirty(&self, cx: &gpui::App) -> bool {
+        match self {
+            Self::Editor(editor) => editor.read(cx).is_dirty(),
+            Self::Image(_) => false,
+        }
+    }
+
+    fn focus(&self, window: &mut Window, cx: &mut gpui::App) {
+        match self {
+            Self::Editor(editor) => editor.update(cx, |editor, cx| editor.focus(window, cx)),
+            Self::Image(viewer) => viewer.update(cx, |viewer, cx| viewer.focus(window, cx)),
+        }
+    }
+
+    fn notify(&self, cx: &mut gpui::App) {
+        match self {
+            Self::Editor(editor) => editor.update(cx, |_, cx| cx.notify()),
+            Self::Image(viewer) => viewer.update(cx, |_, cx| cx.notify()),
+        }
+    }
+
+    fn retarget(&self, path: PathBuf, cx: &mut gpui::App) {
+        match self {
+            Self::Editor(editor) => editor.update(cx, |editor, cx| editor.retarget(path, cx)),
+            Self::Image(viewer) => viewer.update(cx, |viewer, cx| viewer.retarget(path, cx)),
+        }
+    }
+
+    fn reload_clean(&self, window: &mut Window, cx: &mut gpui::App) {
+        match self {
+            Self::Editor(editor) => editor.update(cx, |editor, cx| editor.reload_clean(window, cx)),
+            Self::Image(viewer) => viewer.update(cx, |viewer, cx| viewer.reload_clean(window, cx)),
+        }
+    }
+
+    fn into_any_view(&self) -> gpui::AnyView {
+        match self {
+            Self::Editor(editor) => editor.clone().into(),
+            Self::Image(viewer) => viewer.clone().into(),
+        }
+    }
+}
+
 impl TabContent {
     fn editor(&self) -> Option<&Entity<FileEditor>> {
         match self {
+            Self::File { tab, .. } => tab.editor(),
             Self::Terminal(_) | Self::Diff { .. } => None,
-            Self::File { editor, .. } => Some(editor),
         }
     }
 }
@@ -333,7 +404,7 @@ impl TerminalView {
                     apply_engine_appearance(&mut session.engine);
                     cx.notify();
                 }),
-                TabContent::File { editor, .. } => editor.update(cx, |_, cx| cx.notify()),
+                TabContent::File { tab, .. } => tab.notify(cx),
                 TabContent::Diff { view, .. } => view.update(cx, |_, cx| cx.notify()),
             }
         }
@@ -398,9 +469,7 @@ impl TerminalView {
         self.activate(cx);
         match self.tabs.get(self.active).map(|tab| &tab.content) {
             Some(TabContent::Terminal(session)) => window.focus(&session.read(cx).focus_handle()),
-            Some(TabContent::File { editor, .. }) => {
-                editor.update(cx, |editor, cx| editor.focus(window, cx));
-            }
+            Some(TabContent::File { tab, .. }) => tab.focus(window, cx),
             Some(TabContent::Diff { view, .. }) => window.focus(&view.read(cx).focus),
             None => window.focus(&self.fallback_focus),
         }
@@ -450,11 +519,10 @@ impl TerminalView {
 
     pub(crate) fn paths_busy(&self, paths: &[PathBuf], deleting: bool, cx: &gpui::App) -> bool {
         self.tabs.iter().any(|tab| match &tab.content {
-            TabContent::File { path, editor }
+            TabContent::File { path, tab }
                 if paths.iter().any(|parent| path.starts_with(parent)) =>
             {
-                let editor = editor.read(cx);
-                editor.is_busy() || (deleting && editor.is_dirty())
+                tab.is_busy(cx) || (deleting && tab.is_dirty(cx))
             }
             _ => false,
         })
@@ -462,14 +530,12 @@ impl TerminalView {
 
     pub(crate) fn begin_file_change(&mut self, allow_dirty: bool, cx: &mut Context<Self>) -> bool {
         if self.files_locked
-            || self
-                .tabs
-                .iter()
-                .filter_map(|tab| tab.content.editor())
-                .any(|editor| {
-                    let editor = editor.read(cx);
-                    editor.is_busy() || (!allow_dirty && editor.is_dirty())
-                })
+            || self.tabs.iter().any(|tab| match &tab.content {
+                TabContent::File { tab, .. } => {
+                    tab.is_busy(cx) || (!allow_dirty && tab.is_dirty(cx))
+                }
+                TabContent::Terminal(_) | TabContent::Diff { .. } => false,
+            })
         {
             return false;
         }
@@ -494,11 +560,11 @@ impl TerminalView {
 
     pub(crate) fn files_moved(&mut self, moves: &[(PathBuf, PathBuf)], cx: &mut Context<Self>) {
         for tab in &mut self.tabs {
-            if let TabContent::File { path, editor } = &mut tab.content {
+            if let TabContent::File { path, tab } = &mut tab.content {
                 for (from, to) in moves {
                     if let Ok(relative) = path.strip_prefix(from) {
                         *path = to.join(relative);
-                        editor.update(cx, |editor, cx| editor.retarget(path.clone(), cx));
+                        tab.retarget(path.clone(), cx);
                         break;
                     }
                 }
@@ -518,8 +584,8 @@ impl TerminalView {
             self.remove_tab(id, window, cx);
         }
         for tab in &self.tabs {
-            if let Some(editor) = tab.content.editor() {
-                editor.update(cx, |editor, cx| editor.reload_clean(window, cx));
+            if let TabContent::File { tab, .. } = &tab.content {
+                tab.reload_clean(window, cx);
             }
         }
     }
@@ -584,8 +650,12 @@ impl TerminalView {
             return;
         }
         let project = self.workspace.clone();
-        let editor = cx.new(|cx| FileEditor::open(project, path.clone(), window, cx));
-        self.push_editor(TabContent::File { path, editor }, window, cx);
+        let tab = if crate::services::project_files::is_image_path(&path) {
+            FileTab::Image(cx.new(|cx| ImageViewer::open(project, path.clone(), window, cx)))
+        } else {
+            FileTab::Editor(cx.new(|cx| FileEditor::open(project, path.clone(), window, cx)))
+        };
+        self.push_file(path, tab, window, cx);
     }
 
     pub(crate) fn open_diff(
@@ -647,15 +717,18 @@ impl TerminalView {
         self.select_tab(id, window, cx);
     }
 
-    fn push_editor(&mut self, content: TabContent, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(editor) = content.editor().cloned() else {
-            return;
-        };
+    fn push_file(
+        &mut self,
+        path: PathBuf,
+        tab: FileTab,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let id = self.next_id;
         self.next_id = self.next_id.wrapping_add(1).max(1);
-        let subscription =
-            cx.subscribe_in(
-                &editor,
+        let subscription = match &tab {
+            FileTab::Editor(editor) => cx.subscribe_in(
+                editor,
                 window,
                 move |view, _, event, window, cx| match event {
                     FileEditorEvent::Changed => {
@@ -669,10 +742,19 @@ impl TerminalView {
                     }
                     FileEditorEvent::CloseReady => view.remove_tab(id, window, cx),
                 },
-            );
+            ),
+            FileTab::Image(viewer) => {
+                cx.subscribe_in(viewer, window, move |_, _, event, _, cx| match event {
+                    ImageViewerEvent::Changed => {
+                        cx.emit(TerminalPanelEvent::ContentChanged);
+                        cx.notify();
+                    }
+                })
+            }
+        };
         self.tabs.push(WorkspaceTab {
             id,
-            content,
+            content: TabContent::File { path, tab },
             _subscription: subscription,
         });
         self.select_tab(id, window, cx);
@@ -1087,7 +1169,7 @@ impl Render for TerminalView {
         let active_content: Option<gpui::AnyView> =
             self.tabs.get(self.active).map(|tab| match &tab.content {
                 TabContent::Terminal(session) => session.clone().into(),
-                TabContent::File { editor, .. } => editor.clone().into(),
+                TabContent::File { tab, .. } => tab.into_any_view(),
                 TabContent::Diff { view, .. } => view.clone().into(),
             });
         let mut terminal_index = 0;
@@ -1132,14 +1214,17 @@ impl Render for TerminalView {
                             .then(|| (session.status.label(), status_color)),
                         )
                     }
-                    TabContent::File { path, editor } => {
-                        let editor = editor.read(cx);
-                        let label = editor.title();
+                    TabContent::File { path, tab } => {
+                        let label = tab.title(cx);
+                        let icon = match tab {
+                            FileTab::Image(_) => "icons/image.svg",
+                            FileTab::Editor(_) => "icons/file-code.svg",
+                        };
                         (
                             label,
                             path.to_string_lossy().into_owned(),
-                            "icons/file-code.svg",
-                            editor.is_dirty().then(|| ("●".to_owned(), theme::ash())),
+                            icon,
+                            tab.is_dirty(cx).then(|| ("●".to_owned(), theme::ash())),
                         )
                     }
                     TabContent::Diff { title, .. } => (
@@ -1209,7 +1294,7 @@ impl Render for TerminalView {
                                         TabContent::Terminal(session) => {
                                             session.read(cx).shell.clone()
                                         }
-                                        TabContent::File { editor, .. } => editor.read(cx).title(),
+                                        TabContent::File { tab, .. } => tab.title(cx),
                                         TabContent::Diff { title, .. } => title.clone(),
                                     },
                                 )
@@ -1607,6 +1692,68 @@ mod tests {
                     );
                     assert_eq!(view.terminal_count(), 1);
                     assert!(!view.has_dirty_files(cx));
+                });
+            })
+            .unwrap();
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn image_files_open_in_a_viewer_tab(cx: &mut gpui::TestAppContext) {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT_SOURCE: AtomicU64 = AtomicU64::new(1);
+        struct TestSource(PathBuf);
+        impl Drop for TestSource {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_file(&self.0);
+            }
+        }
+        const TINY_PNG: &[u8] = &[
+            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48,
+            0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x00, 0x00,
+            0x00, 0x90, 0x77, 0x53, 0xDE, 0x00, 0x00, 0x00, 0x0C, 0x49, 0x44, 0x41, 0x54, 0x08,
+            0xD7, 0x63, 0xF8, 0xCF, 0xC0, 0x00, 0x00, 0x00, 0x03, 0x00, 0x01, 0x18, 0xDD, 0x8D,
+            0xB4, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+        ];
+        let project = std::env::temp_dir();
+        let source = TestSource(project.join(format!(
+            "pideck-image-tab-{}-{}.png",
+            std::process::id(),
+            NEXT_SOURCE.fetch_add(1, Ordering::Relaxed)
+        )));
+        std::fs::write(&source.0, TINY_PNG).unwrap();
+        cx.update(FileEditor::initialize);
+        let pane = cx.new(|cx| TerminalView::new(project, cx));
+        let root_pane = pane.clone();
+        let window =
+            cx.add_window(move |window, cx| gpui_component::Root::new(root_pane, window, cx));
+        window
+            .update(cx, |_, window, cx| {
+                pane.update(cx, |view, cx| {
+                    view.open_file(source.0.clone(), window, cx);
+                    assert_eq!(view.tabs.len(), 2);
+                    assert!(matches!(
+                        view.tabs[1].content,
+                        TabContent::File {
+                            tab: FileTab::Image(_),
+                            ..
+                        }
+                    ));
+                    assert!(view.tabs[1].content.editor().is_none());
+                    let tab_id = view.tabs[1].id;
+                    view.open_file(source.0.clone(), window, cx);
+                    assert_eq!(view.tabs.len(), 2);
+                    assert_eq!(view.tabs[1].id, tab_id);
+                    assert_eq!(
+                        view.active_file(),
+                        Some(crate::services::paths::without_windows_verbatim_prefix(
+                            &source.0
+                        ))
+                    );
+                    assert!(!view.has_dirty_files(cx));
+                    view.close_tab(tab_id, window, cx);
+                    assert_eq!(view.tabs.len(), 1);
+                    assert!(matches!(view.tabs[0].content, TabContent::Terminal(_)));
                 });
             })
             .unwrap();
