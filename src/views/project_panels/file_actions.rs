@@ -34,6 +34,7 @@ enum FileAction {
     Collapse,
     Hidden,
     Refresh,
+    HideSidebar,
 }
 
 pub(super) struct NameEdit {
@@ -44,7 +45,12 @@ pub(super) struct NameEdit {
     _subscription: Subscription,
 }
 impl NameEdit {
-    pub(super) fn render(&self, cx: &mut Context<FilesPanel>) -> impl IntoElement {
+    pub(super) fn render(
+        &self,
+        pending: bool,
+        error: Option<&str>,
+        cx: &mut Context<FilesPanel>,
+    ) -> impl IntoElement {
         div()
             .px(px(chrome::TREE_INSET))
             .py(px(4.0))
@@ -58,7 +64,35 @@ impl NameEdit {
             } else {
                 "New file"
             })
-            .child(Input::new(&self.input))
+            .child(
+                Input::new(&self.input)
+                    .h(px(32.0))
+                    .disabled(pending)
+                    .when(error.is_some(), |input| input.border_color(theme::error())),
+            )
+            .when_some(error, |form, error| {
+                form.child(
+                    div()
+                        .text_size(px(11.0))
+                        .text_color(theme::error())
+                        .child(error.to_owned()),
+                )
+            })
+            .child(
+                div()
+                    .text_size(px(11.0))
+                    .text_color(theme::ash())
+                    .child("Enter to save · Esc to cancel"),
+            )
+            .on_key_down(cx.listener(|view, event: &KeyDownEvent, window, cx| {
+                if event.keystroke.key == "escape" && view.operation.is_none() {
+                    view.edit = None;
+                    view.operation_error = None;
+                    window.focus(&view.focus);
+                    cx.stop_propagation();
+                    cx.notify();
+                }
+            }))
             .child(
                 div()
                     .flex()
@@ -180,6 +214,9 @@ impl FilesPanel {
             let _ = view.update(cx, |view, cx| {
                 view.operation = None;
                 view.operation_error = outcome.error;
+                if view.operation_error.is_none() {
+                    view.edit = None;
+                }
                 view.expanded = view
                     .expanded
                     .drain()
@@ -281,6 +318,9 @@ impl FilesPanel {
         cx.notify();
     }
     fn finish_name(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.operation.is_some() {
+            return;
+        }
         let Some(edit) = &self.edit else {
             return;
         };
@@ -298,8 +338,6 @@ impl FilesPanel {
                         directory: edit.directory,
                     }
                 };
-                self.edit = None;
-                window.focus(&self.focus);
                 self.perform(operation, window, cx);
             }
             Err(error) => {
@@ -421,6 +459,7 @@ impl FilesPanel {
                 self.hide_hidden = !self.hide_hidden;
                 self.rebuild_rows();
             }
+            FileAction::HideSidebar => cx.emit(ProjectPanelEvent::ToggleSidebar),
             FileAction::Refresh => {
                 self.refresh(cx);
                 cx.emit(ProjectPanelEvent::FilesChanged);
@@ -450,6 +489,10 @@ impl FilesPanel {
             (false, false, "f5") => Some(FileAction::Refresh),
             _ => None,
         };
+        if self.operation.is_some() && key != "escape" {
+            cx.stop_propagation();
+            return true;
+        }
         if let Some(action) = action {
             self.action(action, window, cx);
         } else if modifiers.control && key == "a" {
@@ -512,6 +555,7 @@ impl FilesPanel {
             ("Collapse all", FileAction::Collapse),
             ("Toggle hidden files", FileAction::Hidden),
             ("Refresh   F5", FileAction::Refresh),
+            ("Hide sidebar   Ctrl+Shift+B", FileAction::HideSidebar),
         ] {
             let owner = owner.clone();
             menu = menu.item(PopupMenuItem::new(label).on_click(move |_, window, cx| {
@@ -526,27 +570,92 @@ impl FilesPanel {
         menu
     }
     pub(super) fn toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        use gpui_component::{
+            button::{Button, ButtonVariants},
+            menu::DropdownMenu,
+        };
+        let owner = cx.weak_entity();
+        let pending = self.operation.is_some();
         div()
-            .px(px(chrome::COMPACT_GAP))
-            .pb(px(chrome::COMPACT_GAP))
+            .flex_shrink_0()
             .flex()
-            .flex_wrap()
-            .gap(px(chrome::SMALL_GAP))
-            .child(control(
-                "New file",
-                cx.listener(|view, _, window, cx| view.action(FileAction::NewFile, window, cx)),
-            ))
-            .child(control(
-                "New folder",
-                cx.listener(|view, _, window, cx| view.action(FileAction::NewFolder, window, cx)),
-            ))
-            .child(control(
-                "Collapse",
-                cx.listener(|view, _, window, cx| view.action(FileAction::Collapse, window, cx)),
-            ))
-            .when(self.operation.is_some(), |bar| {
+            .items_center()
+            .gap(px(2.0))
+            .child(
+                Button::new("new-file-menu")
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(4.0))
+                            .font_family(chrome::CHROME_FONT)
+                            .font_weight(FontWeight::NORMAL)
+                            .text_size(px(12.0))
+                            .text_color(theme::ash())
+                            .child(
+                                svg()
+                                    .path("icons/plus.svg")
+                                    .size(px(12.0))
+                                    .text_color(theme::ash()),
+                            )
+                            .child("New"),
+                    )
+                    .px(px(4.0))
+                    .ghost()
+                    .h(px(28.0))
+                    .on_click(|_, _, cx| cx.stop_propagation())
+                    .dropdown_menu(move |menu, _, _| {
+                        let file_owner = owner.clone();
+                        let folder_owner = owner.clone();
+                        menu.item(PopupMenuItem::new("New file").disabled(pending).on_click(
+                            move |_, window, cx| {
+                                let owner = file_owner.clone();
+                                window.defer(cx, move |window, cx| {
+                                    let _ = owner.update(cx, |view, cx| {
+                                        view.action(FileAction::NewFile, window, cx)
+                                    });
+                                });
+                            },
+                        ))
+                        .item(
+                            PopupMenuItem::new("New folder").disabled(pending).on_click(
+                                move |_, window, cx| {
+                                    let owner = folder_owner.clone();
+                                    window.defer(cx, move |window, cx| {
+                                        let _ = owner.update(cx, |view, cx| {
+                                            view.action(FileAction::NewFolder, window, cx)
+                                        });
+                                    });
+                                },
+                            ),
+                        )
+                    }),
+            )
+            .child(
+                super::icon_control(
+                    "collapse-files",
+                    "Collapse all folders",
+                    "icons/collapse-all.svg",
+                )
+                .on_click(cx.listener(|view, _, window, cx| {
+                    cx.stop_propagation();
+                    view.action(FileAction::Collapse, window, cx);
+                })),
+            )
+            .child({
+                let owner = cx.weak_entity();
+                Button::new("file-tree-actions")
+                    .label("⋯")
+                    .ghost()
+                    .w(px(24.0))
+                    .h(px(28.0))
+                    .tooltip("File actions")
+                    .on_click(|_, _, cx| cx.stop_propagation())
+                    .dropdown_menu(move |menu, _, _| Self::menu(menu, owner.clone()))
+            })
+            .when(pending, |bar| {
                 bar.child(control(
-                    "Cancel operation",
+                    "Cancel",
                     cx.listener(|view, _, _, cx| {
                         if let Some(cancel) = &view.operation {
                             cancel.store(true, Ordering::Release);
@@ -617,6 +726,9 @@ impl FilesPanel {
 
 impl Drop for FilesPanel {
     fn drop(&mut self) {
+        if let Some(cancel) = &self.filter_cancel {
+            cancel.store(true, Ordering::Release);
+        }
         if let Some(cancel) = &self.operation {
             cancel.store(true, Ordering::Release);
         }
@@ -676,7 +788,7 @@ mod tests {
         let (window_root, cx) = cx.add_window_view(|window, cx| {
             let terminal = cx.new(|cx| TerminalView::new(root.clone(), cx));
             let files = cx.new(|cx| {
-                let mut files = FilesPanel::new(root.clone(), terminal.downgrade(), cx);
+                let mut files = FilesPanel::new(root.clone(), terminal.downgrade(), window, cx);
                 files.directories.insert(
                     root.clone(),
                     DirectoryState {
@@ -721,6 +833,37 @@ mod tests {
                 });
             });
         }
+        // A failed rename must retain both the entered name and its keyboard focus.
+        cx.update(|window, cx| {
+            files.update(cx, |files, cx| {
+                let index = files
+                    .rows
+                    .iter()
+                    .position(|row| row.entry.name == "a.txt")
+                    .unwrap();
+                files.select(index, false, false, index);
+                files.begin_name(false, true, window, cx);
+                files
+                    .edit
+                    .as_ref()
+                    .unwrap()
+                    .input
+                    .update(cx, |input, cx| input.set_value("folder", window, cx));
+                files.finish_name(window, cx);
+            });
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            files.update(cx, |files, cx| {
+                let edit = files.edit.as_ref().expect("failed rename retains the form");
+                assert_eq!(edit.input.read(cx).value(), "folder");
+                assert!(edit.input.read(cx).focus_handle(cx).is_focused(window));
+                assert!(files.operation_error.is_some());
+                files.edit = None;
+                files.operation_error = None;
+                cx.notify();
+            });
+        });
         let menu = open_menu(cx, 0);
         click_item(cx, menu, 9);
         cx.update(|_, cx| {

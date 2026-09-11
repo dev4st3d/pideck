@@ -1,6 +1,6 @@
 # Pideck
 
-A native Windows project and terminal workspace, built with Rust and GPUI 0.2.2. Its light editorial workbench follows the [final Paper references](design/paper/README.md).
+A native Windows project and terminal workspace, built with Rust and GPUI 0.2.2. Its neutral workbench follows the [Pideck reimagined handoff](design/pideck-reimagined/README.md).
 
 Switch projects with the top project selector. The sidebar has **Projects**, **Files**, and **Git** tabs; the main pane combines editable files, terminals, and read-only diffs in one tab strip.
 
@@ -10,7 +10,7 @@ Each terminal starts in its project's directory. Run `codex`, `claude`, or anoth
 
 Open files from the tree, edit them, and choose **Save** or press `Ctrl+S`. Changed tabs show a dirty marker. Closing changed files offers Save, Discard, or Cancel; closing a project or window offers **Save all and close**. Saves check for external changes and report conflicts while keeping your edits open.
 
-The Git sidebar shows the branch and changed files, with read-only staged and working-tree diffs. Untracked files open in the editor. It does not stage, commit, or modify Git history.
+The Git sidebar shows the branch and changed files, with read-only staged and working-tree diffs. Untracked text files also have a diff preview. Choose Unified or Split, move between changes with Alt+Up/Down, and use Open file to edit. It does not stage, commit, or modify Git history.
 
 The editor accepts UTF-8 text files up to 2 MiB. Each directory listing is capped at 2,000 entries; the sidebar reports truncation.
 
@@ -24,7 +24,7 @@ From the repository, launch with:
 cargo run --locked
 ```
 
-Pideck embeds Geist interface text, Newsreader headings, and JetBrains Mono technical text. The paper, linen and evergreen palette follows the [final Paper design](design/paper/README.md). No font preparation step, Node.js, or Pi installation is required to build or launch the app. Tools you run inside its terminals have their own installation requirements.
+Pideck embeds DM Sans interface text, Instrument Serif for the wordmark, and IBM Plex Mono for terminals, code, and counts. The four neutral themes follow the [final design handoff](design/pideck-reimagined/README.md). No font preparation step, Node.js, or Pi installation is required to build or launch the app. Tools you run inside its terminals have their own installation requirements.
 
 A release build uses:
 
@@ -34,7 +34,7 @@ cargo build --release --locked
 
 ## App updates
 
-Windows copies installed with **PiDeck Setup** check GitHub Releases for updates on startup. Use **Check for updates** in the footer to check manually, then **Update and restart** to download and verify a new version.
+Windows copies installed with **PiDeck Setup** check GitHub Releases for updates on startup. Use **Check for updates** in the status bar’s **⋯** menu to check manually, then **Update and restart** to download and verify a new version.
 
 Before restarting, Pideck asks about unsaved files and stopping running terminals, then saves the workspace layout. Cancelling keeps the app open; a downloaded update can be applied later with **Restart to update**. File or layout save failures must be resolved before the update can restart the app. Restarting creates fresh shells, not resumed commands or terminal history.
 
@@ -44,13 +44,17 @@ Source builds and unpackaged executables do not support in-app updates. Download
 
 While the app stays open, each project retains its sidebar selection, expanded directories and scroll position, open file buffers and cursor positions, active tab, and terminal sessions. Switching projects reuses those views and processes.
 
-Across app restarts, only project folders, terminal layout, selected terminal/project, and sidebar visibility are restored. This layout is stored in `terminal-workspace.json` beside the settings file, normally under `%APPDATA%\Pideck`. `PI_GUI_SETTINGS_PATH` relocates the settings file and adjacent layout file.
+Across app restarts, only project folders, terminal layout, selected terminal/project, sidebar visibility, and chosen sidebar width are restored. This layout is stored in `terminal-workspace.json` beside the settings file, normally under `%APPDATA%\Pideck`. `PI_GUI_SETTINGS_PATH` relocates the settings file and adjacent layout file.
 
 Restarting creates fresh shells. Open files, file buffers and cursor positions, expanded directories, terminal output, running processes, and CLI conversations are not restored from disk. Save files before closing; use each CLI's own session features when available.
 
 If a saved layout cannot be read or restored, automatic saving pauses to preserve it. Repair the file and reopen the app, or choose **Replace saved layout** to save the current workspace instead. Closing without saving keeps the previous file.
 
 Workspace settings stay local. Pideck adds no telemetry, analytics, or remote reporting; commands you run have their own network and privacy behavior.
+
+Files, projects, and Git changes have independent filters. File search is bounded to 20,000 visited entries and 2,000 matches and never follows directory links; incomplete searches show a notice. Filtering keeps matching ancestors. Clearing Files or Git filters restores the previous expansion, selection, and scroll position.
+
+Drag the sidebar divider between 256 and 420 logical pixels. Keyboard focus on the divider supports Left/Right to resize and Home to reset. The default is 288 pixels, 336 for Git, and 256 in compact windows. Project actions live in each project's row menu.
 
 ## Terminal input
 
@@ -60,7 +64,7 @@ The terminal supports native Unicode/IME composition, bracketed paste, applicati
 
 ## Keyboard
 
-The explorer uses the selected **Catppuccin Latte** icons (Catppuccin Icons 1.23.1, MIT). Click to select a file; double-click or Enter to open. Ctrl-click toggles selection and Shift-click selects a range. Right-click for file operations, path copying, hidden files, and reveal in Windows Explorer. New file/folder naming stays inside the panel.
+The explorer uses neutral outline icons with separate disclosure, filename, and status columns. Click to select a file; double-click or Enter to open. Ctrl-click toggles selection and Shift-click selects a range. Right-click for file operations, path copying, hidden files, and reveal in Windows Explorer. New file/folder naming stays inside the panel.
 
 With explorer focus: `Ctrl+C/X/V` copies/cuts/pastes files, `Ctrl+A` selects visible entries, `Ctrl+D` duplicates, `F2` renames, `Delete` asks to move items to the Recycle Bin, `Ctrl+N` creates a file, and `Ctrl+Shift+N` creates a folder. Drag within the tree to move; hold Ctrl to copy. External drops and Windows file-clipboard pastes copy into the selected folder. Cut is internal to Pideck. Existing destinations are never intentionally overwritten; interrupted copies may leave completed or partial destination files, with the source retained. Directory links are not recursively copied. Cross-drive moves require copying first.
 
@@ -72,6 +76,9 @@ Filesystem changes refresh the explorer and Git status automatically; `F5` refre
 | New terminal | `Ctrl+Shift+T` |
 | Close active tab | `Ctrl+Shift+W` |
 | Next / previous tab | `Ctrl+Tab` / `Ctrl+Shift+Tab` |
+| Previous / next change (diff focus) | `Alt+Up` / `Alt+Down` |
+| Unified / split diff (diff focus) | `Alt+U` / `Alt+S` |
+| Refresh selected diff | `F5` |
 | Save active file | `Ctrl+S` |
 | Previous / next project | `Ctrl+Alt+Up` / `Ctrl+Alt+Down` |
 | Toggle project sidebar | `Ctrl+Shift+B` |
@@ -86,13 +93,10 @@ Filesystem changes refresh the explorer and Git status automatically; `F5` refre
 
 Choose a theme from the appearance picker beside **New terminal**:
 
-- **Paper** — the supplied light editorial design.
-- **Linen** — warm, soft neutrals.
-- **Graphite** — charcoal with sage accents.
-- **Midnight** — deep blue with cool highlights.
-- **Ember** — warm charcoal with copper accents.
-- **Evergreen** — deep pine with soft sage highlights.
-- **Dusk** — violet slate with muted lavender accents.
+- **Black** — near-black surfaces.
+- **Light** — neutral white surfaces.
+- **Graphite** — dark gray surfaces.
+- **Charcoal** — softer charcoal surfaces.
 
 Theme changes apply to open files, diffs, and terminals without restarting shells or clearing their history. The preference stays local in `appearance.json` beside the workspace layout. A malformed preference is preserved until you explicitly choose a theme. The picker supports Tab, arrow keys, Enter, and Escape.
 

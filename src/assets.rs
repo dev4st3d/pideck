@@ -1,9 +1,22 @@
 use std::borrow::Cow;
-use std::{collections::HashMap, path::Path, sync::LazyLock};
+use std::path::Path;
 
 use gpui::{AssetSource, Result, SharedString};
 
-const ICONS: [(&str, &[u8]); 44] = [
+const ICONS: [(&str, &[u8]); 48] = [
+    (
+        "folder-open.svg",
+        include_bytes!("../assets/icons/folder-open.svg"),
+    ),
+    ("files.svg", include_bytes!("../assets/icons/files.svg")),
+    (
+        "file-code.svg",
+        include_bytes!("../assets/icons/file-code.svg"),
+    ),
+    (
+        "collapse-all.svg",
+        include_bytes!("../assets/icons/collapse-all.svg"),
+    ),
     (
         "agent-diamond.svg",
         include_bytes!("../assets/icons/agent-diamond.svg"),
@@ -121,58 +134,27 @@ const ICONS: [(&str, &[u8]); 44] = [
 
 pub(crate) struct Assets;
 
-#[derive(serde::Deserialize)]
-struct IconBundle {
-    theme: serde_json::Value,
-    icons: HashMap<String, String>,
-}
-
-static CATPPUCCIN: LazyLock<IconBundle> = LazyLock::new(|| {
-    serde_json::from_str(include_str!("../assets/catppuccin/latte.json"))
-        .expect("bundled Catppuccin icon data must be valid")
-});
-
-pub(crate) fn project_icon(path: &Path, directory: bool, expanded: bool) -> SharedString {
-    let theme = &CATPPUCCIN.theme;
-    let name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("");
-    let icon = if directory {
-        let state = if expanded { "expanded" } else { "collapsed" };
-        theme["named_directory_icons"][name][state]
-            .as_str()
-            .or_else(|| theme["directory_icons"][state].as_str())
-    } else {
-        let stem = path
-            .file_stem()
-            .and_then(|name| name.to_str())
-            .unwrap_or(name);
-        let mut key = theme["file_stems"][name]
-            .as_str()
-            .or_else(|| theme["file_stems"][stem].as_str());
-        let mut suffix = name;
-        while key.is_none() {
-            key = theme["file_suffixes"][suffix].as_str();
-            let Some((_, rest)) = suffix.split_once('.') else {
-                break;
-            };
-            suffix = rest;
+pub(crate) fn project_icon(path: &Path, directory: bool, expanded: bool) -> &'static str {
+    if directory {
+        if expanded {
+            "icons/folder-open.svg"
+        } else {
+            "icons/folder.svg"
         }
-        key.and_then(|key| theme["file_icons"][key]["path"].as_str())
-    };
-    icon.map(|icon| format!("catppuccin/{icon}").into())
-        .unwrap_or_else(|| "icons/file.svg".into())
+    } else if path.extension().is_some_and(|ext| {
+        matches!(
+            ext.to_str(),
+            Some("rs" | "tsx" | "ts" | "jsx" | "js" | "json" | "toml")
+        )
+    }) {
+        "icons/file-code.svg"
+    } else {
+        "icons/file.svg"
+    }
 }
 
 impl AssetSource for Assets {
     fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
-        if let Some(path) = path.strip_prefix("catppuccin/") {
-            return Ok(CATPPUCCIN
-                .icons
-                .get(path)
-                .map(|svg| Cow::Borrowed(svg.as_bytes())));
-        }
         Ok(path.strip_prefix("icons/").and_then(|name| {
             ICONS
                 .iter()

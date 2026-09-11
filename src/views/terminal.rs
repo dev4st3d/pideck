@@ -28,12 +28,17 @@ use element::{TerminalElement, TerminalGeometry};
 pub(crate) const TERMINAL_LINE_HEIGHT: f32 = chrome::TECH_LINE_HEIGHT;
 const MAX_TERMINAL_TABS: usize = 8;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum TerminalPanelEvent {
     CloseRequested,
     LayoutChanged,
     ContentChanged,
     FilesSaved,
+    Review {
+        path: PathBuf,
+        kind: crate::services::project_git::DiffKind,
+        direction: i32,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -585,47 +590,61 @@ impl TerminalView {
 
     pub(crate) fn open_diff(
         &mut self,
-        title: String,
-        text: String,
-        path: PathBuf,
-        changed_files: usize,
-        line_stats: Option<crate::services::project_git::GitLineStats>,
+        file: crate::services::project_git::ReviewFile,
+        content: crate::services::project_git::DiffContent,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let view = cx.new(|cx| {
-            DiffView::new(
-                self.workspace.clone(),
-                path,
-                text,
-                changed_files,
-                line_stats,
-                cx,
-            )
-        });
-        let subscription = cx.subscribe_in(&view, window, |pane, _, path: &PathBuf, window, cx| {
-            pane.open_file(path.clone(), window, cx);
-        });
-        // One Changes tab follows the sidebar selection without disturbing editor buffers or PTYs.
+        let activate = matches!(content, crate::services::project_git::DiffContent::Loading);
+        let title = file
+            .path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned();
         if let Some(tab) = self
             .tabs
             .iter_mut()
             .find(|tab| matches!(tab.content, TabContent::Diff { .. }))
         {
-            tab.content = TabContent::Diff { title, view };
-            tab._subscription = subscription;
+            if let TabContent::Diff { title: label, view } = &mut tab.content {
+                *label = title;
+                view.update(cx, |view, cx| view.update_snapshot(file, content, cx));
+            }
             let id = tab.id;
-            self.select_tab(id, window, cx);
-        } else {
-            let id = self.next_id;
-            self.next_id = self.next_id.wrapping_add(1).max(1);
-            self.tabs.push(WorkspaceTab {
-                id,
-                content: TabContent::Diff { title, view },
-                _subscription: subscription,
-            });
-            self.select_tab(id, window, cx);
+            if activate {
+                self.select_tab(id, window, cx);
+            }
+            cx.notify();
+            return;
         }
+        if !activate {
+            return;
+        }
+        let view = cx.new(|cx| DiffView::new(self.workspace.clone(), file, content, cx));
+        let subscription = cx.subscribe_in(
+            &view,
+            window,
+            |pane, diff, event: &diff::DiffEvent, window, cx| {
+                let file = diff.read(cx).file.clone();
+                match event {
+                    diff::DiffEvent::OpenFile => pane.open_file(file.path, window, cx),
+                    diff::DiffEvent::Navigate(direction) => cx.emit(TerminalPanelEvent::Review {
+                        path: file.path,
+                        kind: file.kind,
+                        direction: *direction,
+                    }),
+                }
+            },
+        );
+        let id = self.next_id;
+        self.next_id = self.next_id.wrapping_add(1).max(1);
+        self.tabs.push(WorkspaceTab {
+            id,
+            content: TabContent::Diff { title, view },
+            _subscription: subscription,
+        });
+        self.select_tab(id, window, cx);
     }
 
     fn push_editor(&mut self, content: TabContent, window: &mut Window, cx: &mut Context<Self>) {
@@ -985,7 +1004,12 @@ impl Render for TerminalSession {
                     .flex_1()
                     .min_h_0()
                     .overflow_hidden()
-                    .p(px(chrome::CONTENT_INSET))
+                    .px(px(if f32::from(window.viewport_size().width) <= 1100.0 {
+                        20.0
+                    } else {
+                        chrome::CONTENT_INSET
+                    }))
+                    .py(px(24.0))
                     .bg(theme::canvas())
                     .cursor(CursorStyle::IBeam)
                     .font_family(theme::mono())
@@ -1114,18 +1138,14 @@ impl Render for TerminalView {
                         (
                             label,
                             path.to_string_lossy().into_owned(),
-                            if path.extension().is_some_and(|ext| ext == "rs") {
-                                "rs"
-                            } else {
-                                "icons/file.svg"
-                            },
+                            "icons/file-code.svg",
                             editor.is_dirty().then(|| ("●".to_owned(), theme::ash())),
                         )
                     }
                     TabContent::Diff { title, .. } => (
-                        "Changes".to_owned(),
+                        title.clone(),
                         format!("{title} · Read-only diff"),
-                        "icons/diff.svg",
+                        "icons/file-code.svg",
                         None,
                     ),
                 };
@@ -1152,14 +1172,13 @@ impl Render for TerminalView {
             .child(
                 div()
                     .h(px(chrome::HEADER_HEIGHT))
-                    .pl(px(chrome::CONTENT_INSET))
-                    .pr(px(chrome::INSET))
+                    .pr(px(8.0))
                     .flex_shrink_0()
                     .flex()
                     .flex_row()
                     .items_center()
                     .gap(px(chrome::SMALL_GAP))
-                    .bg(theme::canvas())
+                    .bg(theme::floor())
                     .border_b_1()
                     .border_color(theme::edge_soft())
                     .child(
@@ -1173,7 +1192,53 @@ impl Render for TerminalView {
                             .flex_row()
                             .items_center()
                             .children(tabs),
-                    ),
+                    )
+                    .child({
+                        use gpui_component::{
+                            button::{Button, ButtonVariants},
+                            menu::{DropdownMenu, PopupMenuItem},
+                        };
+                        let owner = cx.weak_entity();
+                        let items: Vec<_> = self
+                            .tabs
+                            .iter()
+                            .map(|tab| {
+                                (
+                                    tab.id,
+                                    match &tab.content {
+                                        TabContent::Terminal(session) => {
+                                            session.read(cx).shell.clone()
+                                        }
+                                        TabContent::File { editor, .. } => editor.read(cx).title(),
+                                        TabContent::Diff { title, .. } => title.clone(),
+                                    },
+                                )
+                            })
+                            .collect();
+                        Button::new("tab-list")
+                            .label("⌄")
+                            .ghost()
+                            .w(px(28.0))
+                            .h(px(32.0))
+                            .tooltip("Open tabs")
+                            .dropdown_menu(move |mut menu, _, _| {
+                                for (id, title) in &items {
+                                    let owner = owner.clone();
+                                    let id = *id;
+                                    menu = menu.item(PopupMenuItem::new(title.clone()).on_click(
+                                        move |_, window, cx| {
+                                            let owner = owner.clone();
+                                            window.defer(cx, move |window, cx| {
+                                                let _ = owner.update(cx, |view, cx| {
+                                                    view.select_tab(id, window, cx)
+                                                });
+                                            });
+                                        },
+                                    ));
+                                }
+                                menu
+                            })
+                    }),
             )
             .when_some(active_content, |panel, content| {
                 panel.child(div().flex_1().min_w_0().min_h_0().child(content))
@@ -1236,7 +1301,8 @@ fn workspace_tab(
         .id(SharedString::from(format!("terminal-tab-{id}")))
         .h_full()
         .max_w(px(250.0))
-        .mr(px(chrome::TAB_GAP))
+        .min_w(px(180.0))
+        .border_r_1()
         .px(px(chrome::TAB_INSET))
         .flex_shrink_0()
         .flex()
@@ -1244,18 +1310,18 @@ fn workspace_tab(
         .items_center()
         .gap(px(chrome::COMPACT_GAP))
         .font_family(chrome::CHROME_FONT)
-        .text_size(px(chrome::CHROME_TEXT_SIZE))
+        .text_size(px(12.0))
         .line_height(px(chrome::CHROME_LINE_HEIGHT))
         .bg(if selected {
             theme::canvas()
         } else {
             gpui::rgba(0x0000_0000)
         })
-        .border_b_2()
+        .border_b_1()
         .border_color(if selected {
             theme::focus()
         } else {
-            gpui::rgba(0x0000_0000)
+            theme::edge()
         })
         .text_color(if selected {
             theme::bone()
@@ -1296,17 +1362,14 @@ fn workspace_tab(
         .child(
             div()
                 .min_w_0()
+                .flex_1()
                 .max_w(px(170.0))
                 .overflow_hidden()
                 .text_ellipsis()
                 .whitespace_nowrap()
                 .font_family(chrome::CHROME_FONT)
-                .text_size(px(chrome::CHROME_TEXT_SIZE))
-                .font_weight(if selected {
-                    FontWeight::MEDIUM
-                } else {
-                    FontWeight::NORMAL
-                })
+                .text_size(px(12.0))
+                .font_weight(FontWeight::NORMAL)
                 .child(label),
         )
         .when_some(

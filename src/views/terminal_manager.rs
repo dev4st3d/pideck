@@ -1,5 +1,10 @@
 //! Project ownership and terminal navigation; shells and persistence run off the UI thread.
 
+use gpui_component::{
+    button::{Button, ButtonVariants},
+    input::{InputEvent, InputState},
+    menu::{DropdownMenu, PopupMenuItem},
+};
 use std::path::PathBuf;
 
 use gpui::{
@@ -71,6 +76,7 @@ struct ProjectTerminals {
     files: Entity<FilesPanel>,
     git: Entity<GitPanel>,
     sidebar_tab: SidebarTab,
+    project_kind: Option<&'static str>,
     _panel_subscriptions: Vec<Subscription>,
 }
 
@@ -80,6 +86,11 @@ pub(crate) struct TerminalManager {
     storage_path: PathBuf,
     focus_handle: FocusHandle,
     sidebar_focus: FocusHandle,
+    sidebar_width: f32,
+    resizing_sidebar: bool,
+    project_filter: Option<Entity<InputState>>,
+    project_query: String,
+    _project_filter_subscription: Option<Subscription>,
     notice: Option<String>,
     restore_warning: Option<String>,
     save_failed: bool,
@@ -174,6 +185,11 @@ impl TerminalManager {
             storage_path,
             focus_handle,
             sidebar_focus: cx.focus_handle(),
+            sidebar_width: chrome::SIDEBAR_WIDTH,
+            resizing_sidebar: false,
+            project_filter: None,
+            project_query: String::new(),
+            _project_filter_subscription: None,
             notice: None,
             restore_warning: None,
             save_failed: false,
@@ -205,6 +221,17 @@ impl TerminalManager {
             _bounds_subscription: cx
                 .observe_window_bounds(window, |view, window, cx| view.resize(window, cx)),
         };
+        let filter = cx.new(|cx| InputState::new(window, cx).placeholder("Find project…"));
+        manager._project_filter_subscription = Some(cx.subscribe(
+            &filter,
+            |view, input, event: &InputEvent, cx| {
+                if matches!(event, InputEvent::Change) {
+                    view.project_query = input.read(cx).value().to_lowercase();
+                    cx.notify();
+                }
+            },
+        ));
+        manager.project_filter = Some(filter);
         manager.check_for_updates(window, cx);
         manager
     }
@@ -592,6 +619,23 @@ impl TerminalManager {
             &terminal,
             window,
             move |view, terminal, event, window, cx| {
+                if let TerminalPanelEvent::Review {
+                    path,
+                    kind,
+                    direction,
+                } = event
+                {
+                    if let Some(project) = view
+                        .projects
+                        .iter()
+                        .find(|project| project.terminal.entity_id() == terminal.entity_id())
+                    {
+                        project.git.update(cx, |git, cx| {
+                            git.navigate_review(path, *kind, *direction, cx)
+                        });
+                    }
+                    return;
+                }
                 if matches!(event, TerminalPanelEvent::FilesSaved) {
                     if let Some(project) = view
                         .projects
@@ -623,8 +667,10 @@ impl TerminalManager {
                 cx.notify();
             },
         );
-        let files = cx.new(|cx| FilesPanel::new(project_path.clone(), terminal.downgrade(), cx));
-        let git = cx.new(|cx| GitPanel::new(project_path, terminal.downgrade(), cx));
+        let files =
+            cx.new(|cx| FilesPanel::new(project_path.clone(), terminal.downgrade(), window, cx));
+        let kind_path = project_path.clone();
+        let git = cx.new(|cx| GitPanel::new(project_path, terminal.downgrade(), window, cx));
         let file_pane = terminal.clone();
         let file_subscription =
             cx.subscribe_in(&files, window, move |view, _, event, window, cx| {
@@ -642,12 +688,31 @@ impl TerminalManager {
             cx.notify();
         });
         git.update(cx, |git, cx| git.activate(cx));
+        let terminal_id = terminal.entity_id();
+        let kind_task = cx
+            .background_executor()
+            .spawn(async move { crate::services::project_files::project_kind(&kind_path) });
+        cx.spawn(async move |view, cx| {
+            let kind = kind_task.await;
+            let _ = view.update(cx, |view, cx| {
+                if let Some(project) = view
+                    .projects
+                    .iter_mut()
+                    .find(|project| project.terminal.entity_id() == terminal_id)
+                {
+                    project.project_kind = kind;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
         self.projects.push(ProjectTerminals {
             terminal,
             _subscription: subscription,
             files,
             git,
             sidebar_tab: SidebarTab::Files,
+            project_kind: None,
             _panel_subscriptions: vec![file_subscription, git_subscription, git_observation],
         });
     }
@@ -794,11 +859,17 @@ impl TerminalManager {
             return;
         }
         self.prompt_pending = true;
+        let title = format!("Remove {}?", project_name(&path));
+        let count = self.projects[index].terminal.read(cx).terminal_count();
+        let detail = format!(
+            "Its {count} terminal{} will close. Files on disk stay in place.",
+            if count == 1 { "" } else { "s" }
+        );
         let prompt = window.prompt(
             PromptLevel::Warning,
-            "Remove this project?",
-            Some("Its terminals will close. The project folder and files will remain on disk."),
-            &["Cancel", "Remove project"],
+            &title,
+            Some(&detail),
+            &["Keep project", "Remove project"],
             cx,
         );
         cx.spawn_in(window, async move |view, cx| {
@@ -1016,21 +1087,9 @@ impl TerminalManager {
         let focus = window.focused(cx);
         pane.update(cx, |pane, cx| match event {
             ProjectPanelEvent::OpenFile(path) => pane.open_file(path.clone(), window, cx),
-            ProjectPanelEvent::OpenDiff {
-                title,
-                text,
-                path,
-                changed_files,
-                line_stats,
-            } => pane.open_diff(
-                title.clone(),
-                text.clone(),
-                path.clone(),
-                *changed_files,
-                *line_stats,
-                window,
-                cx,
-            ),
+            ProjectPanelEvent::OpenDiff { file, content } => {
+                pane.open_diff(file.clone(), content.clone(), window, cx)
+            }
             ProjectPanelEvent::ToggleSidebar
             | ProjectPanelEvent::FilesChanged
             | ProjectPanelEvent::BranchChanged => {}
@@ -1098,16 +1157,32 @@ impl TerminalManager {
             .workspace
             .as_ref()
             .map(|workspace| project_name(&workspace.projects[workspace.active].path));
-        let title = project.map_or_else(|| "Pideck".to_owned(), |name| format!("Pideck — {name}"));
+        let title = project.unwrap_or_default();
         div()
             .h(px(chrome::TITLEBAR_HEIGHT))
             .w_full()
             .flex_shrink_0()
             .flex()
             .items_center()
-            .bg(theme::canvas())
+            .bg(theme::chrome())
             .border_b_1()
             .border_color(theme::edge())
+            .pr(px(chrome::TITLEBAR_INSET))
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .h_full()
+                    .px(px(chrome::TITLEBAR_INSET))
+                    .flex()
+                    .items_center()
+                    .whitespace_nowrap()
+                    .line_height(px(31.0))
+                    .font_family(chrome::HEADING_FONT)
+                    .font_weight(FontWeight::NORMAL)
+                    .text_size(px(chrome::WORDMARK_SIZE))
+                    .text_color(theme::focus())
+                    .child("Pideck."),
+            )
             .child(
                 div()
                     .flex_1()
@@ -1116,6 +1191,7 @@ impl TerminalManager {
                     .px(px(chrome::TITLEBAR_INSET))
                     .flex()
                     .items_center()
+                    .justify_center()
                     .window_control_area(WindowControlArea::Drag)
                     .text_size(px(chrome::TITLEBAR_TEXT_SIZE))
                     .text_color(theme::ash())
@@ -1168,13 +1244,16 @@ impl TerminalManager {
         div()
             .relative()
             .min_w(px(100.0))
-            .max_w(px(220.0))
+            .w_full()
             .h(px(chrome::MAIN_CONTROL_HEIGHT))
             .on_children_prepainted(cx.processor(|view, bounds: Vec<Bounds<Pixels>>, _, _| {
                 view.selector_bounds = bounds.first().copied();
             }))
             .child(
                 picker_trigger("project-selector", self.selector_open)
+                    .text_size(px(14.0))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .w_full()
                     .debug_selector(|| "project-selector".into())
                     .track_focus(&self.selector_trigger_focus)
                     .tooltip(text_tooltip(path))
@@ -1232,6 +1311,8 @@ impl TerminalManager {
             }))
             .child(
                 picker_trigger("appearance-picker", self.appearance_menu_open)
+                    .text_size(px(12.0))
+                    .font_weight(FontWeight::NORMAL)
                     .debug_selector(|| "appearance-picker".into())
                     .track_focus(&self.appearance_trigger_focus)
                     .w_full()
@@ -1252,6 +1333,14 @@ impl TerminalManager {
                         }
                         cx.notify();
                     }))
+                    .child(
+                        div()
+                            .size(px(10.0))
+                            .flex_shrink_0()
+                            .rounded_full()
+                            .border_1()
+                            .border_color(theme::bone()),
+                    )
                     .child(
                         div()
                             .flex_1()
@@ -1281,15 +1370,15 @@ impl TerminalManager {
             .min_w_0()
             .flex_shrink_0()
             .flex()
-            .bg(theme::canvas())
+            .bg(theme::chrome())
             .border_b_1()
             .border_color(theme::edge())
             .child(
                 div()
                     .w(px(if sidebar_visible {
-                        chrome::SIDEBAR_WIDTH
+                        self.sidebar_width
                     } else {
-                        chrome::COLLAPSED_BRAND_WIDTH
+                        200.0
                     }))
                     .h_full()
                     .flex_shrink_0()
@@ -1298,12 +1387,8 @@ impl TerminalManager {
                     .pl(px(chrome::SIDEBAR_INSET))
                     .border_r_1()
                     .border_color(theme::edge())
-                    .font_family(chrome::HEADING_FONT)
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_size(px(chrome::WORDMARK_SIZE))
-                    .line_height(px(32.0))
-                    .text_color(theme::focus())
-                    .child("Pideck."),
+                    .pr(px(8.0))
+                    .child(self.project_picker(title.clone(), path.clone(), available, cx)),
             )
             .child(
                 div()
@@ -1317,29 +1402,28 @@ impl TerminalManager {
                     .when(!sidebar_visible, |toolbar| {
                         toolbar.child(sidebar_toggle(available, cx))
                     })
-                    .child(self.project_picker(title, path.clone(), available, cx))
-                    .when(wide, |toolbar| {
-                        toolbar
-                            .child(
-                                div()
-                                    .w(px(1.0))
-                                    .h(px(16.0))
-                                    .flex_shrink_0()
-                                    .bg(theme::edge()),
-                            )
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .truncate()
-                                    .font_family(theme::mono())
-                                    .text_size(px(chrome::DETAIL_TEXT_SIZE))
-                                    .line_height(px(chrome::DETAIL_LINE_HEIGHT))
-                                    .text_color(theme::ash())
-                                    .child(path),
-                            )
-                    })
-                    .when(!wide, |toolbar| toolbar.child(div().flex_1().min_w_0()))
+                    .child(
+                        div()
+                            .id("workspace-path")
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(px(12.0))
+                            .text_color(theme::ash())
+                            .tooltip(text_tooltip(path.clone()))
+                            .child(if wide {
+                                let parent = std::path::Path::new(&path)
+                                    .parent()
+                                    .and_then(|p| p.file_name())
+                                    .map(|p| p.to_string_lossy().into_owned());
+                                parent.map_or_else(
+                                    || format!("Projects  /  {title}"),
+                                    |parent| format!("Projects  /  {parent}  /  {title}"),
+                                )
+                            } else {
+                                title
+                            }),
+                    )
                     .child(self.appearance_picker(cx))
                     .child(
                         div()
@@ -1358,7 +1442,7 @@ impl TerminalManager {
                             .text_color(theme::on_accent())
                             .text_size(px(chrome::CONTROL_TEXT_SIZE))
                             .line_height(px(chrome::CONTROL_LINE_HEIGHT))
-                            .font_weight(FontWeight::MEDIUM)
+                            .font_weight(FontWeight::SEMIBOLD)
                             .tooltip(text_tooltip(if can_add_terminal {
                                 "Open a terminal in this project · Ctrl+Shift+T"
                             } else if available {
@@ -1408,82 +1492,81 @@ impl TerminalManager {
     }
 
     fn update_footer(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
-        let (status, action, enabled) = match &self.update_state {
-            UpdateState::Unavailable => return None,
-            UpdateState::Checking => ("Checking for updates…".to_owned(), None, false),
-            UpdateState::Current => ("Up to date".to_owned(), Some("Check for updates"), true),
-            UpdateState::Available(version) => (
-                format!("Update {version} available"),
-                Some("Update and restart"),
-                true,
-            ),
-            UpdateState::Downloading => ("Preparing update…".to_owned(), None, false),
-            UpdateState::Prepared(version) => (
-                format!("Update {version} ready"),
-                Some("Restart to update"),
-                true,
-            ),
-            UpdateState::Scheduling => ("Starting update…".to_owned(), None, false),
-            UpdateState::Error(message) => (message.clone(), Some("Retry update"), true),
+        let status = match &self.update_state {
+            UpdateState::Unavailable => "Development build".to_owned(),
+            UpdateState::Checking => "Checking for updates…".to_owned(),
+            UpdateState::Current => "Up to date".to_owned(),
+            UpdateState::Available(version) => format!("Update {version} available"),
+            UpdateState::Downloading => "Preparing update…".to_owned(),
+            UpdateState::Prepared(version) => format!("Update {version} ready"),
+            UpdateState::Scheduling => "Starting update…".to_owned(),
+            UpdateState::Error(_) => "Update check failed".to_owned(),
         };
-        let control = match action {
-            Some("Check for updates") => {
-                status_button("check-for-updates", "Check for updates", enabled)
-                    .when(enabled, |button| {
-                        button.on_click(
-                            cx.listener(|view, _, window, cx| view.check_for_updates(window, cx)),
-                        )
-                    })
-                    .into_any_element()
-            }
-            Some("Update and restart") => {
-                status_button("update-and-restart", "Update and restart", enabled)
-                    .when(enabled, |button| {
-                        button.on_click(
-                            cx.listener(|view, _, window, cx| view.prepare_and_restart(window, cx)),
-                        )
-                    })
-                    .into_any_element()
-            }
-            Some("Restart to update") => {
-                status_button("restart-to-update", "Restart to update", enabled)
-                    .when(enabled, |button| {
-                        button.on_click(cx.listener(|view, _, window, cx| {
-                            view.request_update_restart(window, cx)
-                        }))
-                    })
-                    .into_any_element()
-            }
-            Some("Retry update") => status_button("retry-update", "Retry update", enabled)
-                .when(enabled, |button| {
-                    button.on_click(cx.listener(|view, _, window, cx| {
-                        if matches!(view.update_state, UpdateState::Error(_)) {
-                            view.check_for_updates(window, cx);
-                        }
-                    }))
-                })
-                .into_any_element(),
-            _ => div().into_any_element(),
-        };
+        let owner = cx.weak_entity();
+        let state = self.update_state.clone();
         Some(
             div()
                 .id("app-update-status")
                 .min_w_0()
-                .pl(px(chrome::GAP))
                 .flex()
                 .items_center()
-                .gap(px(chrome::COMPACT_GAP))
-                .border_l_1()
-                .border_color(theme::edge())
+                .gap(px(12.0))
                 .child(
                     div()
                         .id("update-message")
-                        .min_w_0()
                         .truncate()
                         .tooltip(text_tooltip(status.clone()))
                         .child(status),
                 )
-                .child(control)
+                .child(
+                    Button::new("status-menu")
+                        .label("⋯")
+                        .ghost()
+                        .w(px(24.0))
+                        .h(px(24.0))
+                        .tooltip("Version and updates")
+                        .dropdown_menu(move |menu, _, _| {
+                            let owner = owner.clone();
+                            let menu = menu.item(
+                                PopupMenuItem::new(format!(
+                                    "Pideck {}",
+                                    app_update::CURRENT_VERSION
+                                ))
+                                .disabled(true),
+                            );
+                            let (label, enabled) = match state {
+                                UpdateState::Available(_) => ("Update and restart", true),
+                                UpdateState::Prepared(_) => ("Restart to update", true),
+                                UpdateState::Current | UpdateState::Error(_) => {
+                                    ("Check for updates", true)
+                                }
+                                UpdateState::Unavailable => {
+                                    ("Updates are available in installed builds", false)
+                                }
+                                _ => ("Update in progress…", false),
+                            };
+                            menu.item(PopupMenuItem::new(label).disabled(!enabled).on_click(
+                                move |_, window, cx| {
+                                    let owner = owner.clone();
+                                    window.defer(cx, move |window, cx| {
+                                        let _ =
+                                            owner.update(cx, |view, cx| match view.update_state {
+                                                UpdateState::Available(_) => {
+                                                    view.prepare_and_restart(window, cx)
+                                                }
+                                                UpdateState::Prepared(_) => {
+                                                    view.request_update_restart(window, cx)
+                                                }
+                                                UpdateState::Current | UpdateState::Error(_) => {
+                                                    view.check_for_updates(window, cx)
+                                                }
+                                                _ => {}
+                                            });
+                                    });
+                                },
+                            ))
+                        }),
+                )
                 .into_any_element(),
         )
     }
@@ -1501,7 +1584,7 @@ impl TerminalManager {
             _ => self.projects_panel(cx).into_any_element(),
         };
         div()
-            .w(px(chrome::SIDEBAR_WIDTH))
+            .w(px(self.sidebar_width))
             .h_full()
             .flex_shrink_0()
             .flex()
@@ -1509,7 +1592,6 @@ impl TerminalManager {
             .bg(theme::floor())
             .border_r_1()
             .border_color(theme::edge())
-            .child(div().flex_1().min_h_0().child(content))
             .child(
                 div()
                     .h(px(chrome::SIDEBAR_NAV_HEIGHT))
@@ -1517,12 +1599,12 @@ impl TerminalManager {
                     .flex()
                     .px(px(12.0))
                     .bg(theme::floor())
-                    .border_t_1()
+                    .border_b_1()
                     .border_color(theme::edge())
                     .children(
                         [
-                            (SidebarTab::Projects, "Projects"),
                             (SidebarTab::Files, "Files"),
+                            (SidebarTab::Projects, "Projects"),
                             (SidebarTab::Git, "Git"),
                         ]
                         .into_iter()
@@ -1536,20 +1618,20 @@ impl TerminalManager {
                                 .items_center()
                                 .justify_center()
                                 .gap(px(chrome::SMALL_GAP))
-                                .border_t_2()
+                                .border_b_2()
                                 .border_color(if tab == item {
                                     theme::focus()
                                 } else {
                                     gpui::rgba(0x00000000)
                                 })
-                                .text_size(px(chrome::CONTROL_TEXT_SIZE))
+                                .text_size(px(12.0))
                                 .text_color(if tab == item {
                                     theme::bone()
                                 } else {
                                     theme::ash()
                                 })
                                 .font_weight(if tab == item {
-                                    FontWeight::MEDIUM
+                                    FontWeight::SEMIBOLD
                                 } else {
                                     FontWeight::NORMAL
                                 })
@@ -1564,6 +1646,20 @@ impl TerminalManager {
                                 .on_click(cx.listener(move |view, _, window, cx| {
                                     view.select_sidebar(item, window, cx)
                                 }))
+                                .child(
+                                    svg()
+                                        .path(match item {
+                                            SidebarTab::Files => "icons/files.svg",
+                                            SidebarTab::Projects => "icons/folder.svg",
+                                            SidebarTab::Git => "icons/branch.svg",
+                                        })
+                                        .size(px(14.0))
+                                        .text_color(if tab == item {
+                                            theme::bone()
+                                        } else {
+                                            theme::ash()
+                                        }),
+                                )
                                 .child(label)
                                 .when(item == SidebarTab::Git, |item| {
                                     item.when_some(changed, |item, count| {
@@ -1579,6 +1675,7 @@ impl TerminalManager {
                         }),
                     ),
             )
+            .child(div().flex_1().min_h_0().child(content))
     }
 
     fn project_selector(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1948,6 +2045,15 @@ impl TerminalManager {
         let can_remove = available && !self.picker_pending && project_count > 1;
         if let Some(workspace) = &self.workspace {
             for (index, project) in workspace.projects.iter().enumerate() {
+                if !self.project_query.is_empty()
+                    && !project
+                        .path
+                        .to_string_lossy()
+                        .to_lowercase()
+                        .contains(&self.project_query)
+                {
+                    continue;
+                }
                 let selected = workspace.active == index;
                 let count = self
                     .projects
@@ -2018,24 +2124,58 @@ impl TerminalManager {
                                 .child(
                                     div()
                                         .text_size(px(chrome::DETAIL_TEXT_SIZE))
-                                        .font_family(theme::mono())
+                                        .font_family(chrome::CHROME_FONT)
+                                        .font_weight(FontWeight::NORMAL)
                                         .line_height(px(chrome::DETAIL_LINE_HEIGHT))
                                         .text_color(theme::ash())
                                         .child(format!(
-                                            "{} terminal{}",
+                                            "{} terminal{}{}",
                                             count,
-                                            if count == 1 { "" } else { "s" }
+                                            if count == 1 { "" } else { "s" },
+                                            self.projects
+                                                .get(index)
+                                                .and_then(|project| project.project_kind)
+                                                .map_or_else(String::new, |kind| format!(
+                                                    " · {kind}"
+                                                ))
                                         )),
                                 ),
                         )
-                        .when(selected, |row| {
-                            row.child(
-                                svg()
-                                    .path("icons/chevron-right.svg")
-                                    .size(px(chrome::ICON_SIZE))
-                                    .flex_shrink_0()
-                                    .text_color(theme::bone_dim()),
-                            )
+                        .child({
+                            let owner = cx.weak_entity();
+                            Button::new(("project-actions", index))
+                                .label("⋯")
+                                .ghost()
+                                .w(px(28.0))
+                                .h(px(32.0))
+                                .tooltip("Project actions")
+                                .on_click(|_, _, cx| cx.stop_propagation())
+                                .dropdown_menu(move |menu, _, _| {
+                                    let open_owner = owner.clone();
+                                    let remove_owner = owner.clone();
+                                    menu.item(PopupMenuItem::new("Open project").on_click(
+                                        move |_, window, cx| {
+                                            let owner = open_owner.clone();
+                                            window.defer(cx, move |window, cx| {
+                                                let _ = owner.update(cx, |view, cx| {
+                                                    view.select_project(index, window, cx)
+                                                });
+                                            });
+                                        },
+                                    ))
+                                    .item(
+                                        PopupMenuItem::new("Remove project")
+                                            .disabled(!can_remove)
+                                            .on_click(move |_, window, cx| {
+                                                let owner = remove_owner.clone();
+                                                window.defer(cx, move |window, cx| {
+                                                    let _ = owner.update(cx, |view, cx| {
+                                                        view.remove_project(index, window, cx)
+                                                    });
+                                                });
+                                            }),
+                                    )
+                                })
                         }),
                 );
             }
@@ -2073,14 +2213,12 @@ impl TerminalManager {
             }))
             .child(
                 div()
-                    .h(px(chrome::HEADER_HEIGHT))
+                    .h(px(48.0))
                     .flex_shrink_0()
                     .px(px(chrome::SIDEBAR_INSET))
                     .flex()
                     .items_center()
                     .justify_between()
-                    .border_b_1()
-                    .border_color(theme::edge())
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(theme::bone_dim())
                     .child("Projects")
@@ -2091,25 +2229,40 @@ impl TerminalManager {
                             .child(project_count.to_string()),
                     ),
             )
+            .when_some(self.project_filter.as_ref(), |panel, input| {
+                panel.child(super::project_panels::filter_field(input, 0.0, 12.0))
+            })
             .child(
                 div()
                     .id("project-list")
                     .flex_1()
                     .min_h_0()
                     .py(px(chrome::SMALL_GAP))
-                    .px(px(chrome::SIDEBAR_INSET))
+                    .px(px(8.0))
+                    .gap(px(4.0))
+                    .flex()
+                    .flex_col()
                     .overflow_y_scroll()
+                    .when(rows.is_empty(), |list| {
+                        list.child(
+                            div()
+                                .p(px(8.0))
+                                .text_color(theme::ash())
+                                .child("No projects match. Clear the filter to see all projects."),
+                        )
+                    })
                     .children(rows),
             )
             .child(
                 div()
-                    .px(px(chrome::SIDEBAR_INSET))
-                    .py(px(chrome::INSET))
+                    .px(px(12.0))
+                    .py(px(12.0))
                     .flex_shrink_0()
                     .border_t_1()
                     .border_color(theme::edge())
                     .flex()
-                    .gap(px(chrome::SMALL_GAP))
+                    .flex_col()
+                    .gap(px(8.0))
                     .child(
                         button(
                             "add-project",
@@ -2120,34 +2273,29 @@ impl TerminalManager {
                             },
                             can_add,
                         )
-                        .flex_1()
-                        .min_w_0()
+                        .w_full()
+                        .justify_center()
+                        .bg(theme::panel_hover())
                         .when(can_add, |button| {
-                            button.on_click(
-                                cx.listener(|view, _, window, cx| view.choose_project(window, cx)),
-                            )
+                            button.on_click(cx.listener(Self::choose_project_click))
                         }),
                     )
                     .child(
-                        button("remove-project", "Remove", can_remove)
-                            .flex_1()
-                            .min_w_0()
-                            .tooltip(text_tooltip(if can_remove {
-                                "Remove the active project from this workspace"
-                            } else if project_count <= 1 {
-                                "Keep at least one project open"
-                            } else {
-                                "Wait for the current operation to finish"
-                            }))
-                            .when(can_remove, |button| {
-                                button.on_click(cx.listener(|view, _, window, cx| {
-                                    if let Some(workspace) = &view.workspace {
-                                        view.remove_project(workspace.active, window, cx);
-                                    }
-                                }))
-                            }),
+                        div()
+                            .text_size(px(11.0))
+                            .text_color(theme::ash())
+                            .child("Project actions are in the row menu."),
                     ),
             )
+    }
+
+    fn choose_project_click(
+        &mut self,
+        _: &gpui::ClickEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.choose_project(window, cx);
     }
 }
 
@@ -2213,21 +2361,6 @@ fn picker_popup(menu: impl IntoElement) -> impl IntoElement {
         .top(px(chrome::MAIN_CONTROL_HEIGHT + chrome::MENU_GAP))
         .left_0()
         .child(deferred(anchored().snap_to_window().child(menu)).with_priority(1))
-}
-
-fn status_button(
-    id: &'static str,
-    label: &'static str,
-    enabled: bool,
-) -> gpui::Stateful<gpui::Div> {
-    button(id, label, enabled)
-        .debug_selector(move || id.into())
-        .h(px(22.0))
-        .px(px(chrome::SMALL_GAP))
-        .border_color(gpui::rgba(0))
-        .text_size(px(chrome::DETAIL_TEXT_SIZE))
-        .line_height(px(chrome::DETAIL_LINE_HEIGHT))
-        .text_color(theme::focus())
 }
 
 fn button(id: &'static str, label: &'static str, enabled: bool) -> gpui::Stateful<gpui::Div> {
@@ -2375,6 +2508,26 @@ pub(super) fn text_tooltip(
 
 impl Render for TerminalManager {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let viewport = f32::from(window.viewport_size().width);
+        let default_width = if viewport <= 1100.0 {
+            chrome::SIDEBAR_MIN
+        } else if self
+            .active_project()
+            .is_some_and(|project| project.sidebar_tab == SidebarTab::Git)
+        {
+            chrome::GIT_SIDEBAR_WIDTH
+        } else {
+            chrome::SIDEBAR_WIDTH
+        };
+        self.sidebar_width = self
+            .workspace
+            .as_ref()
+            .and_then(|workspace| workspace.sidebar_width)
+            .map_or(default_width, f32::from)
+            .clamp(
+                chrome::SIDEBAR_MIN,
+                chrome::SIDEBAR_MAX.min((viewport - 380.0).max(chrome::SIDEBAR_MIN)),
+            );
         let sidebar_visible = self
             .workspace
             .as_ref()
@@ -2413,11 +2566,9 @@ impl Render for TerminalManager {
         let changed = self
             .active_project()
             .and_then(|project| project.git.read(cx).change_count());
-        let terminal_count = self
-            .projects
-            .iter()
-            .map(|project| project.terminal.read(cx).terminal_count())
-            .sum::<usize>();
+        let terminal_count = terminal
+            .as_ref()
+            .map_or(0, |terminal| terminal.read(cx).terminal_count());
         let warning = self
             .restore_warning
             .clone()
@@ -2451,8 +2602,31 @@ impl Render for TerminalManager {
             .bg(theme::canvas())
             .text_color(theme::bone())
             .font_family(chrome::CHROME_FONT)
+            .font_weight(FontWeight::NORMAL)
             .text_size(px(chrome::CHROME_TEXT_SIZE))
             .line_height(px(chrome::CHROME_LINE_HEIGHT))
+            .on_mouse_move(cx.listener(|view, event: &gpui::MouseMoveEvent, _, cx| {
+                if view.resizing_sidebar {
+                    if let Some(workspace) = &mut view.workspace {
+                        workspace.sidebar_width = Some(
+                            f32::from(event.position.x)
+                                .clamp(chrome::SIDEBAR_MIN, chrome::SIDEBAR_MAX)
+                                as u16,
+                        );
+                    }
+                    cx.notify();
+                }
+            }))
+            .on_mouse_up(
+                gpui::MouseButton::Left,
+                cx.listener(|view, _, window, cx| {
+                    if view.resizing_sidebar {
+                        view.resizing_sidebar = false;
+                        view.persist(window, cx);
+                        cx.notify();
+                    }
+                }),
+            )
             .on_key_down(cx.listener(|view, event: &KeyDownEvent, window, cx| {
                 if view.interaction_locked() {
                     cx.stop_propagation();
@@ -2553,7 +2727,59 @@ impl Render for TerminalManager {
                     .min_w_0()
                     .flex()
                     .when(sidebar_visible && !self.update_scheduling, |body| {
-                        body.child(self.sidebar(cx))
+                        body.child(
+                            div()
+                                .relative()
+                                .h_full()
+                                .flex_shrink_0()
+                                .child(self.sidebar(cx))
+                                .child(
+                                    div()
+                                        .id("sidebar-resize")
+                                        .absolute()
+                                        .right(px(-3.0))
+                                        .top_0()
+                                        .bottom_0()
+                                        .w(px(6.0))
+                                        .cursor(gpui::CursorStyle::ResizeLeftRight)
+                                        .tab_index(0)
+                                        .tooltip(text_tooltip(
+                                            "Resize sidebar · Left/Right arrows · Home to reset",
+                                        ))
+                                        .focus(|style| style.bg(theme::edge_hard()))
+                                        .on_mouse_down(
+                                            gpui::MouseButton::Left,
+                                            cx.listener(|view, _, _, cx| {
+                                                view.resizing_sidebar = true;
+                                                cx.stop_propagation();
+                                            }),
+                                        )
+                                        .on_key_down(cx.listener(
+                                            |view, event: &KeyDownEvent, window, cx| {
+                                                let next = match event.keystroke.key.as_str() {
+                                                    "left" => Some(
+                                                        (view.sidebar_width - 16.0)
+                                                            .max(chrome::SIDEBAR_MIN)
+                                                            as u16,
+                                                    ),
+                                                    "right" => Some(
+                                                        (view.sidebar_width + 16.0)
+                                                            .min(chrome::SIDEBAR_MAX)
+                                                            as u16,
+                                                    ),
+                                                    "home" => None,
+                                                    _ => return,
+                                                };
+                                                if let Some(workspace) = &mut view.workspace {
+                                                    workspace.sidebar_width = next;
+                                                }
+                                                view.persist(window, cx);
+                                                cx.stop_propagation();
+                                                cx.notify();
+                                            },
+                                        )),
+                                ),
+                        )
                     })
                     .child(
                         div()
@@ -2665,17 +2891,30 @@ impl Render for TerminalManager {
                     .flex_shrink_0()
                     .flex()
                     .items_center()
-                    .bg(theme::floor())
+                    .bg(theme::chrome())
                     .border_t_1()
                     .border_color(theme::edge())
                     .text_size(px(chrome::DETAIL_TEXT_SIZE))
                     .line_height(px(chrome::DETAIL_LINE_HEIGHT))
                     .text_color(theme::ash())
-                    .tooltip(text_tooltip(save_status))
+                    .tooltip(text_tooltip(
+                        self.active_project()
+                            .and_then(|project| project.git.read(cx).status())
+                            .and_then(crate::services::project_git::GitStatus::line_stats)
+                            .map_or_else(
+                                || save_status.to_owned(),
+                                |stats| {
+                                    format!(
+                                        "{save_status} · +{} additions · −{} deletions",
+                                        stats.additions, stats.deletions
+                                    )
+                                },
+                            ),
+                    ))
                     .child(
                         div()
                             .w(px(if sidebar_visible {
-                                chrome::SIDEBAR_WIDTH
+                                self.sidebar_width
                             } else {
                                 chrome::COLLAPSED_BRAND_WIDTH
                             }))
@@ -2695,7 +2934,13 @@ impl Render for TerminalManager {
                                     .flex_shrink_0()
                                     .text_color(theme::ash()),
                             )
-                            .child(div().min_w_0().truncate().child(branch))
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .truncate()
+                                    .font_family(theme::mono())
+                                    .child(branch),
+                            )
                             .child(div().flex_1())
                             .when_some(changed.filter(|_| sidebar_visible), |footer, count| {
                                 footer.child(div().flex_shrink_0().child(format!(
@@ -2712,18 +2957,17 @@ impl Render for TerminalManager {
                             .flex()
                             .items_center()
                             .gap(px(chrome::GAP))
-                            .child(div().flex_1().min_w_0().truncate().child(title))
-                            .when(wide_toolbar, |footer| {
-                                footer.child(
-                                    div()
-                                        .flex_shrink_0()
-                                        .child(format!("v{}", app_update::CURRENT_VERSION)),
-                                )
-                            })
+                            .child(
+                                svg()
+                                    .path("icons/terminal.svg")
+                                    .size(px(12.0))
+                                    .text_color(theme::ash()),
+                            )
                             .child(div().flex_shrink_0().child(format!(
-                                "{terminal_count} terminal{} open",
+                                "{terminal_count} terminal{}",
                                 if terminal_count == 1 { "" } else { "s" }
                             )))
+                            .child(div().flex_1())
                             .when_some(update_footer, |footer, update| footer.child(update)),
                     ),
             )
@@ -2735,12 +2979,18 @@ mod tests {
     use super::*;
 
     fn fixture(cx: &mut Context<TerminalManager>) -> TerminalManager {
+        super::super::file_editor::FileEditor::initialize(cx);
         TerminalManager {
             workspace: Some(TerminalWorkspace::new("synthetic-project-one".into())),
             projects: Vec::new(),
             storage_path: PathBuf::new(),
             focus_handle: cx.focus_handle(),
             sidebar_focus: cx.focus_handle(),
+            sidebar_width: chrome::SIDEBAR_WIDTH,
+            resizing_sidebar: false,
+            project_filter: None,
+            project_query: String::new(),
+            _project_filter_subscription: None,
             notice: None,
             restore_warning: None,
             save_failed: false,
@@ -2887,8 +3137,8 @@ mod tests {
                 view.appearance_saving = true;
                 view.appearance_menu_open = true;
                 view.choose_appearance(theme::Appearance::Graphite, window, cx);
-                view.choose_appearance(theme::Appearance::Midnight, window, cx);
-                assert_eq!(theme::appearance(), theme::Appearance::Midnight);
+                view.choose_appearance(theme::Appearance::Black, window, cx);
+                assert_eq!(theme::appearance(), theme::Appearance::Black);
                 assert_eq!(view.appearance_revision, 2);
                 assert!(view.appearance_saving);
                 assert!(!view.appearance_menu_open);
@@ -2935,37 +3185,25 @@ mod tests {
     }
 
     #[gpui::test]
-    fn update_footer_exposes_installed_states_without_starting_update_work(
-        cx: &mut gpui::TestAppContext,
-    ) {
+    fn update_footer_keeps_routine_actions_in_the_status_menu(cx: &mut gpui::TestAppContext) {
         let (view, cx) = cx.add_window_view(|_, cx| fixture(cx));
         cx.simulate_resize(gpui::size(px(800.0), px(540.0)));
-        for (state, control) in [
-            (UpdateState::Current, "check-for-updates"),
-            (UpdateState::Available("1.2.3".into()), "update-and-restart"),
-            (UpdateState::Prepared("1.2.3".into()), "restart-to-update"),
-            (UpdateState::Error("Try again.".into()), "retry-update"),
+        for state in [
+            UpdateState::Current,
+            UpdateState::Available("1.2.3".into()),
+            UpdateState::Prepared("1.2.3".into()),
+            UpdateState::Error("Try again.".into()),
+            UpdateState::Unavailable,
         ] {
             view.update(cx, |view, cx| {
                 view.update_state = state;
                 cx.notify();
             });
             cx.refresh().unwrap();
-            let bounds = cx
-                .debug_bounds(control)
-                .unwrap_or_else(|| panic!("missing {control}"));
-            assert!(
-                bounds.right() <= px(800.0),
-                "{control} overflows the footer"
-            );
-            assert!(bounds.size.height <= px(chrome::FOOTER_HEIGHT));
+            assert!(cx.debug_bounds("check-for-updates").is_none());
+            assert!(cx.debug_bounds("update-and-restart").is_none());
+            assert!(!view.read_with(cx, |view, _| view.update_scheduling));
         }
-        view.update(cx, |view, cx| {
-            view.update_state = UpdateState::Unavailable;
-            cx.notify();
-        });
-        cx.refresh().unwrap();
-        assert!(cx.debug_bounds("app-update-status").is_none());
     }
 
     #[gpui::test]

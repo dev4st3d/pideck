@@ -116,6 +116,120 @@ pub(crate) fn list_directory(root: &Path, path: &Path) -> Result<DirectoryListin
     Ok(DirectoryListing { entries, truncated })
 }
 
+/// Identify the project from local manifests on a worker.
+pub(crate) fn project_kind(root: &Path) -> Option<&'static str> {
+    if root.join("Cargo.toml").is_file() {
+        return Some("Rust");
+    }
+    if root.join("artisan").is_file() {
+        return Some("Laravel");
+    }
+    if let Ok(bytes) = read_bounded(&root.join("package.json"))
+        && let Ok(package) = serde_json::from_slice::<serde_json::Value>(&bytes)
+    {
+        if package
+            .get("dependencies")
+            .and_then(|deps| deps.get("expo"))
+            .is_some()
+        {
+            return Some("Expo");
+        }
+        return Some("JavaScript");
+    }
+    if root.join("pyproject.toml").is_file() {
+        return Some("Python");
+    }
+    if root.join("go.mod").is_file() {
+        return Some("Go");
+    }
+    None
+}
+
+/// Search filenames off the event loop. Keep ancestors and never follow links.
+/// The visit cap prevents generated/vendor trees from blocking an interactive filter.
+pub(crate) fn filter_files(
+    root: &Path,
+    query: &str,
+    cancel: &std::sync::atomic::AtomicBool,
+) -> Result<DirectoryListing, FileError> {
+    use std::collections::{HashMap, HashSet};
+    let query = query.trim().to_lowercase().replace('\\', "/");
+    let mut pending = vec![root.to_path_buf()];
+    let mut directories = HashMap::new();
+    let mut retained = HashSet::new();
+    let mut visited = 0;
+    let mut matches = 0;
+    let mut truncated = false;
+    while let Some(path) = pending.pop() {
+        if cancel.load(Ordering::Acquire) {
+            return Ok(DirectoryListing {
+                entries: Vec::new(),
+                truncated: false,
+            });
+        }
+        let listing = match list_directory(root, &path) {
+            Ok(listing) => listing,
+            Err(error) if path == root => return Err(error),
+            Err(_) => {
+                truncated = true;
+                continue;
+            }
+        };
+        truncated |= listing.truncated;
+        for entry in &listing.entries {
+            visited += 1;
+            if visited > 20_000 || matches >= MAX_DIRECTORY_ENTRIES {
+                truncated = true;
+                break;
+            }
+            let relative = entry.path.strip_prefix(root).unwrap_or(&entry.path);
+            if relative
+                .to_string_lossy()
+                .replace('\\', "/")
+                .to_lowercase()
+                .contains(&query)
+            {
+                matches += 1;
+                let mut ancestor = Some(entry.path.as_path());
+                while let Some(path) = ancestor {
+                    if path == root {
+                        break;
+                    }
+                    retained.insert(path.to_path_buf());
+                    ancestor = path.parent();
+                }
+            }
+            if entry.is_dir && !entry.is_symlink {
+                pending.push(entry.path.clone());
+            }
+        }
+        directories.insert(path, listing.entries);
+        if visited > 20_000 || matches >= MAX_DIRECTORY_ENTRIES {
+            break;
+        }
+    }
+    fn append(
+        path: &Path,
+        directories: &HashMap<PathBuf, Vec<DirectoryEntry>>,
+        retained: &HashSet<PathBuf>,
+        output: &mut Vec<DirectoryEntry>,
+    ) {
+        if let Some(entries) = directories.get(path) {
+            for entry in entries {
+                if retained.contains(&entry.path) {
+                    output.push(entry.clone());
+                    if entry.is_dir {
+                        append(&entry.path, directories, retained, output);
+                    }
+                }
+            }
+        }
+    }
+    let mut entries = Vec::new();
+    append(root, &directories, &retained, &mut entries);
+    Ok(DirectoryListing { entries, truncated })
+}
+
 fn read_bounded(path: &Path) -> Result<Vec<u8>, FileError> {
     if !fs::metadata(path)
         .map_err(|_| FileError::Unavailable)?
@@ -388,6 +502,46 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn filename_filter_keeps_nested_ancestors_and_handles_cancellation() {
+        let directory = TestDirectory::new();
+        let root = super::super::paths::without_windows_verbatim_prefix(&directory.0);
+        fs::create_dir_all(root.join("src/views")).unwrap();
+        fs::create_dir_all(root.join("docs")).unwrap();
+        fs::write(root.join("src/views/terminal.rs"), "fixture").unwrap();
+        fs::write(root.join("src/views/project.rs"), "fixture").unwrap();
+        fs::write(root.join("docs/guide.md"), "fixture").unwrap();
+        let cancellation = std::sync::atomic::AtomicBool::new(false);
+        let listing = filter_files(&root, "terminal.rs", &cancellation).unwrap();
+        let names: Vec<_> = listing
+            .entries
+            .iter()
+            .map(|entry| {
+                entry
+                    .path
+                    .strip_prefix(&root)
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/")
+            })
+            .collect();
+        assert_eq!(names, ["src", "src/views", "src/views/terminal.rs"]);
+        assert!(!listing.truncated);
+        assert!(
+            filter_files(&root, "no-match", &cancellation)
+                .unwrap()
+                .entries
+                .is_empty()
+        );
+        cancellation.store(true, Ordering::Release);
+        assert!(
+            filter_files(&root, "terminal", &cancellation)
+                .unwrap()
+                .entries
+                .is_empty()
+        );
     }
 
     #[test]
