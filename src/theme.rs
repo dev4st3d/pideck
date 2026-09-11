@@ -1,4 +1,4 @@
-//! Shared workbench palettes; Paper preserves the supplied design reference.
+//! Neutral palettes from design/pideck-reimagined and its editable Pen master.
 
 use std::cell::Cell;
 
@@ -9,72 +9,50 @@ pub(crate) mod terminal_manager;
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum Appearance {
     #[default]
-    Paper,
-    Linen,
+    Black,
+    Light,
     Graphite,
-    Midnight,
-    Ember,
-    Evergreen,
-    Dusk,
+    Charcoal,
 }
 
 impl Appearance {
-    pub(crate) const ALL: [Self; 7] = [
-        Self::Paper,
-        Self::Linen,
-        Self::Graphite,
-        Self::Midnight,
-        Self::Ember,
-        Self::Evergreen,
-        Self::Dusk,
-    ];
+    pub(crate) const ALL: [Self; 4] = [Self::Black, Self::Light, Self::Graphite, Self::Charcoal];
 
     pub(crate) const fn id(self) -> &'static str {
         match self {
-            Self::Paper => "paper",
-            Self::Linen => "linen",
+            Self::Black => "black",
+            Self::Light => "light",
             Self::Graphite => "graphite",
-            Self::Midnight => "midnight",
-            Self::Ember => "ember",
-            Self::Evergreen => "evergreen",
-            Self::Dusk => "dusk",
+            Self::Charcoal => "charcoal",
         }
     }
-
     pub(crate) const fn label(self) -> &'static str {
         match self {
-            Self::Paper => "Paper",
-            Self::Linen => "Linen",
+            Self::Black => "Black",
+            Self::Light => "Light",
             Self::Graphite => "Graphite",
-            Self::Midnight => "Midnight",
-            Self::Ember => "Ember",
-            Self::Evergreen => "Evergreen",
-            Self::Dusk => "Dusk",
+            Self::Charcoal => "Charcoal",
         }
     }
-
     pub(crate) fn from_id(id: &str) -> Option<Self> {
-        Self::ALL
-            .into_iter()
-            .find(|appearance| appearance.id() == id)
+        // Read existing preferences without resetting the user's light/dark choice.
+        match id {
+            "black" | "midnight" => Some(Self::Black),
+            "light" | "paper" | "linen" => Some(Self::Light),
+            "graphite" | "evergreen" | "dusk" => Some(Self::Graphite),
+            "charcoal" | "ember" => Some(Self::Charcoal),
+            _ => None,
+        }
     }
-
     pub(crate) const fn is_dark(self) -> bool {
-        matches!(
-            self,
-            Self::Graphite | Self::Midnight | Self::Ember | Self::Evergreen | Self::Dusk
-        )
+        !matches!(self, Self::Light)
     }
-
     fn palette(self) -> &'static Palette {
         match self {
-            Self::Paper => &PAPER,
-            Self::Linen => &LINEN,
+            Self::Black => &BLACK,
+            Self::Light => &LIGHT,
             Self::Graphite => &GRAPHITE,
-            Self::Midnight => &MIDNIGHT,
-            Self::Ember => &EMBER,
-            Self::Evergreen => &EVERGREEN,
-            Self::Dusk => &DUSK,
+            Self::Charcoal => &CHARCOAL,
         }
     }
 }
@@ -82,7 +60,7 @@ impl Appearance {
 thread_local! {
     // Rendering and theme changes stay on GPUI's UI thread. Workers receive
     // resolved colors or an explicit Appearance, never ambient theme state.
-    static APPEARANCE: Cell<Appearance> = const { Cell::new(Appearance::Paper) };
+    static APPEARANCE: Cell<Appearance> = const { Cell::new(Appearance::Black) };
 }
 
 pub(crate) fn appearance() -> Appearance {
@@ -95,6 +73,8 @@ pub(crate) fn set_appearance(appearance: Appearance) {
 
 struct Palette {
     canvas: u32,
+    chrome: u32,
+    success: u32,
     floor: u32,
     panel_hover: u32,
     edge: u32,
@@ -114,153 +94,97 @@ struct Palette {
     diff_empty: u32,
 }
 
-const PAPER: Palette = Palette {
-    canvas: 0xf6f5f0ff,
-    floor: 0xecebe4ff,
-    panel_hover: 0xe2e6dcff,
-    edge: 0xd5d8cfff,
-    edge_hard: 0xb4bbaeff,
-    bone: 0x242824ff,
-    ash: 0x646a62ff,
-    focus: 0x315c49ff,
-    accent_hover: 0x284e3dff,
-    accent_pressed: 0x234334ff,
-    on_accent: 0xffffffff,
-    error: 0x875346ff,
-    error_wash: 0xf0e3dcff,
-    selection: 0xdbe3d8ff,
-    working: 0x756025ff,
-    diff_added: 0xe1ebdcff,
-    diff_removed: 0xf0e3dcff,
-    diff_empty: 0xeeefe8ff,
+const BLACK: Palette = Palette {
+    canvas: 0x080808ff,
+    chrome: 0x141414ff,
+    success: 0x99bda3ff,
+    floor: 0x101010ff,
+    panel_hover: 0x1d1d1dff,
+    edge: 0x303030ff,
+    edge_hard: 0xabababff,
+    bone: 0xeeeeeeff,
+    ash: 0xabababff,
+    focus: 0xdededeff,
+    accent_hover: 0xeeeeeeff,
+    accent_pressed: 0xbbbbbbff,
+    on_accent: 0x121212ff,
+    error: 0xd4a0a0ff,
+    error_wash: 0x2b1e1eff,
+    selection: 0x282828ff,
+    working: 0xabababff,
+    diff_added: 0x17251cff,
+    diff_removed: 0x2b1e1eff,
+    diff_empty: 0x141414ff,
 };
 
-const LINEN: Palette = Palette {
-    canvas: 0xf7f3ebff,
-    floor: 0xede6daff,
-    panel_hover: 0xe6ddcdff,
-    edge: 0xd8cfbfff,
-    edge_hard: 0xb6a58fff,
-    bone: 0x302b25ff,
-    ash: 0x6c6255ff,
-    focus: 0x6b4b34ff,
-    accent_hover: 0x593d2aff,
-    accent_pressed: 0x493122ff,
+const LIGHT: Palette = Palette {
+    canvas: 0xfcfcfcff,
+    chrome: 0xf7f7f7ff,
+    success: 0x326047ff,
+    floor: 0xf3f3f3ff,
+    panel_hover: 0xeaeaeaff,
+    edge: 0xd5d5d5ff,
+    edge_hard: 0x616161ff,
+    bone: 0x242424ff,
+    ash: 0x616161ff,
+    focus: 0x404040ff,
+    accent_hover: 0x303030ff,
+    accent_pressed: 0x242424ff,
     on_accent: 0xffffffff,
-    error: 0x8a453aff,
-    error_wash: 0xf0ddd2ff,
-    selection: 0xe5d8c5ff,
-    working: 0x765923ff,
-    diff_added: 0xe0e8d7ff,
-    diff_removed: 0xf0ddd2ff,
-    diff_empty: 0xeee9deff,
+    error: 0x954545ff,
+    error_wash: 0xf6eaeaff,
+    selection: 0xe4e4e4ff,
+    working: 0x616161ff,
+    diff_added: 0xe8f1eaff,
+    diff_removed: 0xf6eaeaff,
+    diff_empty: 0xf7f7f7ff,
 };
 
 const GRAPHITE: Palette = Palette {
-    canvas: 0x20211fff,
-    floor: 0x191c19ff,
-    panel_hover: 0x30382cff,
-    edge: 0x3c4338ff,
-    edge_hard: 0x737e69ff,
-    bone: 0xeeefe8ff,
-    ash: 0xabb3a4ff,
-    focus: 0xc3d6a3ff,
-    accent_hover: 0xd1e2b6ff,
-    accent_pressed: 0xb1c78fff,
-    on_accent: 0x20251bff,
-    error: 0xf0b1a2ff,
-    error_wash: 0x422c28ff,
-    selection: 0x39482fff,
-    working: 0xdec48cff,
-    diff_added: 0x293d28ff,
-    diff_removed: 0x422c28ff,
-    diff_empty: 0x242922ff,
+    canvas: 0x171717ff,
+    chrome: 0x232323ff,
+    success: 0xa5bdaaff,
+    floor: 0x1e1e1eff,
+    panel_hover: 0x2c2c2cff,
+    edge: 0x424242ff,
+    edge_hard: 0xb3b3b3ff,
+    bone: 0xeaeaeaff,
+    ash: 0xb3b3b3ff,
+    focus: 0xc9c9c9ff,
+    accent_hover: 0xeeeeeeff,
+    accent_pressed: 0xbbbbbbff,
+    on_accent: 0x202020ff,
+    error: 0xcfa2a2ff,
+    error_wash: 0x332626ff,
+    selection: 0x383838ff,
+    working: 0xb3b3b3ff,
+    diff_added: 0x223027ff,
+    diff_removed: 0x332626ff,
+    diff_empty: 0x232323ff,
 };
 
-const MIDNIGHT: Palette = Palette {
-    canvas: 0x141d2bff,
-    floor: 0x101925ff,
-    panel_hover: 0x23364fff,
-    edge: 0x30445eff,
-    edge_hard: 0x647f9eff,
-    bone: 0xeaf0faff,
-    ash: 0xa6b7ccff,
-    focus: 0xadc6ffff,
-    accent_hover: 0xc4d6ffff,
-    accent_pressed: 0x96b5f5ff,
-    on_accent: 0x142037ff,
-    error: 0xf0adbaff,
-    error_wash: 0x422d40ff,
-    selection: 0x2a4264ff,
-    working: 0xe7c69bff,
-    diff_added: 0x1d3b37ff,
-    diff_removed: 0x422d40ff,
-    diff_empty: 0x1c293aff,
+const CHARCOAL: Palette = Palette {
+    canvas: 0x262626ff,
+    chrome: 0x313131ff,
+    success: 0xacc8b3ff,
+    floor: 0x2c2c2cff,
+    panel_hover: 0x3b3b3bff,
+    edge: 0x535353ff,
+    edge_hard: 0xbdbdbdff,
+    bone: 0xf2f2f2ff,
+    ash: 0xbdbdbdff,
+    focus: 0xdadadaff,
+    accent_hover: 0xeeeeeeff,
+    accent_pressed: 0xbbbbbbff,
+    on_accent: 0x282828ff,
+    error: 0xd9b0b0ff,
+    error_wash: 0x453232ff,
+    selection: 0x494949ff,
+    working: 0xbdbdbdff,
+    diff_added: 0x2a3c30ff,
+    diff_removed: 0x453232ff,
+    diff_empty: 0x313131ff,
 };
-
-const EMBER: Palette = Palette {
-    canvas: 0x1d1918ff,
-    floor: 0x171312ff,
-    panel_hover: 0x302521ff,
-    edge: 0x4a3b35ff,
-    edge_hard: 0x8a7061ff,
-    bone: 0xf4ece4ff,
-    ash: 0xc5b8adff,
-    focus: 0xe7a86fff,
-    accent_hover: 0xf0ba82ff,
-    accent_pressed: 0xc98652ff,
-    on_accent: 0x2a1710ff,
-    error: 0xffafa0ff,
-    error_wash: 0x492b28ff,
-    selection: 0x473329ff,
-    working: 0xe4bd7bff,
-    diff_added: 0x243b31ff,
-    diff_removed: 0x492b28ff,
-    diff_empty: 0x261f1dff,
-};
-
-const EVERGREEN: Palette = Palette {
-    canvas: 0x13201bff,
-    floor: 0x0e1915ff,
-    panel_hover: 0x20362cff,
-    edge: 0x365043ff,
-    edge_hard: 0x668777ff,
-    bone: 0xe7f1e9ff,
-    ash: 0xb1c3b7ff,
-    focus: 0x9ed2adff,
-    accent_hover: 0xc0e6bdff,
-    accent_pressed: 0x7fb98fff,
-    on_accent: 0x102219ff,
-    error: 0xffb0a4ff,
-    error_wash: 0x472c31ff,
-    selection: 0x234a38ff,
-    working: 0xdec783ff,
-    diff_added: 0x173c2dff,
-    diff_removed: 0x472c31ff,
-    diff_empty: 0x172820ff,
-};
-
-const DUSK: Palette = Palette {
-    canvas: 0x1c1a29ff,
-    floor: 0x161522ff,
-    panel_hover: 0x302c45ff,
-    edge: 0x49435fff,
-    edge_hard: 0x81789fff,
-    bone: 0xefedf7ff,
-    ash: 0xb9b5cdff,
-    focus: 0xbdb2efff,
-    accent_hover: 0xd5ccffff,
-    accent_pressed: 0x9589cbff,
-    on_accent: 0x211c3bff,
-    error: 0xffadbdff,
-    error_wash: 0x4b2a3bff,
-    selection: 0x40375fff,
-    working: 0xe0c18dff,
-    diff_added: 0x203b38ff,
-    diff_removed: 0x4b2a3bff,
-    diff_empty: 0x242238ff,
-};
-
 fn palette() -> &'static Palette {
     appearance().palette()
 }
@@ -277,6 +201,12 @@ pub(crate) const T_MONO: f32 = 13.0;
 
 pub(crate) fn canvas() -> Rgba {
     rgba(palette().canvas)
+}
+pub(crate) fn chrome() -> Rgba {
+    rgba(palette().chrome)
+}
+pub(crate) fn success() -> Rgba {
+    rgba(palette().success)
 }
 pub(crate) fn floor() -> Rgba {
     rgba(palette().floor)
@@ -346,13 +276,13 @@ pub(crate) fn diff_empty() -> Rgba {
 }
 
 const ANSI_LIGHT: [u32; 16] = [
-    0x242824ff, 0x9e3238ff, 0x2f6843ff, 0x765b00ff, 0x315ea3ff, 0x854080ff, 0x226d70ff, 0x646a62ff,
-    0x646a62ff, 0xb13c40ff, 0x316c45ff, 0x7d6000ff, 0x395f9bff, 0x90518aff, 0x267076ff, 0x495048ff,
+    0x242424ff, 0x9e3238ff, 0x2f6843ff, 0x765b00ff, 0x315ea3ff, 0x854080ff, 0x226d70ff, 0x616161ff,
+    0x616161ff, 0xb13c40ff, 0x316c45ff, 0x7d6000ff, 0x395f9bff, 0x90518aff, 0x267076ff, 0x494949ff,
 ];
 
 const ANSI_DARK: [u32; 16] = [
-    0x8d9785ff, 0xf09085ff, 0x9dc88fff, 0xd9bf83ff, 0x91b6e8ff, 0xc5a0dcff, 0x89c8caff, 0xe0e7d8ff,
-    0x9ba88eff, 0xffaca0ff, 0xb7de9fff, 0xead59bff, 0xb0caffff, 0xdcbce8ff, 0xa1dee0ff, 0xf6f7efff,
+    0xaaaaaaff, 0xf09085ff, 0x9dc88fff, 0xd9bf83ff, 0x91b6e8ff, 0xc5a0dcff, 0x89c8caff, 0xddddddff,
+    0xbbbbbbff, 0xffaca0ff, 0xb7de9fff, 0xead59bff, 0xb0caffff, 0xdcbce8ff, 0xa1dee0ff, 0xeeeeeeff,
 ];
 
 pub(crate) fn terminal_ansi(index: u8) -> Option<Rgba> {
@@ -394,9 +324,7 @@ mod tests {
                 assert!(contrast(p.ash, background) >= 4.5, "{appearance:?}");
                 assert!(contrast(p.focus, background) >= 3.0, "{appearance:?}");
             }
-            let muted_surface_minimum = if appearance.is_dark() { 4.5 } else { 4.0 };
-            // Paper and Linen retain their established muted contrast on interactive
-            // surfaces; all dark palettes meet the normal-text 4.5:1 threshold.
+            let muted_surface_minimum = 4.5;
             for background in [p.panel_hover, p.selection] {
                 assert!(contrast(p.bone, background) >= 4.5, "{appearance:?}");
                 assert!(
@@ -418,7 +346,7 @@ mod tests {
             }
             assert!(contrast(p.error, p.error_wash) >= 4.5, "{appearance:?}");
             assert!(contrast(p.error, p.diff_removed) >= 4.5, "{appearance:?}");
-            assert!(contrast(p.focus, p.diff_added) >= 4.5, "{appearance:?}");
+            assert!(contrast(p.success, p.diff_added) >= 4.5, "{appearance:?}");
             let ansi = if appearance.is_dark() {
                 ANSI_DARK
             } else {
@@ -436,18 +364,7 @@ mod tests {
     #[test]
     fn appearance_ids_are_stable_and_unique() {
         let ids = Appearance::ALL.map(Appearance::id);
-        assert_eq!(
-            ids,
-            [
-                "paper",
-                "linen",
-                "graphite",
-                "midnight",
-                "ember",
-                "evergreen",
-                "dusk",
-            ]
-        );
+        assert_eq!(ids, ["black", "light", "graphite", "charcoal"]);
         for (index, id) in ids.iter().enumerate() {
             assert!(!ids[..index].contains(id), "duplicate appearance ID: {id}");
         }
@@ -455,16 +372,19 @@ mod tests {
 
     #[test]
     fn appearance_names_roundtrip_and_state_is_thread_local() {
+        assert_eq!(Appearance::from_id("paper"), Some(Appearance::Light));
+        assert_eq!(Appearance::from_id("midnight"), Some(Appearance::Black));
+        assert_eq!(Appearance::from_id("ember"), Some(Appearance::Charcoal));
         for appearance in Appearance::ALL {
             assert_eq!(Appearance::from_id(appearance.id()), Some(appearance));
         }
         assert_eq!(Appearance::from_id("unknown"), None);
         let original = appearance();
-        set_appearance(Appearance::Midnight);
-        assert_eq!(appearance(), Appearance::Midnight);
+        set_appearance(Appearance::Black);
+        assert_eq!(appearance(), Appearance::Black);
         assert_eq!(
             std::thread::spawn(appearance).join().unwrap(),
-            Appearance::Paper
+            Appearance::Black
         );
         set_appearance(original);
     }

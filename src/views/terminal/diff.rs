@@ -5,9 +5,10 @@ use std::path::PathBuf;
 use gpui::{
     ClipboardItem, Context, EventEmitter, FocusHandle, FontWeight, IntoElement, KeyDownEvent,
     MouseButton, Render, ScrollStrategy, SharedString, UniformListScrollHandle, Window, div,
-    prelude::*, px, uniform_list,
+    prelude::*, px, svg, uniform_list,
 };
 
+use crate::services::project_git::{DiffContent, ReviewFile};
 use crate::theme::{self, terminal_manager as chrome};
 use crate::views::terminal_manager::text_tooltip;
 
@@ -227,14 +228,74 @@ fn parse(text: &str) -> Vec<Section> {
     sections
 }
 
+#[derive(Clone, Copy)]
+pub(super) enum DiffEvent {
+    OpenFile,
+    Navigate(i32),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct DisplayRow {
+    source: usize,
+    side: Option<bool>,
+}
+
+fn display_rows(rows: &[Row], split: bool) -> Vec<DisplayRow> {
+    let mut output = Vec::new();
+    let mut index = 0;
+    while index < rows.len() {
+        if split {
+            output.push(DisplayRow {
+                source: index,
+                side: None,
+            });
+            index += 1;
+            continue;
+        }
+        if matches!(&rows[index], Row::Lines { before, after } if before.as_ref().is_some_and(|line| line.changed) || after.as_ref().is_some_and(|line| line.changed))
+        {
+            let start = index;
+            while index < rows.len()
+                && matches!(&rows[index], Row::Lines { before, after } if before.as_ref().is_some_and(|line| line.changed) || after.as_ref().is_some_and(|line| line.changed))
+            {
+                index += 1;
+            }
+            for right in [false, true] {
+                for (source, row) in rows.iter().enumerate().take(index).skip(start) {
+                    if let Row::Lines { before, after } = row
+                        && if right {
+                            after.is_some()
+                        } else {
+                            before.is_some()
+                        }
+                    {
+                        output.push(DisplayRow {
+                            source,
+                            side: Some(right),
+                        });
+                    }
+                }
+            }
+        } else {
+            output.push(DisplayRow {
+                source: index,
+                side: None,
+            });
+            index += 1;
+        }
+    }
+    output
+}
+
 pub(super) struct DiffView {
     workspace: PathBuf,
-    path: PathBuf,
+    pub(super) file: ReviewFile,
     raw: String,
     sections: Vec<Section>,
     active: usize,
-    changed_files: usize,
-    line_stats: Option<crate::services::project_git::GitLineStats>,
+    content: DiffContent,
+    split: bool,
+    display: Vec<DisplayRow>,
     pub(super) focus: FocusHandle,
     scroll: UniformListScrollHandle,
     selection: Option<(bool, usize, usize)>,
@@ -243,26 +304,76 @@ pub(super) struct DiffView {
 impl DiffView {
     pub(super) fn new(
         workspace: PathBuf,
-        path: PathBuf,
-        text: String,
-        changed_files: usize,
-        line_stats: Option<crate::services::project_git::GitLineStats>,
+        file: ReviewFile,
+        content: DiffContent,
         cx: &mut Context<Self>,
     ) -> Self {
-        let sections = parse(&text);
-        let active = sections.len().saturating_sub(1);
-        Self {
+        let mut view = Self {
             workspace,
-            path,
-            raw: text,
-            sections,
-            active,
-            changed_files,
-            line_stats,
+            file: file.clone(),
+            raw: String::new(),
+            sections: parse(""),
+            active: 0,
+            content: DiffContent::Loading,
+            split: false,
+            display: Vec::new(),
             focus: cx.focus_handle(),
             scroll: UniformListScrollHandle::new(),
             selection: None,
+        };
+        view.update_snapshot(file, content, cx);
+        view
+    }
+
+    pub(super) fn update_snapshot(
+        &mut self,
+        file: ReviewFile,
+        content: DiffContent,
+        cx: &mut Context<Self>,
+    ) {
+        let same_file = self.file.path == file.path && self.file.kind == file.kind;
+        self.file = file;
+        if same_file && self.content == content {
+            cx.notify();
+            return;
         }
+        let raw = match &content {
+            DiffContent::Ready(text) => text.clone(),
+            _ => String::new(),
+        };
+        if !same_file || self.raw != raw {
+            self.selection = None;
+            self.scroll = UniformListScrollHandle::new();
+        }
+        self.raw = raw;
+        self.sections = parse(&self.raw);
+        self.active = self.sections.len().saturating_sub(1);
+        self.display = display_rows(&self.sections[self.active].rows, self.split);
+        self.content = content;
+        cx.notify();
+    }
+
+    fn set_split(&mut self, split: bool, cx: &mut Context<Self>) {
+        if self.split == split {
+            return;
+        }
+        let top =
+            (-f32::from(self.scroll.0.borrow().base_handle.offset().y) / 30.0).max(0.0) as usize;
+        let source = self
+            .display
+            .get(top + self.first_hunk_offset())
+            .map(|row| row.source);
+        self.split = split;
+        self.display = display_rows(&self.sections[self.active].rows, split);
+        if let Some(source) = source
+            && let Some(index) = self.display.iter().position(|row| row.source == source)
+        {
+            self.scroll.scroll_to_item_strict(
+                index.saturating_sub(self.first_hunk_offset()),
+                ScrollStrategy::Top,
+            );
+        }
+        cx.notify();
     }
 
     fn copy(&self, cx: &mut Context<Self>) {
@@ -293,7 +404,17 @@ impl DiffView {
         if key.modifiers.control && key.key == "c" {
             self.copy(cx);
         } else if key.modifiers.control && key.key == "o" {
-            cx.emit(self.path.clone());
+            cx.emit(DiffEvent::OpenFile);
+        } else if key.modifiers.alt && key.key == "up" {
+            cx.emit(DiffEvent::Navigate(-1));
+        } else if key.modifiers.alt && key.key == "down" {
+            cx.emit(DiffEvent::Navigate(1));
+        } else if key.key == "f5" {
+            cx.emit(DiffEvent::Navigate(0));
+        } else if key.modifiers.alt && key.key == "u" {
+            self.set_split(false, cx);
+        } else if key.modifiers.alt && key.key == "s" {
+            self.set_split(true, cx);
         } else if key.key == "escape" {
             self.selection = None;
         } else if matches!(
@@ -322,7 +443,11 @@ impl DiffView {
             };
             self.selection = Some((right, if key.modifiers.shift { anchor } else { end }, end));
             self.scroll.scroll_to_item(
-                end.saturating_sub(self.first_hunk_offset()),
+                self.display
+                    .iter()
+                    .position(|row| row.source == end && row.side.is_none_or(|side| side == right))
+                    .unwrap_or(0)
+                    .saturating_sub(self.first_hunk_offset()),
                 ScrollStrategy::Center,
             );
         } else {
@@ -334,49 +459,62 @@ impl DiffView {
 
     fn cell(
         &self,
-        line: Option<&Line>,
+        before: Option<&Line>,
+        after: Option<&Line>,
         right: bool,
         index: usize,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
+        let line = if right { after } else { before };
         let selected = self.selection.is_some_and(|(side, anchor, end)| {
             side == right && (anchor.min(end)..=anchor.max(end)).contains(&index)
         });
+        let changed = line.is_some_and(|line| line.changed);
         let background = if selected {
             theme::selection()
-        } else {
-            match line {
-                None => theme::diff_empty(),
-                Some(line) if line.changed => {
-                    if right {
-                        theme::diff_added()
-                    } else {
-                        theme::diff_removed()
-                    }
-                }
-                Some(_) => theme::canvas(),
+        } else if changed {
+            if right {
+                theme::diff_added()
+            } else {
+                theme::diff_removed()
             }
+        } else if line.is_none() {
+            theme::diff_empty()
+        } else {
+            theme::canvas()
         };
-        let (number, marker, text) = line.map_or((String::new(), "", String::new()), |line| {
-            (
-                line.number.to_string(),
-                if line.changed {
-                    if right { "+" } else { "−" }
-                } else {
-                    ""
-                },
-                line.text.replace('\t', "    "),
-            )
-        });
+        let foreground = if selected {
+            theme::bone()
+        } else if changed {
+            if right {
+                theme::success()
+            } else {
+                theme::error()
+            }
+        } else {
+            theme::bone()
+        };
+        let number =
+            |line: Option<&Line>| line.map_or_else(String::new, |line| line.number.to_string());
+        let gutter = |value: String| {
+            div()
+                .w(px(44.0))
+                .flex_shrink_0()
+                .pr(px(12.0))
+                .text_right()
+                .text_color(theme::ash())
+                .child(value)
+        };
         div()
             .id(SharedString::from(format!("diff-{index}-{right}")))
-            .h(px(24.0))
+            .h(px(30.0))
             .flex_1()
             .min_w_0()
             .flex()
             .items_center()
             .bg(background)
-            .when(right, |cell| {
+            .text_color(foreground)
+            .when(self.split && right, |cell| {
                 cell.border_l_1().border_color(theme::edge_soft())
             })
             .cursor(gpui::CursorStyle::IBeam)
@@ -395,394 +533,255 @@ impl DiffView {
                     cx.notify();
                 }),
             )
-            .child(
-                div()
-                    .w(px(42.0))
-                    .flex_shrink_0()
-                    .pr(px(10.0))
-                    .text_right()
-                    .text_color(if selected {
-                        theme::bone()
-                    } else {
-                        theme::ash()
-                    })
-                    .child(number),
-            )
-            .child(
-                div()
-                    .w(px(20.0))
-                    .flex_shrink_0()
-                    .text_color(if right {
-                        theme::focus()
-                    } else {
-                        theme::error()
-                    })
-                    .child(marker),
-            )
+            .when(!self.split, |cell| {
+                cell.child(div().w(px(16.0)).flex_shrink_0())
+                    .child(gutter(number(before)))
+            })
+            .child(gutter(number(if self.split { line } else { after })))
+            .child(div().w(px(20.0)).flex_shrink_0().child(if changed {
+                if right { "+" } else { "−" }
+            } else {
+                ""
+            }))
             .child(
                 div()
                     .flex_1()
                     .min_w_0()
+                    .pl(px(if self.split { 24.0 } else { 16.0 }))
                     .whitespace_nowrap()
                     .overflow_hidden()
-                    .child(text),
+                    .child(line.map_or_else(String::new, |line| line.text.replace('\t', "    "))),
             )
             .into_any_element()
     }
 
     fn first_hunk_offset(&self) -> usize {
-        usize::from(matches!(
-            self.sections[self.active].rows.first(),
-            Some(Row::Hunk(_))
-        ))
+        usize::from(
+            self.display.first().is_some_and(|row| {
+                matches!(self.sections[self.active].rows[row.source], Row::Hunk(_))
+            }),
+        )
     }
 
     fn row(&self, index: usize, cx: &mut Context<Self>) -> gpui::AnyElement {
-        match &self.sections[self.active].rows[index] {
+        let display = self.display[index];
+        match &self.sections[self.active].rows[display.source] {
             Row::Hunk(label) => div()
-                .h(px(24.0))
-                .px(px(16.0))
+                .h(px(30.0))
+                .px(px(24.0))
                 .flex()
                 .items_center()
-                .bg(theme::diff_empty())
+                .bg(theme::chrome())
                 .text_color(theme::ash())
                 .child(label.clone())
                 .into_any_element(),
-            Row::Lines { before, after } => div()
-                .h(px(24.0))
+            Row::Lines { before, after } if self.split => div()
+                .h(px(30.0))
                 .flex()
-                .child(self.cell(before.as_ref(), false, index, cx))
-                .child(self.cell(after.as_ref(), true, index, cx))
+                .child(self.cell(before.as_ref(), None, false, display.source, cx))
+                .child(self.cell(None, after.as_ref(), true, display.source, cx))
                 .into_any_element(),
+            Row::Lines { before, after } => {
+                let (before, after, right) = match display.side {
+                    Some(false) => (before.as_ref(), None, false),
+                    Some(true) => (None, after.as_ref(), true),
+                    None => (before.as_ref(), after.as_ref(), true),
+                };
+                self.cell(before, after, right, display.source, cx)
+            }
         }
+    }
+
+    fn control(id: &'static str, label: &'static str, enabled: bool) -> gpui::Stateful<gpui::Div> {
+        div()
+            .id(id)
+            .h(px(28.0))
+            .px(px(10.0))
+            .flex_shrink_0()
+            .flex()
+            .items_center()
+            .gap(px(8.0))
+            .text_size(px(11.0))
+            .rounded(px(4.0))
+            .border_1()
+            .border_color(gpui::rgba(0))
+            .tooltip(text_tooltip(label))
+            .when(!enabled, |control| control.opacity(0.4))
+            .when(enabled, |control| {
+                control
+                    .tab_index(0)
+                    .cursor_pointer()
+                    .hover(|style| style.bg(theme::panel_hover()))
+                    .focus(|style| style.border_color(theme::focus()))
+            })
     }
 }
 
-impl EventEmitter<PathBuf> for DiffView {}
+impl EventEmitter<DiffEvent> for DiffView {}
 
 impl Render for DiffView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let section = &self.sections[self.active];
-        let label = section.label;
-        let rows = section.rows.len();
+        let relative = self
+            .file
+            .path
+            .strip_prefix(&self.workspace)
+            .unwrap_or(&self.file.path);
+        let name = relative
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned();
+        let parent = relative
+            .parent()
+            .unwrap_or(std::path::Path::new(""))
+            .to_string_lossy()
+            .replace('\\', " / ")
+            .replace('/', " / ")
+            .replace("  /  ", " / ");
         let first_hunk = match section.rows.first() {
             Some(Row::Hunk(label)) => Some(label.clone()),
             _ => None,
         };
-        let first_hunk_offset = self.first_hunk_offset();
-        let project = self
-            .workspace
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .to_uppercase();
-        let relative = self
-            .path
-            .strip_prefix(&self.workspace)
-            .unwrap_or(&self.path)
-            .to_string_lossy()
-            .replace('\\', " / ");
-        let min_width = section.min_width;
-        let message = if section.conflicted {
-            "This file has merge conflicts. Open the file to review its conflict markers."
-        } else if section.binary {
-            "Binary file changed. Open the file to inspect it."
-        } else {
-            "No text changes in this snapshot."
+        let offset = self.first_hunk_offset();
+        let rows = self.display.len();
+        let can_previous = self.file.position > 0;
+        let can_next = self.file.position + 1 < self.file.total;
+        let ready = matches!(self.content, DiffContent::Ready(_));
+        let state = match self.file.marker {
+            "A" => "Added",
+            "D" => "Deleted",
+            "R" => "Renamed",
+            "U" => "Untracked",
+            "!" => "Conflict",
+            _ => "Modified",
         };
-        let before_label = if label == "Staged"
-            || !self
-                .sections
-                .iter()
-                .any(|section| section.label == "Staged")
-        {
-            "BEFORE / HEAD"
-        } else {
-            "BEFORE / INDEX"
-        };
-        let after_label = if label == "Staged" {
-            "AFTER / INDEX"
-        } else {
-            "AFTER / WORKING TREE"
-        };
-        let totals = self.line_stats.as_ref();
-        div()
-            .id("working-changes")
-            .track_focus(&self.focus)
-            .tab_index(0)
-            .size_full()
-            .min_h_0()
-            .flex()
-            .flex_col()
-            .px(px(chrome::CONTENT_INSET))
-            .pt(px(23.0))
-            .pb(px(20.0))
-            .bg(theme::canvas())
-            .font_family(chrome::CHROME_FONT)
-            .font_weight(FontWeight::NORMAL)
-            .text_size(px(chrome::CONTROL_TEXT_SIZE))
-            .line_height(px(chrome::CONTROL_LINE_HEIGHT))
-            .text_color(theme::bone())
+        let staged = section.label == "Staged";
+        div().id("working-changes").track_focus(&self.focus).tab_index(0).size_full().min_h_0().flex().flex_col()
+            .bg(theme::canvas()).font_family(chrome::CHROME_FONT).font_weight(FontWeight::NORMAL)
+            .text_size(px(13.0)).line_height(px(20.0)).text_color(theme::bone())
             .on_key_down(cx.listener(Self::on_key))
-            .child(
-                div()
-                    .flex_shrink_0()
-                    .pb(px(16.0))
-                    .border_b_1()
-                    .border_color(theme::edge_soft())
-                    .child(
-                        div()
-                            .mb(px(7.0))
-                            .font_family(theme::mono())
-                            .text_size(px(11.0))
-                            .line_height(px(14.0))
-                            .text_color(theme::ash())
-                            .child(format!("{project} / {}", label.to_uppercase())),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .flex_wrap()
-                            .items_center()
-                            .justify_between()
-                            .gap(px(12.0))
-                            .child(
-                                div()
-                                    .font_family(chrome::HEADING_FONT)
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .text_size(px(chrome::HEADING_SIZE))
-                                    .line_height(px(chrome::HEADING_LINE_HEIGHT))
-                                    .child("Working changes"),
-                            )
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap(px(20.0))
-                                    .child(format!(
-                                        "{} changed {}",
-                                        self.changed_files,
-                                        if self.changed_files == 1 {
-                                            "file"
-                                        } else {
-                                            "files"
-                                        }
-                                    ))
-                                    .when_some(totals, |summary, totals| {
-                                        summary
-                                            .child(
-                                                div().text_color(theme::focus()).child(format!(
-                                                    "+{} additions",
-                                                    totals.additions
-                                                )),
-                                            )
-                                            .child(
-                                                div().text_color(theme::error()).child(format!(
-                                                    "−{} deletions",
-                                                    totals.deletions
-                                                )),
-                                            )
-                                    }),
-                            ),
-                    ),
-            )
-            .child(
-                div()
-                    .h(px(68.0))
-                    .flex_shrink_0()
-                    .flex()
-                    .items_center()
-                    .gap(px(12.0))
-                    .child(
-                        div()
-                            .font_family(theme::mono())
-                            .text_size(px(chrome::TECH_TEXT_SIZE))
-                            .line_height(px(chrome::TECH_LINE_HEIGHT))
-                            .text_color(theme::ash())
-                            .child(
-                                self.path
-                                    .extension()
-                                    .unwrap_or_default()
-                                    .to_string_lossy()
-                                    .into_owned(),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .id("diff-current-file")
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .tooltip(text_tooltip(format!(
-                                "Selected comparison: +{} additions, −{} deletions",
-                                section.additions, section.deletions
-                            )))
-                            .child(relative),
-                    )
-                    .child(
-                        div()
-                            .id("diff-comparison")
-                            .h(px(chrome::CONTROL_HEIGHT))
-                            .flex_shrink_0()
-                            .px(px(chrome::CONTROL_INSET))
-                            .flex()
-                            .items_center()
-                            .rounded(px(chrome::CONTROL_RADIUS))
-                            .border_1()
-                            .border_color(gpui::rgba(0))
-                            .when(self.sections.len() > 1, |button| {
-                                button
-                                    .tab_index(0)
-                                    .cursor_pointer()
-                                    .hover(|b| b.bg(theme::panel_hover()))
-                                    .focus(|b| {
-                                        b.bg(theme::selection()).border_color(theme::focus())
-                                    })
-                                    .tooltip(text_tooltip(
-                                        "Switch between staged and working tree changes",
-                                    ))
-                                    .on_click(cx.listener(|view, _, _, cx| {
-                                        view.active = (view.active + 1) % view.sections.len();
-                                        view.selection = None;
-                                        view.scroll = UniformListScrollHandle::new();
-                                        cx.notify();
-                                    }))
-                            })
-                            .child(if self.sections.len() > 1 {
-                                format!("{label}  ⌄")
-                            } else {
-                                label.to_owned()
-                            }),
-                    )
-                    .child(
-                        div()
-                            .id("diff-open-file")
-                            .h(px(chrome::CONTROL_HEIGHT))
-                            .flex_shrink_0()
-                            .px(px(chrome::CONTROL_INSET))
-                            .flex()
-                            .items_center()
-                            .rounded(px(chrome::CONTROL_RADIUS))
-                            .border_1()
-                            .border_color(gpui::rgba(0))
-                            .tab_index(0)
-                            .cursor_pointer()
-                            .text_color(theme::focus())
-                            .hover(|b| b.bg(theme::panel_hover()))
-                            .focus(|b| b.bg(theme::selection()).border_color(theme::focus()))
-                            .tooltip(text_tooltip("Open file · Ctrl+O"))
-                            .on_click(cx.listener(|view, _, _, cx| cx.emit(view.path.clone())))
-                            .child("Open file ↗"),
-                    ),
-            )
-            .when(section.truncated, |view| {
-                view.child(
-                    div()
-                        .pb(px(8.0))
-                        .text_color(theme::error())
-                        .child("Diff truncated. Use Git in a terminal to inspect the full change."),
-                )
-            })
-            .when(!section.metadata.is_empty(), |view| {
-                view.child(
-                    div()
-                        .pb(px(8.0))
-                        .text_color(theme::ash())
-                        .child(section.metadata.join(" · ")),
-                )
-            })
-            .when(rows == 0, |view| {
-                view.child(div().py(px(24.0)).text_color(theme::ash()).child(message))
-            })
-            .when(rows > 0, |view| {
-                view.child(
-                    div()
-                        .id("diff-horizontal-scroll")
-                        .flex_1()
-                        .min_h_0()
-                        .overflow_x_scroll()
-                        .child(
-                            div()
-                                .h_full()
-                                .w_full()
-                                .min_w(px(min_width.max(800.0)))
-                                .flex()
-                                .flex_col()
-                                .child(
-                                    div()
-                                        .h(px(36.0))
-                                        .flex_shrink_0()
-                                        .flex()
-                                        .bg(theme::panel())
-                                        .border_t_1()
-                                        .border_b_1()
-                                        .border_color(theme::edge_soft())
-                                        .font_family(theme::mono())
-                                        .text_size(px(11.0))
-                                        .text_color(theme::ash())
-                                        .child(
-                                            div()
-                                                .flex_1()
-                                                .px(px(16.0))
-                                                .flex()
-                                                .items_center()
-                                                .child(before_label),
-                                        )
-                                        .child(
-                                            div()
-                                                .flex_1()
-                                                .px(px(16.0))
-                                                .flex()
-                                                .items_center()
-                                                .border_l_1()
-                                                .border_color(theme::edge_soft())
-                                                .child(after_label),
-                                        ),
-                                )
-                                .when_some(first_hunk, |grid, label| {
-                                    grid.child(
-                                        div()
-                                            .h(px(32.0))
-                                            .flex_shrink_0()
-                                            .px(px(16.0))
-                                            .flex()
-                                            .items_center()
-                                            .font_family(theme::mono())
-                                            .text_size(px(12.0))
-                                            .bg(theme::diff_empty())
-                                            .text_color(theme::ash())
-                                            .child(label),
-                                    )
-                                })
-                                .child(
-                                    uniform_list(
-                                        "diff-lines",
-                                        rows - first_hunk_offset,
-                                        cx.processor(
-                                            |view, range: std::ops::Range<usize>, _, cx| {
-                                                let offset = view.first_hunk_offset();
-                                                range
-                                                    .map(|index| view.row(index + offset, cx))
-                                                    .collect::<Vec<_>>()
-                                            },
-                                        ),
-                                    )
-                                    .track_scroll(self.scroll.clone())
-                                    .flex_1()
-                                    .min_h_0()
-                                    .font_family(theme::mono())
-                                    .text_size(px(12.0))
-                                    .line_height(px(24.0)),
-                                ),
-                        ),
-                )
-            })
+            .child(div().h(px(92.0)).flex_shrink_0().px(px(24.0)).py(px(16.0)).flex().flex_col().justify_between().border_b_1().border_color(theme::edge())
+                .child(div().flex().items_center().gap(px(16.0))
+                    .child(svg().path("icons/file-code.svg").size(px(20.0)).flex_shrink_0().text_color(theme::bone()))
+                    .child(div().flex_1().min_w_0().truncate().font_weight(FontWeight::MEDIUM).child(name))
+                    .child(Self::control("previous-change", "Previous change · Alt+Up", can_previous)
+                        .when(can_previous, |button| button.on_click(cx.listener(|_, _, _, cx| cx.emit(DiffEvent::Navigate(-1)))))
+                        .child(svg().path("icons/chevron-up.svg").size(px(14.0)).text_color(theme::ash())))
+                    .child(div().font_family(theme::mono()).text_size(px(12.0)).text_color(theme::ash()).child(format!("{} of {}", self.file.position + 1, self.file.total)))
+                    .child(Self::control("next-change", "Next change · Alt+Down", can_next)
+                        .when(can_next, |button| button.on_click(cx.listener(|_, _, _, cx| cx.emit(DiffEvent::Navigate(1)))))
+                        .child(svg().path("icons/chevron-down.svg").size(px(14.0)).text_color(theme::ash()))))
+                .child(div().flex().items_center().gap(px(16.0)).text_size(px(12.0)).text_color(theme::ash())
+                    .child(div().id("diff-relative-path").flex_1().min_w_0().truncate().tooltip(text_tooltip(relative.to_string_lossy().into_owned())).child(parent))
+                    .child(div().flex_shrink_0().child(format!("{state} · {}", if staged { "Staged" } else { "Unstaged" })))
+                    .when(ready, |summary| summary
+                        .child(div().font_family(theme::mono()).text_size(px(11.0)).text_color(theme::success()).child(format!("+{}", section.additions)))
+                        .child(div().font_family(theme::mono()).text_size(px(11.0)).text_color(theme::error()).child(format!("−{}", section.deletions))))))
+            .child(div().h(px(44.0)).flex_shrink_0().px(px(24.0)).flex().items_center().gap(px(12.0)).border_b_1().border_color(theme::edge())
+                .child(div().flex().rounded(px(4.0)).bg(theme::floor())
+                    .child(Self::control("diff-unified", "Unified diff · Alt+U", true).bg(if !self.split { theme::panel_hover() } else { theme::floor() })
+                        .on_click(cx.listener(|view, _, _, cx| view.set_split(false, cx))).child("Unified"))
+                    .child(Self::control("diff-split", "Split diff · Alt+S", true).bg(if self.split { theme::panel_hover() } else { theme::floor() })
+                        .on_click(cx.listener(|view, _, _, cx| view.set_split(true, cx))).child("Split")))
+                .child(div().text_size(px(11.0)).text_color(theme::ash()).child({
+                    let count = section.rows.iter().filter(|row| matches!(row, Row::Hunk(_))).count();
+                    format!("{count} hunk{}", if count == 1 { "" } else { "s" })
+                }))
+                .child(div().flex_1())
+                .child(Self::control("diff-open-file", "Open file · Ctrl+O", true)
+                    .on_click(cx.listener(|_, _, _, cx| cx.emit(DiffEvent::OpenFile)))
+                    .child(svg().path("icons/pencil.svg").size(px(14.0)).text_color(theme::ash())).child("Open file"))
+                .child({
+                    use gpui_component::{button::{Button, ButtonVariants}, menu::{DropdownMenu, PopupMenuItem}};
+                    let owner = cx.weak_entity();
+                    Button::new("diff-menu").label("⋯").ghost().w(px(24.0)).h(px(28.0)).tooltip("Diff actions")
+                        .dropdown_menu(move |menu, _, _| {
+                            let copy_owner = owner.clone();
+                            let retry_owner = owner.clone();
+                            menu.item(PopupMenuItem::new("Copy diff").on_click(move |_, _, cx| { let _ = copy_owner.update(cx, |view, cx| view.copy(cx)); }))
+                                .item(PopupMenuItem::new("Refresh diff").on_click(move |_, _, cx| { let _ = retry_owner.update(cx, |_, cx| cx.emit(DiffEvent::Navigate(0))); }))
+                        })
+                }))
+            .when(matches!(self.content, DiffContent::Loading), |view| view.child(div().p(px(24.0)).text_color(theme::ash()).child("Loading changes…")))
+            .when_some(match &self.content { DiffContent::Error(error) => Some(error.clone()), _ => None }, |view, error| view
+                .child(div().p(px(24.0)).flex().flex_col().gap(px(12.0)).text_color(theme::ash()).child(error)
+                    .child(Self::control("retry-diff", "Retry diff · F5", true).on_click(cx.listener(|_, _, _, cx| cx.emit(DiffEvent::Navigate(0)))).child("Retry"))))
+            .when(ready && (section.truncated || section.binary || section.conflicted || rows == 0), |view| view.child(
+                div().p(px(24.0)).text_color(theme::ash()).child(if section.truncated { "This diff exceeds the preview limit. Open file to inspect it." }
+                    else if section.binary { "Binary file changed. Open file to inspect it." }
+                    else if section.conflicted { "This file has merge conflicts. Open file to review its conflict markers." }
+                    else { "No text changes in this snapshot." })))
+            .when(ready && !section.metadata.is_empty(), |view| view.child(div().px(px(24.0)).py(px(8.0)).text_size(px(11.0)).text_color(theme::ash()).child(section.metadata.join(" · "))))
+            .when(ready && rows > 0, |view| view.child(
+                div().id("diff-horizontal-scroll").flex_1().min_h_0().overflow_x_scroll()
+                    .child(div().h_full().w_full().min_w(px(if self.split { section.min_width } else { (section.min_width / 2.0 + 80.0).max(480.0) })).flex().flex_col()
+                        .when_some(first_hunk, |grid, label| grid.child(div().h(px(40.0)).flex_shrink_0().px(px(24.0)).flex().items_center().font_family(theme::mono()).text_size(px(12.0)).bg(theme::chrome()).text_color(theme::ash()).child(label)))
+                        .when(self.split, |grid| grid.child(div().h(px(34.0)).flex_shrink_0().flex().bg(theme::chrome()).text_size(px(11.0)).text_color(theme::ash())
+                            .child(div().flex_1().px(px(20.0)).child("Before"))
+                            .child(div().flex_1().px(px(20.0)).child(if staged { "Index" } else { "Working tree" }))))
+                        .child(uniform_list("diff-lines", rows - offset, cx.processor(|view, range: std::ops::Range<usize>, _, cx| {
+                            let offset = view.first_hunk_offset();
+                            range.map(|index| view.row(index + offset, cx)).collect::<Vec<_>>()
+                        })).track_scroll(self.scroll.clone()).flex_1().min_h_0().font_family(theme::mono()).text_size(px(12.0)).line_height(px(30.0))))
+            ))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[gpui::test]
+    fn switching_files_clears_old_diff_until_the_matching_snapshot_arrives(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let file = ReviewFile {
+            path: PathBuf::from("project/a.rs"),
+            kind: crate::services::project_git::DiffKind::WorkingTree,
+            position: 0,
+            total: 2,
+            marker: "M",
+        };
+        let view = cx.new(|cx| {
+            DiffView::new(
+                "project".into(),
+                file.clone(),
+                DiffContent::Ready("@@ -1 +1 @@\n-old\n+new\n".into()),
+                cx,
+            )
+        });
+        view.update(cx, |view, cx| {
+            view.set_split(true, cx);
+            let next = ReviewFile {
+                path: "project/b.rs".into(),
+                position: 1,
+                ..file
+            };
+            view.update_snapshot(next.clone(), DiffContent::Loading, cx);
+            assert!(view.raw.is_empty());
+            assert!(view.display.is_empty());
+            assert!(view.split);
+            view.update_snapshot(
+                next,
+                DiffContent::Ready("@@ -1 +1 @@\n-before\n+after\n".into()),
+                cx,
+            );
+            assert!(view.raw.contains("after"));
+            assert!(!view.raw.contains("old"));
+        });
+    }
+
+    #[test]
+    fn unified_view_keeps_deletions_before_additions_and_context_once() {
+        let sections = parse("@@ -1,3 +1,3 @@\n-old one\n-old two\n+new one\n+new two\n context\n");
+        let rows = display_rows(&sections[0].rows, false);
+        assert_eq!(
+            rows.iter().map(|row| row.side).collect::<Vec<_>>(),
+            vec![None, Some(false), Some(false), Some(true), Some(true), None]
+        );
+        assert_eq!(display_rows(&sections[0].rows, true).len(), 4);
+    }
 
     #[test]
     fn combined_conflicts_and_newline_only_changes_remain_explicit() {

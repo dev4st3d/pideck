@@ -25,6 +25,8 @@ pub(crate) struct GitEntry {
     pub(crate) untracked: bool,
     pub(crate) conflicted: bool,
     pub(crate) line_stats: Option<GitLineStats>,
+    pub(crate) staged_stats: Option<GitLineStats>,
+    pub(crate) working_stats: Option<GitLineStats>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -34,6 +36,31 @@ pub(crate) struct GitLineStats {
 }
 
 impl GitEntry {
+    pub(crate) fn stats(&self, kind: DiffKind) -> Option<GitLineStats> {
+        match kind {
+            DiffKind::Staged => self.staged_stats,
+            DiffKind::WorkingTree => self.working_stats,
+        }
+    }
+    pub(crate) fn marker(&self, kind: DiffKind) -> &'static str {
+        if self.conflicted {
+            return "!";
+        }
+        if self.untracked {
+            return "U";
+        }
+        match if kind == DiffKind::Staged {
+            self.index_status
+        } else {
+            self.worktree_status
+        } {
+            'A' => "A",
+            'D' => "D",
+            'R' => "R",
+            'C' => "C",
+            _ => "M",
+        }
+    }
     pub(crate) fn staged(&self) -> bool {
         !self.untracked && !matches!(self.index_status, ' ' | '!')
     }
@@ -74,6 +101,22 @@ pub(crate) enum DiffKind {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ReviewFile {
+    pub(crate) path: PathBuf,
+    pub(crate) kind: DiffKind,
+    pub(crate) position: usize,
+    pub(crate) total: usize,
+    pub(crate) marker: &'static str,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum DiffContent {
+    Loading,
+    Ready(String),
+    Error(String),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct GitDiff {
     pub(crate) text: String,
     pub(crate) truncated: bool,
@@ -94,7 +137,7 @@ impl fmt::Display for GitError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
             Self::Unavailable => "Git is not available. Install Git and reopen the app.",
-            Self::NotRepository => "This project is not in a Git repository.",
+            Self::NotRepository => "This folder is not a Git repository.",
             Self::ReadFailed => {
                 "Git could not read this project. Check its permissions and refresh."
             }
@@ -152,14 +195,25 @@ pub(crate) struct ChangeRow {
     pub(crate) depth: usize,
     pub(crate) kind: DiffKind,
     pub(crate) entry: Option<usize>,
+    pub(crate) count: usize,
 }
 
 pub(crate) fn change_rows(
     status: &GitStatus,
     collapsed: &std::collections::HashSet<(DiffKind, PathBuf)>,
 ) -> Vec<ChangeRow> {
+    filtered_change_rows(status, collapsed, "")
+}
+
+pub(crate) fn filtered_change_rows(
+    status: &GitStatus,
+    collapsed: &std::collections::HashSet<(DiffKind, PathBuf)>,
+    query: &str,
+) -> Vec<ChangeRow> {
+    let query = query.trim().to_lowercase().replace('\\', "/");
     #[derive(Default)]
     struct Node {
+        count: usize,
         children: std::collections::BTreeMap<std::ffi::OsString, Node>,
         entry: Option<usize>,
     }
@@ -182,6 +236,7 @@ pub(crate) fn change_rows(
                     depth,
                     kind,
                     entry: child.entry,
+                    count: child.count,
                 });
                 if directory && !collapsed.contains(&(kind, path.clone())) {
                     append(child, &path, depth + 1, kind, collapsed, rows);
@@ -190,7 +245,7 @@ pub(crate) fn change_rows(
         }
     }
     let mut rows = Vec::new();
-    for kind in [DiffKind::WorkingTree, DiffKind::Staged] {
+    for kind in [DiffKind::Staged, DiffKind::WorkingTree] {
         let mut root = Node::default();
         for (index, entry) in status.entries.iter().enumerate() {
             if !(if kind == DiffKind::Staged {
@@ -200,12 +255,24 @@ pub(crate) fn change_rows(
             }) {
                 continue;
             }
+            if !query.is_empty()
+                && !entry
+                    .relative_path
+                    .to_string_lossy()
+                    .replace('\\', "/")
+                    .to_lowercase()
+                    .contains(&query)
+            {
+                continue;
+            }
+            root.count += 1;
             let mut node = &mut root;
             for component in entry.relative_path.components() {
                 node = node
                     .children
                     .entry(component.as_os_str().to_owned())
                     .or_default();
+                node.count += 1;
             }
             node.entry = Some(index);
         }
@@ -217,6 +284,7 @@ pub(crate) fn change_rows(
             depth: 0,
             kind,
             entry: None,
+            count: root.count,
         });
         if !collapsed.contains(&(kind, PathBuf::new())) {
             append(&root, Path::new(""), 1, kind, collapsed, &mut rows);
@@ -476,6 +544,8 @@ fn parse_status(root: &Path, bytes: &[u8], mut truncated: bool) -> Result<GitSta
                 || worktree_status == 'U'
                 || matches!((index_status, worktree_status), ('A', 'A') | ('D', 'D')),
             line_stats: None,
+            staged_stats: None,
+            working_stats: None,
         });
     }
     Ok(GitStatus {
@@ -529,6 +599,18 @@ pub(crate) fn read_status(root: &Path) -> Result<GitStatus, GitError> {
         if entry.untracked || entry.conflicted {
             continue;
         }
+        entry.working_stats = working_stats
+            .as_ref()
+            .ok()
+            .and_then(|stats| stats.get(&entry.relative_path))
+            .copied()
+            .flatten();
+        entry.staged_stats = staged_stats
+            .as_ref()
+            .ok()
+            .and_then(|stats| stats.get(&entry.relative_path))
+            .copied()
+            .flatten();
         let mut total = GitLineStats::default();
         let mut complete = true;
         for (needed, stats) in [
@@ -666,12 +748,64 @@ pub(crate) fn file_diff(root: &Path, path: &Path, kind: DiffKind) -> Result<GitD
     })
 }
 
+pub(crate) fn untracked_diff(root: &Path, path: &Path) -> Result<GitDiff, GitError> {
+    match super::project_files::load_text_file(root, path) {
+        Ok(snapshot) => {
+            let lines: Vec<_> = snapshot.text.lines().collect();
+            let mut text = format!("@@ -0,0 +1,{} @@\n", lines.len());
+            for line in lines {
+                text.push('+');
+                text.push_str(line);
+                text.push('\n');
+            }
+            Ok(GitDiff {
+                text,
+                truncated: false,
+            })
+        }
+        Err(super::project_files::FileError::NotText) => Ok(GitDiff {
+            text: "Binary files differ\n".into(),
+            truncated: false,
+        }),
+        Err(super::project_files::FileError::TooLarge) => Ok(GitDiff {
+            text: "Diff truncated: file exceeds the 2 MiB preview limit.\n".into(),
+            truncated: true,
+        }),
+        Err(_) => Err(GitError::ReadFailed),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::atomic::AtomicU64;
 
     static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(1);
+
+    #[test]
+    fn filtered_tree_retains_ancestors_and_counts_hidden_descendants() {
+        let status = parse_status(
+            Path::new("project"),
+            b"## main\0MM src/app/a.rs\0 M src/app/b.rs\0 M docs/guide.md\0",
+            false,
+        )
+        .unwrap();
+        let mut collapsed = std::collections::HashSet::new();
+        collapsed.insert((DiffKind::WorkingTree, PathBuf::from("src")));
+        let rows = change_rows(&status, &collapsed);
+        assert_eq!(rows[0].kind, DiffKind::Staged);
+        assert_eq!(
+            rows.iter()
+                .find(|r| r.kind == DiffKind::WorkingTree && r.path == Path::new("src"))
+                .unwrap()
+                .count,
+            2
+        );
+        let filtered = filtered_change_rows(&status, &std::collections::HashSet::new(), "a.rs");
+        assert_eq!(filtered.iter().filter(|r| r.entry.is_some()).count(), 2);
+        assert!(filtered.iter().any(|r| r.path == Path::new("src/app")));
+        assert!(!filtered.iter().any(|r| r.path == Path::new("docs")));
+    }
 
     #[test]
     fn tree_groups_staging_and_preserves_deleted_paths() {

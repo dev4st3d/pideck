@@ -37,6 +37,8 @@ pub(crate) struct TerminalWorkspace {
     pub(crate) projects: Vec<TerminalProject>,
     pub(crate) active: usize,
     pub(crate) sidebar_visible: bool,
+    #[serde(default)]
+    pub(crate) sidebar_width: Option<u16>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -52,6 +54,7 @@ impl TerminalWorkspace {
             projects: vec![TerminalProject::new(initial_dir)],
             active: 0,
             sidebar_visible: true,
+            sidebar_width: None,
         }
     }
 
@@ -135,6 +138,7 @@ impl TerminalWorkspace {
     }
 
     fn normalize(&mut self, initial_dir: &Path) {
+        self.sidebar_width = self.sidebar_width.map(|width| width.clamp(256, 420));
         let selected_path = self
             .projects
             .get(self.active)
@@ -220,6 +224,19 @@ mod tests {
     }
 
     #[test]
+    fn legacy_layouts_default_the_width_and_invalid_widths_are_bounded() {
+        let root = TestDirectory::new();
+        let path = root.0.join("layout.json");
+        fs::write(&path, br#"{"version":1,"projects":[{"path":"synthetic","tab_count":1,"active_tab":0}],"active":0,"sidebar_visible":true}"#).unwrap();
+        let (mut workspace, warning) = TerminalWorkspace::load(&path, &root.0);
+        assert!(warning.is_none());
+        assert_eq!(workspace.sidebar_width, None);
+        workspace.sidebar_width = Some(900);
+        workspace.normalize(&root.0);
+        assert_eq!(workspace.sidebar_width, Some(420));
+    }
+
+    #[test]
     fn saved_layout_roundtrips_and_keeps_unavailable_projects() {
         let root = TestDirectory::new();
         let mut workspace = TerminalWorkspace::new(root.0.clone());
@@ -232,6 +249,7 @@ mod tests {
         });
         workspace.active = 1;
         workspace.sidebar_visible = false;
+        workspace.sidebar_width = Some(376);
         let path = root.0.join("layout.json");
         workspace.save(&path).unwrap();
         let (loaded, warning) = TerminalWorkspace::load(&path, &root.0);
@@ -275,6 +293,7 @@ mod tests {
             ],
             active: 2,
             sidebar_visible: true,
+            sidebar_width: None,
         };
         workspace.normalize(Path::new("fallback"));
         assert_eq!(workspace.projects.len(), 2);

@@ -75,5 +75,29 @@
     "file": "JetBrains-Mono-OFL.txt",
     "source": "https://raw.githubusercontent.com/JetBrains/JetBrainsMono/master/OFL.txt",
     "sha256": "a76abf002c49097d146e86740a3105a5d00450b1592e820a1109a8c5680cd697"
+  },
+  {
+    "file": "DMSans-Regular.ttf",
+    "source": "https://fonts.gstatic.com/s/dmsans/v17/rP2tp2ywxg089UriI5-g4vlH9VoD8CmcqZG40F9JadbnoEwAopxRSW3z.ttf",
+    "sha256": "75fab8393d951f566ad990897aeeb78e68b16f6e5cf096caed4d78fc52a86f75",
+    "family": "DM Sans 9pt",
+    "license": "DM-Sans-OFL.txt",
+    "windows_family": "DM Sans 9pt 14pt"
+  },
+  {
+    "file": "DMSans-Medium.ttf",
+    "source": "https://fonts.gstatic.com/s/dmsans/v17/rP2tp2ywxg089UriI5-g4vlH9VoD8CmcqZG40F9JadbnoEwAkJxRSW3z.ttf",
+    "sha256": "2a2e62af3370a5f9fa03738afcdb99f96929e2b0a893be41ac64c14e0ca13aa8",
+    "family": "DM Sans 9pt",
+    "license": "DM-Sans-OFL.txt",
+    "windows_family": "DM Sans 9pt 14pt"
+  },
+  {
+    "file": "DMSans-SemiBold.ttf",
+    "source": "https://fonts.gstatic.com/s/dmsans/v17/rP2tp2ywxg089UriI5-g4vlH9VoD8CmcqZG40F9JadbnoEwAfJtRSW3z.ttf",
+    "sha256": "a0bdc33598e5e0cc8fddaf7dd8c1c187e79fe78bcf567354c6bc355b430c62e2",
+    "family": "DM Sans 9pt",
+    "license": "DM-Sans-OFL.txt",
+    "windows_family": "DM Sans 9pt 14pt"
   }
 ]
