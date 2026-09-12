@@ -40,7 +40,6 @@ actions!(
         PreviousProject,
         ToggleProjects,
         ToggleChecklist,
-        FocusTerminal,
         FocusProjects,
     ]
 );
@@ -131,6 +130,7 @@ impl TerminalManager {
         cx.bind_keys([
             KeyBinding::new("ctrl-shift-o", AddProject, Some("TerminalManager")),
             KeyBinding::new("ctrl-shift-t", NewTerminal, Some("TerminalManager")),
+            KeyBinding::new("ctrl-`", NewTerminal, Some("TerminalManager")),
             KeyBinding::new("ctrl-shift-w", CloseTerminal, Some("TerminalManager")),
             KeyBinding::new("ctrl-tab", NextTerminal, Some("TerminalManager")),
             KeyBinding::new("ctrl-shift-tab", PreviousTerminal, Some("TerminalManager")),
@@ -138,7 +138,6 @@ impl TerminalManager {
             KeyBinding::new("ctrl-alt-up", PreviousProject, Some("TerminalManager")),
             KeyBinding::new("ctrl-shift-b", ToggleProjects, Some("TerminalManager")),
             KeyBinding::new("ctrl-shift-l", ToggleChecklist, Some("TerminalManager")),
-            KeyBinding::new("ctrl-`", FocusTerminal, Some("TerminalManager")),
             KeyBinding::new("f6", FocusProjects, Some("TerminalManager")),
         ]);
     }
@@ -1551,7 +1550,7 @@ impl TerminalManager {
                             .line_height(px(chrome::CONTROL_LINE_HEIGHT))
                             .font_weight(FontWeight::SEMIBOLD)
                             .tooltip(text_tooltip(if can_add_terminal {
-                                "Open a terminal in this project · Ctrl+Shift+T"
+                                "Open a terminal in this project · Ctrl+` or Ctrl+Shift+T"
                             } else if available {
                                 "This project has eight terminal tabs"
                             } else {
@@ -2821,11 +2820,6 @@ impl Render for TerminalManager {
             .on_action(cx.listener(|view, _: &ToggleChecklist, window, cx| {
                 view.toggle_checklist(window, cx)
             }))
-            .on_action(cx.listener(|view, _: &FocusTerminal, window, cx| {
-                if let Some(pane) = view.active_terminal() {
-                    pane.update(cx, |pane, cx| pane.focus_terminal(window, cx));
-                }
-            }))
             .on_action(cx.listener(|view, _: &FocusProjects, window, cx| {
                 if !view.interaction_locked()
                     && let Some(workspace) = &mut view.workspace
@@ -3166,6 +3160,57 @@ mod tests {
             update_scheduling: false,
             _bounds_subscription: Subscription::new(|| {}),
         }
+    }
+
+    #[gpui::test]
+    fn new_terminal_shortcuts_create_one_tab_each_and_respect_update_lock(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(super::super::file_editor::FileEditor::initialize);
+        let (root, cx) = cx.add_window_view(|window, cx| {
+            let manager = cx.new(|cx| {
+                let mut view = fixture(cx);
+                TerminalManager::bind_keys(cx);
+                view.saving = true;
+                view.push_terminal("synthetic-project-one".into(), 1, 0, window, cx);
+                window.focus(&view.focus_handle);
+                view
+            });
+            gpui_component::Root::new(manager, window, cx)
+        });
+        let manager = root.read_with(cx, |root, _| {
+            root.view()
+                .clone()
+                .downcast::<TerminalManager>()
+                .ok()
+                .unwrap()
+        });
+        let terminal = manager.read_with(cx, |view, _| view.active_terminal().unwrap());
+        cx.simulate_keystrokes("ctrl-`");
+        assert_eq!(
+            terminal.read_with(cx, |view, _| view.layout_snapshot()),
+            (2, 1)
+        );
+        // The new tab has focus: both shortcuts must also bubble from its PTY input handler.
+        cx.simulate_keystrokes("ctrl-`");
+        assert_eq!(
+            terminal.read_with(cx, |view, _| view.layout_snapshot()),
+            (3, 2)
+        );
+        cx.simulate_keystrokes("ctrl-shift-t");
+        assert_eq!(
+            terminal.read_with(cx, |view, _| view.layout_snapshot()),
+            (4, 3)
+        );
+        manager.update(cx, |view, cx| {
+            view.update_scheduling = true;
+            cx.notify();
+        });
+        cx.simulate_keystrokes("ctrl-`");
+        assert_eq!(
+            terminal.read_with(cx, |view, _| view.layout_snapshot()),
+            (4, 3)
+        );
     }
 
     #[gpui::test]

@@ -99,7 +99,7 @@ impl TerminalSession {
         }
     }
 
-    fn start_cursor_blink(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn start_cursor_blink(&mut self, cx: &mut Context<Self>) {
         self.cursor_visible = true;
         self._cursor_task.take();
         if !crate::services::accessibility::motion_enabled() {
