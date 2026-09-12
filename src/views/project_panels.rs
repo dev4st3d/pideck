@@ -1297,6 +1297,9 @@ impl GitPanel {
         let selected = (self.selection_visible || focused) && self.selected == index;
         div()
             .h(px(if section { 32.0 } else { GIT_ROW_HEIGHT }))
+            .w_full()
+            .min_w_0()
+            .overflow_hidden()
             .px(px(8.0))
             .relative()
             .children((1..row.depth).map(|depth| {
@@ -1314,6 +1317,7 @@ impl GitPanel {
                     .debug_selector(move || format!("git-row-{index}"))
                     .size_full()
                     .min_w_0()
+                    .overflow_hidden()
                     .pl(px(
                         4.0 + row.depth.saturating_sub(1) as f32 * chrome::TREE_INDENT
                     ))
@@ -1402,6 +1406,8 @@ impl GitPanel {
                             div()
                                 .w(px(68.0))
                                 .flex_shrink_0()
+                                .min_w_0()
+                                .overflow_hidden()
                                 .flex()
                                 .justify_end()
                                 .gap(px(4.0))
@@ -1441,6 +1447,8 @@ impl Render for GitPanel {
             .tab_index(0)
             .size_full()
             .min_h_0()
+            .min_w_0()
+            .overflow_hidden()
             .flex()
             .flex_col()
             .font_family(chrome::CHROME_FONT)
@@ -1489,6 +1497,7 @@ impl Render for GitPanel {
                         .mb(px(12.0))
                         .h(px(32.0))
                         .flex_shrink_0()
+                        .min_w_0()
                         .px(px(10.0))
                         .flex()
                         .items_center()
@@ -1538,6 +1547,7 @@ impl Render for GitPanel {
                                 .tab_index(0)
                                 .h(px(32.0))
                                 .px(px(8.0))
+                                .min_w_0()
                                 .flex()
                                 .items_center()
                                 .cursor_pointer()
@@ -1565,7 +1575,8 @@ impl Render for GitPanel {
                     }),
                 )
                 .flex_1()
-                .min_h_0(),
+                .min_h_0()
+                .min_w_0(),
             )
             .when(count == 0 && self.error.is_none(), |panel| {
                 panel.child(message(if self.loading {
@@ -1621,6 +1632,8 @@ impl Render for GitPanel {
                 div()
                     .h(px(28.0))
                     .flex_shrink_0()
+                    .min_w_0()
+                    .overflow_hidden()
                     .border_t_1()
                     .border_color(theme::edge())
                     .px(px(16.0))
@@ -1628,7 +1641,7 @@ impl Render for GitPanel {
                     .items_center()
                     .text_size(px(11.0))
                     .text_color(theme::ash())
-                    .child("M Modified   U Untracked"),
+                    .child(div().min_w_0().truncate().child("M Modified   U Untracked")),
             )
     }
 }
@@ -1717,6 +1730,7 @@ pub(super) fn filter_field(input: &Entity<InputState>, top: f32, bottom: f32) ->
         .mb(px(bottom))
         .h(px(32.0))
         .flex_shrink_0()
+        .min_w_0()
         .child(
             Input::new(input)
                 .h(px(32.0))
