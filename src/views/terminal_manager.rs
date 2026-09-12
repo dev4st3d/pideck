@@ -1597,6 +1597,8 @@ impl TerminalManager {
         div()
             .w(px(self.sidebar_width))
             .h_full()
+            .min_w_0()
+            .overflow_hidden()
             .flex_shrink_0()
             .flex()
             .flex_col()
@@ -1686,7 +1688,14 @@ impl TerminalManager {
                         }),
                     ),
             )
-            .child(div().flex_1().min_h_0().child(content))
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .child(content),
+            )
     }
 
     fn project_selector(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -2520,13 +2529,10 @@ pub(super) fn text_tooltip(
 impl Render for TerminalManager {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let viewport = f32::from(window.viewport_size().width);
+        // Files, Projects, and Git share one sidebar width so switching tabs
+        // does not jump the workbench layout.
         let default_width = if viewport <= 1100.0 {
             chrome::SIDEBAR_MIN
-        } else if self
-            .active_project()
-            .is_some_and(|project| project.sidebar_tab == SidebarTab::Git)
-        {
-            chrome::GIT_SIDEBAR_WIDTH
         } else {
             chrome::SIDEBAR_WIDTH
         };
@@ -3095,6 +3101,32 @@ mod tests {
             theme::set_appearance(original);
             super::super::file_editor::FileEditor::apply_appearance(cx);
         });
+    }
+
+    #[gpui::test]
+    fn git_tab_keeps_the_shared_sidebar_width(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            crate::fonts::initialize(cx);
+            super::super::file_editor::FileEditor::initialize(cx);
+        });
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let mut view = fixture(cx);
+            view.push_terminal("synthetic-project-one".into(), 1, 0, window, cx);
+            view
+        });
+        cx.simulate_resize(gpui::size(px(1280.0), px(720.0)));
+        cx.refresh().unwrap();
+        cx.run_until_parked();
+        let files_width = view.read_with(cx, |view, _| view.sidebar_width);
+        view.update(cx, |view, cx| {
+            view.projects[0].sidebar_tab = SidebarTab::Git;
+            cx.notify();
+        });
+        cx.refresh().unwrap();
+        cx.run_until_parked();
+        let git_width = view.read_with(cx, |view, _| view.sidebar_width);
+        assert_eq!(files_width, chrome::SIDEBAR_WIDTH);
+        assert_eq!(git_width, files_width);
     }
 
     #[gpui::test]

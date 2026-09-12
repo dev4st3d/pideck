@@ -53,6 +53,5 @@ pub(crate) const TECH_LINE_HEIGHT: f32 = 23.0;
 pub(crate) const WIDE_TOOLBAR_MIN_WIDTH: f32 = 1100.0;
 pub(crate) const TOOLTIP_MAX_WIDTH: f32 = 480.0;
 
-pub(crate) const GIT_SIDEBAR_WIDTH: f32 = 336.0;
 pub(crate) const SIDEBAR_MIN: f32 = 256.0;
 pub(crate) const SIDEBAR_MAX: f32 = 420.0;

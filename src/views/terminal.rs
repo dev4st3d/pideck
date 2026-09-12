@@ -1387,7 +1387,6 @@ fn workspace_tab(
         .h_full()
         .max_w(px(250.0))
         .min_w(px(180.0))
-        .border_r_1()
         .px(px(chrome::TAB_INSET))
         .flex_shrink_0()
         .flex()
@@ -1402,11 +1401,11 @@ fn workspace_tab(
         } else {
             gpui::rgba(0x0000_0000)
         })
-        .border_b_1()
+        .border_b_2()
         .border_color(if selected {
             theme::focus()
         } else {
-            theme::edge()
+            gpui::rgba(0x00000000)
         })
         .text_color(if selected {
             theme::bone()
@@ -1422,7 +1421,7 @@ fn workspace_tab(
                 tab.bg(theme::panel_hover()).text_color(theme::bone())
             }
         })
-        .focus(|tab| tab.border_color(theme::focus()).text_color(theme::focus()))
+        .focus(|tab| tab.text_color(theme::focus()))
         .tooltip(text_tooltip(tooltip))
         .on_click(cx.listener(move |view, _, window, cx| view.select_tab(select_id, window, cx)))
         .child(if icon == "rs" {
