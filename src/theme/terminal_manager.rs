@@ -55,3 +55,15 @@ pub(crate) const TOOLTIP_MAX_WIDTH: f32 = 480.0;
 
 pub(crate) const SIDEBAR_MIN: f32 = 256.0;
 pub(crate) const SIDEBAR_MAX: f32 = 420.0;
+
+// Headerless reminder inspector from Pencil variation 05.
+pub(crate) const CHECKLIST_WIDTH: f32 = 352.0;
+pub(crate) const CHECKLIST_ROW_HEIGHT: f32 = 32.0;
+pub(crate) const CHECKLIST_HEADING_HEIGHT: f32 = 40.0;
+pub(crate) const CHECKLIST_HEADING_SIZE: f32 = 23.0;
+pub(crate) const CHECKLIST_INDENT: f32 = 18.0;
+pub(crate) const CHECKLIST_DISCLOSURE_WIDTH: f32 = 20.0;
+pub(crate) const CHECKLIST_CONTROL_SIZE: f32 = 24.0;
+pub(crate) const CHECKLIST_GAP: f32 = 6.0;
+pub(crate) const CHECKLIST_TEXT_INSET: f32 =
+    10.0 + CHECKLIST_DISCLOSURE_WIDTH + CHECKLIST_GAP + 14.0 + CHECKLIST_GAP;

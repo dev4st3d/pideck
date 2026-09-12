@@ -44,7 +44,7 @@ Source builds and unpackaged executables do not support in-app updates. Download
 
 While the app stays open, each project retains its sidebar selection, expanded directories and scroll position, open file buffers and cursor positions, active tab, and terminal sessions. Switching projects reuses those views and processes.
 
-Across app restarts, only project folders, terminal layout, selected terminal/project, sidebar visibility, and chosen sidebar width are restored. This layout is stored in `terminal-workspace.json` beside the settings file, normally under `%APPDATA%\Pideck`. `PI_GUI_SETTINGS_PATH` relocates the settings file and adjacent layout file.
+Across app restarts, project folders, terminal layout, selected terminal/project, sidebar visibility, chosen sidebar width, project checklists, and checklist visibility are restored. This data is stored in `terminal-workspace.json` beside the settings file, normally under `%APPDATA%\Pideck`. `PI_GUI_SETTINGS_PATH` relocates the settings file and adjacent layout file.
 
 Restarting creates fresh shells. Open files, file buffers and cursor positions, expanded directories, terminal output, running processes, and CLI conversations are not restored from disk. Save files before closing; use each CLI's own session features when available.
 
@@ -55,6 +55,14 @@ Workspace settings stay local. Pideck adds no telemetry, analytics, or remote re
 Files, projects, and Git changes have independent filters. File search is bounded to 20,000 visited entries and 2,000 matches and never follows directory links; incomplete searches show a notice. Filtering keeps matching ancestors. Clearing Files or Git filters restores the previous expansion, selection, and scroll position.
 
 Drag the sidebar divider between 256 and 420 logical pixels. Keyboard focus on the divider supports Left/Right to resize and Home to reset. The default is 288 pixels, 336 for Git, and 256 in compact windows. Project actions live in each project's row menu.
+
+## Project checklist
+
+Use the **checklist icon** in the toolbar or `Ctrl+Shift+L` to toggle the right inspector. It uses the headerless outline with numbered Instrument Serif section headings. Each project has its own reminders; committed edits and collapsed branches save locally with the workspace. New projects start with an empty Workspace section.
+
+Click **Add a reminder**, type, and press Enter to save. The adjacent **+** creates a section. Reminder menus contain only **Add subtask**, **Rename**, and **Delete**; section menus contain **Rename** and **Delete**. Indenting and outdenting remain available from the keyboard. Completing a parent completes its subtree; parent checkboxes and counts follow their children. Deleting a subtree or section offers **Undo**, and `Ctrl+Z` restores recent edits while the checklist is focused. Removing a project also removes its saved checklist, as stated in the removal prompt.
+
+With the checklist tree focused: arrows navigate and fold branches, Space checks, Enter adds a reminder, `Ctrl+Enter` adds a subtask, `Tab` / `Shift+Tab` indent or outdent, F2 renames, Delete removes, and `Ctrl+Shift+N` creates a section. Escape cancels text editing; `Ctrl+\`` returns to the terminal. Long labels show their full text in a tooltip. On compact windows, opening the inspector temporarily hides the left sidebar to reserve terminal space; the sidebar preference is preserved. Below 720 logical pixels the inspector is temporarily hidden as well.
 
 ## Terminal input
 
@@ -82,6 +90,7 @@ Filesystem changes refresh the explorer and Git status automatically; `F5` refre
 | Save active file | `Ctrl+S` |
 | Previous / next project | `Ctrl+Alt+Up` / `Ctrl+Alt+Down` |
 | Toggle project sidebar | `Ctrl+Shift+B` |
+| Toggle project checklist | `Ctrl+Shift+L` |
 | Focus terminal | `` Ctrl+` `` |
 | Focus project sidebar | `F6` |
 | Copy terminal selection or visible screen | `Ctrl+Shift+C` |
