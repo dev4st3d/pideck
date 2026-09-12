@@ -154,6 +154,26 @@ fn copy(source: &Path, target: &Path, cancel: &AtomicBool) -> Result<(), String>
     Ok(())
 }
 
+fn recycle(path: &Path) -> Result<(), String> {
+    const ERROR: &str =
+        "Could not move this item to the Recycle Bin. Check permissions and open applications.";
+    // GPUI uses Windows Runtime MTA workers, but trash initializes STA COM.
+    // A fresh thread avoids RPC_E_CHANGED_MODE; joining contains library panics.
+    #[cfg(windows)]
+    {
+        let path = path.to_path_buf();
+        std::thread::Builder::new()
+            .name("pideck-recycle".into())
+            .spawn(move || trash::delete(path))
+            .map_err(|_| ERROR.to_owned())?
+            .join()
+            .map_err(|_| ERROR.to_owned())?
+            .map_err(|_| ERROR.to_owned())
+    }
+    #[cfg(not(windows))]
+    trash::delete(path).map_err(|_| ERROR.to_owned())
+}
+
 pub(crate) fn run(root: &Path, operation: Operation, cancel: &AtomicBool) -> Outcome {
     let mut outcome = Outcome::default();
     let result = (|| -> Result<(), String> {
@@ -271,7 +291,10 @@ pub(crate) fn run(root: &Path, operation: Operation, cancel: &AtomicBool) -> Out
                     confined(&root, path)?;
                 }
                 for path in paths {
-                    trash::delete(&path).map_err(|_| "Could not move this item to the Recycle Bin. Check permissions and open applications.")?;
+                    if cancel.load(Ordering::Acquire) {
+                        return Err("Operation cancelled. Completed items are kept.".into());
+                    }
+                    recycle(&path)?;
                     outcome.removed.push(path);
                 }
             }
@@ -285,6 +308,55 @@ pub(crate) fn run(root: &Path, operation: Operation, cancel: &AtomicBool) -> Out
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "moves disposable files to the Windows Recycle Bin"]
+    fn recycle_from_mta_worker() {
+        std::thread::spawn(|| {
+            use windows_sys::Win32::System::Com::{
+                COINIT_MULTITHREADED, CoInitializeEx, CoUninitialize,
+            };
+            // This test thread owns the successful COM initialization and
+            // balances it before exiting, reproducing GPUI's worker apartment.
+            let initialized =
+                unsafe { CoInitializeEx(std::ptr::null(), COINIT_MULTITHREADED as u32) };
+            assert!(initialized >= 0);
+            let root = std::env::temp_dir().join(format!(
+                "pideck-recycle-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            fs::create_dir(&root).unwrap();
+            let path = root.join("disposable.txt");
+            fs::write(&path, "PiDeck recycle regression fixture").unwrap();
+            let cancelled = run(
+                &root,
+                Operation::Trash(vec![path.clone()]),
+                &AtomicBool::new(true),
+            );
+            assert!(cancelled.error.is_some());
+            assert!(path.exists());
+            let outcome = run(
+                &root,
+                Operation::Trash(vec![path.clone()]),
+                &AtomicBool::new(false),
+            );
+            assert!(outcome.error.is_none(), "{:?}", outcome.error);
+            assert_eq!(outcome.removed, vec![path.clone()]);
+            assert!(!path.exists());
+            let missing = run(&root, Operation::Trash(vec![path]), &AtomicBool::new(false));
+            assert!(missing.error.is_some());
+            assert!(missing.removed.is_empty());
+            fs::remove_dir(&root).unwrap();
+            unsafe { CoUninitialize() };
+        })
+        .join()
+        .unwrap();
+    }
+
     #[test]
     fn selection_removes_descendants_and_rejects_invalid_names() {
         assert_eq!(
