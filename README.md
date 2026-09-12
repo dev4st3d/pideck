@@ -81,7 +81,7 @@ Filesystem changes refresh the explorer and Git status automatically; `F5` refre
 | Action | Keys |
 |---|---|
 | Add project folder | `Ctrl+Shift+O` |
-| New terminal | `Ctrl+Shift+T` |
+| New terminal | `` Ctrl+` `` or `Ctrl+Shift+T` |
 | Close active tab | `Ctrl+Shift+W` |
 | Next / previous tab | `Ctrl+Tab` / `Ctrl+Shift+Tab` |
 | Previous / next change (diff focus) | `Alt+Up` / `Alt+Down` |
@@ -91,7 +91,6 @@ Filesystem changes refresh the explorer and Git status automatically; `F5` refre
 | Previous / next project | `Ctrl+Alt+Up` / `Ctrl+Alt+Down` |
 | Toggle project sidebar | `Ctrl+Shift+B` |
 | Toggle project checklist | `Ctrl+Shift+L` |
-| Focus terminal | `` Ctrl+` `` |
 | Focus project sidebar | `F6` |
 | Copy terminal selection or visible screen | `Ctrl+Shift+C` |
 | Select all terminal history | `Ctrl+Shift+A` |

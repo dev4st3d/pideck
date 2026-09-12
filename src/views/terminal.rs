@@ -3,7 +3,7 @@
 use std::{
     ops::Range,
     path::{Path, PathBuf},
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use gpui::{
@@ -26,7 +26,8 @@ use diff::DiffView;
 mod input;
 use element::{TerminalElement, TerminalGeometry};
 
-pub(crate) const TERMINAL_LINE_HEIGHT: f32 = chrome::TECH_LINE_HEIGHT;
+pub(crate) const TERMINAL_LINE_HEIGHT: f32 = 18.0;
+const OUTPUT_BATCH_INTERVAL: Duration = Duration::from_millis(8);
 const MAX_TERMINAL_TABS: usize = 8;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -128,7 +129,7 @@ impl TerminalSession {
         }
         self.engine.scroll_to_bottom();
         self.engine.clear_selection();
-        self.cursor_visible = true;
+        self.start_cursor_blink(cx);
         self.write_pty(bytes, cx);
         cx.notify();
     }
@@ -157,6 +158,10 @@ impl TerminalSession {
     ) -> Task<()> {
         cx.spawn(async move |view, cx| {
             while let Ok(first) = events.recv().await {
+                // ConPTY can split a clear-and-redraw across separate reads.
+                // Give the rest of that burst one bounded window to arrive;
+                // never extend the deadline under continuous output.
+                cx.background_executor().timer(OUTPUT_BATCH_INTERVAL).await;
                 let mut batch = Vec::with_capacity(8);
                 batch.push(first);
                 while batch.len() < 64 {
@@ -472,24 +477,6 @@ impl TerminalView {
             Some(TabContent::File { tab, .. }) => tab.focus(window, cx),
             Some(TabContent::Diff { view, .. }) => window.focus(&view.read(cx).focus),
             None => window.focus(&self.fallback_focus),
-        }
-    }
-
-    pub(crate) fn focus_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let terminal = self
-            .tabs
-            .iter()
-            .find(|tab| Some(tab.id) == self.last_terminal_id)
-            .or_else(|| {
-                self.tabs
-                    .iter()
-                    .find(|tab| matches!(tab.content, TabContent::Terminal(_)))
-            })
-            .map(|tab| tab.id);
-        if let Some(id) = terminal {
-            self.select_tab(id, window, cx);
-        } else {
-            self.add_tab(window, cx);
         }
     }
 
@@ -1087,12 +1074,7 @@ impl Render for TerminalSession {
                     .flex_1()
                     .min_h_0()
                     .overflow_hidden()
-                    .px(px(if f32::from(window.viewport_size().width) <= 1100.0 {
-                        20.0
-                    } else {
-                        chrome::CONTENT_INSET
-                    }))
-                    .py(px(24.0))
+                    .p(px(chrome::INSET))
                     .bg(theme::canvas())
                     .cursor(CursorStyle::IBeam)
                     .font_family(theme::mono())
@@ -1523,6 +1505,88 @@ mod tests {
 
     use super::*;
 
+    #[gpui::test]
+    fn terminal_output_burst_keeps_old_frame_until_redraw_arrives(cx: &mut gpui::TestAppContext) {
+        let (sender, receiver) = async_channel::bounded(64);
+        let session = cx.new(|cx| {
+            TerminalSession::new(
+                PathBuf::from("synthetic-project"),
+                TerminalSize::default(),
+                cx,
+            )
+        });
+        session.update(cx, |session, cx| {
+            session.engine.feed(b"old frame");
+            session._event_task = Some(TerminalSession::pump_events(
+                receiver,
+                session.generation,
+                cx,
+            ));
+        });
+        sender
+            .try_send(TerminalEvent::Output(b"\x1b[2J\x1b[H".to_vec()))
+            .unwrap();
+        cx.run_until_parked();
+        cx.executor().advance_clock(Duration::from_millis(4));
+        cx.run_until_parked();
+        session.read_with(cx, |session, _| {
+            assert!(session.engine.visible_text().starts_with("old frame"));
+        });
+        sender
+            .try_send(TerminalEvent::Output(b"new frame".to_vec()))
+            .unwrap();
+        cx.executor().advance_clock(Duration::from_millis(4));
+        cx.run_until_parked();
+        session.read_with(cx, |session, _| {
+            assert!(session.engine.visible_text().starts_with("new frame"));
+        });
+
+        // A single final chunk must also render, even when the channel closes.
+        sender
+            .try_send(TerminalEvent::Output(b"!".to_vec()))
+            .unwrap();
+        drop(sender);
+        cx.run_until_parked();
+        cx.executor().advance_clock(OUTPUT_BATCH_INTERVAL);
+        cx.run_until_parked();
+        session.read_with(cx, |session, _| {
+            assert!(session.engine.visible_text().starts_with("new frame!"));
+        });
+    }
+
+    #[gpui::test]
+    fn terminal_output_burst_does_not_cross_session_generations(cx: &mut gpui::TestAppContext) {
+        let (sender, receiver) = async_channel::bounded(64);
+        let session = cx.new(|cx| {
+            TerminalSession::new(
+                PathBuf::from("synthetic-project"),
+                TerminalSize::default(),
+                cx,
+            )
+        });
+        session.update(cx, |session, cx| {
+            session._event_task = Some(TerminalSession::pump_events(
+                receiver,
+                session.generation,
+                cx,
+            ));
+        });
+        sender
+            .try_send(TerminalEvent::Output(b"stale output".to_vec()))
+            .unwrap();
+        cx.run_until_parked();
+        session.update(cx, |session, _| {
+            session.generation += 1;
+            session.engine.feed(b"current frame");
+        });
+        cx.executor().advance_clock(OUTPUT_BATCH_INTERVAL);
+        cx.run_until_parked();
+        session.read_with(cx, |session, _| {
+            assert!(session.engine.visible_text().starts_with("current frame"));
+            assert!(!session.engine.visible_text().contains("stale"));
+        });
+    }
+
     #[test]
     fn appearance_changes_preserve_terminal_history_selection_and_modes() {
         struct RestoreAppearance(theme::Appearance);
@@ -1672,7 +1736,7 @@ mod tests {
                     );
                     assert_eq!(view.layout_snapshot(), (1, 0));
                     assert!(view.has_running_sessions(cx));
-                    view.focus_terminal(window, cx);
+                    view.select_tab(view.tabs[0].id, window, cx);
                     view.select_tab(tab_id, window, cx);
                     assert_eq!(
                         view.tabs[1].content.editor().unwrap().entity_id(),
@@ -1897,7 +1961,7 @@ mod tests {
     }
 
     #[test]
-    fn root_toggle_keeps_ctrl_backtick() {
+    fn new_terminal_shortcut_bubbles_to_workspace() {
         assert_eq!(
             terminal_key_bytes(
                 &key(

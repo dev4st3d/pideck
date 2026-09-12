@@ -2,7 +2,7 @@ use gpui::{
     App, Bounds, ContentMask, DispatchPhase, Element, ElementId, ElementInputHandler, Entity,
     FontStyle, FontWeight, GlobalElementId, HighlightStyle, InspectorElementId, IntoElement,
     LayoutId, MouseMoveEvent, MouseUpEvent, Pixels, Point, ShapedLine, StrikethroughStyle, Style,
-    TextStyle, UnderlineStyle, Window, fill, font, point, px, relative, size,
+    TextStyle, UnderlineStyle, Window, fill, point, px, relative, size,
 };
 
 use super::{TERMINAL_LINE_HEIGHT, TerminalSession};
@@ -64,6 +64,7 @@ pub(super) struct PrepaintState {
     cursor: Vec<gpui::PaintQuad>,
     composition: Option<(Point<Pixels>, ShapedLine)>,
     cursor_blinking: bool,
+    baseline: Pixels,
 }
 
 impl IntoElement for TerminalElement {
@@ -109,23 +110,25 @@ impl Element for TerminalElement {
         let session = self.session.read(cx);
         let snapshot = session.engine.snapshot();
         let font_size = theme::text_size(theme::T_MONO).to_pixels(window.rem_size());
-        let font_id = window.text_system().resolve_font(&font(theme::mono()));
-        // The same measured advance owns layout, glyph placement, selection
-        // and mouse reporting. Platform scale changes are measured each frame.
-        let cell_width = window
-            .text_system()
-            .advance(font_id, font_size, 'M')
-            .map(|advance| advance.width)
-            .unwrap_or_else(|_| {
-                let mut style = window.text_style();
-                style.font_family = theme::mono();
-                window
-                    .text_system()
-                    .shape_line("M".into(), font_size, &[style.to_run(1)], None)
-                    .width
-            })
-            .max(px(1.0));
-        let cell_height = px(TERMINAL_LINE_HEIGHT).max(font_size * 1.3);
+        // Measure through the same shaping path and explicit style used for
+        // cells, including platform font fallback. Chrome styles must not
+        // change the terminal's advance or weight.
+        let default_style = TextStyle {
+            font_family: theme::mono(),
+            font_size: font_size.into(),
+            ..TextStyle::default()
+        };
+        let metrics = window.text_system().shape_line(
+            "M".into(),
+            font_size,
+            &[default_style.to_run(1)],
+            None,
+        );
+        let cell_width = metrics.width.max(px(1.0));
+        let cell_height = (font_size * (TERMINAL_LINE_HEIGHT / theme::T_MONO))
+            .max(metrics.ascent + metrics.descent)
+            .ceil();
+        let baseline = (cell_height + metrics.ascent - metrics.descent) / 2.0;
         let cursor_cell = snapshot.cursor.unwrap_or((0, 0));
         let cursor_width = snapshot
             .rows
@@ -152,9 +155,7 @@ impl Element for TerminalElement {
             cursor_bounds,
         };
         let focused = session.focus_handle.is_focused(window);
-        let mut default_style = window.text_style();
-        default_style.font_family = theme::mono();
-        default_style.font_size = font_size.into();
+        let cursor_visible = !snapshot.cursor_blinking || session.cursor_visible;
         let mut cells = Vec::new();
         for (row, line) in snapshot.rows.iter().enumerate() {
             if cell_height * row >= bounds.size.height {
@@ -172,7 +173,7 @@ impl Element for TerminalElement {
                 let at_cursor = snapshot.cursor == Some((row, col))
                     || (cell.wide_spacer && col > 0 && snapshot.cursor == Some((row, col - 1)));
                 let block_cursor = focused
-                    && session.cursor_visible
+                    && cursor_visible
                     && at_cursor
                     && snapshot.cursor_shape == TerminalCursorShape::Block;
                 if block_cursor {
@@ -202,7 +203,7 @@ impl Element for TerminalElement {
             }
         }
         let mut cursor = Vec::new();
-        if snapshot.cursor.is_some() && (!focused || session.cursor_visible) {
+        if snapshot.cursor.is_some() && (!focused || cursor_visible) {
             if focused {
                 match snapshot.cursor_shape {
                     TerminalCursorShape::Block => {}
@@ -265,6 +266,7 @@ impl Element for TerminalElement {
             cursor,
             composition,
             cursor_blinking: snapshot.cursor_blinking,
+            baseline,
         }
     }
 
@@ -292,8 +294,12 @@ impl Element for TerminalElement {
             }
             for cell in &prepaint.cells {
                 if let Some(line) = &cell.line {
+                    // Fallback glyphs may have different ascent/descent. Keep
+                    // every cell on the primary font's baseline.
+                    let line_baseline =
+                        (prepaint.geometry.cell_height + line.ascent - line.descent) / 2.0;
                     let _ = line.paint(
-                        cell.bounds.origin,
+                        cell.bounds.origin + point(px(0.0), prepaint.baseline - line_baseline),
                         prepaint.geometry.cell_height,
                         window,
                         cx,
