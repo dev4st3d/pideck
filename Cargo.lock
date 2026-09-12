@@ -4246,7 +4246,7 @@ dependencies = [
 
 [[package]]
 name = "pi-gui"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "alacritty_terminal",
  "async-channel 2.5.0",
