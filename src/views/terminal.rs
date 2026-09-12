@@ -959,7 +959,8 @@ fn terminal_key_bytes(keystroke: &Keystroke, application_cursor: bool) -> Option
     if keystroke.key == "f6"
         || (modifiers.control
             && (matches!(keystroke.key.as_str(), "`" | "tab")
-                || (modifiers.shift && matches!(keystroke.key.as_str(), "t" | "w" | "o" | "b"))
+                || (modifiers.shift
+                    && matches!(keystroke.key.as_str(), "t" | "w" | "o" | "b" | "l"))
                 || (modifiers.alt && matches!(keystroke.key.as_str(), "up" | "down"))))
     {
         return None;
@@ -1783,7 +1784,7 @@ mod tests {
             shift: true,
             ..Default::default()
         };
-        for name in ["t", "w", "o", "b", "tab"] {
+        for name in ["t", "w", "o", "b", "l", "tab"] {
             assert_eq!(
                 terminal_key_bytes(&key(name, None, control_shift), false),
                 None

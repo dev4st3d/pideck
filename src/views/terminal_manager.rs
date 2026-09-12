@@ -13,6 +13,7 @@ use gpui::{
     Window, WindowControlArea, actions, anchored, deferred, div, prelude::*, px, svg,
 };
 
+use super::checklist::ChecklistView;
 use super::project_panels::{FilesPanel, GitPanel, ProjectPanelEvent};
 use super::terminal::{TerminalPanelEvent, TerminalView};
 use crate::services::{
@@ -38,6 +39,7 @@ actions!(
         NextProject,
         PreviousProject,
         ToggleProjects,
+        ToggleChecklist,
         FocusTerminal,
         FocusProjects,
     ]
@@ -74,6 +76,7 @@ struct ProjectTerminals {
     terminal: Entity<TerminalView>,
     _subscription: Subscription,
     files: Entity<FilesPanel>,
+    checklist: Entity<ChecklistView>,
     git: Entity<GitPanel>,
     sidebar_tab: SidebarTab,
     project_kind: Option<&'static str>,
@@ -124,6 +127,7 @@ pub(crate) struct TerminalManager {
 
 impl TerminalManager {
     pub(crate) fn bind_keys(cx: &mut App) {
+        ChecklistView::bind_keys(cx);
         cx.bind_keys([
             KeyBinding::new("ctrl-shift-o", AddProject, Some("TerminalManager")),
             KeyBinding::new("ctrl-shift-t", NewTerminal, Some("TerminalManager")),
@@ -133,6 +137,7 @@ impl TerminalManager {
             KeyBinding::new("ctrl-alt-down", NextProject, Some("TerminalManager")),
             KeyBinding::new("ctrl-alt-up", PreviousProject, Some("TerminalManager")),
             KeyBinding::new("ctrl-shift-b", ToggleProjects, Some("TerminalManager")),
+            KeyBinding::new("ctrl-shift-l", ToggleChecklist, Some("TerminalManager")),
             KeyBinding::new("ctrl-`", FocusTerminal, Some("TerminalManager")),
             KeyBinding::new("f6", FocusProjects, Some("TerminalManager")),
         ]);
@@ -677,6 +682,28 @@ impl TerminalManager {
                 cx.notify();
             },
         );
+        let reminders = self
+            .workspace
+            .as_ref()
+            .and_then(|workspace| workspace.projects.iter().find(|p| p.path == project_path))
+            .map(|project| project.checklist.clone())
+            .unwrap_or_default();
+        let checklist = cx.new(|cx| ChecklistView::new(reminders, window, cx));
+        let checklist_path = project_path.clone();
+        let checklist_subscription =
+            cx.subscribe_in(&checklist, window, move |view, checklist, _, window, cx| {
+                if let Some(workspace) = &mut view.workspace
+                    && let Some(project) = workspace
+                        .projects
+                        .iter_mut()
+                        .find(|p| p.path == checklist_path)
+                {
+                    project.checklist = checklist.read(cx).snapshot();
+                }
+                view.on_content_changed(window, cx);
+                view.persist(window, cx);
+                cx.notify();
+            });
         let files =
             cx.new(|cx| FilesPanel::new(project_path.clone(), terminal.downgrade(), window, cx));
         let kind_path = project_path.clone();
@@ -720,10 +747,16 @@ impl TerminalManager {
             terminal,
             _subscription: subscription,
             files,
+            checklist,
             git,
             sidebar_tab: SidebarTab::Files,
             project_kind: None,
-            _panel_subscriptions: vec![file_subscription, git_subscription, git_observation],
+            _panel_subscriptions: vec![
+                file_subscription,
+                git_subscription,
+                git_observation,
+                checklist_subscription,
+            ],
         });
     }
 
@@ -872,7 +905,7 @@ impl TerminalManager {
         let title = format!("Remove {}?", project_name(&path));
         let count = self.projects[index].terminal.read(cx).terminal_count();
         let detail = format!(
-            "Its {count} terminal{} will close. Files on disk stay in place.",
+            "Its {count} terminal{} will close and its saved checklist will be removed. Files on disk stay in place.",
             if count == 1 { "" } else { "s" }
         );
         let prompt = window.prompt(
@@ -1046,6 +1079,69 @@ impl TerminalManager {
             });
         })
         .detach();
+    }
+
+    fn toggle_checklist(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.interaction_locked() {
+            return;
+        }
+        let Some(workspace) = &mut self.workspace else {
+            return;
+        };
+        workspace.inspector_visible = !workspace.inspector_visible;
+        if workspace.inspector_visible {
+            if f32::from(window.viewport_size().width) < 720.0 {
+                self.notice = Some("Widen the window to show the checklist.".into());
+            } else if let Some(project) = self.active_project() {
+                project
+                    .checklist
+                    .update(cx, |list, cx| list.focus(window, cx));
+            }
+        } else {
+            self.focus_active(window, cx);
+        }
+        self.persist(window, cx);
+        cx.notify();
+    }
+
+    fn checklist_toggle(&self, enabled: bool, cx: &mut Context<Self>) -> impl IntoElement {
+        let selected = self.workspace.as_ref().is_some_and(|w| w.inspector_visible);
+        div()
+            .id("toggle-checklist")
+            .debug_selector(|| "toggle-checklist".into())
+            .size(px(chrome::MAIN_CONTROL_HEIGHT))
+            .flex_shrink_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(chrome::CONTROL_RADIUS))
+            .border_1()
+            .border_color(gpui::transparent_black())
+            .bg(theme::panel())
+            .when(selected, |b| b.bg(theme::panel_hover()))
+            .tooltip(text_tooltip(if selected {
+                "Hide project checklist · Ctrl+Shift+L"
+            } else {
+                "Show project checklist · Ctrl+Shift+L"
+            }))
+            .when(enabled, |b| {
+                b.tab_index(0)
+                    .cursor_pointer()
+                    .hover(|s| s.bg(theme::panel_hover()))
+                    .focus(|s| s.border_color(theme::focus()))
+                    .on_click(cx.listener(|view, _, window, cx| view.toggle_checklist(window, cx)))
+            })
+            .when(!enabled, |b| b.opacity(0.5))
+            .child(
+                svg()
+                    .path("icons/inspector.svg")
+                    .size(px(16.0))
+                    .text_color(if selected {
+                        theme::bone()
+                    } else {
+                        theme::ash()
+                    }),
+            )
     }
 
     fn toggle_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1498,7 +1594,8 @@ impl TerminalManager {
                                         .child("Ctrl ⇧ T"),
                                 )
                             }),
-                    ),
+                    )
+                    .child(self.checklist_toggle(available, cx)),
             )
     }
 
@@ -1854,9 +1951,18 @@ impl TerminalManager {
             return;
         }
         self.prompt_pending = true;
-        let prompt = window.prompt(PromptLevel::Warning, "Save changed files before closing?",
-            Some("Closing also stops the affected terminals. Save all changed files, discard their edits, or cancel."),
-            &["Cancel", "Save all and close", "Discard changes and close"], cx);
+        let detail = if matches!(intent, PendingClose::Project(_)) {
+            "Removing this project also removes its saved checklist and stops its terminals. Save changed files, discard their edits, or cancel."
+        } else {
+            "Closing also stops the affected terminals. Save all changed files, discard their edits, or cancel."
+        };
+        let prompt = window.prompt(
+            PromptLevel::Warning,
+            "Save changed files before closing?",
+            Some(detail),
+            &["Cancel", "Save all and close", "Discard changes and close"],
+            cx,
+        );
         cx.spawn_in(window, async move |view, cx| {
             let answer = prompt.await.unwrap_or(0);
             let _ = cx.update(|window, cx| {
@@ -2545,10 +2651,12 @@ impl Render for TerminalManager {
                 chrome::SIDEBAR_MIN,
                 chrome::SIDEBAR_MAX.min((viewport - 380.0).max(chrome::SIDEBAR_MIN)),
             );
-        let sidebar_visible = self
-            .workspace
-            .as_ref()
-            .is_some_and(|workspace| workspace.sidebar_visible);
+        let inspector_visible = self.workspace.as_ref().is_some_and(|w| w.inspector_visible)
+            && viewport >= 720.0
+            && !self.update_scheduling;
+        let inspector_width = chrome::CHECKLIST_WIDTH.min((viewport - 480.0).max(240.0));
+        let sidebar_visible = self.workspace.as_ref().is_some_and(|w| w.sidebar_visible)
+            && (!inspector_visible || viewport >= self.sidebar_width + inspector_width + 480.0);
         let path = self
             .workspace
             .as_ref()
@@ -2591,7 +2699,7 @@ impl Render for TerminalManager {
             .clone()
             .or_else(|| {
                 self.save_failed.then(|| {
-                    "Layout could not be saved. Check storage access and choose Retry save.".into()
+                    "Layout and checklist changes could not be saved. Check storage access and choose Retry save.".into()
                 })
             })
             .or_else(|| self.notice.clone());
@@ -2710,6 +2818,9 @@ impl Render for TerminalManager {
             .on_action(
                 cx.listener(|view, _: &ToggleProjects, window, cx| view.toggle_sidebar(window, cx)),
             )
+            .on_action(cx.listener(|view, _: &ToggleChecklist, window, cx| {
+                view.toggle_checklist(window, cx)
+            }))
             .on_action(cx.listener(|view, _: &FocusTerminal, window, cx| {
                 if let Some(pane) = view.active_terminal() {
                     pane.update(cx, |pane, cx| pane.focus_terminal(window, cx));
@@ -2800,6 +2911,8 @@ impl Render for TerminalManager {
                     })
                     .child(
                         div()
+                            .id("terminal-content-slot")
+                            .debug_selector(|| "terminal-content-slot".into())
                             .flex_1()
                             .min_w_0()
                             .min_h_0()
@@ -2835,7 +2948,22 @@ impl Render for TerminalManager {
                                         )
                                 },
                             ),
-                    ),
+                    )
+                    .when(inspector_visible, |body| {
+                        body.when_some(
+                            self.active_project().map(|p| p.checklist.clone()),
+                            |body, checklist| {
+                                body.child(
+                                    div()
+                                        .w(px(inspector_width))
+                                        .flex_shrink_0()
+                                        .h_full()
+                                        .min_h_0()
+                                        .child(checklist),
+                                )
+                            },
+                        )
+                    }),
             )
             .when_some(warning, |workbench, warning| {
                 workbench.child(
@@ -3038,6 +3166,104 @@ mod tests {
             update_scheduling: false,
             _bounds_subscription: Subscription::new(|| {}),
         }
+    }
+
+    #[gpui::test]
+    fn checklist_toggle_preserves_project_state_and_sidebar_preference(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let window = cx.add_window(|_, cx| fixture(cx));
+        window
+            .update(cx, |view, window, cx| {
+                view.saving = true;
+                let workspace = view.workspace.as_mut().unwrap();
+                workspace.projects[0].checklist.sections[0]
+                    .add("First project reminder".into(), None);
+                workspace.insert_project("synthetic-project-two".into());
+                workspace.projects[1].checklist.sections[0]
+                    .add("Second project reminder".into(), None);
+                view.push_terminal("synthetic-project-one".into(), 1, 0, window, cx);
+                view.push_terminal("synthetic-project-two".into(), 1, 0, window, cx);
+                view.toggle_checklist(window, cx);
+                assert!(view.workspace.as_ref().unwrap().inspector_visible);
+                let first = view.projects[0].checklist.clone();
+                let second = view.projects[1].checklist.clone();
+                assert_ne!(first.entity_id(), second.entity_id());
+                assert_eq!(
+                    first.read(cx).snapshot().sections[0].tasks[0].label,
+                    "First project reminder"
+                );
+                assert_eq!(
+                    second.read(cx).snapshot().sections[0].tasks[0].label,
+                    "Second project reminder"
+                );
+                view.toggle_checklist(window, cx);
+                assert!(!view.workspace.as_ref().unwrap().inspector_visible);
+                assert!(view.workspace.as_ref().unwrap().sidebar_visible);
+                assert_eq!(first.read(cx).snapshot().sections[0].tasks.len(), 1);
+                view.update_scheduling = true;
+                view.toggle_checklist(window, cx);
+                assert!(!view.workspace.as_ref().unwrap().inspector_visible);
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn checklist_renders_at_the_right_and_toggles_from_toolbar_and_keyboard(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(super::super::file_editor::FileEditor::initialize);
+        let (root, cx) = cx.add_window_view(|window, cx| {
+            let manager = cx.new(|cx| {
+                let mut view = fixture(cx);
+                // Match app startup: component initialization precedes app shortcuts.
+                TerminalManager::bind_keys(cx);
+                view.saving = true;
+                view.push_terminal("synthetic-project-one".into(), 1, 0, window, cx);
+                view
+            });
+            gpui_component::Root::new(manager, window, cx)
+        });
+        let manager = root.read_with(cx, |root, _| {
+            root.view()
+                .clone()
+                .downcast::<TerminalManager>()
+                .ok()
+                .unwrap()
+        });
+        cx.simulate_resize(gpui::size(px(1440.0), px(900.0)));
+        assert!(cx.debug_bounds("project-checklist").is_none());
+        let toggle = cx.debug_bounds("toggle-checklist").unwrap();
+        cx.simulate_click(toggle.center(), gpui::Modifiers::none());
+        let inspector = cx.debug_bounds("project-checklist").unwrap();
+        assert_eq!(inspector.size.width, px(chrome::CHECKLIST_WIDTH));
+        assert!(inspector.left() >= px(1000.0));
+        cx.simulate_resize(gpui::size(px(800.0), px(600.0)));
+        let compact = cx.debug_bounds("project-checklist").unwrap();
+        assert_eq!(compact.size.width, px(320.0));
+        let terminal_width = cx.debug_bounds("terminal-content-slot").unwrap().size.width;
+        assert!(manager.read_with(cx, |v, _| v.workspace.as_ref().unwrap().sidebar_visible));
+        cx.simulate_keystrokes("ctrl-shift-l");
+        assert!(
+            !manager.read_with(cx, |v, _| v.workspace.as_ref().unwrap().inspector_visible),
+            "shortcut must change the saved preference"
+        );
+        // GPUI 0.2.2 retains removed selectors in debug_bounds. Measure the
+        // still-rendered terminal to verify that closing releases the space.
+        assert!(cx.debug_bounds("terminal-content-slot").unwrap().size.width > terminal_width);
+        cx.simulate_keystrokes("ctrl-shift-l");
+        assert_eq!(
+            cx.debug_bounds("terminal-content-slot").unwrap().size.width,
+            terminal_width
+        );
+        cx.simulate_resize(gpui::size(px(680.0), px(600.0)));
+        assert!(cx.debug_bounds("terminal-content-slot").unwrap().right() > px(675.0));
+        assert!(manager.read_with(cx, |v, _| v.workspace.as_ref().unwrap().inspector_visible));
+        cx.simulate_resize(gpui::size(px(1440.0), px(900.0)));
+        assert_eq!(
+            cx.debug_bounds("project-checklist").unwrap().size.width,
+            px(chrome::CHECKLIST_WIDTH)
+        );
     }
 
     #[gpui::test]

@@ -14,6 +14,8 @@ pub(crate) struct TerminalProject {
     pub(crate) path: PathBuf,
     pub(crate) tab_count: usize,
     pub(crate) active_tab: usize,
+    #[serde(default)]
+    pub(crate) checklist: super::checklist::Checklist,
 }
 
 impl TerminalProject {
@@ -22,6 +24,7 @@ impl TerminalProject {
             path: super::paths::without_windows_verbatim_prefix(&path),
             tab_count: 1,
             active_tab: 0,
+            checklist: super::checklist::Checklist::default(),
         }
     }
 
@@ -37,6 +40,8 @@ pub(crate) struct TerminalWorkspace {
     pub(crate) projects: Vec<TerminalProject>,
     pub(crate) active: usize,
     pub(crate) sidebar_visible: bool,
+    #[serde(default)]
+    pub(crate) inspector_visible: bool,
     #[serde(default)]
     pub(crate) sidebar_width: Option<u16>,
 }
@@ -54,6 +59,7 @@ impl TerminalWorkspace {
             projects: vec![TerminalProject::new(initial_dir)],
             active: 0,
             sidebar_visible: true,
+            inspector_visible: false,
             sidebar_width: None,
         }
     }
@@ -92,7 +98,7 @@ impl TerminalWorkspace {
         (workspace, None)
     }
 
-    /// Persist layout only; terminal processes and scrollback are not serialized.
+    /// Persist layout and reminders; terminal processes and scrollback are not serialized.
     pub(crate) fn save(&self, path: &Path) -> io::Result<()> {
         let mut workspace = self.clone();
         workspace.normalize(Path::new("."));
@@ -154,6 +160,9 @@ impl TerminalWorkspace {
                 continue;
             }
             project.update_layout(project.tab_count, project.active_tab);
+            for section in &mut project.checklist.sections {
+                section.normalize();
+            }
             unique.push(project);
         }
         if unique.is_empty() {
@@ -199,6 +208,7 @@ fn same_path(left: &Path, right: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::services::checklist;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static NEXT_TEST: AtomicU64 = AtomicU64::new(1);
@@ -231,6 +241,11 @@ mod tests {
         let (mut workspace, warning) = TerminalWorkspace::load(&path, &root.0);
         assert!(warning.is_none());
         assert_eq!(workspace.sidebar_width, None);
+        assert!(!workspace.inspector_visible);
+        assert_eq!(
+            workspace.projects[0].checklist,
+            checklist::Checklist::default()
+        );
         workspace.sidebar_width = Some(900);
         workspace.normalize(&root.0);
         assert_eq!(workspace.sidebar_width, Some(420));
@@ -246,10 +261,18 @@ mod tests {
             ),
             tab_count: 3,
             active_tab: 2,
+            checklist: checklist::Checklist::default(),
         });
         workspace.active = 1;
         workspace.sidebar_visible = false;
         workspace.sidebar_width = Some(376);
+        workspace.inspector_visible = true;
+        let outline = &mut workspace.projects[0].checklist.sections[0];
+        outline.add("Synthetic parent".into(), None);
+        outline.add("Synthetic child".into(), Some(0));
+        outline.toggle(1);
+        outline.tasks[0].collapsed = true;
+        workspace.projects[1].checklist.sections[0].add("Other project".into(), None);
         let path = root.0.join("layout.json");
         workspace.save(&path).unwrap();
         let (loaded, warning) = TerminalWorkspace::load(&path, &root.0);
@@ -279,20 +302,24 @@ mod tests {
                     path: "one".into(),
                     tab_count: 0,
                     active_tab: 90,
+                    checklist: checklist::Checklist::default(),
                 },
                 TerminalProject {
                     path: "one".into(),
                     tab_count: 2,
                     active_tab: 1,
+                    checklist: checklist::Checklist::default(),
                 },
                 TerminalProject {
                     path: "two".into(),
                     tab_count: 90,
                     active_tab: 90,
+                    checklist: checklist::Checklist::default(),
                 },
             ],
             active: 2,
             sidebar_visible: true,
+            inspector_visible: false,
             sidebar_width: None,
         };
         workspace.normalize(Path::new("fallback"));
