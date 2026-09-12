@@ -635,6 +635,61 @@ mod tests {
     }
 
     #[gpui::test]
+    fn large_editor_replacements_deletions_and_undo(cx: &mut TestAppContext) {
+        cx.update(FileEditor::initialize);
+        let original = "Unicode 😀 line of source text\n".repeat(4000);
+        let (root, cx) = cx.add_window_view(|window, cx| {
+            let editor = cx.new(|cx| {
+                let mut editor = FileEditor::new(
+                    Source {
+                        project: PathBuf::from("synthetic-project"),
+                        path: PathBuf::from("synthetic-project/file.json"),
+                    },
+                    &original,
+                    window,
+                    cx,
+                );
+                editor.snapshot = Some(snapshot(&original));
+                editor.focus(window, cx);
+                editor
+            });
+            Root::new(editor, window, cx)
+        });
+        let editor = root.read_with(cx, |root, _| {
+            root.view().clone().downcast::<FileEditor>().ok().unwrap()
+        });
+        for replacement in ["replacement 😀\n".repeat(6000), "x".repeat(100_000)] {
+            cx.simulate_keystrokes("ctrl-a");
+            cx.update(|_, cx| {
+                cx.write_to_clipboard(gpui::ClipboardItem::new_string(replacement.clone()))
+            });
+            cx.simulate_keystrokes("ctrl-v");
+            cx.run_until_parked();
+            assert!(editor.read_with(cx, |editor, _| editor.is_dirty()));
+            assert_eq!(
+                editor.read_with(cx, |editor, cx| editor.input.read(cx).value().to_string()),
+                replacement
+            );
+            cx.simulate_keystrokes("ctrl-a backspace");
+            cx.run_until_parked();
+            assert!(editor.read_with(cx, |editor, cx| editor.input.read(cx).value().is_empty()));
+            // Undo grouping uses wall time; either one or two steps must
+            // restore the baseline, independent of machine speed.
+            for _ in 0..2 {
+                cx.simulate_keystrokes("ctrl-z");
+                cx.run_until_parked();
+                if !editor.read_with(cx, |editor, _| editor.is_dirty()) {
+                    break;
+                }
+            }
+            assert!(
+                editor.read_with(cx, |editor, cx| editor.input.read(cx).value().as_ref()
+                    == original)
+            );
+        }
+    }
+
+    #[gpui::test]
     fn editor_tracks_unicode_edits_undo_and_late_save_completion(cx: &mut TestAppContext) {
         cx.update(FileEditor::initialize);
         let (root, cx) = cx.add_window_view(|window, cx| {
