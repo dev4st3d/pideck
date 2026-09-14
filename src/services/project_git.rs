@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
 use std::fmt;
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
@@ -14,6 +14,8 @@ use std::time::{Duration, Instant};
 const MAX_OUTPUT_BYTES: usize = 2 * 1024 * 1024;
 const MAX_STATUS_ENTRIES: usize = 2_000;
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
+
+pub(crate) mod workflow;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct GitEntry {
@@ -107,6 +109,16 @@ pub(crate) struct ReviewFile {
     pub(crate) position: usize,
     pub(crate) total: usize,
     pub(crate) marker: &'static str,
+    pub(crate) commit: Option<Arc<workflow::CommitDetails>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ReviewAction {
+    Navigate(i32),
+    Stage,
+    Discard(Option<(usize, String)>),
+    SelectFile(usize),
+    SelectParent(usize),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -320,6 +332,15 @@ fn read_pipe(mut pipe: impl Read, limit: usize, exceeded: &AtomicBool) -> io::Re
 }
 
 fn run_git(root: &Path, args: &[OsString]) -> Result<CommandOutput, GitError> {
+    run_git_with_input(root, args, None, COMMAND_TIMEOUT)
+}
+
+fn run_git_with_input(
+    root: &Path,
+    args: &[OsString],
+    input: Option<Vec<u8>>,
+    timeout: Duration,
+) -> Result<CommandOutput, GitError> {
     let mut command = Command::new("git");
     command
         .arg("--no-pager")
@@ -336,10 +357,15 @@ fn run_git(root: &Path, args: &[OsString]) -> Result<CommandOutput, GitError> {
         .args(args)
         .env("GIT_OPTIONAL_LOCKS", "0")
         .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GCM_INTERACTIVE", "Never")
         .env_remove("GIT_DIR")
         .env_remove("GIT_WORK_TREE")
         .env_remove("GIT_INDEX_FILE")
-        .stdin(Stdio::null())
+        .stdin(if input.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     #[cfg(windows)]
@@ -363,6 +389,27 @@ fn run_git(root: &Path, args: &[OsString]) -> Result<CommandOutput, GitError> {
         let _ = child.kill();
         let _ = child.wait();
         return Err(GitError::ReadFailed);
+    };
+    let input_writer = match input {
+        Some(bytes) => {
+            let Some(mut stdin) = child.stdin.take() else {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(GitError::ReadFailed);
+            };
+            match thread::Builder::new()
+                .name("pideck-git-input".into())
+                .spawn(move || stdin.write_all(&bytes))
+            {
+                Ok(writer) => Some(writer),
+                Err(_) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(GitError::ReadFailed);
+                }
+            }
+        }
+        None => None,
     };
     let output_exceeded = Arc::new(AtomicBool::new(false));
     let error_exceeded = Arc::new(AtomicBool::new(false));
@@ -407,7 +454,7 @@ fn run_git(root: &Path, args: &[OsString]) -> Result<CommandOutput, GitError> {
         if output_exceeded.load(Ordering::Acquire) {
             break Ok(false);
         }
-        if started.elapsed() >= COMMAND_TIMEOUT {
+        if started.elapsed() >= timeout {
             break Err(GitError::TimedOut);
         }
         thread::sleep(Duration::from_millis(10));
@@ -417,8 +464,13 @@ fn run_git(root: &Path, args: &[OsString]) -> Result<CommandOutput, GitError> {
     let success = completion?;
     // A descendant inheriting a pipe must not extend the command deadline.
     // Dropping unfinished handles detaches their readers instead of blocking the UI worker.
-    while !output_reader.is_finished() || !error_reader.is_finished() {
-        if started.elapsed() >= COMMAND_TIMEOUT {
+    while !output_reader.is_finished()
+        || !error_reader.is_finished()
+        || input_writer
+            .as_ref()
+            .is_some_and(|writer| !writer.is_finished())
+    {
+        if started.elapsed() >= timeout {
             return Err(GitError::TimedOut);
         }
         thread::sleep(Duration::from_millis(10));
@@ -431,6 +483,12 @@ fn run_git(root: &Path, args: &[OsString]) -> Result<CommandOutput, GitError> {
         .join()
         .map_err(|_| GitError::ReadFailed)?
         .map_err(|_| GitError::ReadFailed)?;
+    if let Some(writer) = input_writer {
+        let wrote = writer.join().map_err(|_| GitError::ReadFailed)?;
+        if success {
+            wrote.map_err(|_| GitError::ReadFailed)?;
+        }
+    }
     if error_exceeded.load(Ordering::Acquire) {
         return Err(GitError::ReadFailed);
     }
@@ -596,7 +654,18 @@ pub(crate) fn read_status(root: &Path) -> Result<GitStatus, GitError> {
     let working_stats = read_numstat(&project_root, false);
     let staged_stats = read_numstat(&project_root, true);
     for entry in &mut status.entries {
-        if entry.untracked || entry.conflicted {
+        if entry.untracked {
+            if let Ok(snapshot) = super::project_files::load_text_file(&project_root, &entry.path) {
+                let stats = GitLineStats {
+                    additions: snapshot.text.lines().count(),
+                    deletions: 0,
+                };
+                entry.working_stats = Some(stats);
+                entry.line_stats = Some(stats);
+            }
+            continue;
+        }
+        if entry.conflicted {
             continue;
         }
         entry.working_stats = working_stats
@@ -1082,13 +1151,13 @@ mod tests {
                 deletions: 1
             })
         );
-        assert!(
-            status
-                .entries
-                .iter()
-                .filter(|entry| entry.untracked)
-                .all(|entry| entry.line_stats.is_none())
-        );
+        assert!(status.entries.iter().filter(|entry| entry.untracked).all(
+            |entry| entry.line_stats
+                == Some(GitLineStats {
+                    additions: 1,
+                    deletions: 0
+                })
+        ));
         let staged = file_diff(&project, &tracked.path, DiffKind::Staged).unwrap();
         assert!(staged.text.contains("+baseline"));
         let worktree = file_diff(&project, &tracked.path, DiffKind::WorkingTree).unwrap();

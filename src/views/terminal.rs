@@ -37,9 +37,8 @@ pub(crate) enum TerminalPanelEvent {
     ContentChanged,
     FilesSaved,
     Review {
-        path: PathBuf,
-        kind: crate::services::project_git::DiffKind,
-        direction: i32,
+        file: crate::services::project_git::ReviewFile,
+        action: crate::services::project_git::ReviewAction,
     },
 }
 
@@ -528,6 +527,9 @@ impl TerminalView {
         }
         self.files_locked = true;
         for tab in &self.tabs {
+            if let TabContent::Diff { view, .. } = &tab.content {
+                view.update(cx, |view, cx| view.set_operation_busy(true, cx));
+            }
             if let Some(editor) = tab.content.editor() {
                 editor.update(cx, |editor, cx| editor.lock_saves(true, cx));
             }
@@ -538,6 +540,9 @@ impl TerminalView {
     pub(crate) fn end_file_change(&mut self, cx: &mut Context<Self>) {
         self.files_locked = false;
         for tab in &self.tabs {
+            if let TabContent::Diff { view, .. } = &tab.content {
+                view.update(cx, |view, cx| view.set_operation_busy(false, cx));
+            }
             if let Some(editor) = tab.content.editor() {
                 editor.update(cx, |editor, cx| editor.lock_saves(false, cx));
             }
@@ -649,16 +654,21 @@ impl TerminalView {
         &mut self,
         file: crate::services::project_git::ReviewFile,
         content: crate::services::project_git::DiffContent,
+        activate: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let activate = matches!(content, crate::services::project_git::DiffContent::Loading);
         let title = file
-            .path
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .into_owned();
+            .commit
+            .as_ref()
+            .map(|commit| commit.summary.subject.clone())
+            .unwrap_or_else(|| {
+                file.path
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned()
+            });
         if let Some(tab) = self
             .tabs
             .iter_mut()
@@ -666,7 +676,10 @@ impl TerminalView {
         {
             if let TabContent::Diff { title: label, view } = &mut tab.content {
                 *label = title;
-                view.update(cx, |view, cx| view.update_snapshot(file, content, cx));
+                view.update(cx, |view, cx| {
+                    view.update_snapshot(file, content, cx);
+                    view.set_operation_busy(self.files_locked, cx);
+                });
             }
             let id = tab.id;
             if activate {
@@ -679,6 +692,9 @@ impl TerminalView {
             return;
         }
         let view = cx.new(|cx| DiffView::new(self.workspace.clone(), file, content, cx));
+        view.update(cx, |view, cx| {
+            view.set_operation_busy(self.files_locked, cx)
+        });
         let subscription = cx.subscribe_in(
             &view,
             window,
@@ -686,10 +702,9 @@ impl TerminalView {
                 let file = diff.read(cx).file.clone();
                 match event {
                     diff::DiffEvent::OpenFile => pane.open_file(file.path, window, cx),
-                    diff::DiffEvent::Navigate(direction) => cx.emit(TerminalPanelEvent::Review {
-                        path: file.path,
-                        kind: file.kind,
-                        direction: *direction,
+                    diff::DiffEvent::Review(action) => cx.emit(TerminalPanelEvent::Review {
+                        file,
+                        action: action.clone(),
                     }),
                 }
             },
