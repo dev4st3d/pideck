@@ -9,6 +9,8 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, atomic::AtomicBool};
 mod file_actions;
+mod git_history;
+mod git_workflow;
 
 use gpui::{
     Context, EventEmitter, FocusHandle, FontWeight, IntoElement, KeyDownEvent, Render,
@@ -18,7 +20,9 @@ use gpui::{
 
 use super::terminal_manager::text_tooltip;
 use crate::services::project_files::{self, DirectoryEntry, DirectoryListing};
-use crate::services::project_git::{self, DiffContent, DiffKind, GitEntry, GitStatus, ReviewFile};
+use crate::services::project_git::{
+    self, DiffContent, DiffKind, GitEntry, GitStatus, ReviewFile, workflow,
+};
 use crate::theme::{self, terminal_manager as chrome};
 
 const FILE_ROW_HEIGHT: f32 = chrome::TREE_ROW_HEIGHT;
@@ -32,10 +36,12 @@ pub(super) enum ProjectPanelEvent {
     OpenDiff {
         file: ReviewFile,
         content: DiffContent,
+        activate: bool,
     },
     ToggleSidebar,
     FilesChanged,
     BranchChanged,
+    WorktreeChanged,
 }
 
 #[derive(Default)]
@@ -843,14 +849,17 @@ impl Render for FilesPanel {
 
 pub(super) struct GitPanel {
     root: PathBuf,
-    filter_input: Entity<InputState>,
-    query: String,
-    browse_state: Option<(
-        HashSet<(DiffKind, PathBuf)>,
-        Option<(DiffKind, PathBuf)>,
-        gpui::ListState,
-    )>,
-    _filter_subscription: Subscription,
+    commit_input: Entity<InputState>,
+    _commit_subscription: Subscription,
+    repository: Option<workflow::Repository>,
+    operation: Option<&'static str>,
+    operation_error: Option<String>,
+    notice: Option<String>,
+    pending_discard: Option<workflow::DiscardPlan>,
+    publish_picker: bool,
+    history: git_workflow::HistoryState,
+    review_file: Option<ReviewFile>,
+    refresh_review: bool,
     terminal: WeakEntity<TerminalView>,
     rows: Vec<project_git::ChangeRow>,
     collapsed: HashSet<(DiffKind, PathBuf)>,
@@ -889,19 +898,35 @@ impl GitPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let filter_input =
-            cx.new(|cx| InputState::new(window, cx).placeholder("Filter changed files…"));
-        let subscription = cx.subscribe(&filter_input, |view, input, event: &InputEvent, cx| {
-            if matches!(event, InputEvent::Change) {
-                view.set_filter(input.read(cx).value().to_string(), cx);
-            }
+        let commit_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .multi_line(true)
+                .rows(3)
+                .placeholder("Commit message")
         });
+        let subscription = cx.subscribe_in(
+            &commit_input,
+            window,
+            |view, _, event: &InputEvent, window, cx| {
+                if matches!(event, InputEvent::PressEnter { secondary: true }) {
+                    view.commit_staged(window, cx);
+                }
+                cx.notify();
+            },
+        );
         Self {
             root,
-            filter_input,
-            query: String::new(),
-            browse_state: None,
-            _filter_subscription: subscription,
+            commit_input,
+            _commit_subscription: subscription,
+            repository: None,
+            operation: None,
+            operation_error: None,
+            notice: None,
+            pending_discard: None,
+            publish_picker: false,
+            history: git_workflow::HistoryState::new(),
+            review_file: None,
+            refresh_review: false,
             terminal,
             rows: Vec::new(),
             collapsed: HashSet::new(),
@@ -936,7 +961,7 @@ impl GitPanel {
     }
 
     pub(super) fn refresh(&mut self, cx: &mut Context<Self>) {
-        if self.loading {
+        if self.loading || self.operation.is_some() {
             self.refresh_pending = true;
             return;
         }
@@ -947,26 +972,39 @@ impl GitPanel {
         self.error = None;
         let root = self.root.clone();
         let task = cx.background_executor().spawn(async move {
-            let status = project_git::read_status(&root)?;
-            let branches = project_git::branches(&root)?;
-            Ok::<_, project_git::GitError>((status, branches))
+            let status = project_git::read_status(&root).map_err(|e| e.to_string())?;
+            let branches = project_git::branches(&root).map_err(|e| e.to_string())?;
+            let repository = workflow::repository(&root)?;
+            Ok::<_, String>((status, branches, repository))
         });
         cx.spawn(async move |view, cx| {
-            let status = task.await;
+            let result = task.await;
             let _ = view.update(cx, |view, cx| {
                 if view.generation != generation {
                     return;
                 }
                 view.loading = false;
-                match status {
-                    Ok((status, branches)) => {
+                match result {
+                    Ok((status, branches, repository)) => {
+                        let changed = view.repository.as_ref().is_none_or(|old| {
+                            old.head != repository.head
+                                || old.upstream != repository.upstream
+                                || old.ahead != repository.ahead
+                        });
                         view.branches = branches;
+                        view.repository = Some(repository);
                         view.status = Some(status);
                         view.rebuild_changes();
+                        if view.history.visible && (changed || view.history.anchor.is_none()) {
+                            view.load_history(false, cx);
+                        }
+                        if view.refresh_review {
+                            view.refresh_review = false;
+                            view.refresh_active_review(cx);
+                        }
                     }
-                    Err(error) => view.error = Some(error.to_string()),
+                    Err(error) => view.error = Some(error),
                 }
-                // A save may finish while Git is reading the previous state.
                 if view.refresh_pending {
                     view.refresh(cx);
                 }
@@ -977,7 +1015,13 @@ impl GitPanel {
         cx.notify();
     }
 
-    fn open_entry(&mut self, entry: GitEntry, kind: DiffKind, cx: &mut Context<Self>) {
+    fn open_entry(
+        &mut self,
+        entry: GitEntry,
+        kind: DiffKind,
+        activate: bool,
+        cx: &mut Context<Self>,
+    ) {
         self.diff_generation += 1;
         let generation = self.diff_generation;
         let path = entry.path.clone();
@@ -993,10 +1037,13 @@ impl GitPanel {
             position,
             total: visible.len(),
             marker: entry.marker(kind),
+            commit: None,
         };
+        self.review_file = Some(file.clone());
         cx.emit(ProjectPanelEvent::OpenDiff {
             file: file.clone(),
             content: DiffContent::Loading,
+            activate,
         });
         let root = self.root.clone();
         let task = cx.background_executor().spawn(async move {
@@ -1005,12 +1052,7 @@ impl GitPanel {
             } else {
                 project_git::file_diff(&root, &entry.path, kind)?
             };
-            let label = if kind == DiffKind::Staged {
-                "Staged"
-            } else {
-                "Working tree"
-            };
-            let mut text = format!("{label}\n\n{}\n", diff.text);
+            let mut text = diff.text;
             if diff.truncated {
                 text.push_str("\nDiff truncated: open the file to inspect the full change.\n");
             }
@@ -1027,7 +1069,11 @@ impl GitPanel {
                     Ok(text) => DiffContent::Ready(text),
                     Err(error) => DiffContent::Error(error.to_string()),
                 };
-                cx.emit(ProjectPanelEvent::OpenDiff { file, content });
+                cx.emit(ProjectPanelEvent::OpenDiff {
+                    file,
+                    content,
+                    activate: false,
+                });
                 cx.notify();
             });
         })
@@ -1039,7 +1085,7 @@ impl GitPanel {
         self.status
             .as_ref()
             .map(|status| {
-                project_git::filtered_change_rows(status, &HashSet::new(), &self.query)
+                project_git::change_rows(status, &HashSet::new())
                     .iter()
                     .filter(|row| row.kind == kind)
                     .filter_map(|row| row.entry.map(|index| status.entries[index].clone()))
@@ -1077,46 +1123,7 @@ impl GitPanel {
             .unwrap_or(0);
         self.selection_visible = true;
         self.scroll.scroll_to_reveal_item(self.selected);
-        self.open_entry(entry, kind, cx);
-    }
-
-    fn set_filter(&mut self, query: String, cx: &mut Context<Self>) {
-        let query = query.trim().to_owned();
-        if self.query == query {
-            return;
-        }
-        if self.query.is_empty() && !query.is_empty() {
-            self.browse_state = Some((
-                self.collapsed.clone(),
-                self.rows
-                    .get(self.selected)
-                    .map(|row| (row.kind, row.path.clone())),
-                self.scroll.clone(),
-            ));
-            self.scroll = gpui::ListState::new(0, gpui::ListAlignment::Top, px(200.0));
-            self.collapsed.clear();
-        }
-        self.query = query;
-        if self.query.is_empty() {
-            if let Some((collapsed, selected, scroll)) = self.browse_state.take() {
-                self.collapsed = collapsed;
-                let offset = scroll.logical_scroll_top();
-                self.scroll = scroll;
-                self.rebuild_changes();
-                self.scroll.scroll_to(offset);
-                self.selected = selected
-                    .and_then(|key| {
-                        self.rows
-                            .iter()
-                            .position(|row| (row.kind, row.path.clone()) == key)
-                    })
-                    .unwrap_or(0);
-            }
-        } else {
-            self.collapsed.clear();
-            self.rebuild_changes();
-        }
-        cx.notify();
+        self.open_entry(entry, kind, true, cx);
     }
 
     fn collapse_all(&mut self, cx: &mut Context<Self>) {
@@ -1144,7 +1151,7 @@ impl GitPanel {
         self.rows = self
             .status
             .as_ref()
-            .map(|status| project_git::filtered_change_rows(status, &self.collapsed, &self.query))
+            .map(|status| project_git::change_rows(status, &self.collapsed))
             .unwrap_or_default();
         self.scroll
             .splice(0..self.scroll.item_count(), self.rows.len());
@@ -1190,7 +1197,7 @@ impl GitPanel {
             .and_then(|index| self.status.as_ref()?.entries.get(index))
             .cloned()
         {
-            self.open_entry(entry, row.kind, cx);
+            self.open_entry(entry, row.kind, true, cx);
         } else {
             let key = (row.kind, row.path);
             if !self.collapsed.remove(&key) {
@@ -1202,7 +1209,7 @@ impl GitPanel {
     }
 
     fn choose_branch(&mut self, branch: String, cx: &mut Context<Self>) {
-        if self.switching || self.branch() == Some(branch.as_str()) {
+        if self.git_busy() || self.branch() == Some(branch.as_str()) {
             self.branch_picker = false;
             cx.notify();
             return;
@@ -1247,6 +1254,17 @@ impl GitPanel {
     }
 
     fn on_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if self.pending_discard.is_some() && event.keystroke.key == "escape" {
+            self.pending_discard = None;
+            window.focus(&self.focus);
+            cx.stop_propagation();
+            cx.notify();
+            return;
+        }
+        if self.history.visible && self.focus.is_focused(window) {
+            self.history_key(event, window, cx);
+            return;
+        }
         if !self.focus.is_focused(window) {
             return;
         }
@@ -1288,361 +1306,15 @@ impl GitPanel {
     }
 
     fn row(&self, index: usize, focused: bool, cx: &mut Context<Self>) -> impl IntoElement {
-        let row = &self.rows[index];
-        let entry = row
-            .entry
-            .and_then(|index| self.status.as_ref()?.entries.get(index));
-        let expanded = !self.collapsed.contains(&(row.kind, row.path.clone()));
-        let section = row.path.as_os_str().is_empty();
-        let selected = (self.selection_visible || focused) && self.selected == index;
-        div()
-            .h(px(if section { 32.0 } else { GIT_ROW_HEIGHT }))
-            .w_full()
-            .min_w_0()
-            .overflow_hidden()
-            .px(px(8.0))
-            .relative()
-            .children((1..row.depth).map(|depth| {
-                div()
-                    .absolute()
-                    .left(px(8.0 + (depth - 1) as f32 * chrome::TREE_INDENT))
-                    .top_0()
-                    .bottom_0()
-                    .w(px(1.0))
-                    .bg(theme::edge())
-            }))
-            .child(
-                div()
-                    .id(("git-row", index))
-                    .debug_selector(move || format!("git-row-{index}"))
-                    .size_full()
-                    .min_w_0()
-                    .overflow_hidden()
-                    .pl(px(
-                        4.0 + row.depth.saturating_sub(1) as f32 * chrome::TREE_INDENT
-                    ))
-                    .pr(px(6.0))
-                    .flex()
-                    .items_center()
-                    .gap(px(6.0))
-                    .rounded(px(4.0))
-                    .text_size(px(if section { 12.0 } else { 13.0 }))
-                    .font_weight(if section {
-                        FontWeight::MEDIUM
-                    } else {
-                        FontWeight::NORMAL
-                    })
-                    .text_color(theme::bone())
-                    .border_1()
-                    .border_color(if selected && focused {
-                        theme::focus()
-                    } else {
-                        rgba(0)
-                    })
-                    .bg(if selected && focused {
-                        theme::selection()
-                    } else if selected {
-                        theme::panel_hover()
-                    } else {
-                        rgba(0)
-                    })
-                    .hover(|style| style.bg(theme::panel_hover()))
-                    .cursor_pointer()
-                    .tooltip(text_tooltip(row.path.to_string_lossy().into_owned()))
-                    .on_click(cx.listener(move |view, _, window, cx| {
-                        window.focus(&view.focus);
-                        view.selection_visible = true;
-                        view.open_change(index, cx);
-                    }))
-                    .child(
-                        div()
-                            .w(px(14.0))
-                            .flex_shrink_0()
-                            .when(entry.is_none(), |item| {
-                                item.child(panel_icon(if expanded {
-                                    "icons/chevron-down.svg"
-                                } else {
-                                    "icons/chevron-right.svg"
-                                }))
-                            }),
-                    )
-                    .when(!section, |item| {
-                        item.child(project_icon(&row.path, entry.is_none(), expanded))
-                    })
-                    .child(if section {
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .child(if row.kind == DiffKind::Staged {
-                                "Staged"
-                            } else {
-                                "Unstaged"
-                            })
-                            .into_any_element()
-                    } else {
-                        filename(&row.path).into_any_element()
-                    })
-                    .when(entry.is_none(), |item| {
-                        item.child(
-                            div()
-                                .flex_shrink_0()
-                                .font_family(theme::mono())
-                                .text_size(px(11.0))
-                                .text_color(theme::ash())
-                                .child(row.count.to_string()),
-                        )
-                    })
-                    .when_some(entry, |item, entry| {
-                        item.child(
-                            div()
-                                .w(px(16.0))
-                                .flex_shrink_0()
-                                .font_family(theme::mono())
-                                .text_size(px(11.0))
-                                .text_color(theme::ash())
-                                .child(entry.marker(row.kind)),
-                        )
-                        .child(
-                            div()
-                                .w(px(68.0))
-                                .flex_shrink_0()
-                                .min_w_0()
-                                .overflow_hidden()
-                                .flex()
-                                .justify_end()
-                                .gap(px(4.0))
-                                .font_family(theme::mono())
-                                .text_size(px(10.0))
-                                .when_some(entry.stats(row.kind), |stats, lines| {
-                                    stats
-                                        .child(
-                                            div()
-                                                .text_color(theme::success())
-                                                .child(format!("+{}", lines.additions)),
-                                        )
-                                        .child(
-                                            div()
-                                                .text_color(theme::error())
-                                                .child(format!("−{}", lines.deletions)),
-                                        )
-                                })
-                                .when(entry.stats(row.kind).is_none(), |stats| {
-                                    stats.child(div().text_color(theme::ash()).child("—"))
-                                }),
-                        )
-                    }),
-            )
+        self.render_change_row(index, focused, cx)
     }
 }
 
 impl EventEmitter<ProjectPanelEvent> for GitPanel {}
 
 impl Render for GitPanel {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let count = self.change_count().unwrap_or(0);
-        let branch = self.branch().map(str::to_owned);
-        div()
-            .id("git-panel")
-            .track_focus(&self.focus)
-            .tab_index(0)
-            .size_full()
-            .min_h_0()
-            .min_w_0()
-            .overflow_hidden()
-            .flex()
-            .flex_col()
-            .font_family(chrome::CHROME_FONT)
-            .font_weight(FontWeight::NORMAL)
-            .text_size(px(chrome::CHROME_TEXT_SIZE))
-            .line_height(px(chrome::CHROME_LINE_HEIGHT))
-            .text_color(theme::bone())
-            .on_key_down(cx.listener(Self::on_key))
-            .child(
-                div()
-                    .h(px(48.0))
-                    .px(px(16.0))
-                    .flex_shrink_0()
-                    .flex()
-                    .items_center()
-                    .gap(px(6.0))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .font_weight(FontWeight::MEDIUM)
-                            .child("Working changes"),
-                    )
-                    .when(self.loading, |header| {
-                        header.child(row_metadata("Refreshing…", false))
-                    })
-                    .child(
-                        icon_control(
-                            "collapse-git",
-                            "Collapse all folders",
-                            "icons/collapse-all.svg",
-                        )
-                        .on_click(cx.listener(|view, _, _, cx| view.collapse_all(cx))),
-                    )
-                    .child(
-                        icon_control("refresh-git", "Refresh changes · F5", "icons/refresh.svg")
-                            .on_click(cx.listener(|view, _, _, cx| view.refresh(cx))),
-                    ),
-            )
-            .when_some(branch, |panel, branch| {
-                panel.child(
-                    div()
-                        .id("choose-branch")
-                        .mx(px(12.0))
-                        .mb(px(12.0))
-                        .h(px(32.0))
-                        .flex_shrink_0()
-                        .min_w_0()
-                        .px(px(10.0))
-                        .flex()
-                        .items_center()
-                        .gap(px(8.0))
-                        .bg(theme::canvas())
-                        .border_1()
-                        .border_color(theme::edge())
-                        .rounded(px(5.0))
-                        .tab_index(0)
-                        .cursor_pointer()
-                        .hover(|style| style.bg(theme::panel_hover()))
-                        .focus(|style| style.border_color(theme::focus()))
-                        .tooltip(text_tooltip(format!("Choose branch · B\n{branch}")))
-                        .on_click(cx.listener(|view, _, _, cx| {
-                            if !view.switching {
-                                view.branch_picker = !view.branch_picker;
-                                cx.notify();
-                            }
-                        }))
-                        .child(panel_icon("icons/branch.svg"))
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .truncate()
-                                .font_family(theme::mono())
-                                .text_size(px(12.0))
-                                .child(branch),
-                        )
-                        .child(panel_icon("icons/chevron-down.svg")),
-                )
-            })
-            .when(self.switching, |panel| {
-                panel.child(message("Switching branch…"))
-            })
-            .when(self.branch_picker, |panel| {
-                panel.child(
-                    div()
-                        .id("branch-list")
-                        .max_h(px(240.0))
-                        .overflow_y_scroll()
-                        .px(px(12.0))
-                        .children(self.branches.iter().enumerate().map(|(index, branch)| {
-                            let branch = branch.clone();
-                            div()
-                                .id(("branch-option", index))
-                                .tab_index(0)
-                                .h(px(32.0))
-                                .px(px(8.0))
-                                .min_w_0()
-                                .flex()
-                                .items_center()
-                                .cursor_pointer()
-                                .hover(|style| style.bg(theme::panel_hover()))
-                                .focus(|style| {
-                                    style.bg(theme::selection()).border_color(theme::focus())
-                                })
-                                .child(div().truncate().child(branch.clone()))
-                                .on_click(cx.listener(move |view, _, _, cx| {
-                                    view.choose_branch(branch.clone(), cx)
-                                }))
-                        }))
-                        .when(self.branches.is_empty(), |list| {
-                            list.child(message("No local branches yet."))
-                        }),
-                )
-            })
-            .child(filter_field(&self.filter_input, 0.0, 8.0))
-            .child(
-                gpui::list(
-                    self.scroll.clone(),
-                    cx.processor(|view, index, window, cx| {
-                        let focused = view.focus.is_focused(window);
-                        view.row(index, focused, cx).into_any_element()
-                    }),
-                )
-                .flex_1()
-                .min_h_0()
-                .min_w_0(),
-            )
-            .when(count == 0 && self.error.is_none(), |panel| {
-                panel.child(message(if self.loading {
-                    "Reading Git status…"
-                } else {
-                    "No working changes"
-                }))
-            })
-            .when(count > 0 && self.rows.is_empty(), |panel| {
-                panel.child(message(format!(
-                    "No changes match “{}”. Clear the filter to see all changes.",
-                    self.query
-                )))
-            })
-            .when(!self.query.is_empty() && self.rows.is_empty(), |panel| {
-                panel.child(file_actions::control(
-                    "Clear filter",
-                    cx.listener(|view, _, window, cx| {
-                        view.filter_input
-                            .update(cx, |input, cx| input.set_value("", window, cx));
-                    }),
-                ))
-            })
-            .when_some(self.error.clone(), |panel, error| {
-                panel.child(
-                    div()
-                        .p(px(12.0))
-                        .flex_shrink_0()
-                        .flex()
-                        .flex_col()
-                        .gap(px(8.0))
-                        .child(
-                            div()
-                                .text_color(theme::error())
-                                .child(if self.status.is_some() {
-                                    "Could not refresh changes. Showing the last successful list."
-                                        .to_owned()
-                                } else {
-                                    error
-                                }),
-                        )
-                        .child(file_actions::control(
-                            "Retry",
-                            cx.listener(|view, _, _, cx| view.refresh(cx)),
-                        )),
-                )
-            })
-            .when(
-                self.status.as_ref().is_some_and(|status| status.truncated),
-                |panel| panel.child(message("Large change list: some entries are hidden.")),
-            )
-            .child(
-                div()
-                    .h(px(28.0))
-                    .flex_shrink_0()
-                    .min_w_0()
-                    .overflow_hidden()
-                    .border_t_1()
-                    .border_color(theme::edge())
-                    .px(px(16.0))
-                    .flex()
-                    .items_center()
-                    .text_size(px(11.0))
-                    .text_color(theme::ash())
-                    .child(div().min_w_0().truncate().child("M Modified   U Untracked")),
-            )
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.render_git_panel(window, cx)
     }
 }
 
@@ -1812,7 +1484,7 @@ mod reimagined_tests {
     }
 
     #[gpui::test]
-    fn git_filter_and_collapse_preserve_section_identity(cx: &mut gpui::TestAppContext) {
+    fn git_collapse_preserves_section_identity(cx: &mut gpui::TestAppContext) {
         cx.update(super::super::file_editor::FileEditor::initialize);
         let window = cx.add_window(|window, cx| {
             let terminal = cx.new(|cx| TerminalView::new("project".into(), cx));
@@ -1829,7 +1501,7 @@ mod reimagined_tests {
             panel
         });
         window
-            .update(cx, |panel, _, cx| {
+            .update(cx, |panel, _, _cx| {
                 panel.selected = panel
                     .rows
                     .iter()
@@ -1844,20 +1516,7 @@ mod reimagined_tests {
                 panel.rebuild_changes();
                 assert_eq!(panel.rows[panel.selected].path, PathBuf::from("src"));
                 assert_eq!(panel.rows[panel.selected].kind, DiffKind::WorkingTree);
-                let saved = panel.collapsed.clone();
-                panel.set_filter("a.rs".into(), cx);
-                assert_eq!(
-                    panel.rows.iter().filter(|row| row.entry.is_some()).count(),
-                    2
-                );
-                assert!(
-                    panel
-                        .rows
-                        .iter()
-                        .any(|row| row.path == std::path::Path::new("src/app"))
-                );
-                panel.set_filter("".into(), cx);
-                assert_eq!(panel.collapsed, saved);
+                panel.rebuild_changes();
                 assert_eq!(panel.rows[panel.selected].path, PathBuf::from("src"));
             })
             .unwrap();

@@ -8,9 +8,14 @@ use gpui::{
     prelude::*, px, svg, uniform_list,
 };
 
-use crate::services::project_git::{DiffContent, ReviewFile};
+use crate::services::project_git::{DiffContent, DiffKind, ReviewAction, ReviewFile};
 use crate::theme::{self, terminal_manager as chrome};
 use crate::views::terminal_manager::text_tooltip;
+
+const ROW_HEIGHT: f32 = 22.0;
+
+#[path = "diff_review.rs"]
+mod review;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Line {
@@ -228,10 +233,10 @@ fn parse(text: &str) -> Vec<Section> {
     sections
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(super) enum DiffEvent {
     OpenFile,
-    Navigate(i32),
+    Review(ReviewAction),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -299,6 +304,14 @@ pub(super) struct DiffView {
     pub(super) focus: FocusHandle,
     scroll: UniformListScrollHandle,
     selection: Option<(bool, usize, usize)>,
+    operation_busy: bool,
+    hunk_cursor: Option<usize>,
+    files_expanded: bool,
+    body_expanded: bool,
+    parent_picker: bool,
+    copied_hash: bool,
+    copy_generation: u64,
+    files_scroll: UniformListScrollHandle,
 }
 
 impl DiffView {
@@ -320,6 +333,14 @@ impl DiffView {
             focus: cx.focus_handle(),
             scroll: UniformListScrollHandle::new(),
             selection: None,
+            operation_busy: false,
+            hunk_cursor: None,
+            files_expanded: true,
+            body_expanded: false,
+            parent_picker: false,
+            copied_hash: false,
+            copy_generation: 0,
+            files_scroll: UniformListScrollHandle::new(),
         };
         view.update_snapshot(file, content, cx);
         view
@@ -331,7 +352,27 @@ impl DiffView {
         content: DiffContent,
         cx: &mut Context<Self>,
     ) {
-        let same_file = self.file.path == file.path && self.file.kind == file.kind;
+        let same_commit = self
+            .file
+            .commit
+            .as_ref()
+            .map(|commit| (&commit.summary.id, &commit.parent))
+            == file
+                .commit
+                .as_ref()
+                .map(|commit| (&commit.summary.id, &commit.parent));
+        let same_file = self.file.path == file.path && self.file.kind == file.kind && same_commit;
+        if !same_commit {
+            self.files_expanded = true;
+            self.body_expanded = false;
+            self.parent_picker = false;
+            self.copied_hash = false;
+            self.files_scroll = UniformListScrollHandle::new();
+        }
+        if file.total > 0 {
+            self.files_scroll
+                .scroll_to_item(file.position, ScrollStrategy::Center);
+        }
         self.file = file;
         if same_file && self.content == content {
             cx.notify();
@@ -343,6 +384,7 @@ impl DiffView {
         };
         if !same_file || self.raw != raw {
             self.selection = None;
+            self.hunk_cursor = None;
             self.scroll = UniformListScrollHandle::new();
         }
         self.raw = raw;
@@ -357,21 +399,16 @@ impl DiffView {
         if self.split == split {
             return;
         }
-        let top =
-            (-f32::from(self.scroll.0.borrow().base_handle.offset().y) / 30.0).max(0.0) as usize;
-        let source = self
-            .display
-            .get(top + self.first_hunk_offset())
-            .map(|row| row.source);
+        let top = (-f32::from(self.scroll.0.borrow().base_handle.offset().y) / ROW_HEIGHT).max(0.0)
+            as usize;
+        let source = self.display.get(top).map(|row| row.source);
         self.split = split;
         self.display = display_rows(&self.sections[self.active].rows, split);
         if let Some(source) = source
             && let Some(index) = self.display.iter().position(|row| row.source == source)
         {
-            self.scroll.scroll_to_item_strict(
-                index.saturating_sub(self.first_hunk_offset()),
-                ScrollStrategy::Top,
-            );
+            self.scroll
+                .scroll_to_item_strict(index, ScrollStrategy::Top);
         }
         cx.notify();
     }
@@ -403,14 +440,16 @@ impl DiffView {
         let key = &event.keystroke;
         if key.modifiers.control && key.key == "c" {
             self.copy(cx);
-        } else if key.modifiers.control && key.key == "o" {
+        } else if key.modifiers.control && key.key == "o" && self.file.commit.is_none() {
             cx.emit(DiffEvent::OpenFile);
         } else if key.modifiers.alt && key.key == "up" {
-            cx.emit(DiffEvent::Navigate(-1));
+            cx.emit(DiffEvent::Review(ReviewAction::Navigate(-1)));
         } else if key.modifiers.alt && key.key == "down" {
-            cx.emit(DiffEvent::Navigate(1));
+            cx.emit(DiffEvent::Review(ReviewAction::Navigate(1)));
+        } else if key.key == "f7" {
+            self.navigate_hunk(!key.modifiers.shift, cx);
         } else if key.key == "f5" {
-            cx.emit(DiffEvent::Navigate(0));
+            cx.emit(DiffEvent::Review(ReviewAction::Navigate(0)));
         } else if key.modifiers.alt && key.key == "u" {
             self.set_split(false, cx);
         } else if key.modifiers.alt && key.key == "s" {
@@ -446,8 +485,7 @@ impl DiffView {
                 self.display
                     .iter()
                     .position(|row| row.source == end && row.side.is_none_or(|side| side == right))
-                    .unwrap_or(0)
-                    .saturating_sub(self.first_hunk_offset()),
+                    .unwrap_or(0),
                 ScrollStrategy::Center,
             );
         } else {
@@ -507,7 +545,7 @@ impl DiffView {
         };
         div()
             .id(SharedString::from(format!("diff-{index}-{right}")))
-            .h(px(30.0))
+            .h(px(ROW_HEIGHT))
             .flex_1()
             .min_w_0()
             .flex()
@@ -534,7 +572,7 @@ impl DiffView {
                 }),
             )
             .when(!self.split, |cell| {
-                cell.child(div().w(px(16.0)).flex_shrink_0())
+                cell.child(div().w(px(4.0)).flex_shrink_0())
                     .child(gutter(number(before)))
             })
             .child(gutter(number(if self.split { line } else { after })))
@@ -547,7 +585,7 @@ impl DiffView {
                 div()
                     .flex_1()
                     .min_w_0()
-                    .pl(px(if self.split { 24.0 } else { 16.0 }))
+                    .pl(px(4.0))
                     .whitespace_nowrap()
                     .overflow_hidden()
                     .child(line.map_or_else(String::new, |line| line.text.replace('\t', "    "))),
@@ -555,28 +593,92 @@ impl DiffView {
             .into_any_element()
     }
 
-    fn first_hunk_offset(&self) -> usize {
-        usize::from(
-            self.display.first().is_some_and(|row| {
-                matches!(self.sections[self.active].rows[row.source], Row::Hunk(_))
-            }),
-        )
+    pub(super) fn set_operation_busy(&mut self, busy: bool, cx: &mut Context<Self>) {
+        if self.operation_busy != busy {
+            self.operation_busy = busy;
+            cx.notify();
+        }
+    }
+
+    fn navigate_hunk(&mut self, forward: bool, cx: &mut Context<Self>) {
+        let hunks: Vec<_> = self.sections[self.active]
+            .rows
+            .iter()
+            .enumerate()
+            .filter_map(|(index, row)| matches!(row, Row::Hunk(_)).then_some(index))
+            .collect();
+        if hunks.is_empty() {
+            return;
+        }
+        let index = match self.hunk_cursor {
+            Some(index) if forward => (index + 1) % hunks.len(),
+            Some(index) => (index + hunks.len() - 1) % hunks.len(),
+            None if forward => 0,
+            None => hunks.len() - 1,
+        };
+        self.hunk_cursor = Some(index);
+        let source = hunks[index];
+        self.selection = Some((true, source, source));
+        if let Some(display) = self.display.iter().position(|row| row.source == source) {
+            self.scroll
+                .scroll_to_item_strict(display, ScrollStrategy::Top);
+        }
+        cx.notify();
+    }
+
+    fn can_discard(&self) -> bool {
+        !self.operation_busy
+            && self.file.commit.is_none()
+            && self.file.total > 0
+            && self.file.kind == DiffKind::WorkingTree
+            && self.file.marker != "!"
+            && matches!(self.content, DiffContent::Ready(_))
     }
 
     fn row(&self, index: usize, cx: &mut Context<Self>) -> gpui::AnyElement {
         let display = self.display[index];
         match &self.sections[self.active].rows[display.source] {
-            Row::Hunk(label) => div()
-                .h(px(30.0))
-                .px(px(24.0))
-                .flex()
-                .items_center()
-                .bg(theme::chrome())
-                .text_color(theme::ash())
-                .child(label.clone())
-                .into_any_element(),
+            Row::Hunk(label) => {
+                let ordinal = self.sections[self.active].rows[..display.source]
+                    .iter()
+                    .filter(|row| matches!(row, Row::Hunk(_)))
+                    .count();
+                let undo = self.can_discard() && self.file.marker == "M";
+                div()
+                    .h(px(ROW_HEIGHT))
+                    .px(px(12.0))
+                    .flex()
+                    .items_center()
+                    .gap(px(8.0))
+                    .bg(theme::chrome())
+                    .text_color(theme::ash())
+                    .child(div().flex_1().min_w_0().truncate().child(label.clone()))
+                    .when(undo, |row| {
+                        row.child(
+                            Self::control(("undo-hunk", ordinal), "Discard this hunk", true)
+                                .h(px(20.0))
+                                .px(px(6.0))
+                                .child(
+                                    svg()
+                                        .path("icons/undo.svg")
+                                        .size(px(12.0))
+                                        .text_color(theme::ash()),
+                                )
+                                .child("Undo hunk")
+                                .on_click(cx.listener(move |view, _, _, cx| {
+                                    if view.can_discard() {
+                                        cx.emit(DiffEvent::Review(ReviewAction::Discard(Some((
+                                            ordinal,
+                                            view.raw.clone(),
+                                        )))));
+                                    }
+                                })),
+                        )
+                    })
+                    .into_any_element()
+            }
             Row::Lines { before, after } if self.split => div()
-                .h(px(30.0))
+                .h(px(ROW_HEIGHT))
                 .flex()
                 .child(self.cell(before.as_ref(), None, false, display.source, cx))
                 .child(self.cell(None, after.as_ref(), true, display.source, cx))
@@ -592,7 +694,12 @@ impl DiffView {
         }
     }
 
-    fn control(id: &'static str, label: &'static str, enabled: bool) -> gpui::Stateful<gpui::Div> {
+    fn control(
+        id: impl Into<gpui::ElementId>,
+        label: impl Into<SharedString>,
+        enabled: bool,
+    ) -> gpui::Stateful<gpui::Div> {
+        let label = label.into();
         div()
             .id(id)
             .h(px(28.0))
@@ -605,7 +712,7 @@ impl DiffView {
             .rounded(px(4.0))
             .border_1()
             .border_color(gpui::rgba(0))
-            .tooltip(text_tooltip(label))
+            .tooltip(text_tooltip(label.to_string()))
             .when(!enabled, |control| control.opacity(0.4))
             .when(enabled, |control| {
                 control
@@ -621,116 +728,116 @@ impl EventEmitter<DiffEvent> for DiffView {}
 
 impl Render for DiffView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let section = &self.sections[self.active];
-        let relative = self
-            .file
-            .path
-            .strip_prefix(&self.workspace)
-            .unwrap_or(&self.file.path);
-        let name = relative
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .into_owned();
-        let parent = relative
-            .parent()
-            .unwrap_or(std::path::Path::new(""))
-            .to_string_lossy()
-            .replace('\\', " / ")
-            .replace('/', " / ")
-            .replace("  /  ", " / ");
-        let first_hunk = match section.rows.first() {
-            Some(Row::Hunk(label)) => Some(label.clone()),
-            _ => None,
-        };
-        let offset = self.first_hunk_offset();
-        let rows = self.display.len();
-        let can_previous = self.file.position > 0;
-        let can_next = self.file.position + 1 < self.file.total;
-        let ready = matches!(self.content, DiffContent::Ready(_));
-        let state = match self.file.marker {
-            "A" => "Added",
-            "D" => "Deleted",
-            "R" => "Renamed",
-            "U" => "Untracked",
-            "!" => "Conflict",
-            _ => "Modified",
-        };
-        let staged = section.label == "Staged";
-        div().id("working-changes").track_focus(&self.focus).tab_index(0).size_full().min_h_0().flex().flex_col()
-            .bg(theme::canvas()).font_family(chrome::CHROME_FONT).font_weight(FontWeight::NORMAL)
-            .text_size(px(13.0)).line_height(px(20.0)).text_color(theme::bone())
-            .on_key_down(cx.listener(Self::on_key))
-            .child(div().h(px(92.0)).flex_shrink_0().px(px(24.0)).py(px(16.0)).flex().flex_col().justify_between().border_b_1().border_color(theme::edge())
-                .child(div().flex().items_center().gap(px(16.0))
-                    .child(svg().path("icons/file-code.svg").size(px(20.0)).flex_shrink_0().text_color(theme::bone()))
-                    .child(div().flex_1().min_w_0().truncate().font_weight(FontWeight::MEDIUM).child(name))
-                    .child(Self::control("previous-change", "Previous change · Alt+Up", can_previous)
-                        .when(can_previous, |button| button.on_click(cx.listener(|_, _, _, cx| cx.emit(DiffEvent::Navigate(-1)))))
-                        .child(svg().path("icons/chevron-up.svg").size(px(14.0)).text_color(theme::ash())))
-                    .child(div().font_family(theme::mono()).text_size(px(12.0)).text_color(theme::ash()).child(format!("{} of {}", self.file.position + 1, self.file.total)))
-                    .child(Self::control("next-change", "Next change · Alt+Down", can_next)
-                        .when(can_next, |button| button.on_click(cx.listener(|_, _, _, cx| cx.emit(DiffEvent::Navigate(1)))))
-                        .child(svg().path("icons/chevron-down.svg").size(px(14.0)).text_color(theme::ash()))))
-                .child(div().flex().items_center().gap(px(16.0)).text_size(px(12.0)).text_color(theme::ash())
-                    .child(div().id("diff-relative-path").flex_1().min_w_0().truncate().tooltip(text_tooltip(relative.to_string_lossy().into_owned())).child(parent))
-                    .child(div().flex_shrink_0().child(format!("{state} · {}", if staged { "Staged" } else { "Unstaged" })))
-                    .when(ready, |summary| summary
-                        .child(div().font_family(theme::mono()).text_size(px(11.0)).text_color(theme::success()).child(format!("+{}", section.additions)))
-                        .child(div().font_family(theme::mono()).text_size(px(11.0)).text_color(theme::error()).child(format!("−{}", section.deletions))))))
-            .child(div().h(px(44.0)).flex_shrink_0().px(px(24.0)).flex().items_center().gap(px(12.0)).border_b_1().border_color(theme::edge())
-                .child(div().flex().rounded(px(4.0)).bg(theme::floor())
-                    .child(Self::control("diff-unified", "Unified diff · Alt+U", true).bg(if !self.split { theme::panel_hover() } else { theme::floor() })
-                        .on_click(cx.listener(|view, _, _, cx| view.set_split(false, cx))).child("Unified"))
-                    .child(Self::control("diff-split", "Split diff · Alt+S", true).bg(if self.split { theme::panel_hover() } else { theme::floor() })
-                        .on_click(cx.listener(|view, _, _, cx| view.set_split(true, cx))).child("Split")))
-                .child(div().text_size(px(11.0)).text_color(theme::ash()).child({
-                    let count = section.rows.iter().filter(|row| matches!(row, Row::Hunk(_))).count();
-                    format!("{count} hunk{}", if count == 1 { "" } else { "s" })
-                }))
-                .child(div().flex_1())
-                .child(Self::control("diff-open-file", "Open file · Ctrl+O", true)
-                    .on_click(cx.listener(|_, _, _, cx| cx.emit(DiffEvent::OpenFile)))
-                    .child(svg().path("icons/pencil.svg").size(px(14.0)).text_color(theme::ash())).child("Open file"))
-                .child({
-                    use gpui_component::{button::{Button, ButtonVariants}, menu::{DropdownMenu, PopupMenuItem}};
-                    let owner = cx.weak_entity();
-                    Button::new("diff-menu").label("⋯").ghost().w(px(24.0)).h(px(28.0)).tooltip("Diff actions")
-                        .dropdown_menu(move |menu, _, _| {
-                            let copy_owner = owner.clone();
-                            let retry_owner = owner.clone();
-                            menu.item(PopupMenuItem::new("Copy diff").on_click(move |_, _, cx| { let _ = copy_owner.update(cx, |view, cx| view.copy(cx)); }))
-                                .item(PopupMenuItem::new("Refresh diff").on_click(move |_, _, cx| { let _ = retry_owner.update(cx, |_, cx| cx.emit(DiffEvent::Navigate(0))); }))
-                        })
-                }))
-            .when(matches!(self.content, DiffContent::Loading), |view| view.child(div().p(px(24.0)).text_color(theme::ash()).child("Loading changes…")))
-            .when_some(match &self.content { DiffContent::Error(error) => Some(error.clone()), _ => None }, |view, error| view
-                .child(div().p(px(24.0)).flex().flex_col().gap(px(12.0)).text_color(theme::ash()).child(error)
-                    .child(Self::control("retry-diff", "Retry diff · F5", true).on_click(cx.listener(|_, _, _, cx| cx.emit(DiffEvent::Navigate(0)))).child("Retry"))))
-            .when(ready && (section.truncated || section.binary || section.conflicted || rows == 0), |view| view.child(
-                div().p(px(24.0)).text_color(theme::ash()).child(if section.truncated { "This diff exceeds the preview limit. Open file to inspect it." }
-                    else if section.binary { "Binary file changed. Open file to inspect it." }
-                    else if section.conflicted { "This file has merge conflicts. Open file to review its conflict markers." }
-                    else { "No text changes in this snapshot." })))
-            .when(ready && !section.metadata.is_empty(), |view| view.child(div().px(px(24.0)).py(px(8.0)).text_size(px(11.0)).text_color(theme::ash()).child(section.metadata.join(" · "))))
-            .when(ready && rows > 0, |view| view.child(
-                div().id("diff-horizontal-scroll").flex_1().min_h_0().overflow_x_scroll()
-                    .child(div().h_full().w_full().min_w(px(if self.split { section.min_width } else { (section.min_width / 2.0 + 80.0).max(480.0) })).flex().flex_col()
-                        .when_some(first_hunk, |grid, label| grid.child(div().h(px(40.0)).flex_shrink_0().px(px(24.0)).flex().items_center().font_family(theme::mono()).text_size(px(12.0)).bg(theme::chrome()).text_color(theme::ash()).child(label)))
-                        .when(self.split, |grid| grid.child(div().h(px(34.0)).flex_shrink_0().flex().bg(theme::chrome()).text_size(px(11.0)).text_color(theme::ash())
-                            .child(div().flex_1().px(px(20.0)).child("Before"))
-                            .child(div().flex_1().px(px(20.0)).child(if staged { "Index" } else { "Working tree" }))))
-                        .child(uniform_list("diff-lines", rows - offset, cx.processor(|view, range: std::ops::Range<usize>, _, cx| {
-                            let offset = view.first_hunk_offset();
-                            range.map(|index| view.row(index + offset, cx)).collect::<Vec<_>>()
-                        })).track_scroll(self.scroll.clone()).flex_1().min_h_0().font_family(theme::mono()).text_size(px(12.0)).line_height(px(30.0))))
-            ))
+        self.render_review(cx)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[gpui::test]
+    fn historical_diff_renders_file_rows_and_has_no_working_tree_undo(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use crate::services::project_git::{
+            GitLineStats,
+            workflow::{CommitDetails, CommitSummary},
+        };
+        cx.update(|cx| {
+            crate::fonts::initialize(cx);
+            crate::views::file_editor::FileEditor::initialize(cx);
+        });
+        let summary = CommitSummary {
+            id: "a".repeat(40),
+            parents: Vec::new(),
+            author: "Example Developer".into(),
+            timestamp: 0,
+            date: "2026-09-14 14:32".into(),
+            subject: "Example commit".into(),
+            body: "A commit body".into(),
+            local: Some(true),
+            head: true,
+            remote_tip: false,
+        };
+        let details = std::sync::Arc::new(CommitDetails {
+            summary,
+            parent: None,
+            parent_index: 0,
+            files: vec![crate::services::project_git::workflow::CommitFile {
+                path: "project/file.rs".into(),
+                relative_path: "file.rs".into(),
+                stats: Some(GitLineStats {
+                    additions: 1,
+                    deletions: 1,
+                }),
+            }],
+        });
+        let file = ReviewFile {
+            path: "project/file.rs".into(),
+            kind: DiffKind::WorkingTree,
+            position: 0,
+            total: 1,
+            marker: "M",
+            commit: Some(details),
+        };
+        let (view, cx) = cx.add_window_view(|_, cx| {
+            DiffView::new(
+                "project".into(),
+                file,
+                DiffContent::Ready("@@ -1 +1 @@\n-before\n+after\n".into()),
+                cx,
+            )
+        });
+        cx.simulate_resize(gpui::size(px(800.0), px(620.0)));
+        cx.refresh().unwrap();
+        cx.run_until_parked();
+        assert_eq!(
+            cx.debug_bounds("committed-file-0").unwrap().size.height,
+            px(28.0)
+        );
+        assert!(!view.read_with(cx, |view, _| view.can_discard()));
+    }
+
+    #[gpui::test]
+    fn hunk_navigation_wraps_and_preserves_source_rows_in_both_layouts(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let file = ReviewFile {
+            path: "project/file.rs".into(),
+            kind: DiffKind::WorkingTree,
+            position: 0,
+            total: 1,
+            marker: "M",
+            commit: None,
+        };
+        let view = cx.new(|cx| {
+            DiffView::new(
+                "project".into(),
+                file,
+                DiffContent::Ready(
+                    "@@ -1 +1 @@\n-old\n+new\n@@ -9 +9 @@\n-before\n+after\n".into(),
+                ),
+                cx,
+            )
+        });
+        view.update(cx, |view, cx| {
+            for split in [false, true] {
+                view.set_split(split, cx);
+                view.hunk_cursor = None;
+                for source in [0, 2, 0] {
+                    view.navigate_hunk(true, cx);
+                    assert_eq!(view.selection, Some((true, source, source)));
+                }
+                view.navigate_hunk(false, cx);
+                assert_eq!(view.selection, Some((true, 2, 2)));
+            }
+            let file = view.file.clone();
+            view.update_snapshot(file, DiffContent::Ready(String::new()), cx);
+            view.navigate_hunk(true, cx);
+            assert_eq!(view.selection, None);
+        });
+    }
 
     #[gpui::test]
     fn switching_files_clears_old_diff_until_the_matching_snapshot_arrives(
@@ -742,6 +849,7 @@ mod tests {
             position: 0,
             total: 2,
             marker: "M",
+            commit: None,
         };
         let view = cx.new(|cx| {
             DiffView::new(

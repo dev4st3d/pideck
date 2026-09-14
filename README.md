@@ -10,7 +10,11 @@ Each terminal starts in its project's directory. Run `codex`, `claude`, or anoth
 
 Open files from the tree, edit them, and choose **Save** or press `Ctrl+S`. Changed tabs show a dirty marker. Closing changed files offers Save, Discard, or Cancel; closing a project or window offers **Save all and close**. Saves check for external changes and report conflicts while keeping your edits open.
 
-The Git sidebar shows the branch and changed files, with read-only staged and working-tree diffs. Untracked text files also have a diff preview. Choose Unified or Split, move between changes with Alt+Up/Down, and use Open file to edit. It does not stage, commit, or modify Git history.
+The Git sidebar keeps the directory tree and shows added/deleted line counts, including new text files. Use **+** to stage a file and **−** to unstage it. Undo opens a discard confirmation; tracked files restore their staged version, and new files go to the Recycle Bin. The diff also supports discarding individual text hunks. Changed files are checked again before a discard is applied.
+
+The commit box stays below the tree. **Commit staged** or `Ctrl+Enter` commits only staged changes; failures keep the message. **Push** sends the reviewed branch without forcing, and **Publish** lets you choose a remote for a new branch. A failed push keeps the local commit. Fetch is available for reviewing remote changes; merging and conflict resolution remain explicit Git operations. Commits respect your configured Git hooks and signing setup.
+
+**History** opens a compact, paginated commit timeline in the sidebar. Select a commit and then one of its visible changed files to review the historical diff. The view identifies HEAD, known unpushed commits, and the remote tip; merge commits support choosing a comparison parent. **Changes** returns to the working tree and preserves the commit draft. History is read-only. Choose Unified or Split, move between files with Alt+Up/Down, and jump between hunks with F7/Shift+F7. Hunk navigation wraps at either end of the file.
 
 The editor accepts UTF-8 text files up to 2 MiB. PNG, JPEG, GIF, WebP, BMP, and TIFF files open in a read-only viewer (32 MiB or 50 megapixels). Each directory listing is capped at 2,000 entries; the sidebar reports truncation.
 
@@ -84,9 +88,11 @@ Filesystem changes refresh the explorer and Git status automatically; `F5` refre
 | New terminal | `` Ctrl+` `` or `Ctrl+Shift+T` |
 | Close active tab | `Ctrl+Shift+W` |
 | Next / previous tab | `Ctrl+Tab` / `Ctrl+Shift+Tab` |
-| Previous / next change (diff focus) | `Alt+Up` / `Alt+Down` |
+| Previous / next file (diff focus) | `Alt+Up` / `Alt+Down` |
+| Previous / next hunk (diff focus) | `Shift+F7` / `F7` |
 | Unified / split diff (diff focus) | `Alt+U` / `Alt+S` |
 | Refresh selected diff | `F5` |
+| Commit staged changes (commit box) | `Ctrl+Enter` |
 | Save active file | `Ctrl+S` |
 | Previous / next project | `Ctrl+Alt+Up` / `Ctrl+Alt+Down` |
 | Toggle project sidebar | `Ctrl+Shift+B` |

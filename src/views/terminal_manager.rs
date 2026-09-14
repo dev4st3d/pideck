@@ -633,20 +633,15 @@ impl TerminalManager {
             &terminal,
             window,
             move |view, terminal, event, window, cx| {
-                if let TerminalPanelEvent::Review {
-                    path,
-                    kind,
-                    direction,
-                } = event
-                {
+                if let TerminalPanelEvent::Review { file, action } = event {
                     if let Some(project) = view
                         .projects
                         .iter()
                         .find(|project| project.terminal.entity_id() == terminal.entity_id())
                     {
-                        project.git.update(cx, |git, cx| {
-                            git.navigate_review(path, *kind, *direction, cx)
-                        });
+                        project
+                            .git
+                            .update(cx, |git, cx| git.dispatch_review(file, action, window, cx));
                     }
                     return;
                 }
@@ -1171,7 +1166,9 @@ impl TerminalManager {
         }
         if matches!(
             event,
-            ProjectPanelEvent::FilesChanged | ProjectPanelEvent::BranchChanged
+            ProjectPanelEvent::FilesChanged
+                | ProjectPanelEvent::BranchChanged
+                | ProjectPanelEvent::WorktreeChanged
         ) {
             if let Some(project) = self
                 .projects
@@ -1179,7 +1176,10 @@ impl TerminalManager {
                 .find(|project| project.terminal.entity_id() == pane.entity_id())
             {
                 project.git.update(cx, |git, cx| git.refresh(cx));
-                if matches!(event, ProjectPanelEvent::BranchChanged) {
+                if matches!(
+                    event,
+                    ProjectPanelEvent::BranchChanged | ProjectPanelEvent::WorktreeChanged
+                ) {
                     project.files.update(cx, |files, cx| files.refresh(cx));
                     pane.update(cx, |pane, cx| pane.reload_clean_files(window, cx));
                 }
@@ -1192,14 +1192,20 @@ impl TerminalManager {
         let focus = window.focused(cx);
         pane.update(cx, |pane, cx| match event {
             ProjectPanelEvent::OpenFile(path) => pane.open_file(path.clone(), window, cx),
-            ProjectPanelEvent::OpenDiff { file, content } => {
-                pane.open_diff(file.clone(), content.clone(), window, cx)
-            }
+            ProjectPanelEvent::OpenDiff {
+                file,
+                content,
+                activate,
+            } => pane.open_diff(file.clone(), content.clone(), *activate, window, cx),
             ProjectPanelEvent::ToggleSidebar
             | ProjectPanelEvent::FilesChanged
+            | ProjectPanelEvent::WorktreeChanged
             | ProjectPanelEvent::BranchChanged => {}
         });
-        if !active && let Some(focus) = focus {
+        if (!active
+            || matches!(event, ProjectPanelEvent::OpenDiff { file, .. } if file.commit.is_some()))
+            && let Some(focus) = focus
+        {
             window.focus(&focus);
         }
     }
