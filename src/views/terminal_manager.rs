@@ -771,7 +771,7 @@ impl TerminalManager {
         }
         if let Some(workspace) = &self.workspace {
             let name = project_name(&workspace.projects[workspace.active].path);
-            window.set_window_title(&format!("{name} — Pideck"));
+            window.set_window_title(&format!("{name} — Zidesk"));
         }
     }
 
@@ -1292,7 +1292,7 @@ impl TerminalManager {
                     .font_weight(FontWeight::NORMAL)
                     .text_size(px(chrome::WORDMARK_SIZE))
                     .text_color(theme::focus())
-                    .child("Pideck."),
+                    .child("Zidesk"),
             )
             .child(
                 div()
@@ -1642,7 +1642,7 @@ impl TerminalManager {
                             let owner = owner.clone();
                             let menu = menu.item(
                                 PopupMenuItem::new(format!(
-                                    "Pideck {}",
+                                    "Zidesk {}",
                                     app_update::CURRENT_VERSION
                                 ))
                                 .disabled(true),
