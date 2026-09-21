@@ -40,7 +40,7 @@ pub fn run() {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
                     window_min_size: Some(size(px(800.0), px(540.0))),
                     titlebar: Some(TitlebarOptions {
-                        title: Some("Zidesk — Terminals".into()),
+                        title: Some("Pideck — Terminals".into()),
                         appears_transparent: true,
                         ..Default::default()
                     }),
