@@ -4,8 +4,8 @@ use std::path::PathBuf;
 
 use gpui::{
     ClipboardItem, Context, EventEmitter, FocusHandle, FontWeight, IntoElement, KeyDownEvent,
-    MouseButton, Render, ScrollStrategy, SharedString, UniformListScrollHandle, Window, div,
-    prelude::*, px, svg, uniform_list,
+    MouseButton, Render, ScrollHandle, ScrollStrategy, SharedString, UniformListScrollHandle,
+    Window, div, point, prelude::*, px, relative, svg, uniform_list,
 };
 
 use crate::services::project_git::{DiffContent, DiffKind, ReviewAction, ReviewFile};
@@ -21,7 +21,19 @@ mod review;
 struct Line {
     number: usize,
     text: String,
+    display: SharedString,
     changed: bool,
+}
+
+impl Line {
+    fn new(number: usize, text: &str, changed: bool) -> Self {
+        Self {
+            number,
+            text: text.to_owned(),
+            display: SharedString::new(text.replace('\t', "    ")),
+            changed,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -43,7 +55,7 @@ struct Section {
     conflicted: bool,
     truncated: bool,
     metadata: Vec<String>,
-    min_width: f32,
+    code_width: f32,
 }
 
 impl Section {
@@ -57,7 +69,7 @@ impl Section {
             conflicted: false,
             truncated: false,
             metadata: Vec::new(),
-            min_width: 800.0,
+            code_width: 0.0,
         }
     }
 }
@@ -144,34 +156,18 @@ fn parse(text: &str) -> Vec<Section> {
             }
         } else if in_hunk {
             if let Some(text) = line.strip_prefix('-') {
-                before.push(Line {
-                    number: old_number,
-                    text: text.into(),
-                    changed: true,
-                });
+                before.push(Line::new(old_number, text, true));
                 old_number += 1;
                 section.deletions += 1;
             } else if let Some(text) = line.strip_prefix('+') {
-                after.push(Line {
-                    number: new_number,
-                    text: text.into(),
-                    changed: true,
-                });
+                after.push(Line::new(new_number, text, true));
                 new_number += 1;
                 section.additions += 1;
             } else if let Some(text) = line.strip_prefix(' ') {
                 flush_changes(&mut section.rows, &mut before, &mut after);
                 section.rows.push(Row::Lines {
-                    before: Some(Line {
-                        number: old_number,
-                        text: text.into(),
-                        changed: false,
-                    }),
-                    after: Some(Line {
-                        number: new_number,
-                        text: text.into(),
-                        changed: false,
-                    }),
+                    before: Some(Line::new(old_number, text, false)),
+                    after: Some(Line::new(new_number, text, false)),
                 });
                 old_number += 1;
                 new_number += 1;
@@ -228,7 +224,9 @@ fn parse(text: &str) -> Vec<Section> {
             })
             .max()
             .unwrap_or(0);
-        section.min_width = (columns as f32 * 7.2 * 2.0 + 124.0).max(800.0);
+        // All visible rows use the same text extent so either split pane can
+        // scroll to the same column without moving the divider.
+        section.code_width = columns as f32 * 7.2 + 4.0;
     }
     sections
 }
@@ -301,8 +299,11 @@ pub(super) struct DiffView {
     content: DiffContent,
     split: bool,
     display: Vec<DisplayRow>,
+    hunk_rows: Vec<usize>,
+    hunk_display: Vec<usize>,
     pub(super) focus: FocusHandle,
     scroll: UniformListScrollHandle,
+    code_scroll: ScrollHandle,
     selection: Option<(bool, usize, usize)>,
     operation_busy: bool,
     hunk_cursor: Option<usize>,
@@ -330,12 +331,15 @@ impl DiffView {
             content: DiffContent::Loading,
             split: false,
             display: Vec::new(),
+            hunk_rows: Vec::new(),
+            hunk_display: Vec::new(),
             focus: cx.focus_handle(),
             scroll: UniformListScrollHandle::new(),
+            code_scroll: ScrollHandle::new(),
             selection: None,
             operation_busy: false,
             hunk_cursor: None,
-            files_expanded: true,
+            files_expanded: false,
             body_expanded: false,
             parent_picker: false,
             copied_hash: false,
@@ -363,7 +367,7 @@ impl DiffView {
                 .map(|commit| (&commit.summary.id, &commit.parent));
         let same_file = self.file.path == file.path && self.file.kind == file.kind && same_commit;
         if !same_commit {
-            self.files_expanded = true;
+            self.files_expanded = false;
             self.body_expanded = false;
             self.parent_picker = false;
             self.copied_hash = false;
@@ -386,11 +390,13 @@ impl DiffView {
             self.selection = None;
             self.hunk_cursor = None;
             self.scroll = UniformListScrollHandle::new();
+            self.reset_code_scroll();
         }
         self.raw = raw;
         self.sections = parse(&self.raw);
         self.active = self.sections.len().saturating_sub(1);
         self.display = display_rows(&self.sections[self.active].rows, self.split);
+        self.cache_hunks();
         self.content = content;
         cx.notify();
     }
@@ -403,7 +409,9 @@ impl DiffView {
             as usize;
         let source = self.display.get(top).map(|row| row.source);
         self.split = split;
+        self.reset_code_scroll();
         self.display = display_rows(&self.sections[self.active].rows, split);
+        self.cache_hunks();
         if let Some(source) = source
             && let Some(index) = self.display.iter().position(|row| row.source == source)
         {
@@ -411,6 +419,31 @@ impl DiffView {
                 .scroll_to_item_strict(index, ScrollStrategy::Top);
         }
         cx.notify();
+    }
+
+    fn reset_code_scroll(&self) {
+        let origin = point(px(0.0), px(0.0));
+        self.code_scroll.set_offset(origin);
+    }
+
+    fn cache_hunks(&mut self) {
+        self.hunk_rows = self.sections[self.active]
+            .rows
+            .iter()
+            .enumerate()
+            .filter_map(|(index, row)| matches!(row, Row::Hunk(_)).then_some(index))
+            .collect();
+        self.hunk_display = self
+            .display
+            .iter()
+            .enumerate()
+            .filter_map(|(index, row)| {
+                self.hunk_rows
+                    .binary_search(&row.source)
+                    .is_ok()
+                    .then_some(index)
+            })
+            .collect();
     }
 
     fn copy(&self, cx: &mut Context<Self>) {
@@ -454,6 +487,15 @@ impl DiffView {
             self.set_split(false, cx);
         } else if key.modifiers.alt && key.key == "s" {
             self.set_split(true, cx);
+        } else if key.modifiers.control
+            && key.modifiers.shift
+            && matches!(key.key.as_str(), "left" | "right")
+        {
+            let step = if key.key == "left" { 120.0 } else { -120.0 };
+            let x = (self.code_scroll.offset().x + px(step))
+                .clamp(-self.code_scroll.max_offset().width, px(0.0));
+            self.code_scroll.set_offset(point(x, px(0.0)));
+            cx.notify();
         } else if key.key == "escape" {
             self.selection = None;
         } else if matches!(
@@ -544,9 +586,11 @@ impl DiffView {
                 .child(value)
         };
         div()
-            .id(SharedString::from(format!("diff-{index}-{right}")))
+            .id((if right { "diff-after" } else { "diff-before" }, index))
+            .debug_selector(move || format!("diff-{index}-{right}"))
             .h(px(ROW_HEIGHT))
-            .flex_1()
+            .when(self.split, |cell| cell.w(relative(0.5)).flex_shrink_0())
+            .when(!self.split, |cell| cell.w_full())
             .min_w_0()
             .flex()
             .items_center()
@@ -581,15 +625,37 @@ impl DiffView {
             } else {
                 ""
             }))
-            .child(
-                div()
+            .child({
+                let mut code = div()
+                    .id((
+                        if right {
+                            "diff-code-after"
+                        } else {
+                            "diff-code-before"
+                        },
+                        index,
+                    ))
+                    .debug_selector(move || format!("diff-code-{index}-{right}"))
                     .flex_1()
                     .min_w_0()
-                    .pl(px(4.0))
-                    .whitespace_nowrap()
-                    .overflow_hidden()
-                    .child(line.map_or_else(String::new, |line| line.text.replace('\t', "    "))),
-            )
+                    .overflow_x_scroll()
+                    .track_scroll(&self.code_scroll)
+                    .child(
+                        div()
+                            .debug_selector(move || format!("diff-text-{index}-{right}"))
+                            .w(px(self.sections[self.active].code_width))
+                            .pl(px(4.0))
+                            .whitespace_nowrap()
+                            .child(line.map_or_else(
+                                || SharedString::new_static(""),
+                                |line| line.display.clone(),
+                            )),
+                    );
+                // GPUI otherwise turns a plain vertical wheel into horizontal
+                // movement on an x-only scroll element inside the vertical list.
+                code.style().restrict_scroll_to_axis = Some(true);
+                code
+            })
             .into_any_element()
     }
 
@@ -601,28 +667,20 @@ impl DiffView {
     }
 
     fn navigate_hunk(&mut self, forward: bool, cx: &mut Context<Self>) {
-        let hunks: Vec<_> = self.sections[self.active]
-            .rows
-            .iter()
-            .enumerate()
-            .filter_map(|(index, row)| matches!(row, Row::Hunk(_)).then_some(index))
-            .collect();
-        if hunks.is_empty() {
+        if self.hunk_rows.is_empty() {
             return;
         }
         let index = match self.hunk_cursor {
-            Some(index) if forward => (index + 1) % hunks.len(),
-            Some(index) => (index + hunks.len() - 1) % hunks.len(),
+            Some(index) if forward => (index + 1) % self.hunk_rows.len(),
+            Some(index) => (index + self.hunk_rows.len() - 1) % self.hunk_rows.len(),
             None if forward => 0,
-            None => hunks.len() - 1,
+            None => self.hunk_rows.len() - 1,
         };
         self.hunk_cursor = Some(index);
-        let source = hunks[index];
+        let source = self.hunk_rows[index];
         self.selection = Some((true, source, source));
-        if let Some(display) = self.display.iter().position(|row| row.source == source) {
-            self.scroll
-                .scroll_to_item_strict(display, ScrollStrategy::Top);
-        }
+        self.scroll
+            .scroll_to_item_strict(self.hunk_display[index], ScrollStrategy::Top);
         cx.notify();
     }
 
@@ -639,20 +697,26 @@ impl DiffView {
         let display = self.display[index];
         match &self.sections[self.active].rows[display.source] {
             Row::Hunk(label) => {
-                let ordinal = self.sections[self.active].rows[..display.source]
-                    .iter()
-                    .filter(|row| matches!(row, Row::Hunk(_)))
-                    .count();
+                let ordinal = self.hunk_rows.binary_search(&display.source).unwrap_or(0);
                 let undo = self.can_discard() && self.file.marker == "M";
                 div()
                     .h(px(ROW_HEIGHT))
+                    .w_full()
                     .px(px(12.0))
                     .flex()
                     .items_center()
                     .gap(px(8.0))
                     .bg(theme::chrome())
                     .text_color(theme::ash())
-                    .child(div().flex_1().min_w_0().truncate().child(label.clone()))
+                    .child(
+                        div()
+                            .id(("diff-hunk-label", display.source))
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .tooltip(text_tooltip(label.clone()))
+                            .child(label.clone()),
+                    )
                     .when(undo, |row| {
                         row.child(
                             Self::control(("undo-hunk", ordinal), "Discard this hunk", true)
@@ -679,6 +743,7 @@ impl DiffView {
             }
             Row::Lines { before, after } if self.split => div()
                 .h(px(ROW_HEIGHT))
+                .w_full()
                 .flex()
                 .child(self.cell(before.as_ref(), None, false, display.source, cx))
                 .child(self.cell(None, after.as_ref(), true, display.source, cx))
@@ -792,11 +857,131 @@ mod tests {
         cx.simulate_resize(gpui::size(px(800.0), px(620.0)));
         cx.refresh().unwrap();
         cx.run_until_parked();
+        assert!(cx.debug_bounds("committed-file-0").is_none());
+        assert!(!view.read_with(cx, |view, _| view.files_expanded));
+        view.update(cx, |view, cx| {
+            view.files_expanded = true;
+            cx.notify();
+        });
+        cx.refresh().unwrap();
         assert_eq!(
             cx.debug_bounds("committed-file-0").unwrap().size.height,
             px(28.0)
         );
         assert!(!view.read_with(cx, |view, _| view.can_discard()));
+    }
+
+    #[gpui::test]
+    fn split_rows_keep_a_fixed_divider_and_unified_rows_fill_the_viewer(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let file = ReviewFile {
+            path: "project/file.rs".into(),
+            kind: DiffKind::WorkingTree,
+            position: 0,
+            total: 1,
+            marker: "M",
+            commit: None,
+        };
+        let (view, cx) = cx.add_window_view(|_, cx| {
+            DiffView::new(
+                "project".into(),
+                file,
+                DiffContent::Ready(format!(
+                    "@@ -1,83 +1,83 @@\n short\n {}\n last\n{}",
+                    "long line ".repeat(40),
+                    " context\n".repeat(80)
+                )),
+                cx,
+            )
+        });
+        for width in [380.0, 540.0, 900.0, 1200.0] {
+            cx.simulate_resize(gpui::size(px(width), px(640.0)));
+            view.update(cx, |view, cx| view.set_split(true, cx));
+            cx.refresh().unwrap();
+            let left_short = cx.debug_bounds("diff-1-false").unwrap();
+            let right_short = cx.debug_bounds("diff-1-true").unwrap();
+            let left_long = cx.debug_bounds("diff-2-false").unwrap();
+            let right_long = cx.debug_bounds("diff-2-true").unwrap();
+            assert_eq!(left_short.right(), right_short.left());
+            assert_eq!(left_long.right(), right_long.left());
+            assert_eq!(left_short.size.width, right_short.size.width);
+            assert_eq!(left_short.left(), left_long.left());
+            assert_eq!(right_short.left(), right_long.left());
+            assert_eq!(right_short.right(), right_long.right());
+            let viewer = cx.debug_bounds("diff-horizontal-scroll").unwrap();
+            assert_eq!(right_short.right(), viewer.right());
+
+            if width == 900.0 {
+                let code_before = cx.debug_bounds("diff-code-2-false").unwrap();
+                let wheel_position =
+                    point(code_before.left() + px(24.0), code_before.top() + px(8.0));
+                let y_before =
+                    view.read_with(cx, |view, _| view.scroll.0.borrow().base_handle.offset().y);
+                cx.simulate_event(gpui::ScrollWheelEvent {
+                    position: wheel_position,
+                    delta: gpui::ScrollDelta::Pixels(point(px(0.0), px(-40.0))),
+                    ..Default::default()
+                });
+                cx.refresh().unwrap();
+                assert_eq!(
+                    view.read_with(cx, |view, _| view.code_scroll.offset().x),
+                    px(0.0)
+                );
+                assert!(
+                    view.read_with(cx, |view, _| view.scroll.0.borrow().base_handle.offset().y)
+                        < y_before
+                );
+                view.update(cx, |view, cx| {
+                    view.scroll.scroll_to_item_strict(0, ScrollStrategy::Top);
+                    cx.notify();
+                });
+                cx.refresh().unwrap();
+                cx.simulate_event(gpui::ScrollWheelEvent {
+                    position: wheel_position,
+                    delta: gpui::ScrollDelta::Pixels(point(px(-40.0), px(0.0))),
+                    ..Default::default()
+                });
+                cx.refresh().unwrap();
+                assert!(view.read_with(cx, |view, _| view.code_scroll.offset().x < px(0.0)));
+                let y_after =
+                    view.read_with(cx, |view, _| view.scroll.0.borrow().base_handle.offset().y);
+                assert_eq!(y_after, y_before);
+                let left_before = cx.debug_bounds("diff-text-2-false").unwrap();
+                let right_before = cx.debug_bounds("diff-text-2-true").unwrap();
+                view.update(cx, |view, cx| {
+                    view.code_scroll.set_offset(point(px(-320.0), px(0.0)));
+                    cx.notify();
+                });
+                cx.refresh().unwrap();
+                let code_after = cx.debug_bounds("diff-code-2-false").unwrap();
+                let left_after = cx.debug_bounds("diff-text-2-false").unwrap();
+                let right_after = cx.debug_bounds("diff-text-2-true").unwrap();
+                assert_eq!(code_after, code_before);
+                assert!(left_after.left() <= left_before.left());
+                assert_eq!(
+                    left_before.left() - left_after.left(),
+                    right_before.left() - right_after.left()
+                );
+                assert_eq!(
+                    right_short.left(),
+                    cx.debug_bounds("diff-1-true").unwrap().left()
+                );
+                assert!(view.read_with(cx, |view, _| view.code_scroll.offset().x < px(0.0)));
+            }
+
+            view.update(cx, |view, cx| view.set_split(false, cx));
+            cx.refresh().unwrap();
+            assert_eq!(
+                view.read_with(cx, |view, _| view.code_scroll.offset().x),
+                px(0.0)
+            );
+            let unified_short = cx.debug_bounds("diff-1-true").unwrap();
+            let unified_long = cx.debug_bounds("diff-2-true").unwrap();
+            assert_eq!(unified_short.left(), viewer.left());
+            assert_eq!(unified_short.right(), viewer.right());
+            assert_eq!(unified_long.size.width, unified_short.size.width);
+        }
     }
 
     #[gpui::test]
@@ -861,6 +1046,7 @@ mod tests {
         });
         view.update(cx, |view, cx| {
             view.set_split(true, cx);
+            view.code_scroll.set_offset(point(px(-100.0), px(0.0)));
             let next = ReviewFile {
                 path: "project/b.rs".into(),
                 position: 1,
@@ -870,6 +1056,7 @@ mod tests {
             assert!(view.raw.is_empty());
             assert!(view.display.is_empty());
             assert!(view.split);
+            assert_eq!(view.code_scroll.offset().x, px(0.0));
             view.update_snapshot(
                 next,
                 DiffContent::Ready("@@ -1 +1 @@\n-before\n+after\n".into()),
@@ -891,6 +1078,42 @@ mod tests {
         assert_eq!(display_rows(&sections[0].rows, true).len(), 4);
     }
 
+    #[gpui::test]
+    fn far_rows_remain_reachable_in_the_virtualized_view(cx: &mut gpui::TestAppContext) {
+        let file = ReviewFile {
+            path: "project/large.rs".into(),
+            kind: DiffKind::WorkingTree,
+            position: 0,
+            total: 1,
+            marker: "M",
+            commit: None,
+        };
+        let mut diff = "@@ -1,300 +1,300 @@\n".to_owned();
+        for index in 0..300 {
+            diff.push_str(&format!(" line {index}\n"));
+        }
+        let (view, cx) = cx.add_window_view(|_, cx| {
+            DiffView::new("project".into(), file, DiffContent::Ready(diff), cx)
+        });
+        cx.simulate_resize(gpui::size(px(900.0), px(600.0)));
+        cx.refresh().unwrap();
+        assert!(cx.debug_bounds("diff-290-true").is_none());
+        view.update(cx, |view, cx| {
+            view.scroll.scroll_to_item_strict(290, ScrollStrategy::Top);
+            cx.notify();
+        });
+        cx.refresh().unwrap();
+        let far_row = cx.debug_bounds("diff-290-true").unwrap();
+        let viewport = cx.debug_bounds("diff-horizontal-scroll").unwrap();
+        assert!(far_row.top() >= viewport.top());
+        assert!(far_row.bottom() <= viewport.bottom());
+        // GPUI retains past debug bounds; the scroll handle identifies the current viewport.
+        assert!(
+            view.read_with(cx, |view, _| view.scroll.0.borrow().base_handle.offset().y)
+                < -px(250.0 * ROW_HEIGHT)
+        );
+    }
+
     #[test]
     fn combined_conflicts_and_newline_only_changes_remain_explicit() {
         let sections = parse("Working tree\n@@@ -1,1 -1,1 +1,5 @@@\n++<<<<<<< HEAD\n");
@@ -905,7 +1128,7 @@ mod tests {
     #[test]
     fn horizontal_extent_reserves_space_for_wide_unicode() {
         let sections = parse(&format!("@@ -0,0 +1 @@\n+{}\n", "界".repeat(80)));
-        assert!(sections[0].min_width >= 2.0 * (80.0 * 2.0 * 7.2 + 62.0));
+        assert!(sections[0].code_width >= 80.0 * 2.0 * 7.2);
     }
 
     #[test]
