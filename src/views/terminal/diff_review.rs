@@ -66,19 +66,14 @@ impl DiffView {
         } else {
             "Parent".into()
         };
-        let body = if self.body_expanded {
-            summary.body.clone()
-        } else {
-            summary.body.lines().next().unwrap_or("").to_owned()
-        };
         div()
-            .px(px(16.0))
-            .py(px(10.0))
+            .px(px(12.0))
+            .py(px(6.0))
             .flex_shrink_0()
             .min_w_0()
             .flex()
             .flex_col()
-            .gap(px(6.0))
+            .gap(px(4.0))
             .child(
                 div()
                     .flex()
@@ -89,8 +84,8 @@ impl DiffView {
                             .flex_1()
                             .min_w_0()
                             .truncate()
-                            .text_size(px(18.0))
-                            .line_height(px(24.0))
+                            .text_size(px(14.0))
+                            .line_height(px(20.0))
                             .font_weight(FontWeight::MEDIUM)
                             .id("commit-subject")
                             .tooltip(text_tooltip(summary.subject.clone()))
@@ -109,65 +104,84 @@ impl DiffView {
                                 .text_color(theme::success())
                                 .child("Unpushed"),
                         )
-                    }),
-            )
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(8.0))
-                    .text_size(px(11.0))
-                    .text_color(theme::ash())
+                    })
                     .child(
-                        div()
-                            .min_w_0()
-                            .truncate()
-                            .child(format!("{} · {}", summary.author, summary.date)),
-                    )
-                    .child(div().flex_1())
-                    .child(
-                        Self::control(
-                            "commit-parent",
-                            "Choose comparison parent",
-                            summary.parents.len() > 1,
-                        )
-                        .h(px(22.0))
-                        .px(px(6.0))
-                        .child(parent_label)
-                        .when(summary.parents.len() > 1, |button| {
-                            button.child(
-                                svg()
-                                    .path("icons/chevron-down.svg")
-                                    .size(px(11.0))
-                                    .text_color(theme::ash()),
-                            )
-                        })
-                        .on_click(cx.listener(|view, _, _, cx| {
-                            if view
-                                .file
-                                .commit
-                                .as_ref()
-                                .is_some_and(|commit| commit.summary.parents.len() > 1)
-                            {
-                                view.parent_picker = !view.parent_picker;
-                                cx.notify();
-                            }
-                        })),
-                    )
-                    .child(
-                        Self::control("copy-commit-hash", "Copy full commit hash", true)
-                            .h(px(22.0))
+                        Self::control("commit-details", "Show commit details", true)
+                            .h(px(24.0))
                             .px(px(6.0))
-                            .font_family(theme::mono())
-                            .child(if self.copied_hash {
-                                "Copied".to_owned()
+                            .child(if self.body_expanded {
+                                "Less"
                             } else {
-                                summary.short_id().to_owned()
+                                "Details"
                             })
-                            .on_click(cx.listener(|view, _, _, cx| view.copy_hash(cx))),
+                            .on_click(cx.listener(|view, _, _, cx| {
+                                view.body_expanded = !view.body_expanded;
+                                if !view.body_expanded {
+                                    view.parent_picker = false;
+                                }
+                                cx.notify();
+                            })),
                     ),
             )
-            .when(self.parent_picker, |panel| {
+            .when(self.body_expanded, |panel| {
+                panel.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(8.0))
+                        .text_size(px(11.0))
+                        .text_color(theme::ash())
+                        .child(
+                            div()
+                                .min_w_0()
+                                .truncate()
+                                .child(format!("{} · {}", summary.author, summary.date)),
+                        )
+                        .child(div().flex_1())
+                        .child(
+                            Self::control(
+                                "commit-parent",
+                                "Choose comparison parent",
+                                summary.parents.len() > 1,
+                            )
+                            .h(px(22.0))
+                            .px(px(6.0))
+                            .child(parent_label)
+                            .when(summary.parents.len() > 1, |button| {
+                                button.child(
+                                    svg()
+                                        .path("icons/chevron-down.svg")
+                                        .size(px(11.0))
+                                        .text_color(theme::ash()),
+                                )
+                            })
+                            .on_click(cx.listener(|view, _, _, cx| {
+                                if view
+                                    .file
+                                    .commit
+                                    .as_ref()
+                                    .is_some_and(|commit| commit.summary.parents.len() > 1)
+                                {
+                                    view.parent_picker = !view.parent_picker;
+                                    cx.notify();
+                                }
+                            })),
+                        )
+                        .child(
+                            Self::control("copy-commit-hash", "Copy full commit hash", true)
+                                .h(px(22.0))
+                                .px(px(6.0))
+                                .font_family(theme::mono())
+                                .child(if self.copied_hash {
+                                    "Copied".to_owned()
+                                } else {
+                                    summary.short_id().to_owned()
+                                })
+                                .on_click(cx.listener(|view, _, _, cx| view.copy_hash(cx))),
+                        ),
+                )
+            })
+            .when(self.body_expanded && self.parent_picker, |panel| {
                 panel.child(
                     div()
                         .id("commit-parent-options")
@@ -190,48 +204,24 @@ impl DiffView {
                         })),
                 )
             })
-            .when(!summary.body.trim().is_empty(), |panel| {
-                panel.child(
-                    div()
-                        .flex()
-                        .items_start()
-                        .gap(px(8.0))
-                        .child(
+            .when(
+                self.body_expanded && !summary.body.trim().is_empty(),
+                |panel| {
+                    panel.child(
+                        div().flex().items_start().gap(px(8.0)).child(
                             div()
                                 .id("commit-message-body")
                                 .flex_1()
                                 .min_w_0()
                                 .text_size(px(12.0))
                                 .text_color(theme::ash())
-                                .when(!self.body_expanded, |body| body.truncate())
-                                .when(self.body_expanded, |body| {
-                                    body.max_h(px(120.0)).overflow_y_scroll()
-                                })
-                                .child(body),
-                        )
-                        .when(
-                            summary.body.lines().count() > 1 || summary.body.len() > 100,
-                            |row| {
-                                row.child(
-                                    Self::control(
-                                        "expand-commit-message",
-                                        "Expand commit description",
-                                        true,
-                                    )
-                                    .h(px(20.0))
-                                    .px(px(4.0))
-                                    .child(if self.body_expanded { "Less" } else { "More" })
-                                    .on_click(cx.listener(
-                                        |view, _, _, cx| {
-                                            view.body_expanded = !view.body_expanded;
-                                            cx.notify();
-                                        },
-                                    )),
-                                )
-                            },
+                                .max_h(px(120.0))
+                                .overflow_y_scroll()
+                                .child(summary.body.clone()),
                         ),
-                )
-            })
+                    )
+                },
+            )
             .into_any_element()
     }
 
@@ -308,6 +298,11 @@ impl DiffView {
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let count = commit.files.len();
+        let selected_path = commit
+            .files
+            .get(self.file.position)
+            .map(|file| file.relative_path.to_string_lossy().into_owned())
+            .unwrap_or_default();
         div()
             .flex_shrink_0()
             .min_w_0()
@@ -341,7 +336,16 @@ impl DiffView {
                 } else {
                     "Changed files".into()
                 })
-                .child(div().flex_1())
+                .child(
+                    div()
+                        .id("commit-selected-file")
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_color(theme::ash())
+                        .tooltip(text_tooltip(selected_path.clone()))
+                        .child(selected_path),
+                )
                 .when(ready, |row| row.child(stats(commit.stats())))
                 .on_click(cx.listener(|view, _, _, cx| {
                     view.files_expanded = !view.files_expanded;
@@ -384,12 +388,12 @@ impl DiffView {
         let staged = self.file.kind == DiffKind::Staged;
         let enabled = ready && !self.operation_busy && self.file.total > 0;
         div()
-            .h(px(40.0))
+            .h(px(34.0))
             .flex_shrink_0()
             .px(px(12.0))
             .flex()
             .items_center()
-            .gap(px(8.0))
+            .gap(px(6.0))
             .border_b_1()
             .border_color(theme::edge())
             .child(
@@ -404,7 +408,10 @@ impl DiffView {
                     .truncate()
                     .text_size(px(12.0))
                     .id("diff-file-path")
-                    .tooltip(text_tooltip(relative.clone()))
+                    .tooltip(text_tooltip(format!(
+                        "{} — {relative}",
+                        if staged { "Staged" } else { section.label }
+                    )))
                     .child(relative),
             )
             .when(ready, |header| {
@@ -421,14 +428,14 @@ impl DiffView {
                         self.can_discard(),
                     )
                     .h(px(26.0))
-                    .px(px(6.0))
+                    .w(px(26.0))
+                    .justify_center()
                     .child(
                         svg()
                             .path("icons/undo.svg")
                             .size(px(13.0))
                             .text_color(theme::ash()),
                     )
-                    .child("Undo file")
                     .when(self.can_discard(), |button| {
                         button.on_click(cx.listener(|_, _, _, cx| {
                             cx.emit(DiffEvent::Review(ReviewAction::Discard(None)))
@@ -447,12 +454,8 @@ impl DiffView {
                     enabled,
                 )
                 .h(px(26.0))
-                .px(px(6.0))
-                .child(if staged {
-                    "− Unstage"
-                } else {
-                    "+ Stage file"
-                })
+                .px(px(7.0))
+                .child(if staged { "Unstage" } else { "Stage" })
                 .when(enabled, |button| {
                     button.on_click(
                         cx.listener(|_, _, _, cx| cx.emit(DiffEvent::Review(ReviewAction::Stage))),
@@ -462,8 +465,8 @@ impl DiffView {
             .child(
                 Self::control("diff-open-file", "Open file · Ctrl+O", !self.operation_busy)
                     .h(px(26.0))
-                    .px(px(6.0))
-                    .child("Open file")
+                    .px(px(7.0))
+                    .child("Open")
                     .when(!self.operation_busy, |button| {
                         button.on_click(cx.listener(|_, _, _, cx| cx.emit(DiffEvent::OpenFile)))
                     }),
@@ -476,11 +479,7 @@ impl DiffView {
         let history = self.file.commit.is_some();
         let ready = matches!(self.content, DiffContent::Ready(_));
         let rows = self.display.len();
-        let hunks = section
-            .rows
-            .iter()
-            .filter(|row| matches!(row, Row::Hunk(_)))
-            .count();
+        let hunks = self.hunk_rows.len();
         let previous = self.file.position > 0;
         let next = self.file.position + 1 < self.file.total;
         div()
@@ -514,7 +513,7 @@ impl DiffView {
             })
             .child(
                 div()
-                    .h(px(32.0))
+                    .h(px(30.0))
                     .flex_shrink_0()
                     .px(px(10.0))
                     .flex()
@@ -524,7 +523,7 @@ impl DiffView {
                     .border_color(theme::edge())
                     .child(
                         Self::control("diff-unified", "Unified diff · Alt+U", true)
-                            .h(px(26.0))
+                            .h(px(24.0))
                             .bg(if !self.split {
                                 theme::panel_hover()
                             } else {
@@ -535,7 +534,7 @@ impl DiffView {
                     )
                     .child(
                         Self::control("diff-split", "Split diff · Alt+S", true)
-                            .h(px(26.0))
+                            .h(px(24.0))
                             .bg(if self.split {
                                 theme::panel_hover()
                             } else {
@@ -544,30 +543,17 @@ impl DiffView {
                             .child("Split")
                             .on_click(cx.listener(|view, _, _, cx| view.set_split(true, cx))),
                     )
-                    .when(!history, |bar| {
-                        bar.child(
-                            div()
-                                .px(px(8.0))
-                                .text_size(px(10.0))
-                                .text_color(theme::ash())
-                                .child(if self.file.kind == DiffKind::Staged {
-                                    "Staged"
-                                } else {
-                                    section.label
-                                }),
-                        )
-                    })
                     .child(div().flex_1())
                     .child(div().text_size(px(10.0)).text_color(theme::ash()).child(
                         if hunks == 0 {
-                            "No hunks".into()
+                            "0 hunks".into()
                         } else {
-                            format!("{} of {hunks} hunks", self.hunk_cursor.unwrap_or(0) + 1)
+                            format!("{}/{} hunks", self.hunk_cursor.unwrap_or(0) + 1, hunks)
                         },
                     ))
                     .child(
                         Self::control("previous-hunk", "Previous hunk · Shift+F7", hunks > 0)
-                            .h(px(26.0))
+                            .h(px(24.0))
                             .px(px(6.0))
                             .child(
                                 svg()
@@ -583,7 +569,7 @@ impl DiffView {
                     )
                     .child(
                         Self::control("next-hunk", "Next hunk · F7", hunks > 0)
-                            .h(px(26.0))
+                            .h(px(24.0))
                             .px(px(6.0))
                             .child(
                                 svg()
@@ -603,7 +589,7 @@ impl DiffView {
                             "Copy selected lines or the complete diff · Ctrl+C",
                             ready,
                         )
-                        .h(px(26.0))
+                        .h(px(24.0))
                         .px(px(6.0))
                         .child("Copy")
                         .when(ready, |button| {
@@ -689,18 +675,14 @@ impl DiffView {
                 panel.child(
                     div()
                         .id("diff-horizontal-scroll")
+                        .debug_selector(|| "diff-horizontal-scroll".into())
                         .flex_1()
                         .min_h_0()
-                        .overflow_x_scroll()
+                        .overflow_hidden()
                         .child(
                             div()
                                 .h_full()
                                 .w_full()
-                                .min_w(px(if self.split {
-                                    section.min_width
-                                } else {
-                                    (section.min_width / 2.0 + 80.0).max(480.0)
-                                }))
                                 .flex()
                                 .flex_col()
                                 .when(self.split, |grid| {
@@ -728,8 +710,8 @@ impl DiffView {
                                             })),
                                     )
                                 })
-                                .child(
-                                    uniform_list(
+                                .child({
+                                    let mut lines = uniform_list(
                                         "diff-lines",
                                         rows,
                                         cx.processor(
@@ -745,15 +727,17 @@ impl DiffView {
                                     .min_h_0()
                                     .font_family(theme::mono())
                                     .text_size(px(12.0))
-                                    .line_height(px(ROW_HEIGHT)),
-                                ),
+                                    .line_height(px(ROW_HEIGHT));
+                                    lines.style().restrict_scroll_to_axis = Some(true);
+                                    lines
+                                }),
                         ),
                 )
             })
             .when(!ready || rows == 0, |panel| panel.child(div().flex_1()))
             .child(
                 div()
-                    .h(px(28.0))
+                    .h(px(26.0))
                     .flex_shrink_0()
                     .px(px(12.0))
                     .border_t_1()
@@ -765,15 +749,28 @@ impl DiffView {
                         if self.file.total == 0 {
                             "0 files".into()
                         } else {
-                            format!("File {} of {}", self.file.position + 1, self.file.total)
+                            format!("{} / {} files", self.file.position + 1, self.file.total)
                         },
                     ))
                     .child(div().flex_1())
+                    .when(self.code_scroll.max_offset().width > px(0.0), |bar| {
+                        bar.child(
+                            div()
+                                .id("diff-pan-help")
+                                .flex_shrink_0()
+                                .text_size(px(10.0))
+                                .text_color(theme::ash())
+                                .tooltip(text_tooltip(
+                                    "Pan horizontally: Shift+wheel or Ctrl+Shift+Left/Right",
+                                ))
+                                .child("Pan"),
+                        )
+                    })
                     .child(
                         Self::control("previous-change", "Previous file · Alt+Up", previous)
-                            .h(px(24.0))
+                            .h(px(22.0))
                             .px(px(6.0))
-                            .child("Previous file")
+                            .child("Previous")
                             .when(previous, |button| {
                                 button.on_click(cx.listener(|_, _, _, cx| {
                                     cx.emit(DiffEvent::Review(ReviewAction::Navigate(-1)))
@@ -782,9 +779,9 @@ impl DiffView {
                     )
                     .child(
                         Self::control("next-change", "Next file · Alt+Down", next)
-                            .h(px(24.0))
+                            .h(px(22.0))
                             .px(px(6.0))
-                            .child("Next file")
+                            .child("Next")
                             .when(next, |button| {
                                 button.on_click(cx.listener(|_, _, _, cx| {
                                     cx.emit(DiffEvent::Review(ReviewAction::Navigate(1)))
