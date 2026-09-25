@@ -901,7 +901,7 @@ impl GitPanel {
         let commit_input = cx.new(|cx| {
             InputState::new(window, cx)
                 .multi_line(true)
-                .rows(3)
+                .rows(2)
                 .placeholder("Commit message")
         });
         let subscription = cx.subscribe_in(
