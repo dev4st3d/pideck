@@ -7,7 +7,8 @@ pub(crate) use history::CommitFile;
 #[cfg(test)]
 mod tests;
 pub(crate) use history::{
-    CommitDetails, CommitSummary, commit_details, commit_file_diff, history_page,
+    CommitDetails, CommitPrefix, CommitSummary, commit_details, commit_file_diff, day_label,
+    history_page,
 };
 const WRITE_TIMEOUT: Duration = Duration::from_secs(120);
 pub(crate) const HISTORY_PAGE_SIZE: usize = 40;

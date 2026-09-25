@@ -1,10 +1,18 @@
 use super::git_workflow::{git_control, git_quiet};
 use super::*;
 
+// Timeline geometry. Rows sit edge to edge so the graph line stays continuous.
+const HISTORY_ROW_HEIGHT: f32 = 48.0;
+const DAY_ROW_HEIGHT: f32 = 28.0;
+const ROW_INSET: f32 = 8.0;
+const GRAPH_WIDTH: f32 = 14.0;
+const NODE_SIZE: f32 = 8.0;
+// Center of the subject line inside a commit row's content box.
+const NODE_CENTER: f32 = 14.0;
+
 #[derive(Clone)]
 enum HistoryRow {
-    Day(String, usize),
-    Remote(String),
+    Day { label: String, unpushed: usize },
     Commit(usize),
 }
 
@@ -17,6 +25,7 @@ pub(super) struct HistoryState {
     more: bool,
     loading: bool,
     generation: u64,
+    today: Option<i64>,
     error: Option<String>,
     scroll: gpui::ListState,
 }
@@ -32,27 +41,27 @@ impl HistoryState {
             more: false,
             loading: false,
             generation: 0,
+            today: None,
             error: None,
             scroll: gpui::ListState::new(0, gpui::ListAlignment::Top, px(200.0)),
         }
     }
-    fn rebuild(&mut self, upstream: Option<&str>) {
+
+    fn rebuild(&mut self) {
         self.rows.clear();
         let mut day = "";
         for (index, commit) in self.commits.iter().enumerate() {
-            if commit.remote_tip
-                && let Some(upstream) = upstream
-            {
-                self.rows.push(HistoryRow::Remote(upstream.into()));
-            }
             if commit.day() != day {
                 day = commit.day();
-                let local = self.commits[index..]
+                let unpushed = self.commits[index..]
                     .iter()
                     .take_while(|item| item.day() == day)
                     .filter(|item| item.local == Some(true))
                     .count();
-                self.rows.push(HistoryRow::Day(day.into(), local));
+                self.rows.push(HistoryRow::Day {
+                    label: workflow::day_label(day, self.today),
+                    unpushed,
+                });
             }
             self.rows.push(HistoryRow::Commit(index));
         }
@@ -127,6 +136,9 @@ impl GitPanel {
                     Ok(page) => {
                         view.history.anchor = page.anchor;
                         view.history.more = page.more;
+                        if page.today.is_some() {
+                            view.history.today = page.today;
+                        }
                         if append {
                             view.history.commits.extend(page.commits);
                         } else {
@@ -140,12 +152,7 @@ impl GitPanel {
                                     .position(|commit| commit.id == id)
                             })
                             .unwrap_or(0);
-                        let upstream = view
-                            .repository
-                            .as_ref()
-                            .and_then(|repository| repository.upstream.as_ref())
-                            .map(|upstream| upstream.label.as_str());
-                        view.history.rebuild(upstream);
+                        view.history.rebuild();
                         if !append
                             && view.history.visible
                             && let Some(commit) =
@@ -329,161 +336,180 @@ impl GitPanel {
 
     fn history_row(&self, row: usize, focused: bool, cx: &mut Context<Self>) -> gpui::AnyElement {
         match &self.history.rows[row] {
-            HistoryRow::Day(day, local) => div()
-                .h(px(24.0))
-                .px(px(12.0))
-                .pl(px(42.0))
-                .flex()
-                .items_center()
-                .text_size(px(10.0))
-                .text_color(theme::ash())
-                .child(day.clone())
-                .child(div().flex_1())
-                .when(*local > 0, |row| {
-                    row.child(
+            HistoryRow::Day { label, unpushed } => {
+                let unpushed = *unpushed;
+                div()
+                    .h(px(DAY_ROW_HEIGHT))
+                    .w_full()
+                    .min_w_0()
+                    .px(px(ROW_INSET))
+                    .child(
                         div()
-                            .text_color(theme::success())
-                            .child(format!("{local} unpushed")),
+                            .size_full()
+                            .min_w_0()
+                            .pl(px(6.0))
+                            .pr(px(8.0))
+                            .flex()
+                            .items_center()
+                            .gap(px(8.0))
+                            // Matches the commit rows' focus border so the graph stays aligned.
+                            .border_1()
+                            .border_color(rgba(0))
+                            .child(timeline(row > 0, row > 0, None))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_size(px(chrome::DETAIL_TEXT_SIZE))
+                                    .line_height(px(chrome::DETAIL_LINE_HEIGHT))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(theme::ash())
+                                    .child(label.clone()),
+                            )
+                            .when(unpushed > 0, |line| {
+                                line.child(
+                                    div()
+                                        .flex_shrink_0()
+                                        .flex()
+                                        .items_center()
+                                        .gap(px(4.0))
+                                        .text_size(px(chrome::DETAIL_TEXT_SIZE))
+                                        .line_height(px(chrome::DETAIL_LINE_HEIGHT))
+                                        .text_color(theme::success())
+                                        .child(
+                                            svg()
+                                                .path("icons/arrow-up.svg")
+                                                .size(px(10.0))
+                                                .text_color(theme::success()),
+                                        )
+                                        .child(format!("{unpushed} unpushed")),
+                                )
+                            }),
                     )
-                })
-                .into_any_element(),
-            HistoryRow::Remote(label) => div()
-                .h(px(24.0))
-                .pl(px(42.0))
-                .pr(px(12.0))
-                .flex()
-                .items_center()
-                .gap(px(6.0))
-                .child(panel_icon("icons/branch.svg"))
-                .child(
-                    div()
-                        .text_size(px(10.0))
-                        .text_color(theme::ash())
-                        .child(label.clone()),
-                )
-                .child(div().flex_1().h(px(1.0)).bg(theme::edge()))
-                .into_any_element(),
+                    .into_any_element()
+            }
             HistoryRow::Commit(index) => {
                 let index = *index;
                 let commit = &self.history.commits[index];
                 let selected = self.history.selected == index;
-                let color = if commit.local == Some(true) {
-                    theme::success()
-                } else {
-                    theme::ash()
-                };
+                let prefix = commit.prefix();
+                let upstream = commit
+                    .remote_tip
+                    .then(|| self.repository.as_ref()?.upstream.as_ref())
+                    .flatten()
+                    .map(|upstream| upstream.label.clone());
+                let mut tooltip = format!(
+                    "{}\n{} · {}\n{}",
+                    commit.subject, commit.author, commit.date, commit.id
+                );
+                if commit.local == Some(true) {
+                    tooltip.push_str("\nNot pushed yet");
+                }
                 div()
-                    .id(("git-history-commit", index))
-                    .debug_selector(move || format!("git-history-commit-{index}"))
-                    .h(px(52.0))
+                    .h(px(HISTORY_ROW_HEIGHT))
                     .w_full()
                     .min_w_0()
-                    .px(px(12.0))
-                    .flex()
-                    .items_center()
-                    .gap(px(10.0))
-                    .border_l_2()
-                    .border_color(if selected && focused {
-                        theme::focus()
-                    } else {
-                        gpui::rgba(0)
-                    })
-                    .bg(if selected {
-                        theme::selection()
-                    } else {
-                        theme::floor()
-                    })
-                    .hover(|style| style.bg(theme::panel_hover()))
-                    .cursor_pointer()
-                    .tooltip(text_tooltip(format!(
-                        "{}\n{}\n{}",
-                        commit.subject, commit.author, commit.id
-                    )))
-                    .on_click(cx.listener(move |view, _, window, cx| {
-                        window.focus(&view.focus);
-                        view.select_history(index, cx);
-                    }))
+                    .px(px(ROW_INSET))
                     .child(
                         div()
-                            .w(px(16.0))
-                            .h_full()
-                            .flex_shrink_0()
-                            .relative()
-                            .child(
-                                div()
-                                    .absolute()
-                                    .left(px(7.0))
-                                    .top_0()
-                                    .bottom_0()
-                                    .w(px(1.0))
-                                    .bg(if commit.local == Some(true) {
-                                        theme::success()
-                                    } else {
-                                        theme::edge()
-                                    }),
-                            )
-                            .child(
-                                div()
-                                    .absolute()
-                                    .left(px(if selected { 2.0 } else { 4.0 }))
-                                    .top(px(if selected { 11.0 } else { 13.0 }))
-                                    .size(px(if selected { 11.0 } else { 7.0 }))
-                                    .rounded_full()
-                                    .border_1()
-                                    .border_color(color)
-                                    .bg(theme::floor()),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
+                            .id(("git-history-commit", index))
+                            .debug_selector(move || format!("git-history-commit-{index}"))
+                            .size_full()
                             .min_w_0()
+                            .pl(px(6.0))
+                            .pr(px(8.0))
                             .flex()
-                            .flex_col()
-                            .gap(px(4.0))
+                            .items_center()
+                            .gap(px(8.0))
+                            .rounded(px(ROW_RADIUS))
+                            .border_1()
+                            .border_color(if selected && focused {
+                                theme::focus()
+                            } else {
+                                rgba(0)
+                            })
+                            .bg(if selected {
+                                theme::selection()
+                            } else {
+                                rgba(0)
+                            })
+                            .when(!selected, |row| {
+                                row.hover(|style| style.bg(theme::panel_hover()))
+                            })
+                            .cursor_pointer()
+                            .tooltip(text_tooltip(tooltip))
+                            .on_click(cx.listener(move |view, _, window, cx| {
+                                window.focus(&view.focus);
+                                view.select_history(index, cx);
+                            }))
+                            .child(timeline(
+                                index > 0,
+                                index + 1 < self.history.commits.len() || self.history.more,
+                                Some(commit),
+                            ))
                             .child(
                                 div()
+                                    .flex_1()
+                                    .min_w_0()
                                     .flex()
-                                    .items_center()
-                                    .gap(px(6.0))
+                                    .flex_col()
+                                    .gap(px(2.0))
                                     .child(
                                         div()
-                                            .flex_1()
+                                            .h(px(20.0))
                                             .min_w_0()
-                                            .truncate()
-                                            .text_size(px(13.0))
-                                            .child(commit.subject.clone()),
+                                            .flex()
+                                            .items_center()
+                                            .gap(px(6.0))
+                                            .when_some(prefix, |line, prefix| {
+                                                line.child(prefix_badge(prefix))
+                                            })
+                                            .child(
+                                                div()
+                                                    .flex_1()
+                                                    .min_w_0()
+                                                    .truncate()
+                                                    .text_size(px(13.0))
+                                                    .line_height(px(20.0))
+                                                    .text_color(theme::bone())
+                                                    .child(
+                                                        prefix
+                                                            .map_or(commit.subject.as_str(), |p| {
+                                                                p.summary
+                                                            })
+                                                            .to_owned(),
+                                                    ),
+                                            ),
                                     )
-                                    .when(commit.head, |line| {
-                                        line.child(
-                                            div()
-                                                .px(px(3.0))
-                                                .rounded(px(2.0))
-                                                .border_1()
-                                                .border_color(theme::edge())
-                                                .font_family(theme::mono())
-                                                .text_size(px(9.0))
-                                                .text_color(theme::ash())
-                                                .child("HEAD"),
-                                        )
-                                    }),
-                            )
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap(px(6.0))
-                                    .text_size(px(10.0))
-                                    .text_color(theme::ash())
-                                    .child(div().flex_1().min_w_0().truncate().child(format!(
-                                        "{} · {}",
-                                        commit.author,
-                                        commit.time()
-                                    )))
                                     .child(
                                         div()
-                                            .font_family(theme::mono())
-                                            .child(commit.short_id().to_owned()),
+                                            .h(px(chrome::DETAIL_LINE_HEIGHT))
+                                            .min_w_0()
+                                            .flex()
+                                            .items_center()
+                                            .gap(px(6.0))
+                                            .text_size(px(chrome::DETAIL_TEXT_SIZE))
+                                            .line_height(px(chrome::DETAIL_LINE_HEIGHT))
+                                            .text_color(theme::ash())
+                                            .child(div().flex_1().min_w_0().truncate().child(
+                                                format!("{} · {}", commit.author, commit.time()),
+                                            ))
+                                            .when(commit.head, |line| {
+                                                line.child(ref_chip(None, "HEAD".into()))
+                                            })
+                                            .when_some(upstream, |line, upstream| {
+                                                line.child(ref_chip(
+                                                    Some("icons/branch.svg"),
+                                                    upstream,
+                                                ))
+                                            })
+                                            .child(
+                                                div()
+                                                    .flex_shrink_0()
+                                                    .font_family(theme::mono())
+                                                    .child(commit.short_id().to_owned()),
+                                            ),
                                     ),
                             ),
                     )
@@ -494,13 +520,14 @@ impl GitPanel {
 
     pub(super) fn render_history_list(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let loading = self.history.loading;
+        let count = self.history.commits.len();
         div()
             .flex_1()
             .min_h_0()
             .min_w_0()
             .flex()
             .flex_col()
-            .when(self.history.commits.is_empty(), |panel| {
+            .when(count == 0, |panel| {
                 panel.child(message(if loading {
                     "Loading history…"
                 } else if self.history.error.is_some() {
@@ -518,7 +545,8 @@ impl GitPanel {
                 )
                 .flex_1()
                 .min_h_0()
-                .min_w_0(),
+                .min_w_0()
+                .pb(px(4.0)),
             )
             .when_some(self.history.error.clone(), |panel, error| {
                 panel.child(
@@ -544,37 +572,180 @@ impl GitPanel {
                         ),
                 )
             })
-            .child(
-                div()
-                    .h(px(30.0))
-                    .flex_shrink_0()
-                    .px(px(12.0))
-                    .border_t_1()
-                    .border_color(theme::edge())
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .child(
-                        div()
-                            .text_size(px(10.0))
-                            .text_color(theme::ash())
-                            .child(format!("{} shown", self.history.commits.len())),
-                    )
-                    .when(self.history.more || loading, |footer| {
-                        footer.child(
-                            git_quiet(git_control(
-                                "load-older-commits",
-                                if loading { "Loading…" } else { "Load older" },
-                                Some("icons/chevron-down.svg"),
-                                !loading,
-                            ))
-                            .h(px(24.0))
-                            .on_click(cx.listener(|view, _, _, cx| view.load_history(true, cx))),
+            .when(count > 0, |panel| {
+                panel.child(
+                    div()
+                        .h(px(32.0))
+                        .flex_shrink_0()
+                        .pl(px(12.0))
+                        .pr(px(8.0))
+                        .border_t_1()
+                        .border_color(theme::edge())
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .gap(px(8.0))
+                        .child(
+                            div()
+                                .min_w_0()
+                                .truncate()
+                                .text_size(px(chrome::DETAIL_TEXT_SIZE))
+                                .line_height(px(chrome::DETAIL_LINE_HEIGHT))
+                                .text_color(theme::ash())
+                                .child(match (count, self.history.more) {
+                                    (1, false) => "1 commit".to_owned(),
+                                    (count, false) => format!("{count} commits"),
+                                    (count, true) => format!("Latest {count} commits"),
+                                }),
                         )
-                    }),
-            )
+                        .when(self.history.more || loading, |footer| {
+                            footer.child(
+                                git_quiet(git_control(
+                                    "load-older-commits",
+                                    if loading { "Loading…" } else { "Load older" },
+                                    Some("icons/chevron-down.svg"),
+                                    !loading,
+                                ))
+                                .h(px(24.0))
+                                .px(px(8.0))
+                                .on_click(
+                                    cx.listener(|view, _, _, cx| view.load_history(true, cx)),
+                                ),
+                            )
+                        }),
+                )
+            })
             .into_any_element()
     }
+}
+
+/// One graph cell. The line skips the newest commit's top and the oldest commit's bottom,
+/// and stops at the node edge so hollow nodes read cleanly on any row background.
+fn timeline(above: bool, below: bool, commit: Option<&workflow::CommitSummary>) -> gpui::Div {
+    let segment = || {
+        div()
+            .absolute()
+            .left(px((GRAPH_WIDTH - 1.0) / 2.0))
+            .w(px(1.0))
+            .bg(theme::edge())
+    };
+    let column = div().w(px(GRAPH_WIDTH)).h_full().flex_shrink_0().relative();
+    // Offsets of -1 reach across the row's 1px border so adjacent rows join seamlessly.
+    let Some(commit) = commit else {
+        return column.when(above && below, |column| {
+            column.child(segment().top(px(-1.0)).bottom(px(-1.0)))
+        });
+    };
+    let top = NODE_CENTER - NODE_SIZE / 2.0;
+    let unpushed = commit.local == Some(true);
+    let tone = if unpushed {
+        theme::success()
+    } else {
+        theme::ash()
+    };
+    column
+        .when(above, |column| {
+            column.child(segment().top(px(-1.0)).h(px(top + 1.0)))
+        })
+        .when(below, |column| {
+            column.child(segment().top(px(top + NODE_SIZE)).bottom(px(-1.0)))
+        })
+        .child(
+            div()
+                .absolute()
+                .left(px((GRAPH_WIDTH - NODE_SIZE) / 2.0))
+                .top(px(top))
+                .size(px(NODE_SIZE))
+                .rounded_full()
+                .border_color(tone)
+                .when(commit.head, |node| node.border_2())
+                .when(!commit.head, |node| node.border_1())
+                .when(unpushed, |node| node.bg(tone)),
+        )
+}
+
+fn tint(color: gpui::Rgba, alpha: f32) -> gpui::Rgba {
+    gpui::Rgba { a: alpha, ..color }
+}
+
+/// Badge for a Conventional Commits prefix. Tone only reinforces the label text.
+fn prefix_badge(prefix: workflow::CommitPrefix<'_>) -> gpui::Div {
+    let kind = prefix.kind.to_ascii_lowercase();
+    let tone = match kind.as_str() {
+        _ if prefix.breaking => theme::error(),
+        "feat" => theme::success(),
+        "fix" | "hotfix" => theme::modified(),
+        "revert" => theme::error(),
+        _ => theme::ash(),
+    };
+    div()
+        .flex_shrink_0()
+        .max_w(px(128.0))
+        .h(px(18.0))
+        .px(px(5.0))
+        .flex()
+        .items_center()
+        .gap(px(4.0))
+        .overflow_hidden()
+        .rounded(px(3.0))
+        .border_1()
+        .border_color(tint(tone, 0.32))
+        .bg(tint(tone, 0.12))
+        .font_family(theme::mono())
+        .text_size(px(10.0))
+        .line_height(px(14.0))
+        .text_color(tone)
+        .child(div().flex_shrink_0().child(kind))
+        .when_some(prefix.scope, |badge, scope| {
+            badge
+                .child(
+                    div()
+                        .flex_shrink_0()
+                        .w(px(1.0))
+                        .h(px(10.0))
+                        .bg(tint(tone, 0.32)),
+                )
+                .child(
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .text_color(tint(tone, 0.72))
+                        .child(scope.to_owned()),
+                )
+        })
+        .when(prefix.breaking, |badge| {
+            badge.child(div().flex_shrink_0().child("!"))
+        })
+}
+
+/// Neutral reference label such as `HEAD` or the upstream branch.
+fn ref_chip(icon: Option<&'static str>, label: String) -> gpui::Div {
+    div()
+        .flex_shrink_0()
+        .max_w(px(112.0))
+        .h(px(chrome::DETAIL_LINE_HEIGHT))
+        .px(px(4.0))
+        .flex()
+        .items_center()
+        .gap(px(3.0))
+        .overflow_hidden()
+        .rounded(px(3.0))
+        .border_1()
+        .border_color(theme::edge())
+        .font_family(theme::mono())
+        .text_size(px(10.0))
+        .line_height(px(14.0))
+        .text_color(theme::ash())
+        .when_some(icon, |chip, icon| {
+            chip.child(
+                svg()
+                    .path(icon)
+                    .size(px(10.0))
+                    .flex_shrink_0()
+                    .text_color(theme::ash()),
+            )
+        })
+        .child(div().min_w_0().truncate().child(label))
 }
 
 #[cfg(test)]
@@ -613,7 +784,7 @@ mod tests {
                 head: true,
                 remote_tip: false,
             });
-            panel.history.rebuild(None);
+            panel.history.rebuild();
             panel
                 .collapsed
                 .insert((DiffKind::WorkingTree, "src".into()));
@@ -627,7 +798,7 @@ mod tests {
         cx.run_until_parked();
         assert_eq!(
             cx.debug_bounds("git-history-commit-0").unwrap().size.height,
-            px(52.0)
+            px(HISTORY_ROW_HEIGHT)
         );
         cx.update(|window, cx| window.focus(&panel.read(cx).focus));
         cx.simulate_keystrokes("escape");
