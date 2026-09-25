@@ -1,4 +1,4 @@
-use super::git_workflow::git_control;
+use super::git_workflow::{git_control, git_quiet};
 use super::*;
 
 #[derive(Clone)]
@@ -562,12 +562,12 @@ impl GitPanel {
                     )
                     .when(self.history.more || loading, |footer| {
                         footer.child(
-                            git_control(
+                            git_quiet(git_control(
                                 "load-older-commits",
                                 if loading { "Loading…" } else { "Load older" },
                                 Some("icons/chevron-down.svg"),
                                 !loading,
-                            )
+                            ))
                             .h(px(24.0))
                             .on_click(cx.listener(|view, _, _, cx| view.load_history(true, cx))),
                         )
