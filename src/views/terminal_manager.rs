@@ -2769,17 +2769,24 @@ impl Render for TerminalManager {
                     return;
                 }
                 let modifiers = event.keystroke.modifiers;
-                // A focused terminal consumes Tab before it bubbles to workspace chrome.
+                // A focused terminal consumes Tab and Shift+Tab before they bubble.
+                // Shift+F6 is the reverse-focus chord so Shift+Tab can reach programs
+                // such as Claude Code, which cycles permission mode on that key.
                 if event.keystroke.key == "tab"
+                    && !modifiers.shift
                     && !modifiers.control
                     && !modifiers.alt
                     && !modifiers.platform
                 {
-                    if modifiers.shift {
-                        window.focus_prev();
-                    } else {
-                        window.focus_next();
-                    }
+                    window.focus_next();
+                    cx.stop_propagation();
+                } else if event.keystroke.key == "f6"
+                    && modifiers.shift
+                    && !modifiers.control
+                    && !modifiers.alt
+                    && !modifiers.platform
+                {
+                    window.focus_prev();
                     cx.stop_propagation();
                 }
             }))
