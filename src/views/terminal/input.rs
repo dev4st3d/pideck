@@ -50,6 +50,22 @@ impl TerminalSession {
             cx.notify();
             return;
         }
+        // Tab and Shift+Tab belong to the running program. Claude Code cycles
+        // permission mode on Shift+Tab, and a reported key_char must not let
+        // that chord bubble into workspace focus movement.
+        if event.keystroke.key == "tab"
+            && !modifiers.alt
+            && !modifiers.control
+            && !modifiers.platform
+        {
+            if let Some(bytes) =
+                terminal_key_bytes(&event.keystroke, self.engine.modes().app_cursor)
+            {
+                self.send_input(bytes, cx);
+            }
+            cx.stop_propagation();
+            return;
+        }
         // Native text input owns printable text and IME composition. Handling
         // key_char here as well would duplicate committed platform input.
         if !modifiers.platform

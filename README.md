@@ -72,7 +72,7 @@ With the checklist tree focused: arrows navigate and fold branches, Space checks
 
 Drag to select text, double-click to select a word, or triple-click to select a line. Hold `Alt` while dragging for a rectangular selection. When a terminal application captures the mouse, hold `Shift` to select text or scroll the terminal history instead.
 
-The terminal supports native Unicode/IME composition, bracketed paste, application mouse input, and scrollback. Copy uses the selected text, or the visible screen when nothing is selected.
+The terminal supports native Unicode/IME composition, bracketed paste, application mouse input, and scrollback. Copy uses the selected text, or the visible screen when nothing is selected. With the terminal focused, `Tab` and `Shift+Tab` are sent to the running program; `Shift+F6` moves to the previous control.
 
 ## Keyboard
 
@@ -99,6 +99,7 @@ Filesystem changes refresh the explorer and Git status automatically; `F5` refre
 | Toggle project sidebar | `Ctrl+Shift+B` |
 | Toggle project checklist | `Ctrl+Shift+L` |
 | Focus project sidebar | `F6` |
+| Previous focus | `Shift+F6` |
 | Copy terminal selection or visible screen | `Ctrl+Shift+C` |
 | Select all terminal history | `Ctrl+Shift+A` |
 | Paste into terminal | `Ctrl+Shift+V` |

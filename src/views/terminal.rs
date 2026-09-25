@@ -956,8 +956,9 @@ fn active_index_after_close(active: usize, removed: usize, remaining: usize) -> 
 
 fn terminal_key_bytes(keystroke: &Keystroke, application_cursor: bool) -> Option<Vec<u8>> {
     let modifiers = keystroke.modifiers;
-    // Project and tab shortcuts belong to the manager; ordinary control keys
-    // (especially Ctrl+C) and Tab belong to the running terminal program.
+    // Project and tab shortcuts belong to the manager, as do F6 and Shift+F6.
+    // Ordinary control keys (especially Ctrl+C), Tab, and Shift+Tab belong to
+    // the running terminal program.
     if keystroke.key == "f6"
         || (modifiers.control
             && (matches!(keystroke.key.as_str(), "`" | "tab")
@@ -1882,6 +1883,20 @@ mod tests {
             terminal_key_bytes(&key("tab", None, Modifiers::default()), false),
             Some(vec![9])
         );
+        assert_eq!(
+            terminal_key_bytes(
+                &key(
+                    "tab",
+                    Some("\t"),
+                    Modifiers {
+                        shift: true,
+                        ..Default::default()
+                    },
+                ),
+                false,
+            ),
+            Some(b"\x1b[Z".to_vec())
+        );
         for name in ["up", "down"] {
             assert_eq!(
                 terminal_key_bytes(
@@ -1901,6 +1916,20 @@ mod tests {
         }
         assert_eq!(
             terminal_key_bytes(&key("f6", None, Modifiers::default()), false),
+            None
+        );
+        assert_eq!(
+            terminal_key_bytes(
+                &key(
+                    "f6",
+                    None,
+                    Modifiers {
+                        shift: true,
+                        ..Default::default()
+                    },
+                ),
+                false,
+            ),
             None
         );
         assert_eq!(
