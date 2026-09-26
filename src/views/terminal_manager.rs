@@ -607,7 +607,7 @@ impl TerminalManager {
                                     .rounded_full()
                                     .bg(appearance.swatch())
                                     .border_1()
-                                    .border_color(theme::edge()),
+                                    .border_color(appearance.swatch_accent()),
                             )
                             .child(div().flex_1().min_w_0().child(appearance.label()))
                             .when(appearance == theme::appearance(), |row| row.child("✓"))
@@ -1451,7 +1451,7 @@ impl TerminalManager {
                             .rounded_full()
                             .bg(theme::canvas())
                             .border_1()
-                            .border_color(theme::bone()),
+                            .border_color(theme::focus()),
                     )
                     .child(
                         div()

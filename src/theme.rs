@@ -1,4 +1,5 @@
 //! Neutral palettes from design/pideck-reimagined, plus Stone and Flint as warmer darks.
+//! Slate, Moss, Kiln, and Iris tint a near-black base and pair it with one muted accent.
 
 use std::cell::Cell;
 
@@ -15,16 +16,24 @@ pub(crate) enum Appearance {
     Flint,
     #[default]
     Stone,
+    Slate,
+    Moss,
+    Kiln,
+    Iris,
 }
 
 impl Appearance {
-    pub(crate) const ALL: [Self; 6] = [
+    pub(crate) const ALL: [Self; 10] = [
         Self::Black,
         Self::Light,
         Self::Graphite,
         Self::Charcoal,
         Self::Flint,
         Self::Stone,
+        Self::Slate,
+        Self::Moss,
+        Self::Kiln,
+        Self::Iris,
     ];
 
     pub(crate) const fn id(self) -> &'static str {
@@ -35,6 +44,10 @@ impl Appearance {
             Self::Charcoal => "charcoal",
             Self::Flint => "flint",
             Self::Stone => "stone",
+            Self::Slate => "slate",
+            Self::Moss => "moss",
+            Self::Kiln => "kiln",
+            Self::Iris => "iris",
         }
     }
     pub(crate) const fn label(self) -> &'static str {
@@ -45,6 +58,10 @@ impl Appearance {
             Self::Charcoal => "Charcoal",
             Self::Flint => "Flint",
             Self::Stone => "Stone",
+            Self::Slate => "Slate",
+            Self::Moss => "Moss",
+            Self::Kiln => "Kiln",
+            Self::Iris => "Iris",
         }
     }
     pub(crate) fn from_id(id: &str) -> Option<Self> {
@@ -56,6 +73,10 @@ impl Appearance {
             "charcoal" | "ember" => Some(Self::Charcoal),
             "flint" => Some(Self::Flint),
             "stone" => Some(Self::Stone),
+            "slate" => Some(Self::Slate),
+            "moss" => Some(Self::Moss),
+            "kiln" => Some(Self::Kiln),
+            "iris" => Some(Self::Iris),
             _ => None,
         }
     }
@@ -70,10 +91,17 @@ impl Appearance {
             Self::Charcoal => &CHARCOAL,
             Self::Flint => &FLINT,
             Self::Stone => &STONE,
+            Self::Slate => &SLATE,
+            Self::Moss => &MOSS,
+            Self::Kiln => &KILN,
+            Self::Iris => &IRIS,
         }
     }
     pub(crate) fn swatch(self) -> Rgba {
         rgba(self.palette().canvas)
+    }
+    pub(crate) fn swatch_accent(self) -> Rgba {
+        rgba(self.palette().focus)
     }
 }
 
@@ -257,6 +285,106 @@ const STONE: Palette = Palette {
     diff_added: 0x3a4a3cff,
     diff_removed: 0x4a3c38ff,
     diff_empty: 0x46413cff,
+};
+
+// Cool blue-gray base with a muted steel-blue accent.
+const SLATE: Palette = Palette {
+    canvas: 0x12151aff,
+    chrome: 0x1c2027ff,
+    success: 0xa3c9aeff,
+    floor: 0x171b21ff,
+    panel_hover: 0x242931ff,
+    edge: 0x363d48ff,
+    edge_hard: 0xb4bcc8ff,
+    bone: 0xe8ecf1ff,
+    ash: 0xb4bcc8ff,
+    focus: 0x8fb4e0ff,
+    accent_hover: 0xa7c5eaff,
+    accent_pressed: 0x7a9fccff,
+    on_accent: 0x0f1318ff,
+    error: 0xe0a3a3ff,
+    error_wash: 0x2e1f22ff,
+    selection: 0x2a3441ff,
+    working: 0xb4bcc8ff,
+    modified: 0xe3bb8aff,
+    diff_added: 0x1a2a22ff,
+    diff_removed: 0x2e1f22ff,
+    diff_empty: 0x1c2027ff,
+};
+
+// Green-black base with a sage accent.
+const MOSS: Palette = Palette {
+    canvas: 0x121512ff,
+    chrome: 0x1c201cff,
+    success: 0xa8d0b4ff,
+    floor: 0x171b17ff,
+    panel_hover: 0x242923ff,
+    edge: 0x373f36ff,
+    edge_hard: 0xb6c0b3ff,
+    bone: 0xebefe6ff,
+    ash: 0xb6c0b3ff,
+    focus: 0xa9c79aff,
+    accent_hover: 0xbfd8b1ff,
+    accent_pressed: 0x93b384ff,
+    on_accent: 0x10140fff,
+    error: 0xdcaaa0ff,
+    error_wash: 0x2f2220ff,
+    selection: 0x2b3529ff,
+    working: 0xb6c0b3ff,
+    modified: 0xe2bf8cff,
+    diff_added: 0x1d2c20ff,
+    diff_removed: 0x2f2220ff,
+    diff_empty: 0x1c201cff,
+};
+
+// Warm flint base with a terracotta accent; errors lean rose to stay distinct.
+const KILN: Palette = Palette {
+    canvas: 0x171412ff,
+    chrome: 0x221e1bff,
+    success: 0xafc6a6ff,
+    floor: 0x1d1917ff,
+    panel_hover: 0x2b2622ff,
+    edge: 0x413a34ff,
+    edge_hard: 0xc8bfb5ff,
+    bone: 0xf3ede6ff,
+    ash: 0xc8bfb5ff,
+    focus: 0xdea283ff,
+    accent_hover: 0xebb89cff,
+    accent_pressed: 0xc98c6dff,
+    on_accent: 0x16110eff,
+    error: 0xe6a3a8ff,
+    error_wash: 0x30201fff,
+    selection: 0x3a2c25ff,
+    working: 0xc8bfb5ff,
+    modified: 0xe6c28aff,
+    diff_added: 0x1f2b1fff,
+    diff_removed: 0x30201fff,
+    diff_empty: 0x221e1bff,
+};
+
+// Indigo-black base with a lavender accent.
+const IRIS: Palette = Palette {
+    canvas: 0x141319ff,
+    chrome: 0x1e1d25ff,
+    success: 0xa8cbb2ff,
+    floor: 0x19181fff,
+    panel_hover: 0x26252eff,
+    edge: 0x3a3848ff,
+    edge_hard: 0xbdb9ccff,
+    bone: 0xeeecf4ff,
+    ash: 0xbdb9ccff,
+    focus: 0xb3a6e6ff,
+    accent_hover: 0xc7bdf0ff,
+    accent_pressed: 0x9d8fd4ff,
+    on_accent: 0x131119ff,
+    error: 0xe0a6adff,
+    error_wash: 0x2f1f25ff,
+    selection: 0x2f2c40ff,
+    working: 0xbdb9ccff,
+    modified: 0xe3bf8eff,
+    diff_added: 0x1b2a22ff,
+    diff_removed: 0x2f1f25ff,
+    diff_empty: 0x1e1d25ff,
 };
 
 fn palette() -> &'static Palette {
@@ -449,7 +577,10 @@ mod tests {
         let ids = Appearance::ALL.map(Appearance::id);
         assert_eq!(
             ids,
-            ["black", "light", "graphite", "charcoal", "flint", "stone"]
+            [
+                "black", "light", "graphite", "charcoal", "flint", "stone", "slate", "moss",
+                "kiln", "iris"
+            ]
         );
         for (index, id) in ids.iter().enumerate() {
             assert!(!ids[..index].contains(id), "duplicate appearance ID: {id}");
@@ -490,5 +621,26 @@ mod tests {
                 > luminance(Appearance::Black.palette().canvas)
         );
         assert_ne!(Appearance::Stone.swatch(), Appearance::Flint.swatch());
+    }
+
+    #[test]
+    fn accented_darks_stay_near_black_with_distinct_accents() {
+        let accented = [
+            Appearance::Slate,
+            Appearance::Moss,
+            Appearance::Kiln,
+            Appearance::Iris,
+        ];
+        for appearance in accented {
+            assert!(appearance.is_dark());
+            let canvas = luminance(appearance.palette().canvas);
+            assert!(canvas < luminance(FLINT.chrome), "{appearance:?}");
+            assert!(canvas > luminance(BLACK.canvas), "{appearance:?}");
+        }
+        for (index, appearance) in accented.iter().enumerate() {
+            for other in &accented[..index] {
+                assert_ne!(appearance.swatch_accent(), other.swatch_accent());
+            }
+        }
     }
 }
