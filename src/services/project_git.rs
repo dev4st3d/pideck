@@ -77,6 +77,8 @@ pub(crate) struct GitStatus {
     pub(crate) branch: String,
     pub(crate) entries: Vec<GitEntry>,
     pub(crate) truncated: bool,
+    /// Ignored, untracked paths; wholly ignored directories appear once.
+    pub(crate) ignored: Vec<PathBuf>,
 }
 
 impl GitStatus {
@@ -610,6 +612,7 @@ fn parse_status(root: &Path, bytes: &[u8], mut truncated: bool) -> Result<GitSta
         branch,
         entries,
         truncated,
+        ignored: Vec::new(),
     })
 }
 
@@ -702,7 +705,41 @@ pub(crate) fn read_status(root: &Path) -> Result<GitStatus, GitError> {
         }
         entry.line_stats = complete.then_some(total);
     }
+    // Ignore decoration is cosmetic, so an unreadable list leaves rows undimmed.
+    status.ignored = read_ignored(&project_root).unwrap_or_default();
     Ok(status)
+}
+
+fn read_ignored(root: &Path) -> Result<Vec<PathBuf>, GitError> {
+    // `--directory` collapses ignored trees such as `target/` into one record.
+    let output = checked_output(run_git(
+        root,
+        &args(&[
+            "ls-files",
+            "--others",
+            "--ignored",
+            "--exclude-standard",
+            "--directory",
+            "-z",
+            "--",
+            ".",
+        ]),
+    )?)?;
+    parse_ignored(root, &output.bytes)
+}
+
+fn parse_ignored(root: &Path, bytes: &[u8]) -> Result<Vec<PathBuf>, GitError> {
+    // Only NUL-terminated records are complete; a truncated tail is dropped.
+    bytes
+        .split_inclusive(|byte| *byte == 0)
+        .filter_map(|record| record.strip_suffix(&[0]))
+        .filter(|record| !record.is_empty())
+        .map(|record| {
+            let path = path_from_bytes(record.strip_suffix(b"/").unwrap_or(record))?;
+            relative_path(&path)?;
+            Ok(root.join(path))
+        })
+        .collect()
 }
 
 fn read_numstat(
@@ -850,6 +887,16 @@ mod tests {
     use std::sync::atomic::AtomicU64;
 
     static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(1);
+
+    #[test]
+    fn ignored_paths_strip_directory_slashes_and_drop_truncated_tails() {
+        let root = Path::new("project");
+        assert_eq!(
+            parse_ignored(root, b"target/\0notes.log\0partial").unwrap(),
+            [root.join("target"), root.join("notes.log")]
+        );
+        assert!(parse_ignored(root, b"../escape\0").is_err());
+    }
 
     #[test]
     fn filtered_tree_retains_ancestors_and_counts_hidden_descendants() {

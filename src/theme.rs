@@ -470,6 +470,59 @@ pub(crate) fn working() -> Rgba {
 pub(crate) fn modified() -> Rgba {
     rgba(palette().modified)
 }
+// Explorer Git decorations are livelier than the muted status palette so changed
+// files stand out at a glance; they are shared by every dark or light theme.
+const GIT_DARK: GitColors = GitColors {
+    added: 0x7fd99bff,
+    modified: 0xf2b35cff,
+};
+const GIT_LIGHT: GitColors = GitColors {
+    added: 0x17692fff,
+    modified: 0x8a4d00ff,
+};
+
+struct GitColors {
+    added: u32,
+    modified: u32,
+}
+
+fn git_colors() -> &'static GitColors {
+    if appearance().is_dark() {
+        &GIT_DARK
+    } else {
+        &GIT_LIGHT
+    }
+}
+
+pub(crate) fn git_added() -> Rgba {
+    rgba(git_colors().added)
+}
+pub(crate) fn git_modified() -> Rgba {
+    rgba(git_colors().modified)
+}
+/// Ignored rows recede toward the panel floor while keeping the theme's tint.
+pub(crate) fn git_ignored() -> Rgba {
+    rgba(ignored_color(palette()))
+}
+
+// Light floors need more of the text color to stay legible after dimming.
+const IGNORED_WEIGHT_DARK: f32 = 0.5;
+const IGNORED_WEIGHT_LIGHT: f32 = 0.62;
+
+fn ignored_color(p: &Palette) -> u32 {
+    let weight = if p.bone < p.floor {
+        IGNORED_WEIGHT_LIGHT
+    } else {
+        IGNORED_WEIGHT_DARK
+    };
+    let channel = |shift: u32| {
+        let text = ((p.bone >> shift) & 0xff) as f32;
+        let floor = ((p.floor >> shift) & 0xff) as f32;
+        (floor + (text - floor) * weight).round() as u32
+    };
+    (channel(24) << 24) | (channel(16) << 16) | (channel(8) << 8) | 0xff
+}
+
 pub(crate) fn diff_added() -> Rgba {
     rgba(palette().diff_added)
 }
@@ -557,6 +610,28 @@ mod tests {
                     contrast(p.modified, background) >= 4.5,
                     "{appearance:?}: modified on {background:08x}"
                 );
+            }
+            let git = if appearance.is_dark() {
+                &GIT_DARK
+            } else {
+                &GIT_LIGHT
+            };
+            let ignored = ignored_color(p);
+            for background in [p.floor, p.panel_hover, p.selection] {
+                for color in [git.added, git.modified] {
+                    assert!(
+                        contrast(color, background) >= 4.5,
+                        "{appearance:?}: {color:08x} on {background:08x}"
+                    );
+                }
+            }
+            // Dimmed on purpose, yet still legible; selected rows switch to `ash`.
+            for background in [p.floor, p.panel_hover] {
+                assert!(
+                    contrast(ignored, background) >= 3.0,
+                    "{appearance:?}: ignored on {background:08x}"
+                );
+                assert!(contrast(ignored, background) < contrast(p.ash, background));
             }
             let ansi = if appearance.is_dark() {
                 ANSI_DARK
