@@ -107,14 +107,14 @@ fn discard_checks_the_preview_snapshot_and_preserves_the_staged_version() {
     repo.put("file.txt", "staged\nsecond\n");
     stage(&repo.0, &[repo.entry("file.txt")], true).unwrap();
     repo.put("file.txt", "staged\nworking\n");
-    let old = prepare_discard(&repo.0, &repo.entry("file.txt"), None).unwrap();
+    let old = prepare_discard(&repo.0, &repo.entry("file.txt")).unwrap();
     repo.put("file.txt", "newer\nworking\n");
     assert!(discard(&old).is_err());
     assert_eq!(
         fs::read_to_string(repo.0.join("file.txt")).unwrap(),
         "newer\nworking\n"
     );
-    let plan = prepare_discard(&repo.0, &repo.entry("file.txt"), None).unwrap();
+    let plan = prepare_discard(&repo.0, &repo.entry("file.txt")).unwrap();
     discard(&plan).unwrap();
     assert_eq!(
         fs::read_to_string(repo.0.join("file.txt")).unwrap(),
@@ -125,36 +125,6 @@ fn discard_checks_the_preview_snapshot_and_preserves_the_staged_version() {
     assert!(!status.unstaged());
     commit(&repo.0, &repository(&repo.0).unwrap(), "Only staged").unwrap();
     assert_eq!(repo.git(&["show", "HEAD:file.txt"]), "staged\nsecond");
-}
-
-#[test]
-fn discard_one_hunk_leaves_other_hunks_and_the_index_untouched() {
-    let repo = Repo::new();
-    let mut lines: Vec<_> = (0..30).map(|i| format!("line {i}")).collect();
-    repo.put("file.txt", &(lines.join("\n") + "\n"));
-    repo.save("Initial");
-    lines[2] = "first edit".into();
-    lines[25] = "second edit".into();
-    repo.put("file.txt", &(lines.join("\n") + "\n"));
-    let entry = repo.entry("file.txt");
-    let diff = file_diff(&repo.0, &entry.path, DiffKind::WorkingTree).unwrap();
-    assert_eq!(
-        diff.text
-            .lines()
-            .filter(|line| line.starts_with("@@ "))
-            .count(),
-        2
-    );
-    let before = index_snapshot(&repo.0).unwrap();
-    let plan = prepare_discard(&repo.0, &entry, Some((0, diff.text))).unwrap();
-    discard(&plan).unwrap();
-    lines[2] = "line 2".into();
-    assert_eq!(
-        fs::read_to_string(repo.0.join("file.txt")).unwrap(),
-        lines.join("\n") + "\n"
-    );
-    assert_eq!(index_snapshot(&repo.0).unwrap(), before);
-    assert!(discard(&plan).is_err());
 }
 
 #[test]

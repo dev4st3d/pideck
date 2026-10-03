@@ -198,7 +198,6 @@ impl GitPanel {
     pub(super) fn request_discard(
         &mut self,
         entry: GitEntry,
-        hunk: Option<(usize, String)>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -212,7 +211,7 @@ impl GitPanel {
         let root = self.root.clone();
         let work = cx
             .background_executor()
-            .spawn(async move { workflow::prepare_discard(&root, &entry, hunk) });
+            .spawn(async move { workflow::prepare_discard(&root, &entry) });
         cx.spawn(async move |view, cx| {
             let result = work.await;
             let _ = view.update(cx, |view, cx| {
@@ -298,7 +297,7 @@ impl GitPanel {
                 ReviewAction::SelectParent(index) => {
                     self.open_history_commit(details.summary.clone(), *index, cx)
                 }
-                ReviewAction::Stage | ReviewAction::Discard(_) => {}
+                ReviewAction::Stage | ReviewAction::Discard => {}
             }
             return;
         }
@@ -306,15 +305,15 @@ impl GitPanel {
             ReviewAction::Navigate(direction) => {
                 self.navigate_review(&file.path, file.kind, *direction, cx)
             }
-            ReviewAction::Stage | ReviewAction::Discard(_) => {
+            ReviewAction::Stage | ReviewAction::Discard => {
                 let entry = self
                     .status
                     .as_ref()
                     .and_then(|status| status.entries.iter().find(|entry| entry.path == file.path))
                     .cloned();
                 if let Some(entry) = entry {
-                    if let ReviewAction::Discard(hunk) = action {
-                        self.request_discard(entry, hunk.clone(), window, cx);
+                    if *action == ReviewAction::Discard {
+                        self.request_discard(entry, window, cx);
                     } else {
                         self.stage_entries(
                             vec![entry],
@@ -415,18 +414,21 @@ impl GitPanel {
             .overflow_hidden()
             .px(px(8.0))
             .relative()
+            // Guides sit under each ancestor's chevron: row inset, border,
+            // content inset, and half the 14px chevron slot.
             .children((1..row.depth).map(|depth| {
                 div()
                     .absolute()
-                    .left(px(8.0 + (depth - 1) as f32 * chrome::TREE_INDENT))
+                    .left(px(19.5 + (depth - 1) as f32 * chrome::TREE_INDENT))
                     .top_0()
                     .bottom_0()
                     .w(px(1.0))
-                    .bg(theme::edge())
+                    .bg(theme::edge_soft())
             }))
             .child(
                 div()
                     .id(("git-row", index))
+                    .group("git-change-row")
                     .debug_selector(move || format!("git-row-{index}"))
                     .size_full()
                     .min_w_0()
@@ -445,7 +447,11 @@ impl GitPanel {
                     } else {
                         FontWeight::NORMAL
                     })
-                    .text_color(theme::bone())
+                    .text_color(if entry.is_none() && !section {
+                        theme::bone_dim()
+                    } else {
+                        theme::bone()
+                    })
                     .border_1()
                     .border_color(if selected && focused {
                         theme::focus()
@@ -495,7 +501,7 @@ impl GitPanel {
                     } else {
                         filename(&row.path).into_any_element()
                     })
-                    .when(entry.is_none(), |item| {
+                    .when(section, |item| {
                         item.child(
                             div()
                                 .flex_shrink_0()
@@ -542,49 +548,61 @@ impl GitPanel {
                     .when_some(entry.cloned(), |item, entry| {
                         let undo_entry = entry.clone();
                         item.child(line_stats(entry.stats(kind), entry.conflicted))
-                            .child(if kind == DiffKind::WorkingTree {
-                                git_icon_button(
-                                    ("git-discard", index),
-                                    Some("icons/undo.svg"),
-                                    enabled && !entry.conflicted,
-                                )
-                                .tooltip(text_tooltip(if entry.untracked {
-                                    "Discard new file · move to Recycle Bin"
-                                } else {
-                                    "Discard unstaged changes"
-                                }))
-                                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                                .on_click(cx.listener(move |view, _, window, cx| {
-                                    cx.stop_propagation();
-                                    view.request_discard(undo_entry.clone(), None, window, cx);
-                                }))
-                                .into_any_element()
-                            } else {
-                                div().w(px(24.0)).flex_shrink_0().into_any_element()
-                            })
                             .child(
-                                git_icon_button(("git-stage", index), None, enabled)
+                                // Row actions stay out of the way until the row is
+                                // hovered or selected; keyboard selection reveals them.
+                                div()
+                                    .flex_shrink_0()
+                                    .flex()
+                                    .items_center()
+                                    .when(!selected, |actions| actions.invisible())
+                                    .group_hover("git-change-row", |style| style.visible())
                                     .child(if kind == DiffKind::WorkingTree {
-                                        "+"
+                                        git_icon_button(
+                                            ("git-discard", index),
+                                            Some("icons/undo.svg"),
+                                            enabled && !entry.conflicted,
+                                        )
+                                        .tooltip(text_tooltip(if entry.untracked {
+                                            "Discard new file · move to Recycle Bin"
+                                        } else {
+                                            "Discard unstaged changes"
+                                        }))
+                                        .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                            cx.stop_propagation()
+                                        })
+                                        .on_click(cx.listener(move |view, _, window, cx| {
+                                            cx.stop_propagation();
+                                            view.request_discard(undo_entry.clone(), window, cx);
+                                        }))
+                                        .into_any_element()
                                     } else {
-                                        "−"
+                                        div().w(px(24.0)).flex_shrink_0().into_any_element()
                                     })
-                                    .tooltip(text_tooltip(format!(
-                                        "{stage_label} {}",
-                                        entry.relative_path.display()
-                                    )))
-                                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                                        cx.stop_propagation()
-                                    })
-                                    .on_click(cx.listener(move |view, _, window, cx| {
-                                        cx.stop_propagation();
-                                        view.stage_entries(
-                                            vec![entry.clone()],
-                                            kind == DiffKind::WorkingTree,
-                                            window,
-                                            cx,
-                                        );
-                                    })),
+                                    .child(
+                                        git_icon_button(("git-stage", index), None, enabled)
+                                            .child(if kind == DiffKind::WorkingTree {
+                                                "+"
+                                            } else {
+                                                "−"
+                                            })
+                                            .tooltip(text_tooltip(format!(
+                                                "{stage_label} {}",
+                                                entry.relative_path.display()
+                                            )))
+                                            .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                                cx.stop_propagation()
+                                            })
+                                            .on_click(cx.listener(move |view, _, window, cx| {
+                                                cx.stop_propagation();
+                                                view.stage_entries(
+                                                    vec![entry.clone()],
+                                                    kind == DiffKind::WorkingTree,
+                                                    window,
+                                                    cx,
+                                                );
+                                            })),
+                                    ),
                             )
                     }),
             )
@@ -816,11 +834,7 @@ impl GitPanel {
                             div()
                                 .text_size(px(12.0))
                                 .font_weight(FontWeight::MEDIUM)
-                                .child(if let Some(hunk) = plan.hunk {
-                                    format!("Discard hunk {}?", hunk + 1)
-                                } else {
-                                    "Discard file changes?".into()
-                                }),
+                                .child("Discard file changes?"),
                         )
                         .child(
                             div()

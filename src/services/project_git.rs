@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 
 const MAX_OUTPUT_BYTES: usize = 2 * 1024 * 1024;
 const MAX_STATUS_ENTRIES: usize = 2_000;
+pub(crate) const FULL_CONTEXT: &str = "--unified=1000000";
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub(crate) mod workflow;
@@ -118,7 +119,7 @@ pub(crate) struct ReviewFile {
 pub(crate) enum ReviewAction {
     Navigate(i32),
     Stage,
-    Discard(Option<(usize, String)>),
+    Discard,
     SelectFile(usize),
     SelectParent(usize),
 }
@@ -836,6 +837,9 @@ pub(crate) fn file_diff(root: &Path, path: &Path, kind: DiffKind) -> Result<GitD
         "--output-indicator-new=+",
         "--output-indicator-old=-",
         "--output-indicator-context= ",
+        // Whole-file context lets the viewer fold and expand unchanged code
+        // locally instead of showing fixed hunk headers.
+        FULL_CONTEXT,
     ]);
     if kind == DiffKind::Staged {
         arguments.push("--cached".into());
