@@ -6,7 +6,7 @@ use gpui::{ClipboardItem, Entity, ExternalPaths, MouseButton, Subscription, Task
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::menu::{PopupMenu, PopupMenuItem};
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, atomic::AtomicBool};
 mod file_actions;
 mod git_history;
@@ -29,6 +29,7 @@ const FILE_ROW_HEIGHT: f32 = chrome::TREE_ROW_HEIGHT;
 const GIT_ROW_HEIGHT: f32 = chrome::TREE_ROW_HEIGHT;
 const ROW_RADIUS: f32 = 4.0;
 const PANEL_ICON_SIZE: f32 = 14.0;
+const IGNORED_ICON_OPACITY: f32 = 0.55;
 
 #[derive(Clone)]
 pub(super) enum ProjectPanelEvent {
@@ -77,6 +78,7 @@ pub(super) struct FilesPanel {
     focus: FocusHandle,
     scroll: UniformListScrollHandle,
     git_markers: HashMap<PathBuf, &'static str>,
+    git_ignored: HashSet<PathBuf>,
     marked: HashSet<PathBuf>,
     anchor: usize,
     terminal: WeakEntity<TerminalView>,
@@ -123,6 +125,7 @@ impl FilesPanel {
             focus: cx.focus_handle(),
             scroll: UniformListScrollHandle::new(),
             git_markers: HashMap::new(),
+            git_ignored: HashSet::new(),
             marked: HashSet::new(),
             anchor: 0,
             terminal,
@@ -275,7 +278,15 @@ impl FilesPanel {
                 parent = path.parent();
             }
         }
+        self.git_ignored = status.ignored.iter().cloned().collect();
         cx.notify();
+    }
+
+    fn is_git_ignored(&self, path: &Path) -> bool {
+        // Git reports wholly ignored directories once, so descendants inherit it.
+        path.ancestors()
+            .take_while(|path| path.starts_with(&self.root) && *path != self.root)
+            .any(|path| self.git_ignored.contains(path))
     }
 
     fn load(&mut self, path: PathBuf, cx: &mut Context<Self>) {
@@ -540,8 +551,10 @@ impl FilesPanel {
         }
         let path = row.entry.path.to_string_lossy().into_owned();
         let git_marker = self.git_markers.get(&row.entry.path).copied();
+        let ignored = git_marker.is_none() && self.is_git_ignored(&row.entry.path);
         let tooltip = match git_marker {
             Some(marker) => format!("{path} · {}", git_status_label(marker)),
+            None if ignored => format!("{path} · ignored"),
             None => path,
         };
         let loading = self
@@ -551,6 +564,12 @@ impl FilesPanel {
         let expanded = self.expanded.contains(&row.entry.path);
         let selected = self.marked.contains(&row.entry.path)
             || ((self.selection_visible || focused) && index == self.selected);
+        let text_color = match git_marker {
+            Some(marker) => marker_color(marker),
+            None if ignored && selected => theme::ash(),
+            None if ignored => theme::git_ignored(),
+            None => theme::bone(),
+        };
         let drag = file_actions::FileDrag {
             paths: if self.marked.contains(&row.entry.path) {
                 self.selected_paths()
@@ -594,7 +613,7 @@ impl FilesPanel {
                     .font_weight(FontWeight::NORMAL)
                     .text_size(px(chrome::CHROME_TEXT_SIZE))
                     .line_height(px(chrome::CONTROL_LINE_HEIGHT))
-                    .text_color(git_marker.map_or(theme::bone(), marker_color))
+                    .text_color(text_color)
                     .rounded(px(ROW_RADIUS))
                     .border_1()
                     .border_color(if focused && selected {
@@ -705,7 +724,13 @@ impl FilesPanel {
                                 }))
                             }),
                     )
-                    .child(project_icon(&row.entry.path, row.entry.is_dir, expanded))
+                    .child(
+                        div()
+                            .flex_shrink_0()
+                            .flex()
+                            .when(ignored, |icon| icon.opacity(IGNORED_ICON_OPACITY))
+                            .child(project_icon(&row.entry.path, row.entry.is_dir, expanded)),
+                    )
                     .child(
                         div()
                             .min_w_0()
@@ -1434,8 +1459,8 @@ fn project_icon(path: &std::path::Path, directory: bool, expanded: bool) -> impl
 fn marker_color(marker: &str) -> gpui::Rgba {
     match marker {
         "!" | "D" => theme::error(),
-        "A" | "U" => theme::success(),
-        _ => theme::modified(),
+        "A" | "U" => theme::git_added(),
+        _ => theme::git_modified(),
     }
 }
 
@@ -1568,6 +1593,7 @@ mod reimagined_tests {
                     entry("src/app/b.rs", ' ', 'M'),
                 ],
                 truncated: false,
+                ignored: Vec::new(),
             });
             panel.rebuild_changes();
             panel
@@ -1597,10 +1623,10 @@ mod reimagined_tests {
     #[test]
     fn explorer_git_status_colors_modified_orange() {
         theme::set_appearance(theme::Appearance::Black);
-        assert_eq!(marker_color("M"), theme::modified());
-        assert_eq!(marker_color("R"), theme::modified());
-        assert_eq!(marker_color("A"), theme::success());
-        assert_eq!(marker_color("U"), theme::success());
+        assert_eq!(marker_color("M"), theme::git_modified());
+        assert_eq!(marker_color("R"), theme::git_modified());
+        assert_eq!(marker_color("A"), theme::git_added());
+        assert_eq!(marker_color("U"), theme::git_added());
         assert_eq!(marker_color("D"), theme::error());
         assert_eq!(marker_color("!"), theme::error());
         assert_eq!(git_status_label("M"), "modified");
