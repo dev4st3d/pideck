@@ -20,6 +20,7 @@ impl Render for FileDrag {
 
 #[derive(Clone, Copy)]
 enum FileAction {
+    Open,
     NewFile,
     NewFolder,
     Rename,
@@ -31,6 +32,8 @@ enum FileAction {
     CopyPath,
     CopyRelative,
     Reveal,
+    RevealProject,
+    CopyProjectPath,
     Collapse,
     Hidden,
     Refresh,
@@ -111,6 +114,15 @@ impl NameEdit {
                     )),
             )
     }
+}
+
+/// What a menu was opened on; it decides which actions are offered.
+#[derive(Clone, Copy, PartialEq)]
+enum MenuTarget {
+    Panel,
+    File,
+    Folder,
+    Many(usize),
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -349,6 +361,7 @@ impl FilesPanel {
     fn action(&mut self, action: FileAction, window: &mut Window, cx: &mut Context<Self>) {
         let paths = self.selected_paths();
         match action {
+            FileAction::Open => self.open_row(self.selected, cx),
             FileAction::NewFile | FileAction::NewFolder => {
                 self.begin_name(matches!(action, FileAction::NewFolder), false, window, cx)
             }
@@ -451,6 +464,10 @@ impl FilesPanel {
                 cx.write_to_clipboard(ClipboardItem::new_string(text));
             }
             FileAction::Reveal => cx.reveal_path(paths.first().unwrap_or(&self.root)),
+            FileAction::RevealProject => cx.reveal_path(&self.root),
+            FileAction::CopyProjectPath => cx.write_to_clipboard(ClipboardItem::new_string(
+                self.root.to_string_lossy().into_owned(),
+            )),
             FileAction::Collapse => {
                 self.expanded.clear();
                 self.rebuild_rows();
@@ -520,14 +537,21 @@ impl FilesPanel {
         let Some(row) = self.rows.get(index) else {
             return;
         };
+        let is_dir = row.entry.is_dir;
         if !self.marked.contains(&row.entry.path) {
             self.select(index, false, false, index);
         }
         self.selection_visible = true;
+        let target = match self.marked.len() {
+            0 | 1 if is_dir => MenuTarget::Folder,
+            0 | 1 => MenuTarget::File,
+            count => MenuTarget::Many(count),
+        };
+        let can_paste = Self::can_paste(cx);
         let owner = cx.weak_entity();
         let focus = self.focus.clone();
         let menu = PopupMenu::build(window, cx, move |menu, _, _| {
-            Self::menu(menu.action_context(focus), owner)
+            Self::menu(menu.action_context(focus), owner, target, can_paste, false)
         });
         let subscription = cx.subscribe(&menu, |view, _, _: &gpui::DismissEvent, cx| {
             view.context_menu = None;
@@ -539,35 +563,132 @@ impl FilesPanel {
         cx.notify();
     }
 
-    fn menu(mut menu: PopupMenu, owner: WeakEntity<Self>) -> PopupMenu {
-        for (label, action) in [
-            ("New file   Ctrl+N", FileAction::NewFile),
-            ("New folder   Ctrl+Shift+N", FileAction::NewFolder),
-            ("Rename   F2", FileAction::Rename),
-            ("Copy   Ctrl+C", FileAction::Copy),
-            ("Cut   Ctrl+X", FileAction::Cut),
-            ("Paste   Ctrl+V", FileAction::Paste),
-            ("Duplicate   Ctrl+D", FileAction::Duplicate),
-            ("Move to Recycle Bin   Delete", FileAction::Trash),
-            ("Copy path", FileAction::CopyPath),
-            ("Copy relative path", FileAction::CopyRelative),
-            ("Reveal in Windows Explorer", FileAction::Reveal),
-            ("Collapse all", FileAction::Collapse),
-            ("Toggle hidden files", FileAction::Hidden),
-            ("Refresh   F5", FileAction::Refresh),
-            ("Hide sidebar   Ctrl+Shift+B", FileAction::HideSidebar),
-        ] {
+    /// Paste is offered only when the app or Windows clipboard holds files.
+    fn can_paste(cx: &gpui::App) -> bool {
+        let internal = cx.read_from_clipboard().is_some_and(|item| {
+            item.metadata()
+                .and_then(|text| serde_json::from_str::<FileClipboard>(text).ok())
+                .is_some_and(|clipboard| !clipboard.paths.is_empty())
+        });
+        #[cfg(windows)]
+        let internal = internal
+            || file_operations::system_clipboard_files().is_ok_and(|paths| !paths.is_empty());
+        internal
+    }
+
+    fn menu(
+        menu: PopupMenu,
+        owner: WeakEntity<Self>,
+        target: MenuTarget,
+        can_paste: bool,
+        show_hidden: bool,
+    ) -> PopupMenu {
+        let item = |label: SharedString, shortcut: Option<&'static str>, action: FileAction| {
             let owner = owner.clone();
-            menu = menu.item(PopupMenuItem::new(label).on_click(move |_, window, cx| {
+            menu_item(label, shortcut).on_click(move |_, window, cx| {
                 let owner = owner.clone();
                 // PopupMenu restores focus after invoking handlers. Run after dismissal
                 // so inline naming and native prompts retain their intended focus.
                 window.defer(cx, move |window, cx| {
                     let _ = owner.update(cx, |view, cx| view.action(action, window, cx));
                 });
-            }));
+            })
+        };
+        if target == MenuTarget::Panel {
+            return menu
+                .item(
+                    item("Show hidden files".into(), None, FileAction::Hidden).checked(show_hidden),
+                )
+                .item(item("Refresh".into(), Some("F5"), FileAction::Refresh))
+                .separator()
+                .item(item(
+                    "Reveal project in File Explorer".into(),
+                    None,
+                    FileAction::RevealProject,
+                ))
+                .item(item(
+                    "Copy project path".into(),
+                    None,
+                    FileAction::CopyProjectPath,
+                ))
+                .separator()
+                .item(item(
+                    "Hide sidebar".into(),
+                    Some("Ctrl+Shift+B"),
+                    FileAction::HideSidebar,
+                ));
         }
-        menu
+        let many = match target {
+            MenuTarget::Many(count) => Some(count),
+            _ => None,
+        };
+        menu.when_some(many, |menu, count| {
+            menu.item(PopupMenuItem::label(format!("{count} items selected")))
+                .separator()
+        })
+        .when(target == MenuTarget::File, |menu| {
+            menu.item(item("Open".into(), Some("Enter"), FileAction::Open))
+                .separator()
+        })
+        .when(target == MenuTarget::Folder, |menu| {
+            menu.item(item("New file".into(), Some("Ctrl+N"), FileAction::NewFile))
+                .item(item(
+                    "New folder".into(),
+                    Some("Ctrl+Shift+N"),
+                    FileAction::NewFolder,
+                ))
+                .separator()
+        })
+        .item(item("Cut".into(), Some("Ctrl+X"), FileAction::Cut))
+        .item(item("Copy".into(), Some("Ctrl+C"), FileAction::Copy))
+        .when(many.is_none(), |menu| {
+            menu.item(item("Paste".into(), Some("Ctrl+V"), FileAction::Paste).disabled(!can_paste))
+        })
+        .item(item(
+            "Duplicate".into(),
+            Some("Ctrl+D"),
+            FileAction::Duplicate,
+        ))
+        .separator()
+        .item(item(
+            if many.is_some() {
+                "Copy paths"
+            } else {
+                "Copy path"
+            }
+            .into(),
+            None,
+            FileAction::CopyPath,
+        ))
+        .item(item(
+            if many.is_some() {
+                "Copy relative paths"
+            } else {
+                "Copy relative path"
+            }
+            .into(),
+            Some("Ctrl+Shift+C"),
+            FileAction::CopyRelative,
+        ))
+        .when(many.is_none(), |menu| {
+            menu.item(item(
+                "Reveal in File Explorer".into(),
+                None,
+                FileAction::Reveal,
+            ))
+        })
+        .separator()
+        .when(many.is_none(), |menu| {
+            menu.item(item("Rename".into(), Some("F2"), FileAction::Rename))
+        })
+        .item(item(
+            match many {
+                Some(count) => format!("Move {count} items to Recycle Bin").into(),
+                None => "Move to Recycle Bin".into(),
+            },
+            Some("Delete"),
+            FileAction::Trash,
+        ))
     }
     pub(super) fn toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         use gpui_component::{
@@ -644,14 +765,17 @@ impl FilesPanel {
             )
             .child({
                 let owner = cx.weak_entity();
+                let show_hidden = !self.hide_hidden;
                 Button::new("file-tree-actions")
                     .label("⋯")
                     .ghost()
                     .w(px(24.0))
                     .h(px(28.0))
-                    .tooltip("File actions")
+                    .tooltip("More actions")
                     .on_click(|_, _, cx| cx.stop_propagation())
-                    .dropdown_menu(move |menu, _, _| Self::menu(menu, owner.clone()))
+                    .dropdown_menu(move |menu, _, _| {
+                        Self::menu(menu, owner.clone(), MenuTarget::Panel, false, show_hidden)
+                    })
             })
             .when(pending, |bar| {
                 bar.child(control(
@@ -766,16 +890,27 @@ mod tests {
         cx.debug_bounds("explorer-context-menu").unwrap()
     }
 
-    fn click_item(cx: &mut VisualTestContext, bounds: gpui::Bounds<gpui::Pixels>, index: usize) {
-        // GPUI Component 0.5.1 uses 26px menu items, a 2px gap and 4px padding.
-        cx.simulate_click(
-            gpui::point(
-                bounds.right() - px(20.0),
-                bounds.top() + px(18.0 + index as f32 * 28.0),
-            ),
-            gpui::Modifiers::none(),
-        );
+    fn click_item(cx: &mut VisualTestContext, selector: &'static str) {
+        let item = cx.debug_bounds(selector).expect("menu item is rendered");
+        cx.simulate_click(item.center(), gpui::Modifiers::none());
         cx.run_until_parked();
+    }
+
+    #[test]
+    fn drops_into_self_or_current_parent_are_rejected() {
+        let root = PathBuf::from("project");
+        let folder = root.join("folder");
+        let file = folder.join("a.txt");
+        assert!(!accepts_drop(&[folder.clone()], &folder, true));
+        assert!(!accepts_drop(
+            &[folder.clone()],
+            &folder.join("child"),
+            false
+        ));
+        assert!(!accepts_drop(&[file.clone()], &folder, true));
+        assert!(accepts_drop(&[file.clone()], &folder, false));
+        assert!(accepts_drop(&[file], &root, true));
+        assert!(!accepts_drop(&[], &root, true));
     }
 
     #[gpui::test]
@@ -814,10 +949,14 @@ mod tests {
         });
         cx.simulate_resize(gpui::size(px(800.0), px(600.0)));
         let files = host.read_with(cx, |host, _| host.files.clone());
-        for index in [0, 1, 2] {
+        for (selector, rename, directory) in [
+            ("file-menu-New file", false, false),
+            ("file-menu-New folder", false, true),
+            ("file-menu-Rename", true, false),
+        ] {
             let menu = open_menu(cx, 0);
             assert!(menu.right() > px(256.0));
-            click_item(cx, menu, index);
+            click_item(cx, selector);
             cx.update(|window, cx| {
                 files.update(cx, |files, cx| {
                     assert!(files.context_menu.is_none());
@@ -826,8 +965,8 @@ mod tests {
                         .as_ref()
                         .expect("menu click must open naming input");
                     assert!(edit.input.read(cx).focus_handle(cx).is_focused(window));
-                    assert_eq!(edit.source.is_some(), index == 2);
-                    assert_eq!(edit.directory, index == 1);
+                    assert_eq!(edit.source.is_some(), rename);
+                    assert_eq!(edit.directory, directory);
                     files.edit = None;
                     cx.notify();
                 });
@@ -864,16 +1003,16 @@ mod tests {
                 cx.notify();
             });
         });
-        let menu = open_menu(cx, 0);
-        click_item(cx, menu, 9);
+        open_menu(cx, 0);
+        click_item(cx, "file-menu-Copy relative path");
         cx.update(|_, cx| {
             assert_eq!(
                 cx.read_from_clipboard().and_then(|item| item.text()),
                 Some("folder".into())
             )
         });
-        let menu = open_menu(cx, 1);
-        click_item(cx, menu, 6);
+        open_menu(cx, 1);
+        click_item(cx, "file-menu-Duplicate");
         assert_eq!(
             std::fs::read_to_string(root.join("a copy.txt")).unwrap(),
             "fixture"
@@ -887,6 +1026,40 @@ mod tests {
         assert!(files.read_with(cx, |files, _| files.context_menu.is_none()));
         std::fs::remove_dir_all(root).unwrap();
     }
+}
+
+/// Rejects drops that would nest a folder in itself or move items where they
+/// already are, so the tree never highlights a target that would only fail.
+pub(super) fn accepts_drop(paths: &[PathBuf], destination: &std::path::Path, cut: bool) -> bool {
+    !paths.is_empty()
+        && paths.iter().all(|path| {
+            !destination.starts_with(path) && !(cut && path.parent() == Some(destination))
+        })
+}
+
+/// Menu row with its keyboard shortcut right-aligned and muted.
+fn menu_item(label: SharedString, shortcut: Option<&'static str>) -> PopupMenuItem {
+    PopupMenuItem::element(move |_, _| {
+        let selector = format!("file-menu-{label}");
+        div()
+            .debug_selector(move || selector.clone())
+            .flex_1()
+            .min_w_0()
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap(px(24.0))
+            .child(label.clone())
+            .when_some(shortcut, |row, shortcut| {
+                row.child(
+                    div()
+                        .flex_shrink_0()
+                        .text_size(px(chrome::DETAIL_TEXT_SIZE))
+                        .text_color(theme::ash())
+                        .child(shortcut),
+                )
+            })
+    })
 }
 
 pub(super) fn control(
