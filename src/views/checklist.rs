@@ -1,8 +1,8 @@
 //! Headerless project outline. The manager owns saving; this view owns editing and undo.
 
 use gpui::{
-    AnyElement, Context, Entity, EventEmitter, FocusHandle, KeyDownEvent, Render, ScrollHandle,
-    SharedString, Subscription, Window, div, prelude::*, px, svg,
+    AnyElement, Context, Div, ElementId, Entity, EventEmitter, FocusHandle, KeyDownEvent, Render,
+    ScrollHandle, SharedString, Stateful, Subscription, Window, div, prelude::*, px, svg,
 };
 use gpui_component::{
     button::{Button, ButtonVariants},
@@ -17,6 +17,9 @@ use crate::{
 };
 
 gpui::actions!(checklist, [IndentReminder, OutdentReminder]);
+
+/// Left padding shared by every row so labels, editors, and add controls align.
+const ROW_INSET: f32 = 10.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Selection(usize, Option<usize>);
@@ -50,7 +53,8 @@ pub(super) struct ChecklistView {
     editing: Option<Edit>,
     selected: Option<Selection>,
     undo: Vec<Checklist>,
-    deleted: bool,
+    /// Banner copy for the delete that `Undo` can still reverse.
+    deleted: Option<&'static str>,
     scroll: ScrollHandle,
 }
 
@@ -79,7 +83,7 @@ impl ChecklistView {
             editing: None,
             selected: None,
             undo: Vec::new(),
-            deleted: false,
+            deleted: None,
             scroll: ScrollHandle::new(),
         }
     }
@@ -101,7 +105,7 @@ impl ChecklistView {
             self.undo.remove(0);
         }
         self.undo.push(self.data.clone());
-        self.deleted = false;
+        self.deleted = None;
     }
 
     fn changed(&mut self, cx: &mut Context<Self>) {
@@ -117,6 +121,7 @@ impl ChecklistView {
         };
         self.editing = Some(edit);
         self.input.update(cx, |input, cx| {
+            input.set_placeholder(placeholder(edit), window, cx);
             input.set_value(value, window, cx);
             input.focus(window, cx);
         });
@@ -148,8 +153,13 @@ impl ChecklistView {
                 self.editing = Some(Edit::Add(s, None));
             }
         }
-        self.input
-            .update(cx, |input, cx| input.set_value("", window, cx));
+        let next = self.editing;
+        self.input.update(cx, |input, cx| {
+            if let Some(next) = next {
+                input.set_placeholder(placeholder(next), window, cx);
+            }
+            input.set_value("", window, cx);
+        });
         if matches!(edit, Edit::Task(..) | Edit::Section(_)) {
             self.editing = None;
             window.focus(&self.focus);
@@ -209,7 +219,7 @@ impl ChecklistView {
                 self.data = data;
                 self.selected = None;
                 self.editing = None;
-                self.deleted = false;
+                self.deleted = None;
                 window.focus(&self.focus);
                 self.changed(cx);
             }
@@ -258,7 +268,11 @@ impl ChecklistView {
                 }
                 self.selected = None;
                 self.editing = None;
-                self.deleted = true;
+                self.deleted = Some(if task.is_some() {
+                    "Reminder deleted"
+                } else {
+                    "Section deleted"
+                });
                 self.changed(cx);
             }
             Command::Undo => {}
@@ -375,7 +389,7 @@ impl ChecklistView {
         })
     }
 
-    fn row(&self, selection: Selection, cx: &mut Context<Self>) -> AnyElement {
+    fn row(&self, selection: Selection, focused: bool, cx: &mut Context<Self>) -> AnyElement {
         let Selection(s, task_index) = selection;
         let section = &self.data.sections[s];
         let task = task_index.map(|t| &section.tasks[t]);
@@ -394,11 +408,12 @@ impl ChecklistView {
             } else {
                 chrome::CHECKLIST_ROW_HEIGHT
             }))
+            .relative()
             .flex_shrink_0()
             .flex()
             .items_center()
             .gap(px(chrome::CHECKLIST_GAP))
-            .pl(px(10.0
+            .pl(px(ROW_INSET
                 + task.map_or(0.0, |t| {
                     t.depth as f32 * chrome::CHECKLIST_INDENT
                 })))
@@ -408,6 +423,19 @@ impl ChecklistView {
             .when(selected, |r| r.bg(theme::selection()))
             .hover(|r| r.bg(theme::panel_hover()))
             .on_click(cx.listener(move |view, _, window, cx| view.select(selection, window, cx)))
+            // Keyboard position marker; it takes no space, so rows never shift.
+            .when(selected && focused, |r| {
+                r.child(
+                    div()
+                        .absolute()
+                        .left_0()
+                        .top(px(7.0))
+                        .bottom(px(7.0))
+                        .w(px(2.0))
+                        .rounded(px(1.0))
+                        .bg(theme::focus()),
+                )
+            })
             .child(if task.is_none() {
                 div()
                     .w(px(chrome::CHECKLIST_DISCLOSURE_WIDTH))
@@ -601,64 +629,350 @@ fn icon(name: &str, size: f32) -> impl IntoElement {
         .text_color(theme::ash())
 }
 
+fn placeholder(edit: Edit) -> &'static str {
+    match edit {
+        Edit::Add(_, Some(_)) => "Add a subtask…",
+        Edit::Add(..) => "Add a reminder…",
+        Edit::Task(..) => "Rename reminder",
+        Edit::Section(_) => "Rename section",
+        Edit::NewSection => "Name the section…",
+    }
+}
+
+/// Quiet, left-aligned text control. The transparent border reserves room for the
+/// focus ring, so focusing never shifts the label.
+fn control(id: impl Into<ElementId>) -> Stateful<Div> {
+    div()
+        .id(id)
+        .flex()
+        .items_center()
+        .rounded(px(3.0))
+        .border_1()
+        .border_color(gpui::transparent_black())
+        .font_family(chrome::CHROME_FONT)
+        .text_size(px(13.0))
+        .line_height(px(chrome::CONTROL_LINE_HEIGHT))
+        .text_color(theme::ash())
+        .tab_index(0)
+        .cursor_pointer()
+        .hover(|s| s.bg(theme::panel_hover()).text_color(theme::bone()))
+        .active(|s| s.bg(theme::selection()))
+        .focus(|s| s.border_color(theme::focus()).text_color(theme::bone()))
+}
+
+/// Footer action lined up with the checkbox column, with its shortcut spelled out.
+fn footer_action(
+    id: &'static str,
+    label: &'static str,
+    shortcut: &'static str,
+    tooltip: &'static str,
+) -> Stateful<Div> {
+    control(id)
+        .debug_selector(move || id.into())
+        .h(px(chrome::CHECKLIST_ROW_HEIGHT))
+        .gap(px(chrome::CHECKLIST_GAP))
+        // The 1px border sits inside the box, so trim the inset to keep labels aligned.
+        .pl(px(ROW_INSET - 1.0))
+        .pr(px(8.0))
+        .tooltip(super::terminal_manager::text_tooltip(tooltip))
+        .child(
+            div()
+                .w(px(chrome::CHECKLIST_DISCLOSURE_WIDTH))
+                .flex_shrink_0(),
+        )
+        .child(
+            svg()
+                .path("icons/plus.svg")
+                .size(px(14.0))
+                .flex_shrink_0()
+                .text_color(theme::ash()),
+        )
+        .child(label)
+        .child(
+            div()
+                .ml_auto()
+                .flex_shrink_0()
+                .text_size(px(11.0))
+                .opacity(0.7)
+                .child(shortcut),
+        )
+}
+
+impl ChecklistView {
+    fn empty_hint(&self) -> impl IntoElement {
+        let no_sections = self.data.sections.is_empty();
+        div()
+            .flex()
+            .flex_col()
+            .justify_center()
+            .font_family(chrome::CHROME_FONT)
+            .text_size(px(12.0))
+            .line_height(px(18.0))
+            .text_color(theme::ash())
+            .when(no_sections, |hint| {
+                hint.px(px(ROW_INSET)).pt(px(4.0)).pb(px(8.0)).child(
+                    div()
+                        .text_size(px(13.0))
+                        .line_height(px(chrome::CONTROL_LINE_HEIGHT))
+                        .text_color(theme::bone())
+                        .child("No reminders yet"),
+                )
+            })
+            .when(!no_sections, |hint| {
+                hint.h(px(chrome::CHECKLIST_ROW_HEIGHT))
+                    .pl(px(chrome::CHECKLIST_TEXT_INSET))
+            })
+            .child("Keep the next thing to do here.")
+    }
+
+    fn editor(&self, edit: Edit, cx: &mut Context<Self>) -> AnyElement {
+        let (caption, glyph, save_tooltip) = match edit {
+            Edit::Add(_, Some(_)) => (Some("New subtask"), "plus", "Add subtask · Enter"),
+            Edit::Add(..) => (None, "plus", "Add reminder · Enter"),
+            Edit::Task(..) => (Some("Rename reminder"), "pencil", "Save name · Enter"),
+            Edit::Section(_) => (Some("Rename section"), "pencil", "Save name · Enter"),
+            Edit::NewSection => (Some("New section"), "plus", "Create section · Enter"),
+        };
+        div()
+            .mt(px(4.0))
+            .pr(px(4.0))
+            .when_some(caption, |editor, caption| {
+                editor.child(
+                    div()
+                        .pl(px(chrome::CHECKLIST_TEXT_INSET))
+                        .pt(px(4.0))
+                        .font_family(chrome::CHROME_FONT)
+                        .text_size(px(chrome::DETAIL_TEXT_SIZE))
+                        .line_height(px(chrome::DETAIL_LINE_HEIGHT))
+                        .text_color(theme::ash())
+                        .child(caption),
+                )
+            })
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(chrome::CHECKLIST_GAP))
+                    .pl(px(ROW_INSET
+                        + chrome::CHECKLIST_DISCLOSURE_WIDTH
+                        + chrome::CHECKLIST_GAP))
+                    .child(
+                        div()
+                            .size(px(14.0))
+                            .flex_shrink_0()
+                            .child(icon(glyph, 14.0)),
+                    )
+                    .child(
+                        div()
+                            .id("checklist-editor-input")
+                            .debug_selector(|| "checklist-editor-input".into())
+                            .flex_1()
+                            .min_w_0()
+                            .child(
+                                Input::new(&self.input)
+                                    .appearance(false)
+                                    .bordered(false)
+                                    .px_0()
+                                    .py_0()
+                                    .h(px(chrome::CHECKLIST_ROW_HEIGHT))
+                                    .font_family(chrome::CHROME_FONT)
+                                    .text_size(px(13.0)),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_shrink_0()
+                            .items_center()
+                            .gap(px(2.0))
+                            .child(
+                                Button::new("checklist-save")
+                                    .ghost()
+                                    .child(icon("queue-return", 14.0))
+                                    .size(px(chrome::CHECKLIST_CONTROL_SIZE))
+                                    .p_0()
+                                    .tooltip(save_tooltip)
+                                    .on_click(
+                                        cx.listener(|view, _, window, cx| view.submit(window, cx)),
+                                    ),
+                            )
+                            .child(
+                                Button::new("checklist-cancel")
+                                    .ghost()
+                                    .child(icon("close", 12.0))
+                                    .size(px(chrome::CHECKLIST_CONTROL_SIZE))
+                                    .p_0()
+                                    .tooltip("Cancel · Escape")
+                                    .on_click(cx.listener(|view, _, window, cx| {
+                                        view.editing = None;
+                                        window.focus(&view.focus);
+                                        cx.notify();
+                                    })),
+                            ),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    fn footer(&self, focused: bool, cx: &mut Context<Self>) -> AnyElement {
+        // With no row selected, Enter adds to the first section, so mark that target.
+        let default_target = focused && self.selected.is_none();
+        div()
+            .child(
+                footer_action(
+                    "checklist-add",
+                    "Add a reminder",
+                    "Enter",
+                    "Add a reminder · Enter · Ctrl+Enter adds a subtask",
+                )
+                .mt(px(4.0))
+                .when(default_target, |action| action.border_color(theme::focus()))
+                .on_click(cx.listener(|view, _, window, cx| {
+                    view.command(Command::Add, window, cx);
+                })),
+            )
+            .child(
+                footer_action(
+                    "checklist-add-section",
+                    "New section",
+                    "Ctrl+Shift+N",
+                    "Add a section · Ctrl+Shift+N",
+                )
+                .mt(px(12.0))
+                .on_click(cx.listener(|view, _, window, cx| {
+                    view.begin(Edit::NewSection, window, cx);
+                })),
+            )
+            .into_any_element()
+    }
+
+    /// Docked below the list so the notice never covers reminders or shifts them.
+    fn undo_bar(&self, label: &'static str, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .id("checklist-undo-bar")
+            .flex_shrink_0()
+            .h(px(40.0))
+            .pl(px(16.0))
+            .pr(px(8.0))
+            .flex()
+            .items_center()
+            .gap(px(4.0))
+            .border_t_1()
+            .border_color(theme::edge())
+            .bg(theme::chrome())
+            .font_family(chrome::CHROME_FONT)
+            .text_size(px(13.0))
+            .text_color(theme::bone())
+            .child(div().flex_1().min_w_0().truncate().child(label))
+            .child(
+                control("checklist-undo")
+                    .h(px(28.0))
+                    .px(px(7.0))
+                    .gap(px(6.0))
+                    .text_color(theme::bone())
+                    .tooltip(super::terminal_manager::text_tooltip("Undo · Ctrl+Z"))
+                    .on_click(cx.listener(|view, _, window, cx| {
+                        view.command(Command::Undo, window, cx);
+                    }))
+                    .child(
+                        svg()
+                            .path("icons/undo.svg")
+                            .size(px(12.0))
+                            .text_color(theme::ash()),
+                    )
+                    .child("Undo"),
+            )
+            .child(
+                control("checklist-undo-dismiss")
+                    .size(px(28.0))
+                    .justify_center()
+                    .tooltip(super::terminal_manager::text_tooltip("Dismiss"))
+                    .on_click(cx.listener(|view, _, window, cx| {
+                        view.deleted = None;
+                        window.focus(&view.focus);
+                        cx.notify();
+                    }))
+                    .child(icon("close", 12.0)),
+            )
+    }
+}
+
 impl Render for ChecklistView {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let focused = self.focus.contains_focused(window, cx);
         let rows = self.rows();
-        div().id("project-checklist").debug_selector(|| "project-checklist".into())
-            .track_focus(&self.focus).key_context("Checklist").tab_index(0).tab_group().size_full().min_h_0()
-            .flex().flex_col().bg(theme::panel()).text_color(theme::bone())
-            .border_l_1().border_color(theme::edge())
-            .focus(|s| s.border_color(theme::focus()))
+        let no_reminders = self.data.sections.iter().all(|s| s.tasks.is_empty());
+        let footer = match self.editing {
+            Some(edit) => self.editor(edit, cx),
+            None => self.footer(focused, cx),
+        };
+        div()
+            .id("project-checklist")
+            .debug_selector(|| "project-checklist".into())
+            .track_focus(&self.focus)
+            .key_context("Checklist")
+            .tab_index(0)
+            .tab_group()
+            .size_full()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .bg(theme::panel())
+            .text_color(theme::bone())
+            .border_l_1()
+            .border_color(theme::edge())
             .on_action(cx.listener(|view, _: &IndentReminder, window, cx| {
                 if view.focus.is_focused(window) {
                     view.command(Command::Indent, window, cx);
-                } else { cx.propagate(); }
+                } else {
+                    cx.propagate();
+                }
             }))
             .on_action(cx.listener(|view, _: &OutdentReminder, window, cx| {
                 if view.focus.is_focused(window) {
                     view.command(Command::Outdent, window, cx);
-                } else { cx.propagate(); }
+                } else {
+                    cx.propagate();
+                }
             }))
-            .on_action(cx.listener(|view, _: &gpui_component::input::Enter, _, cx| {
-                // Single-line Input propagates Enter after emitting PressEnter. Consume
-                // it here so the platform cannot insert a newline into the editor.
-                if view.editing.is_some() { cx.stop_propagation(); } else { cx.propagate(); }
-            }))
-            .on_action(cx.listener(|view, _: &gpui_component::input::Escape, window, cx| {
-                if view.editing.take().is_some() {
-                    window.focus(&view.focus);
-                    cx.stop_propagation();
-                    cx.notify();
-                } else { cx.propagate(); }
-            }))
+            .on_action(
+                cx.listener(|view, _: &gpui_component::input::Enter, _, cx| {
+                    // Single-line Input propagates Enter after emitting PressEnter. Consume
+                    // it here so the platform cannot insert a newline into the editor.
+                    if view.editing.is_some() {
+                        cx.stop_propagation();
+                    } else {
+                        cx.propagate();
+                    }
+                }),
+            )
+            .on_action(
+                cx.listener(|view, _: &gpui_component::input::Escape, window, cx| {
+                    if view.editing.take().is_some() {
+                        window.focus(&view.focus);
+                        cx.stop_propagation();
+                        cx.notify();
+                    } else {
+                        cx.propagate();
+                    }
+                }),
+            )
             .on_key_down(cx.listener(Self::key_down))
-            .child(div().id("checklist-scroll").track_scroll(&self.scroll)
-                .overflow_y_scroll().flex_1().min_h_0().px(px(12.0)).pt(px(12.0)).pb(px(12.0))
-                .children(rows.into_iter().map(|row| self.row(row, cx)))
-                .when(self.data.sections.iter().all(|s| s.tasks.is_empty()), |body| body.child(
-                    div().px(px(10.0)).py(px(8.0)).text_size(px(12.0)).text_color(theme::ash())
-                        .child("Keep the next thing to do here.")))
-                .child(div().mt(px(4.0)).pl(px(chrome::CHECKLIST_TEXT_INSET)).pr(px(4.0)).when_some(self.editing, |r, edit| {
-                    let label = match edit { Edit::Add(_, Some(_)) => "Add subtask", Edit::Add(..) => "Add a reminder",
-                        Edit::Task(..) => "Rename reminder", Edit::Section(_) => "Rename section", Edit::NewSection => "New section" };
-                    r.child(div().flex().items_center().gap(px(4.0))
-                        .child(div().id("checklist-editor-input").debug_selector(|| "checklist-editor-input".into()).flex_1().min_w_0().child(Input::new(&self.input).appearance(false).bordered(false)
-                            .px_0().py_0().h(px(chrome::CHECKLIST_ROW_HEIGHT)).font_family(chrome::CHROME_FONT).text_size(px(13.0))))
-                        .child(Button::new("checklist-save").ghost().child(icon("queue-return", 14.0)).size(px(chrome::CHECKLIST_CONTROL_SIZE)).p_0().tooltip(label)
-                            .on_click(cx.listener(|view, _, window, cx| view.submit(window, cx))))
-                        .child(Button::new("checklist-cancel").ghost().child(icon("close", 12.0)).size(px(chrome::CHECKLIST_CONTROL_SIZE)).p_0().tooltip("Cancel · Escape")
-                            .on_click(cx.listener(|view, _, window, cx| { view.editing = None; window.focus(&view.focus); cx.notify(); }))))
-                }).when(self.editing.is_none(), |r| r.child(
-                    div().flex().items_center().justify_between()
-                        .child(Button::new("checklist-add").ghost().label("Add a reminder…").px_0().text_size(px(13.0))
-                            .tooltip("Add a reminder · Enter · Ctrl+Enter adds a subtask")
-                            .on_click(cx.listener(|view, _, window, cx| view.command(Command::Add, window, cx))))
-                        .child(Button::new("checklist-add-section").ghost().child(icon("plus", 14.0)).size(px(chrome::CHECKLIST_CONTROL_SIZE)).p_0()
-                            .tooltip("Add section · Ctrl+Shift+N")
-                            .on_click(cx.listener(|view, _, window, cx| view.begin(Edit::NewSection, window, cx))))
-                )))
-                .when(self.deleted, |r| r.child(Button::new("checklist-undo").ghost().label("Deleted · Undo")
-                    .on_click(cx.listener(|view, _, window, cx| view.command(Command::Undo, window, cx))))))
+            .child(
+                div()
+                    .id("checklist-scroll")
+                    .track_scroll(&self.scroll)
+                    .overflow_y_scroll()
+                    .flex_1()
+                    .min_h_0()
+                    .p(px(12.0))
+                    .children(rows.into_iter().map(|row| self.row(row, focused, cx)))
+                    .when(no_reminders, |body| body.child(self.empty_hint()))
+                    .child(footer),
+            )
+            .when_some(self.deleted, |panel, label| {
+                panel.child(self.undo_bar(label, cx))
+            })
     }
 }
 
@@ -718,9 +1032,20 @@ mod tests {
         );
         cx.simulate_keystrokes("delete");
         assert_eq!(view.read_with(cx, |v, _| v.data.sections[0].tasks.len()), 1);
+        assert_eq!(
+            view.read_with(cx, |v, _| v.deleted),
+            Some("Reminder deleted")
+        );
         cx.simulate_keystrokes("ctrl-z");
         assert_eq!(view.read_with(cx, |v, _| v.data.sections[0].tasks.len()), 2);
+        assert_eq!(view.read_with(cx, |v, _| v.deleted), None);
         assert!(cx.debug_bounds("project-checklist").is_some());
+        // The add control spans the list like a row instead of shrinking to its label.
+        let add = cx.debug_bounds("checklist-add").unwrap();
+        let first_row = cx.debug_bounds("checklist-row-0-Some(0)").unwrap();
+        assert_eq!(add.left(), first_row.left());
+        assert_eq!(add.size.width, first_row.size.width);
+        assert_eq!(add.size.height, px(chrome::CHECKLIST_ROW_HEIGHT));
     }
 
     #[gpui::test]
