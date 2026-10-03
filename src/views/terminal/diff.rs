@@ -1,6 +1,6 @@
 //! Read-only, aligned Git changes. Parsing is independent of GPUI and happens once per snapshot.
 
-use std::path::PathBuf;
+use std::{ops::Range, path::PathBuf};
 
 use gpui::{
     ClipboardItem, Context, EventEmitter, FocusHandle, FontWeight, IntoElement, KeyDownEvent,
@@ -13,6 +13,10 @@ use crate::theme::{self, terminal_manager as chrome};
 use crate::views::terminal_manager::text_tooltip;
 
 const ROW_HEIGHT: f32 = 22.0;
+/// Unchanged lines kept visible on each side of a change.
+const CONTEXT_LINES: usize = 3;
+/// Shorter unchanged runs stay visible; folding them would save almost nothing.
+const MIN_FOLD_LINES: usize = 4;
 
 #[path = "diff_review.rs"]
 mod review;
@@ -37,12 +41,53 @@ impl Line {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-enum Row {
-    Hunk(String),
-    Lines {
-        before: Option<Line>,
-        after: Option<Line>,
-    },
+struct Row {
+    before: Option<Line>,
+    after: Option<Line>,
+}
+
+impl Row {
+    fn changed(&self) -> bool {
+        self.before.as_ref().is_some_and(|line| line.changed)
+            || self.after.as_ref().is_some_and(|line| line.changed)
+    }
+}
+
+/// A run of unchanged rows hidden behind an expandable row.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Fold {
+    rows: Range<usize>,
+    expanded: bool,
+}
+
+/// Diffs arrive with whole-file context; long unchanged runs are folded here
+/// so the reader sees changes first and can reveal surrounding code on demand.
+fn folds(rows: &[Row]) -> Vec<Fold> {
+    let mut folds = Vec::new();
+    let mut index = 0;
+    while index < rows.len() {
+        if rows[index].changed() {
+            index += 1;
+            continue;
+        }
+        let start = index;
+        while index < rows.len() && !rows[index].changed() {
+            index += 1;
+        }
+        let hidden_start = if start == 0 { 0 } else { start + CONTEXT_LINES };
+        let hidden_end = if index == rows.len() {
+            index
+        } else {
+            index.saturating_sub(CONTEXT_LINES)
+        };
+        if hidden_end >= hidden_start + MIN_FOLD_LINES {
+            folds.push(Fold {
+                rows: hidden_start..hidden_end,
+                expanded: false,
+            });
+        }
+    }
+    folds
 }
 
 #[derive(Debug)]
@@ -78,7 +123,7 @@ fn flush_changes(rows: &mut Vec<Row>, before: &mut Vec<Line>, after: &mut Vec<Li
     let count = before.len().max(after.len());
     let mut before = before.drain(..);
     let mut after = after.drain(..);
-    rows.extend((0..count).map(|_| Row::Lines {
+    rows.extend((0..count).map(|_| Row {
         before: before.next(),
         after: after.next(),
     }));
@@ -135,7 +180,6 @@ fn parse(text: &str) -> Vec<Section> {
             old_number = old;
             new_number = new;
             in_hunk = true;
-            section.rows.push(Row::Hunk(line.to_owned()));
         } else if line.starts_with("Diff truncated:") {
             flush_changes(&mut section.rows, &mut before, &mut after);
             section.truncated = true;
@@ -165,7 +209,7 @@ fn parse(text: &str) -> Vec<Section> {
                 section.additions += 1;
             } else if let Some(text) = line.strip_prefix(' ') {
                 flush_changes(&mut section.rows, &mut before, &mut after);
-                section.rows.push(Row::Lines {
+                section.rows.push(Row {
                     before: Some(Line::new(old_number, text, false)),
                     after: Some(Line::new(new_number, text, false)),
                 });
@@ -195,32 +239,29 @@ fn parse(text: &str) -> Vec<Section> {
         let columns = section
             .rows
             .iter()
-            .filter_map(|row| match row {
-                Row::Lines { before, after } => Some(
-                    before
-                        .iter()
-                        .chain(after)
-                        .map(|line| {
-                            line.text
-                                .chars()
-                                // Reserve two cells for non-ASCII fallback glyphs.
-                                // This may leave extra scroll room for combining
-                                // sequences, but never clips wide CJK/emoji text.
-                                .map(|ch| {
-                                    if ch == '\t' {
-                                        4
-                                    } else if ch.is_ascii() {
-                                        1
-                                    } else {
-                                        2
-                                    }
-                                })
-                                .sum::<usize>()
-                        })
-                        .max()
-                        .unwrap_or(0),
-                ),
-                Row::Hunk(_) => None,
+            .map(|row| {
+                row.before
+                    .iter()
+                    .chain(&row.after)
+                    .map(|line| {
+                        line.text
+                            .chars()
+                            // Reserve two cells for non-ASCII fallback glyphs.
+                            // This may leave extra scroll room for combining
+                            // sequences, but never clips wide CJK/emoji text.
+                            .map(|ch| {
+                                if ch == '\t' {
+                                    4
+                                } else if ch.is_ascii() {
+                                    1
+                                } else {
+                                    2
+                                }
+                            })
+                            .sum::<usize>()
+                    })
+                    .max()
+                    .unwrap_or(0)
             })
             .max()
             .unwrap_or(0);
@@ -238,53 +279,60 @@ pub(super) enum DiffEvent {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct DisplayRow {
-    source: usize,
-    side: Option<bool>,
+enum DisplayRow {
+    Line { source: usize, side: Option<bool> },
+    Fold(usize),
 }
 
-fn display_rows(rows: &[Row], split: bool) -> Vec<DisplayRow> {
+impl DisplayRow {
+    fn source(self) -> Option<usize> {
+        match self {
+            Self::Line { source, .. } => Some(source),
+            Self::Fold(_) => None,
+        }
+    }
+}
+
+fn display_rows(rows: &[Row], folds: &[Fold], split: bool) -> Vec<DisplayRow> {
     let mut output = Vec::new();
+    let mut collapsed = folds
+        .iter()
+        .enumerate()
+        .filter(|(_, fold)| !fold.expanded)
+        .peekable();
     let mut index = 0;
     while index < rows.len() {
-        if split {
-            output.push(DisplayRow {
+        if let Some((fold, hidden)) = collapsed.next_if(|(_, fold)| fold.rows.start == index) {
+            output.push(DisplayRow::Fold(fold));
+            index = hidden.rows.end;
+            continue;
+        }
+        if split || !rows[index].changed() {
+            output.push(DisplayRow::Line {
                 source: index,
                 side: None,
             });
             index += 1;
             continue;
         }
-        if matches!(&rows[index], Row::Lines { before, after } if before.as_ref().is_some_and(|line| line.changed) || after.as_ref().is_some_and(|line| line.changed))
-        {
-            let start = index;
-            while index < rows.len()
-                && matches!(&rows[index], Row::Lines { before, after } if before.as_ref().is_some_and(|line| line.changed) || after.as_ref().is_some_and(|line| line.changed))
-            {
-                index += 1;
-            }
-            for right in [false, true] {
-                for (source, row) in rows.iter().enumerate().take(index).skip(start) {
-                    if let Row::Lines { before, after } = row
-                        && if right {
-                            after.is_some()
-                        } else {
-                            before.is_some()
-                        }
-                    {
-                        output.push(DisplayRow {
-                            source,
-                            side: Some(right),
-                        });
-                    }
+        let start = index;
+        while index < rows.len() && rows[index].changed() {
+            index += 1;
+        }
+        for right in [false, true] {
+            for (source, row) in rows.iter().enumerate().take(index).skip(start) {
+                let present = if right {
+                    row.after.is_some()
+                } else {
+                    row.before.is_some()
+                };
+                if present {
+                    output.push(DisplayRow::Line {
+                        source,
+                        side: Some(right),
+                    });
                 }
             }
-        } else {
-            output.push(DisplayRow {
-                source: index,
-                side: None,
-            });
-            index += 1;
         }
     }
     output
@@ -296,6 +344,7 @@ pub(super) struct DiffView {
     raw: String,
     sections: Vec<Section>,
     active: usize,
+    folds: Vec<Fold>,
     content: DiffContent,
     split: bool,
     display: Vec<DisplayRow>,
@@ -328,6 +377,7 @@ impl DiffView {
             raw: String::new(),
             sections: parse(""),
             active: 0,
+            folds: Vec::new(),
             content: DiffContent::Loading,
             split: false,
             display: Vec::new(),
@@ -395,8 +445,8 @@ impl DiffView {
         self.raw = raw;
         self.sections = parse(&self.raw);
         self.active = self.sections.len().saturating_sub(1);
-        self.display = display_rows(&self.sections[self.active].rows, self.split);
-        self.cache_hunks();
+        self.folds = folds(&self.sections[self.active].rows);
+        self.rebuild_display();
         self.content = content;
         cx.notify();
     }
@@ -407,13 +457,15 @@ impl DiffView {
         }
         let top = (-f32::from(self.scroll.0.borrow().base_handle.offset().y) / ROW_HEIGHT).max(0.0)
             as usize;
-        let source = self.display.get(top).map(|row| row.source);
+        let source = self.display.get(top).and_then(|row| row.source());
         self.split = split;
         self.reset_code_scroll();
-        self.display = display_rows(&self.sections[self.active].rows, split);
-        self.cache_hunks();
+        self.rebuild_display();
         if let Some(source) = source
-            && let Some(index) = self.display.iter().position(|row| row.source == source)
+            && let Some(index) = self
+                .display
+                .iter()
+                .position(|row| row.source() == Some(source))
         {
             self.scroll
                 .scroll_to_item_strict(index, ScrollStrategy::Top);
@@ -426,24 +478,32 @@ impl DiffView {
         self.code_scroll.set_offset(origin);
     }
 
-    fn cache_hunks(&mut self) {
-        self.hunk_rows = self.sections[self.active]
-            .rows
-            .iter()
-            .enumerate()
-            .filter_map(|(index, row)| matches!(row, Row::Hunk(_)).then_some(index))
+    fn rebuild_display(&mut self) {
+        let rows = &self.sections[self.active].rows;
+        self.display = display_rows(rows, &self.folds, self.split);
+        // Change blocks start where a changed row follows an unchanged one.
+        self.hunk_rows = (0..rows.len())
+            .filter(|&index| rows[index].changed() && (index == 0 || !rows[index - 1].changed()))
             .collect();
-        self.hunk_display = self
-            .display
-            .iter()
-            .enumerate()
-            .filter_map(|(index, row)| {
-                self.hunk_rows
-                    .binary_search(&row.source)
-                    .is_ok()
-                    .then_some(index)
-            })
-            .collect();
+        // Changed rows are never folded and appear in source order, so one
+        // pass finds the first display row of every block.
+        self.hunk_display.clear();
+        for (index, row) in self.display.iter().enumerate() {
+            if let Some(&next) = self.hunk_rows.get(self.hunk_display.len())
+                && row.source() == Some(next)
+            {
+                self.hunk_display.push(index);
+            }
+        }
+    }
+
+    fn expand_fold(&mut self, fold: usize, cx: &mut Context<Self>) {
+        let Some(fold) = self.folds.get_mut(fold) else {
+            return;
+        };
+        fold.expanded = true;
+        self.rebuild_display();
+        cx.notify();
     }
 
     fn copy(&self, cx: &mut Context<Self>) {
@@ -451,14 +511,13 @@ impl DiffView {
             Some((right, anchor, end)) => self.sections[self.active].rows
                 [anchor.min(end)..=anchor.max(end)]
                 .iter()
-                .filter_map(|row| match row {
-                    Row::Lines { before, after } => if right {
-                        after.as_ref()
+                .filter_map(|row| {
+                    if right {
+                        row.after.as_ref()
                     } else {
-                        before.as_ref()
+                        row.before.as_ref()
                     }
-                    .map(|line| line.text.as_str()),
-                    Row::Hunk(_) => None,
+                    .map(|line| line.text.as_str())
                 })
                 .collect::<Vec<_>>()
                 .join("\n"),
@@ -523,10 +582,21 @@ impl DiffView {
                 _ => end,
             };
             self.selection = Some((right, if key.modifiers.shift { anchor } else { end }, end));
+            if let Some(fold) = self
+                .folds
+                .iter()
+                .position(|fold| !fold.expanded && fold.rows.contains(&end))
+            {
+                self.folds[fold].expanded = true;
+                self.rebuild_display();
+            }
             self.scroll.scroll_to_item(
                 self.display
                     .iter()
-                    .position(|row| row.source == end && row.side.is_none_or(|side| side == right))
+                    .position(|row| {
+                        matches!(row, DisplayRow::Line { source, side }
+                            if *source == end && side.is_none_or(|side| side == right))
+                    })
                     .unwrap_or(0),
                 ScrollStrategy::Center,
             );
@@ -563,17 +633,6 @@ impl DiffView {
         } else {
             theme::canvas()
         };
-        let foreground = if selected {
-            theme::bone()
-        } else if changed {
-            if right {
-                theme::success()
-            } else {
-                theme::error()
-            }
-        } else {
-            theme::bone()
-        };
         let number =
             |line: Option<&Line>| line.map_or_else(String::new, |line| line.number.to_string());
         let gutter = |value: String| {
@@ -595,7 +654,7 @@ impl DiffView {
             .flex()
             .items_center()
             .bg(background)
-            .text_color(foreground)
+            .text_color(theme::bone())
             .when(self.split && right, |cell| {
                 cell.border_l_1().border_color(theme::edge_soft())
             })
@@ -620,11 +679,6 @@ impl DiffView {
                     .child(gutter(number(before)))
             })
             .child(gutter(number(if self.split { line } else { after })))
-            .child(div().w(px(20.0)).flex_shrink_0().child(if changed {
-                if right { "+" } else { "−" }
-            } else {
-                ""
-            }))
             .child({
                 let mut code = div()
                     .id((
@@ -644,7 +698,7 @@ impl DiffView {
                         div()
                             .debug_selector(move || format!("diff-text-{index}-{right}"))
                             .w(px(self.sections[self.active].code_width))
-                            .pl(px(4.0))
+                            .pl(px(8.0))
                             .whitespace_nowrap()
                             .child(line.map_or_else(
                                 || SharedString::new_static(""),
@@ -693,70 +747,62 @@ impl DiffView {
             && matches!(self.content, DiffContent::Ready(_))
     }
 
+    fn fold_row(&self, fold: usize, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let count = self.folds[fold].rows.len();
+        div()
+            .id(("diff-fold", fold))
+            .debug_selector(move || format!("diff-fold-{fold}"))
+            .h(px(ROW_HEIGHT))
+            .w_full()
+            .pl(px(if self.split { 16.0 } else { 60.0 }))
+            .flex()
+            .items_center()
+            .gap(px(8.0))
+            .bg(theme::chrome())
+            .border_y_1()
+            .border_color(theme::edge_soft())
+            .font_family(chrome::CHROME_FONT)
+            .text_size(px(11.0))
+            .text_color(theme::ash())
+            .tab_index(0)
+            .cursor_pointer()
+            .hover(|style| style.bg(theme::panel_hover()).text_color(theme::bone()))
+            .focus(|style| style.border_color(theme::focus()))
+            .child(
+                svg()
+                    .path("icons/chevron-down.svg")
+                    .size(px(12.0))
+                    .text_color(theme::ash()),
+            )
+            .child(format!(
+                "Show {count} unchanged line{}",
+                if count == 1 { "" } else { "s" }
+            ))
+            .on_click(cx.listener(move |view, _, _, cx| view.expand_fold(fold, cx)))
+            .into_any_element()
+    }
+
     fn row(&self, index: usize, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let display = self.display[index];
-        match &self.sections[self.active].rows[display.source] {
-            Row::Hunk(label) => {
-                let ordinal = self.hunk_rows.binary_search(&display.source).unwrap_or(0);
-                let undo = self.can_discard() && self.file.marker == "M";
-                div()
-                    .h(px(ROW_HEIGHT))
-                    .w_full()
-                    .px(px(12.0))
-                    .flex()
-                    .items_center()
-                    .gap(px(8.0))
-                    .bg(theme::chrome())
-                    .text_color(theme::ash())
-                    .child(
-                        div()
-                            .id(("diff-hunk-label", display.source))
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .tooltip(text_tooltip(label.clone()))
-                            .child(label.clone()),
-                    )
-                    .when(undo, |row| {
-                        row.child(
-                            Self::control(("undo-hunk", ordinal), "Discard this hunk", true)
-                                .h(px(20.0))
-                                .px(px(6.0))
-                                .child(
-                                    svg()
-                                        .path("icons/undo.svg")
-                                        .size(px(12.0))
-                                        .text_color(theme::ash()),
-                                )
-                                .child("Undo hunk")
-                                .on_click(cx.listener(move |view, _, _, cx| {
-                                    if view.can_discard() {
-                                        cx.emit(DiffEvent::Review(ReviewAction::Discard(Some((
-                                            ordinal,
-                                            view.raw.clone(),
-                                        )))));
-                                    }
-                                })),
-                        )
-                    })
-                    .into_any_element()
-            }
-            Row::Lines { before, after } if self.split => div()
+        let (source, side) = match self.display[index] {
+            DisplayRow::Fold(fold) => return self.fold_row(fold, cx),
+            DisplayRow::Line { source, side } => (source, side),
+        };
+        let Row { before, after } = &self.sections[self.active].rows[source];
+        if self.split {
+            return div()
                 .h(px(ROW_HEIGHT))
                 .w_full()
                 .flex()
-                .child(self.cell(before.as_ref(), None, false, display.source, cx))
-                .child(self.cell(None, after.as_ref(), true, display.source, cx))
-                .into_any_element(),
-            Row::Lines { before, after } => {
-                let (before, after, right) = match display.side {
-                    Some(false) => (before.as_ref(), None, false),
-                    Some(true) => (None, after.as_ref(), true),
-                    None => (before.as_ref(), after.as_ref(), true),
-                };
-                self.cell(before, after, right, display.source, cx)
-            }
+                .child(self.cell(before.as_ref(), None, false, source, cx))
+                .child(self.cell(None, after.as_ref(), true, source, cx))
+                .into_any_element();
         }
+        let (before, after, right) = match side {
+            Some(false) => (before.as_ref(), None, false),
+            Some(true) => (None, after.as_ref(), true),
+            None => (before.as_ref(), after.as_ref(), true),
+        };
+        self.cell(before, after, right, source, cx)
     }
 
     fn control(
@@ -895,14 +941,21 @@ mod tests {
                 cx,
             )
         });
+        // Context-only fixtures fold entirely; expand them to test layout.
+        view.update(cx, |view, _| {
+            for fold in &mut view.folds {
+                fold.expanded = true;
+            }
+            view.rebuild_display();
+        });
         for width in [380.0, 540.0, 900.0, 1200.0] {
             cx.simulate_resize(gpui::size(px(width), px(640.0)));
             view.update(cx, |view, cx| view.set_split(true, cx));
             cx.refresh().unwrap();
-            let left_short = cx.debug_bounds("diff-1-false").unwrap();
-            let right_short = cx.debug_bounds("diff-1-true").unwrap();
-            let left_long = cx.debug_bounds("diff-2-false").unwrap();
-            let right_long = cx.debug_bounds("diff-2-true").unwrap();
+            let left_short = cx.debug_bounds("diff-0-false").unwrap();
+            let right_short = cx.debug_bounds("diff-0-true").unwrap();
+            let left_long = cx.debug_bounds("diff-1-false").unwrap();
+            let right_long = cx.debug_bounds("diff-1-true").unwrap();
             assert_eq!(left_short.right(), right_short.left());
             assert_eq!(left_long.right(), right_long.left());
             assert_eq!(left_short.size.width, right_short.size.width);
@@ -913,7 +966,7 @@ mod tests {
             assert_eq!(right_short.right(), viewer.right());
 
             if width == 900.0 {
-                let code_before = cx.debug_bounds("diff-code-2-false").unwrap();
+                let code_before = cx.debug_bounds("diff-code-1-false").unwrap();
                 let wheel_position =
                     point(code_before.left() + px(24.0), code_before.top() + px(8.0));
                 let y_before =
@@ -947,16 +1000,16 @@ mod tests {
                 let y_after =
                     view.read_with(cx, |view, _| view.scroll.0.borrow().base_handle.offset().y);
                 assert_eq!(y_after, y_before);
-                let left_before = cx.debug_bounds("diff-text-2-false").unwrap();
-                let right_before = cx.debug_bounds("diff-text-2-true").unwrap();
+                let left_before = cx.debug_bounds("diff-text-1-false").unwrap();
+                let right_before = cx.debug_bounds("diff-text-1-true").unwrap();
                 view.update(cx, |view, cx| {
                     view.code_scroll.set_offset(point(px(-320.0), px(0.0)));
                     cx.notify();
                 });
                 cx.refresh().unwrap();
-                let code_after = cx.debug_bounds("diff-code-2-false").unwrap();
-                let left_after = cx.debug_bounds("diff-text-2-false").unwrap();
-                let right_after = cx.debug_bounds("diff-text-2-true").unwrap();
+                let code_after = cx.debug_bounds("diff-code-1-false").unwrap();
+                let left_after = cx.debug_bounds("diff-text-1-false").unwrap();
+                let right_after = cx.debug_bounds("diff-text-1-true").unwrap();
                 assert_eq!(code_after, code_before);
                 assert!(left_after.left() <= left_before.left());
                 assert_eq!(
@@ -965,7 +1018,7 @@ mod tests {
                 );
                 assert_eq!(
                     right_short.left(),
-                    cx.debug_bounds("diff-1-true").unwrap().left()
+                    cx.debug_bounds("diff-0-true").unwrap().left()
                 );
                 assert!(view.read_with(cx, |view, _| view.code_scroll.offset().x < px(0.0)));
             }
@@ -976,8 +1029,8 @@ mod tests {
                 view.read_with(cx, |view, _| view.code_scroll.offset().x),
                 px(0.0)
             );
-            let unified_short = cx.debug_bounds("diff-1-true").unwrap();
-            let unified_long = cx.debug_bounds("diff-2-true").unwrap();
+            let unified_short = cx.debug_bounds("diff-0-true").unwrap();
+            let unified_long = cx.debug_bounds("diff-1-true").unwrap();
             assert_eq!(unified_short.left(), viewer.left());
             assert_eq!(unified_short.right(), viewer.right());
             assert_eq!(unified_long.size.width, unified_short.size.width);
@@ -1001,7 +1054,7 @@ mod tests {
                 "project".into(),
                 file,
                 DiffContent::Ready(
-                    "@@ -1 +1 @@\n-old\n+new\n@@ -9 +9 @@\n-before\n+after\n".into(),
+                    "@@ -1,4 +1,4 @@\n-old\n+new\n same\n same\n-before\n+after\n".into(),
                 ),
                 cx,
             )
@@ -1010,12 +1063,12 @@ mod tests {
             for split in [false, true] {
                 view.set_split(split, cx);
                 view.hunk_cursor = None;
-                for source in [0, 2, 0] {
+                for source in [0, 3, 0] {
                     view.navigate_hunk(true, cx);
                     assert_eq!(view.selection, Some((true, source, source)));
                 }
                 view.navigate_hunk(false, cx);
-                assert_eq!(view.selection, Some((true, 2, 2)));
+                assert_eq!(view.selection, Some((true, 3, 3)));
             }
             let file = view.file.clone();
             view.update_snapshot(file, DiffContent::Ready(String::new()), cx);
@@ -1070,12 +1123,17 @@ mod tests {
     #[test]
     fn unified_view_keeps_deletions_before_additions_and_context_once() {
         let sections = parse("@@ -1,3 +1,3 @@\n-old one\n-old two\n+new one\n+new two\n context\n");
-        let rows = display_rows(&sections[0].rows, false);
+        let rows = display_rows(&sections[0].rows, &[], false);
         assert_eq!(
-            rows.iter().map(|row| row.side).collect::<Vec<_>>(),
-            vec![None, Some(false), Some(false), Some(true), Some(true), None]
+            rows.iter()
+                .map(|row| match row {
+                    DisplayRow::Line { side, .. } => *side,
+                    DisplayRow::Fold(_) => unreachable!("short context is never folded"),
+                })
+                .collect::<Vec<_>>(),
+            vec![Some(false), Some(false), Some(true), Some(true), None]
         );
-        assert_eq!(display_rows(&sections[0].rows, true).len(), 4);
+        assert_eq!(display_rows(&sections[0].rows, &[], true).len(), 3);
     }
 
     #[gpui::test]
@@ -1095,6 +1153,13 @@ mod tests {
         let (view, cx) = cx.add_window_view(|_, cx| {
             DiffView::new("project".into(), file, DiffContent::Ready(diff), cx)
         });
+        // Context-only fixtures fold entirely; expand them to test layout.
+        view.update(cx, |view, _| {
+            for fold in &mut view.folds {
+                fold.expanded = true;
+            }
+            view.rebuild_display();
+        });
         cx.simulate_resize(gpui::size(px(900.0), px(600.0)));
         cx.refresh().unwrap();
         assert!(cx.debug_bounds("diff-290-true").is_none());
@@ -1112,6 +1177,38 @@ mod tests {
             view.read_with(cx, |view, _| view.scroll.0.borrow().base_handle.offset().y)
                 < -px(250.0 * ROW_HEIGHT)
         );
+    }
+
+    #[test]
+    fn long_unchanged_runs_fold_around_changes_and_expand_in_place() {
+        let mut diff = "@@ -1,41 +1,41 @@\n".to_owned();
+        for index in 0..20 {
+            diff.push_str(&format!(" before {index}\n"));
+        }
+        diff.push_str("-old\n+new\n");
+        for index in 0..20 {
+            diff.push_str(&format!(" after {index}\n"));
+        }
+        let sections = parse(&diff);
+        let rows = &sections[0].rows;
+        let mut folds = folds(rows);
+        assert_eq!(
+            folds
+                .iter()
+                .map(|fold| fold.rows.clone())
+                .collect::<Vec<_>>(),
+            vec![0..17, 24..41]
+        );
+        let collapsed = display_rows(rows, &folds, true);
+        assert_eq!(collapsed.len(), 9);
+        assert_eq!(collapsed[0], DisplayRow::Fold(0));
+        assert_eq!(collapsed[8], DisplayRow::Fold(1));
+        folds[0].expanded = true;
+        let expanded = display_rows(rows, &folds, true);
+        assert_eq!(expanded.len(), 25);
+        assert_eq!(expanded[0].source(), Some(0));
+        // Three trailing context lines are shown rather than folded.
+        assert_eq!(super::folds(&rows[..24]).len(), 1);
     }
 
     #[test]
@@ -1138,15 +1235,15 @@ mod tests {
         );
         let section = &sections[0];
         assert_eq!((section.additions, section.deletions), (2, 1));
-        assert_eq!(section.rows.len(), 5);
+        assert_eq!(section.rows.len(), 4);
         assert!(
-            matches!(&section.rows[2], Row::Lines { before: Some(before), after: Some(after) } if before.number == 43 && before.text == "old" && after.number == 43 && after.text == "new")
+            matches!(&section.rows[1], Row { before: Some(before), after: Some(after) } if before.number == 43 && before.text == "old" && after.number == 43 && after.text == "new")
         );
         assert!(
-            matches!(&section.rows[3], Row::Lines { before: None, after: Some(after) } if after.number == 44 && after.text == "extra")
+            matches!(&section.rows[2], Row { before: None, after: Some(after) } if after.number == 44 && after.text == "extra")
         );
         assert!(
-            matches!(&section.rows[4], Row::Lines { before: Some(before), after: Some(after) } if before.number == 44 && after.number == 45 && !before.changed)
+            matches!(&section.rows[3], Row { before: Some(before), after: Some(after) } if before.number == 44 && after.number == 45 && !before.changed)
         );
     }
 
@@ -1181,12 +1278,12 @@ mod tests {
     #[test]
     fn multiple_hunks_flush_uneven_deletions_and_keep_unicode() {
         let sections = parse("@@ -1,2 +0,0 @@\n-α\n-β\n@@ -10 +8 @@\n café\n");
-        assert_eq!(sections[0].rows.len(), 5);
+        assert_eq!(sections[0].rows.len(), 3);
         assert!(
-            matches!(&sections[0].rows[2], Row::Lines { before: Some(line), after: None } if line.number == 2 && line.text == "β")
+            matches!(&sections[0].rows[1], Row { before: Some(line), after: None } if line.number == 2 && line.text == "β")
         );
         assert!(
-            matches!(&sections[0].rows[4], Row::Lines { before: Some(before), after: Some(after) } if before.number == 10 && after.number == 8 && after.text == "café")
+            matches!(&sections[0].rows[2], Row { before: Some(before), after: Some(after) } if before.number == 10 && after.number == 8 && after.text == "café")
         );
         assert_eq!(hunk_start("@@ invalid @@"), None);
         assert_eq!(parse("")[0].rows.len(), 0);

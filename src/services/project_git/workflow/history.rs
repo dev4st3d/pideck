@@ -379,6 +379,7 @@ pub(crate) fn commit_file_diff(
         "--output-indicator-new=+",
         "--output-indicator-old=-",
         "--output-indicator-context= ",
+        super::super::FULL_CONTEXT,
         "--",
     ]));
     arguments.push(literal(&file.relative_path));

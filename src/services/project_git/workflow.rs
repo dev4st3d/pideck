@@ -462,44 +462,10 @@ pub(crate) struct DiscardPlan {
     pub(crate) project: PathBuf,
     pub(crate) path: PathBuf,
     pub(crate) untracked: bool,
-    pub(crate) hunk: Option<usize>,
     snapshot: FileStamp,
-    patch: Option<Vec<u8>>,
 }
 
-fn hunk_patch(diff: &str, hunk: usize) -> Result<Vec<u8>, String> {
-    let lines: Vec<_> = diff.split_inclusive('\n').collect();
-    let hunks: Vec<_> = lines
-        .iter()
-        .enumerate()
-        .filter_map(|(i, line)| line.starts_with("@@ ").then_some(i))
-        .collect();
-    let start = *hunks
-        .get(hunk)
-        .ok_or("This hunk changed. Refresh the diff before discarding it.")?;
-    let end = hunks.get(hunk + 1).copied().unwrap_or(lines.len());
-    let header = *hunks.first().ok_or("This file has no text hunks.")?;
-    if lines[..header].iter().any(|line| {
-        line.starts_with("new file")
-            || line.starts_with("deleted file")
-            || line.starts_with("rename ")
-            || line.starts_with("old mode")
-    }) {
-        return Err("Use Undo file for added, deleted, renamed, or mode-changed files.".into());
-    }
-    Ok(lines[..header]
-        .iter()
-        .chain(lines[start..end].iter())
-        .copied()
-        .collect::<String>()
-        .into_bytes())
-}
-
-pub(crate) fn prepare_discard(
-    project: &Path,
-    entry: &GitEntry,
-    hunk: Option<(usize, String)>,
-) -> Result<DiscardPlan, String> {
+pub(crate) fn prepare_discard(project: &Path, entry: &GitEntry) -> Result<DiscardPlan, String> {
     if entry.conflicted {
         return Err("Resolve this file's merge conflict before discarding changes.".into());
     }
@@ -515,18 +481,6 @@ pub(crate) fn prepare_discard(
     }) {
         return Err("The file's Git state changed. Refresh before discarding it.".into());
     }
-    let (hunk, patch) = if let Some((index, expected)) = hunk {
-        if entry.untracked {
-            return Err("Use Undo file for a new file.".into());
-        }
-        let diff = file_diff(&project, &path, DiffKind::WorkingTree).map_err(|e| e.to_string())?;
-        if diff.truncated || diff.text != expected {
-            return Err("The diff changed. Refresh before discarding this hunk.".into());
-        }
-        (Some(index), Some(hunk_patch(&diff.text, index)?))
-    } else {
-        (None, None)
-    };
     if stamp(&project, &path)? != before {
         return Err("The file changed while preparing the discard. Refresh and retry.".into());
     }
@@ -534,9 +488,7 @@ pub(crate) fn prepare_discard(
         project,
         path,
         untracked: entry.untracked,
-        hunk,
         snapshot: before,
-        patch,
     })
 }
 
@@ -553,24 +505,6 @@ pub(crate) fn discard(plan: &DiscardPlan) -> Result<(), String> {
             &AtomicBool::new(false),
         );
         return result.error.map_or(Ok(()), Err);
-    }
-    if let Some(patch) = &plan.patch {
-        let root = PathBuf::from(text(
-            &plan.project,
-            &args(&["rev-parse", "--show-toplevel"]),
-        )?);
-        write(
-            &root,
-            &args(&["apply", "--reverse", "--check", "--whitespace=nowarn", "-"]),
-            Some(patch.clone()),
-            "This hunk no longer applies. Refresh and review it again.",
-        )?;
-        return write(
-            &root,
-            &args(&["apply", "--reverse", "--whitespace=nowarn", "-"]),
-            Some(patch.clone()),
-            "Could not discard the hunk. Refresh and review the file.",
-        );
     }
     let mut arguments = args(&["restore", "--worktree", "--"]);
     arguments.push(literal(&scoped_path(&plan.project, &plan.path)?));

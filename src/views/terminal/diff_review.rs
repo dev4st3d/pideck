@@ -105,6 +105,7 @@ impl DiffView {
                                 .child("Unpushed"),
                         )
                     })
+                    .child(self.layout_toggle(cx))
                     .child(
                         Self::control("commit-details", "Show commit details", true)
                             .h(px(24.0))
@@ -370,6 +371,99 @@ impl DiffView {
             .into_any_element()
     }
 
+    fn icon_button(
+        id: &'static str,
+        label: &'static str,
+        icon: &'static str,
+        enabled: bool,
+    ) -> gpui::Stateful<gpui::Div> {
+        Self::control(id, label, enabled)
+            .size(px(26.0))
+            .px(px(0.0))
+            .justify_center()
+            .child(svg().path(icon).size(px(14.0)).text_color(theme::ash()))
+    }
+
+    fn layout_option(&self, split: bool, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let active = self.split == split;
+        let (id, label, tooltip) = if split {
+            ("diff-split", "Split", "Split diff · Alt+S")
+        } else {
+            ("diff-unified", "Unified", "Unified diff · Alt+U")
+        };
+        Self::control(id, tooltip, true)
+            .h(px(20.0))
+            .px(px(8.0))
+            .rounded(px(3.0))
+            .text_color(if active { theme::bone() } else { theme::ash() })
+            .when(active, |option| option.bg(theme::panel_hover()))
+            .child(label)
+            .on_click(cx.listener(move |view, _, _, cx| view.set_split(split, cx)))
+            .into_any_element()
+    }
+
+    /// One segmented control replaces the old toolbar; the active layout is
+    /// marked by both contrast and fill so it does not rely on color alone.
+    fn layout_toggle(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        div()
+            .flex_shrink_0()
+            .flex()
+            .items_center()
+            .gap(px(2.0))
+            .p(px(2.0))
+            .rounded(px(5.0))
+            .border_1()
+            .border_color(theme::edge())
+            .child(self.layout_option(false, cx))
+            .child(self.layout_option(true, cx))
+            .into_any_element()
+    }
+
+    fn file_navigation(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let previous = self.file.position > 0;
+        let next = self.file.position + 1 < self.file.total;
+        div()
+            .flex_shrink_0()
+            .flex()
+            .items_center()
+            .child(
+                Self::icon_button(
+                    "previous-change",
+                    "Previous file · Alt+Up",
+                    "icons/chevron-left.svg",
+                    previous,
+                )
+                .when(previous, |button| {
+                    button.on_click(cx.listener(|_, _, _, cx| {
+                        cx.emit(DiffEvent::Review(ReviewAction::Navigate(-1)))
+                    }))
+                }),
+            )
+            .child(
+                div()
+                    .min_w(px(28.0))
+                    .text_center()
+                    .font_family(theme::mono())
+                    .text_size(px(10.0))
+                    .text_color(theme::ash())
+                    .child(format!("{}/{}", self.file.position + 1, self.file.total)),
+            )
+            .child(
+                Self::icon_button(
+                    "next-change",
+                    "Next file · Alt+Down",
+                    "icons/chevron-right.svg",
+                    next,
+                )
+                .when(next, |button| {
+                    button.on_click(cx.listener(|_, _, _, cx| {
+                        cx.emit(DiffEvent::Review(ReviewAction::Navigate(1)))
+                    }))
+                }),
+            )
+            .into_any_element()
+    }
+
     fn working_header(
         &self,
         section: &Section,
@@ -380,20 +474,25 @@ impl DiffView {
             .file
             .path
             .strip_prefix(&self.workspace)
-            .unwrap_or(&self.file.path)
-            .to_string_lossy()
-            .replace('\\', " / ")
-            .replace('/', " / ")
-            .replace("  /  ", " / ");
+            .unwrap_or(&self.file.path);
+        let name = relative
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let directory = relative
+            .parent()
+            .map(|parent| parent.to_string_lossy().replace('\\', "/"))
+            .unwrap_or_default();
         let staged = self.file.kind == DiffKind::Staged;
         let enabled = ready && !self.operation_busy && self.file.total > 0;
         div()
-            .h(px(34.0))
+            .h(px(36.0))
             .flex_shrink_0()
-            .px(px(12.0))
+            .pl(px(12.0))
+            .pr(px(8.0))
             .flex()
             .items_center()
-            .gap(px(6.0))
+            .gap(px(8.0))
             .border_b_1()
             .border_color(theme::edge())
             .child(
@@ -403,16 +502,44 @@ impl DiffView {
             )
             .child(
                 div()
+                    .id("diff-file-path")
                     .flex_1()
                     .min_w_0()
-                    .truncate()
-                    .text_size(px(12.0))
-                    .id("diff-file-path")
+                    .flex()
+                    .items_baseline()
+                    .gap(px(8.0))
+                    .overflow_hidden()
                     .tooltip(text_tooltip(format!(
-                        "{} — {relative}",
-                        if staged { "Staged" } else { section.label }
+                        "{} — {}",
+                        if staged { "Staged" } else { section.label },
+                        relative.display()
                     )))
-                    .child(relative),
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(px(13.0))
+                            .font_weight(FontWeight::MEDIUM)
+                            .child(name),
+                    )
+                    .when(staged, |title| {
+                        title.child(
+                            div()
+                                .flex_shrink_0()
+                                .text_size(px(11.0))
+                                .text_color(theme::success())
+                                .child("Staged"),
+                        )
+                    })
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(px(11.0))
+                            .text_color(theme::ash())
+                            .child(directory),
+                    ),
             )
             .when(ready, |header| {
                 header.child(stats(Some(GitLineStats {
@@ -420,57 +547,88 @@ impl DiffView {
                     deletions: section.deletions,
                 })))
             })
-            .when(!staged, |header| {
-                header.child(
-                    Self::control(
-                        "diff-discard-file",
-                        "Discard unstaged file changes",
-                        self.can_discard(),
-                    )
-                    .h(px(26.0))
-                    .w(px(26.0))
-                    .justify_center()
-                    .child(
-                        svg()
-                            .path("icons/undo.svg")
-                            .size(px(13.0))
-                            .text_color(theme::ash()),
-                    )
-                    .when(self.can_discard(), |button| {
-                        button.on_click(cx.listener(|_, _, _, cx| {
-                            cx.emit(DiffEvent::Review(ReviewAction::Discard(None)))
-                        }))
-                    }),
-                )
+            .when(self.file.total > 1, |header| {
+                header.child(self.file_navigation(cx))
             })
+            .child(self.layout_toggle(cx))
             .child(
-                Self::control(
-                    "diff-stage-file",
-                    if staged {
-                        "Unstage this file"
-                    } else {
-                        "Stage this file"
-                    },
-                    enabled,
-                )
-                .h(px(26.0))
-                .px(px(7.0))
-                .child(if staged { "Unstage" } else { "Stage" })
-                .when(enabled, |button| {
-                    button.on_click(
-                        cx.listener(|_, _, _, cx| cx.emit(DiffEvent::Review(ReviewAction::Stage))),
+                div()
+                    .flex_shrink_0()
+                    .flex()
+                    .items_center()
+                    .gap(px(2.0))
+                    .when(!staged && self.can_discard(), |actions| {
+                        actions.child(
+                            Self::icon_button(
+                                "diff-discard-file",
+                                "Discard unstaged file changes",
+                                "icons/undo.svg",
+                                true,
+                            )
+                            .on_click(cx.listener(|_, _, _, cx| {
+                                cx.emit(DiffEvent::Review(ReviewAction::Discard))
+                            })),
+                        )
+                    })
+                    .child(
+                        Self::icon_button(
+                            "diff-open-file",
+                            "Open file · Ctrl+O",
+                            "icons/external.svg",
+                            !self.operation_busy,
+                        )
+                        .when(!self.operation_busy, |button| {
+                            button.on_click(cx.listener(|_, _, _, cx| cx.emit(DiffEvent::OpenFile)))
+                        }),
                     )
-                }),
+                    .child(
+                        Self::control(
+                            "diff-stage-file",
+                            if staged {
+                                "Unstage this file"
+                            } else {
+                                "Stage this file"
+                            },
+                            enabled,
+                        )
+                        .h(px(24.0))
+                        .ml(px(4.0))
+                        .border_color(theme::edge())
+                        .child(if staged { "Unstage" } else { "Stage" })
+                        .when(enabled, |button| {
+                            button.on_click(cx.listener(|_, _, _, cx| {
+                                cx.emit(DiffEvent::Review(ReviewAction::Stage))
+                            }))
+                        }),
+                    ),
             )
-            .child(
-                Self::control("diff-open-file", "Open file · Ctrl+O", !self.operation_busy)
-                    .h(px(26.0))
-                    .px(px(7.0))
-                    .child("Open")
-                    .when(!self.operation_busy, |button| {
-                        button.on_click(cx.listener(|_, _, _, cx| cx.emit(DiffEvent::OpenFile)))
-                    }),
-            )
+            .into_any_element()
+    }
+
+    fn notice(text: impl Into<SharedString>, color: gpui::Rgba) -> gpui::AnyElement {
+        div()
+            .flex_shrink_0()
+            .px(px(12.0))
+            .py(px(5.0))
+            .border_b_1()
+            .border_color(theme::edge_soft())
+            .text_size(px(11.0))
+            .text_color(color)
+            .child(text.into())
+            .into_any_element()
+    }
+
+    fn placeholder(text: impl Into<SharedString>) -> gpui::AnyElement {
+        div()
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .p(px(16.0))
+            .text_size(px(12.0))
+            .text_color(theme::ash())
+            .child(text.into())
             .into_any_element()
     }
 
@@ -479,9 +637,6 @@ impl DiffView {
         let history = self.file.commit.is_some();
         let ready = matches!(self.content, DiffContent::Ready(_));
         let rows = self.display.len();
-        let hunks = self.hunk_rows.len();
-        let previous = self.file.position > 0;
-        let next = self.file.position + 1 < self.file.total;
         div()
             .id("git-diff-review")
             .track_focus(&self.focus)
@@ -496,7 +651,7 @@ impl DiffView {
             .bg(theme::canvas())
             .font_family(chrome::CHROME_FONT)
             .font_weight(FontWeight::NORMAL)
-            .text_size(px(13.0))
+            .text_size(px(12.0))
             .line_height(px(20.0))
             .text_color(theme::bone())
             .on_key_down(cx.listener(Self::on_key))
@@ -511,284 +666,78 @@ impl DiffView {
             } else {
                 self.working_header(section, ready, cx)
             })
-            .child(
-                div()
-                    .h(px(30.0))
-                    .flex_shrink_0()
-                    .px(px(10.0))
-                    .flex()
-                    .items_center()
-                    .gap(px(4.0))
-                    .border_b_1()
-                    .border_color(theme::edge())
-                    .child(
-                        Self::control("diff-unified", "Unified diff · Alt+U", true)
-                            .h(px(24.0))
-                            .bg(if !self.split {
-                                theme::panel_hover()
-                            } else {
-                                gpui::rgba(0)
-                            })
-                            .child("Unified")
-                            .on_click(cx.listener(|view, _, _, cx| view.set_split(false, cx))),
-                    )
-                    .child(
-                        Self::control("diff-split", "Split diff · Alt+S", true)
-                            .h(px(24.0))
-                            .bg(if self.split {
-                                theme::panel_hover()
-                            } else {
-                                gpui::rgba(0)
-                            })
-                            .child("Split")
-                            .on_click(cx.listener(|view, _, _, cx| view.set_split(true, cx))),
-                    )
-                    .child(div().flex_1())
-                    .child(div().text_size(px(10.0)).text_color(theme::ash()).child(
-                        if hunks == 0 {
-                            "0 hunks".into()
-                        } else {
-                            format!("{}/{} hunks", self.hunk_cursor.unwrap_or(0) + 1, hunks)
-                        },
-                    ))
-                    .child(
-                        Self::control("previous-hunk", "Previous hunk · Shift+F7", hunks > 0)
-                            .h(px(24.0))
-                            .px(px(6.0))
-                            .child(
-                                svg()
-                                    .path("icons/chevron-up.svg")
-                                    .size(px(12.0))
-                                    .text_color(theme::ash()),
-                            )
-                            .when(hunks > 0, |button| {
-                                button.on_click(
-                                    cx.listener(|view, _, _, cx| view.navigate_hunk(false, cx)),
-                                )
-                            }),
-                    )
-                    .child(
-                        Self::control("next-hunk", "Next hunk · F7", hunks > 0)
-                            .h(px(24.0))
-                            .px(px(6.0))
-                            .child(
-                                svg()
-                                    .path("icons/chevron-down.svg")
-                                    .size(px(12.0))
-                                    .text_color(theme::ash()),
-                            )
-                            .when(hunks > 0, |button| {
-                                button.on_click(
-                                    cx.listener(|view, _, _, cx| view.navigate_hunk(true, cx)),
-                                )
-                            }),
-                    )
-                    .child(
-                        Self::control(
-                            "copy-diff",
-                            "Copy selected lines or the complete diff · Ctrl+C",
-                            ready,
-                        )
-                        .h(px(24.0))
-                        .px(px(6.0))
-                        .child("Copy")
-                        .when(ready, |button| {
-                            button.on_click(cx.listener(|view, _, _, cx| view.copy(cx)))
-                        }),
-                    ),
-            )
-            .when(matches!(self.content, DiffContent::Loading), |panel| {
-                panel.child(
-                    div()
-                        .p(px(16.0))
-                        .text_color(theme::ash())
-                        .child("Loading diff…"),
-                )
-            })
-            .when_some(
-                match &self.content {
-                    DiffContent::Error(error) => Some(error.clone()),
-                    _ => None,
-                },
-                |panel, error| {
-                    panel.child(
-                        div()
-                            .p(px(16.0))
-                            .flex()
-                            .flex_col()
-                            .gap(px(10.0))
-                            .child(div().text_color(theme::error()).child(error))
-                            .child(
-                                Self::control("retry-diff", "Retry diff · F5", true)
-                                    .child("Retry")
-                                    .on_click(cx.listener(|_, _, _, cx| {
-                                        cx.emit(DiffEvent::Review(ReviewAction::Navigate(0)))
-                                    })),
-                            ),
-                    )
-                },
-            )
             .when(ready && !section.metadata.is_empty(), |panel| {
-                panel.child(
-                    div()
-                        .px(px(16.0))
-                        .py(px(6.0))
-                        .text_size(px(11.0))
-                        .text_color(theme::ash())
-                        .child(section.metadata.join(" · ")),
-                )
+                panel.child(Self::notice(section.metadata.join(" · "), theme::ash()))
             })
             .when(ready && section.conflicted, |panel| {
-                panel.child(
-                    div()
-                        .px(px(16.0))
-                        .py(px(6.0))
-                        .text_color(theme::error())
-                        .child("Resolve this file's conflict before committing."),
-                )
+                panel.child(Self::notice(
+                    "Resolve this file's conflict before committing.",
+                    theme::error(),
+                ))
             })
             .when(ready && section.truncated, |panel| {
-                panel.child(
-                    div()
-                        .px(px(16.0))
-                        .py(px(6.0))
-                        .text_size(px(11.0))
-                        .text_color(theme::ash())
-                        .child("Large diff: some changes are not shown."),
-                )
+                panel.child(Self::notice(
+                    "Large diff: some changes are not shown.",
+                    theme::ash(),
+                ))
             })
-            .when(ready && rows == 0, |panel| {
-                panel.child(
+            .map(|panel| match &self.content {
+                DiffContent::Loading => panel.child(Self::placeholder("Loading diff…")),
+                DiffContent::Error(error) => panel.child(
                     div()
+                        .flex_1()
+                        .min_h_0()
+                        .flex()
+                        .flex_col()
+                        .items_center()
+                        .justify_center()
+                        .gap(px(10.0))
                         .p(px(16.0))
-                        .text_color(theme::ash())
-                        .child(if section.binary {
-                            "Binary changes cannot be shown as text."
-                        } else if history && self.file.total == 0 {
-                            "This commit has no file changes in this project."
-                        } else {
-                            "No text changes"
-                        }),
-                )
-            })
-            .when(ready && rows > 0, |panel| {
-                panel.child(
+                        .child(div().text_color(theme::error()).child(error.clone()))
+                        .child(
+                            Self::control("retry-diff", "Retry diff · F5", true)
+                                .h(px(24.0))
+                                .border_color(theme::edge())
+                                .child("Retry")
+                                .on_click(cx.listener(|_, _, _, cx| {
+                                    cx.emit(DiffEvent::Review(ReviewAction::Navigate(0)))
+                                })),
+                        ),
+                ),
+                DiffContent::Ready(_) if rows == 0 => {
+                    panel.child(Self::placeholder(if section.binary {
+                        "Binary changes cannot be shown as text."
+                    } else if history && self.file.total == 0 {
+                        "This commit has no file changes in this project."
+                    } else {
+                        "No text changes"
+                    }))
+                }
+                DiffContent::Ready(_) => panel.child(
                     div()
                         .id("diff-horizontal-scroll")
                         .debug_selector(|| "diff-horizontal-scroll".into())
                         .flex_1()
                         .min_h_0()
                         .overflow_hidden()
-                        .child(
-                            div()
-                                .h_full()
-                                .w_full()
-                                .flex()
-                                .flex_col()
-                                .when(self.split, |grid| {
-                                    grid.child(
-                                        div()
-                                            .h(px(26.0))
-                                            .flex_shrink_0()
-                                            .flex()
-                                            .bg(theme::chrome())
-                                            .text_size(px(10.0))
-                                            .text_color(theme::ash())
-                                            .child(div().flex_1().px(px(16.0)).child(if history {
-                                                "Parent"
-                                            } else if self.file.kind == DiffKind::Staged {
-                                                "HEAD"
-                                            } else {
-                                                "Index"
-                                            }))
-                                            .child(div().flex_1().px(px(16.0)).child(if history {
-                                                "Commit"
-                                            } else if self.file.kind == DiffKind::Staged {
-                                                "Index"
-                                            } else {
-                                                "Working tree"
-                                            })),
-                                    )
-                                })
-                                .child({
-                                    let mut lines = uniform_list(
-                                        "diff-lines",
-                                        rows,
-                                        cx.processor(
-                                            |view, range: std::ops::Range<usize>, _, cx| {
-                                                range
-                                                    .map(|index| view.row(index, cx))
-                                                    .collect::<Vec<_>>()
-                                            },
-                                        ),
-                                    )
-                                    .track_scroll(self.scroll.clone())
-                                    .flex_1()
-                                    .min_h_0()
-                                    .font_family(theme::mono())
-                                    .text_size(px(12.0))
-                                    .line_height(px(ROW_HEIGHT));
-                                    lines.style().restrict_scroll_to_axis = Some(true);
-                                    lines
+                        .child({
+                            let mut lines = uniform_list(
+                                "diff-lines",
+                                rows,
+                                cx.processor(|view, range: std::ops::Range<usize>, _, cx| {
+                                    range.map(|index| view.row(index, cx)).collect::<Vec<_>>()
                                 }),
-                        ),
-                )
+                            )
+                            .track_scroll(self.scroll.clone())
+                            .size_full()
+                            .font_family(theme::mono())
+                            .text_size(px(12.0))
+                            .line_height(px(ROW_HEIGHT));
+                            lines.style().restrict_scroll_to_axis = Some(true);
+                            lines
+                        }),
+                ),
             })
-            .when(!ready || rows == 0, |panel| panel.child(div().flex_1()))
-            .child(
-                div()
-                    .h(px(26.0))
-                    .flex_shrink_0()
-                    .px(px(12.0))
-                    .border_t_1()
-                    .border_color(theme::edge())
-                    .flex()
-                    .items_center()
-                    .gap(px(4.0))
-                    .child(div().text_size(px(10.0)).text_color(theme::ash()).child(
-                        if self.file.total == 0 {
-                            "0 files".into()
-                        } else {
-                            format!("{} / {} files", self.file.position + 1, self.file.total)
-                        },
-                    ))
-                    .child(div().flex_1())
-                    .when(self.code_scroll.max_offset().width > px(0.0), |bar| {
-                        bar.child(
-                            div()
-                                .id("diff-pan-help")
-                                .flex_shrink_0()
-                                .text_size(px(10.0))
-                                .text_color(theme::ash())
-                                .tooltip(text_tooltip(
-                                    "Pan horizontally: Shift+wheel or Ctrl+Shift+Left/Right",
-                                ))
-                                .child("Pan"),
-                        )
-                    })
-                    .child(
-                        Self::control("previous-change", "Previous file · Alt+Up", previous)
-                            .h(px(22.0))
-                            .px(px(6.0))
-                            .child("Previous")
-                            .when(previous, |button| {
-                                button.on_click(cx.listener(|_, _, _, cx| {
-                                    cx.emit(DiffEvent::Review(ReviewAction::Navigate(-1)))
-                                }))
-                            }),
-                    )
-                    .child(
-                        Self::control("next-change", "Next file · Alt+Down", next)
-                            .h(px(22.0))
-                            .px(px(6.0))
-                            .child("Next")
-                            .when(next, |button| {
-                                button.on_click(cx.listener(|_, _, _, cx| {
-                                    cx.emit(DiffEvent::Review(ReviewAction::Navigate(1)))
-                                }))
-                            }),
-                    ),
-            )
             .into_any_element()
     }
 }
