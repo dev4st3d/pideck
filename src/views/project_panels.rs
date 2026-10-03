@@ -564,6 +564,7 @@ impl FilesPanel {
             row.entry.path.parent().unwrap_or(&self.root).to_path_buf()
         };
         let external_destination = destination.clone();
+        let hover_destination = destination.clone();
         div()
             .h(px(FILE_ROW_HEIGHT))
             .w_full()
@@ -648,22 +649,34 @@ impl FilesPanel {
                         cx.notify();
                     }))
                     .on_drag(drag, |drag, _, _, cx| cx.new(|_| drag.clone()))
-                    .drag_over::<file_actions::FileDrag>(|style, _, _, _| {
-                        style.bg(theme::selection())
+                    .drag_over::<file_actions::FileDrag>(move |style, drag, window, _| {
+                        if file_actions::accepts_drop(
+                            &drag.paths,
+                            &hover_destination,
+                            !window.modifiers().control,
+                        ) {
+                            style.bg(theme::selection())
+                        } else {
+                            style
+                        }
                     })
                     .drag_over::<ExternalPaths>(|style, _, _, _| style.bg(theme::selection()))
                     .on_drop(
                         cx.listener(move |view, drag: &file_actions::FileDrag, window, cx| {
+                            cx.stop_propagation();
+                            let cut = !window.modifiers().control;
+                            if !file_actions::accepts_drop(&drag.paths, &destination, cut) {
+                                return;
+                            }
                             view.perform(
                                 Operation::Transfer {
                                     paths: drag.paths.clone(),
                                     destination: destination.clone(),
-                                    cut: !window.modifiers().control,
+                                    cut,
                                 },
                                 window,
                                 cx,
                             );
-                            cx.stop_propagation();
                         }),
                     )
                     .on_drop(cx.listener(move |view, drag: &ExternalPaths, window, cx| {
@@ -747,16 +760,20 @@ impl Render for FilesPanel {
                     }))
                     .on_drop(
                         cx.listener(|view, drag: &file_actions::FileDrag, window, cx| {
+                            cx.stop_propagation();
+                            let cut = !window.modifiers().control;
+                            if !file_actions::accepts_drop(&drag.paths, &view.root, cut) {
+                                return;
+                            }
                             view.perform(
                                 Operation::Transfer {
                                     paths: drag.paths.clone(),
                                     destination: view.root.clone(),
-                                    cut: !window.modifiers().control,
+                                    cut,
                                 },
                                 window,
                                 cx,
                             );
-                            cx.stop_propagation();
                         }),
                     )
                     .on_drop(cx.listener(|view, drag: &ExternalPaths, window, cx| {
@@ -816,15 +833,25 @@ impl Render for FilesPanel {
             })
             .when(self.filter_loading, |panel| panel.child(message("Filtering files…")))
             .when(self.filter_truncated && !self.query.is_empty(), |panel| panel.child(message("Search limit reached or a folder was unavailable. Refine the filter to narrow the results.")))
-            .when(error.is_some(), |panel| panel.child(file_actions::control("Retry folder", cx.listener(|view, _, _, cx| view.load(view.root.clone(), cx)))))
             .when(!self.query.is_empty() && self.rows.is_empty(), |panel| panel.child(file_actions::control("Clear filter", cx.listener(|view, _, window, cx| {
                 view.filter_input.update(cx, |input, cx| input.set_value("", window, cx));
             }))))
-            .when_some(self.operation_error.clone().filter(|_| self.edit.is_none()).or(error), |panel, error| {
-                panel.child(div().px(px(12.0)).py(px(8.0)).text_color(theme::error()).text_size(px(11.0)).child(error))
-                    .child(file_actions::control("Refresh files", cx.listener(|view, _, _, cx| view.refresh(cx))))
+            .when_some(error, |panel, error| {
+                panel.child(error_banner(
+                    error,
+                    file_actions::control("Retry", cx.listener(|view, _, _, cx| view.load(view.root.clone(), cx))),
+                ))
             })
-            .child(div().h(px(24.0)).flex_shrink_0().px(px(12.0)).flex().items_center().font_weight(FontWeight::NORMAL).text_size(px(11.0)).text_color(theme::ash()).child("↑↓ Move · Enter Open · F2 Rename"))
+            .when_some(self.operation_error.clone().filter(|_| self.edit.is_none()), |panel, error| {
+                panel.child(error_banner(
+                    error,
+                    file_actions::control("Dismiss", cx.listener(|view, _, window, cx| {
+                        view.operation_error = None;
+                        window.focus(&view.focus);
+                        cx.notify();
+                    })),
+                ))
+            })
             .when(truncated, |panel| {
                 panel.child(message("Large folder: showing the first 2,000 entries."))
             })
@@ -890,6 +917,16 @@ impl GitPanel {
 
     pub(super) fn change_count(&self) -> Option<usize> {
         self.status.as_ref().map(|status| status.entries.len())
+    }
+
+    /// Commits ahead of and behind the upstream, when the branch tracks one.
+    pub(super) fn sync_counts(&self) -> Option<(usize, usize)> {
+        let repository = self.repository.as_ref()?;
+        repository.upstream.as_ref()?;
+        Some((
+            repository.ahead.unwrap_or(0),
+            repository.behind.unwrap_or(0),
+        ))
     }
 
     pub(super) fn new(
@@ -1327,6 +1364,41 @@ fn message(text: impl Into<SharedString>) -> impl IntoElement {
         .line_height(px(chrome::DETAIL_LINE_HEIGHT))
         .whitespace_normal()
         .child(text.into())
+}
+
+/// Inline failure notice with a single recovery action; it stays until acted on.
+fn error_banner(message: String, action: impl IntoElement) -> impl IntoElement {
+    div()
+        .mx(px(8.0))
+        .my(px(6.0))
+        .p(px(8.0))
+        .flex_shrink_0()
+        .flex()
+        .items_start()
+        .gap(px(8.0))
+        .rounded(px(chrome::CONTROL_RADIUS))
+        .border_1()
+        .border_color(theme::error())
+        .bg(theme::chrome())
+        .child(
+            svg()
+                .path("icons/circle-x.svg")
+                .mt(px(2.0))
+                .size(px(PANEL_ICON_SIZE))
+                .flex_shrink_0()
+                .text_color(theme::error()),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .whitespace_normal()
+                .text_size(px(chrome::DETAIL_TEXT_SIZE))
+                .line_height(px(chrome::DETAIL_LINE_HEIGHT))
+                .text_color(theme::bone())
+                .child(message),
+        )
+        .child(div().flex_shrink_0().child(action))
 }
 
 fn panel_icon(path: &'static str) -> impl IntoElement {

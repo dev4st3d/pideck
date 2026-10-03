@@ -3,7 +3,7 @@
 use gpui_component::{
     button::{Button, ButtonVariants},
     input::{InputEvent, InputState},
-    menu::{DropdownMenu, PopupMenuItem},
+    menu::{ContextMenuExt, DropdownMenu, PopupMenu, PopupMenuItem},
 };
 use std::path::PathBuf;
 
@@ -1250,6 +1250,21 @@ impl TerminalManager {
         }
     }
 
+    /// Status bar Git shortcuts reveal a hidden sidebar before switching tabs.
+    fn open_git_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.interaction_locked() {
+            return;
+        }
+        if let Some(workspace) = &mut self.workspace
+            && !workspace.sidebar_visible
+        {
+            workspace.sidebar_visible = true;
+            self.resize(window, cx);
+            self.persist(window, cx);
+        }
+        self.select_sidebar(SidebarTab::Git, window, cx);
+    }
+
     fn select_sidebar(&mut self, tab: SidebarTab, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(workspace) = &self.workspace
             && let Some(project) = self.projects.get_mut(workspace.active)
@@ -1606,9 +1621,11 @@ impl TerminalManager {
 
     fn update_footer(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         let status = match &self.update_state {
-            UpdateState::Unavailable => "Development build".to_owned(),
+            UpdateState::Unavailable => {
+                format!("Pideck {} · dev build", app_update::CURRENT_VERSION)
+            }
             UpdateState::Checking => "Checking for updates…".to_owned(),
-            UpdateState::Current => "Up to date".to_owned(),
+            UpdateState::Current => format!("Pideck {}", app_update::CURRENT_VERSION),
             UpdateState::Available(version) => format!("Update {version} available"),
             UpdateState::Downloading => "Preparing update…".to_owned(),
             UpdateState::Prepared(version) => format!("Update {version} ready"),
@@ -1624,13 +1641,45 @@ impl TerminalManager {
                 .flex()
                 .items_center()
                 .gap(px(12.0))
-                .child(
-                    div()
-                        .id("update-message")
-                        .truncate()
-                        .tooltip(text_tooltip(status.clone()))
-                        .child(status),
-                )
+                .child({
+                    let actionable = matches!(
+                        self.update_state,
+                        UpdateState::Available(_)
+                            | UpdateState::Prepared(_)
+                            | UpdateState::Error(_)
+                    );
+                    let tooltip = match &self.update_state {
+                        UpdateState::Current => "Pideck is up to date".to_owned(),
+                        UpdateState::Available(_) => "Download, then restart to update".to_owned(),
+                        UpdateState::Prepared(_) => "Restart to finish updating".to_owned(),
+                        UpdateState::Error(_) => "Check for updates again".to_owned(),
+                        _ => status.clone(),
+                    };
+                    status_segment("update-message")
+                        .min_w_0()
+                        .when(actionable, |segment| {
+                            segment
+                                .text_color(if matches!(self.update_state, UpdateState::Error(_)) {
+                                    theme::error()
+                                } else {
+                                    theme::focus()
+                                })
+                                .on_click(cx.listener(
+                                    |view, _, window, cx| match view.update_state {
+                                        UpdateState::Available(_) => {
+                                            view.prepare_and_restart(window, cx)
+                                        }
+                                        UpdateState::Prepared(_) => {
+                                            view.request_update_restart(window, cx)
+                                        }
+                                        UpdateState::Error(_) => view.check_for_updates(window, cx),
+                                        _ => {}
+                                    },
+                                ))
+                        })
+                        .tooltip(text_tooltip(tooltip))
+                        .child(div().min_w_0().truncate().child(status))
+                })
                 .child(
                     Button::new("status-menu")
                         .label("⋯")
@@ -2190,125 +2239,126 @@ impl TerminalManager {
                     .projects
                     .get(index)
                     .map_or(0, |project| project.terminal.read(cx).terminal_count());
-                rows.push(
-                    div()
-                        .id(("project", index))
-                        .tab_index(0)
-                        .h(px(chrome::ROW_HEIGHT))
-                        .pl(px(chrome::INSET))
-                        .pr(px(chrome::INSET))
-                        .flex()
-                        .items_center()
-                        .gap(px(chrome::GAP))
-                        .border_1()
-                        .border_color(gpui::rgba(0x00000000))
-                        .rounded(px(chrome::CONTROL_RADIUS))
-                        .bg(if selected {
+                let menu_owner = cx.weak_entity();
+                let menu_path = project.path.clone();
+                let row = div()
+                    .id(("project", index))
+                    .tab_index(0)
+                    .relative()
+                    .h(px(chrome::ROW_HEIGHT))
+                    .pl(px(chrome::INSET))
+                    .pr(px(chrome::INSET))
+                    .flex()
+                    .items_center()
+                    .gap(px(chrome::GAP))
+                    .border_1()
+                    .border_color(gpui::rgba(0x00000000))
+                    .rounded(px(chrome::CONTROL_RADIUS))
+                    .bg(if selected {
+                        theme::selection()
+                    } else {
+                        theme::floor()
+                    })
+                    .cursor_pointer()
+                    .hover(move |style| {
+                        style.bg(if selected {
                             theme::selection()
                         } else {
-                            theme::floor()
+                            theme::panel_hover()
                         })
-                        .cursor_pointer()
-                        .hover(move |style| {
-                            style.bg(if selected {
-                                theme::selection()
-                            } else {
-                                theme::panel_hover()
-                            })
-                        })
-                        .active(|style| style.bg(theme::selection()))
-                        .focus(|style| style.border_color(theme::focus()))
-                        .tooltip(text_tooltip(project.path.to_string_lossy().into_owned()))
-                        .on_click(cx.listener(move |view, _, window, cx| {
-                            view.select_project(index, window, cx)
-                        }))
-                        .child(
-                            svg()
-                                .path("icons/folder.svg")
-                                .size(px(chrome::ICON_SIZE))
-                                .flex_shrink_0()
-                                .text_color(if selected {
-                                    theme::bone()
-                                } else {
-                                    theme::ash()
-                                }),
-                        )
-                        .child(
+                    })
+                    .active(|style| style.bg(theme::selection()))
+                    .focus(|style| style.border_color(theme::focus()))
+                    .tooltip(text_tooltip(project.path.to_string_lossy().into_owned()))
+                    .on_click(cx.listener(move |view, _, window, cx| {
+                        view.select_project(index, window, cx)
+                    }))
+                    .when(selected, |row| {
+                        row.child(
                             div()
-                                .flex_1()
-                                .min_w_0()
-                                .flex()
-                                .flex_col()
-                                .gap(px(chrome::ROW_DETAIL_GAP))
-                                .child(
-                                    div()
-                                        .text_ellipsis()
-                                        .overflow_hidden()
-                                        .whitespace_nowrap()
-                                        .font_weight(if selected {
-                                            FontWeight::MEDIUM
-                                        } else {
-                                            FontWeight::NORMAL
-                                        })
-                                        .child(project_name(&project.path)),
-                                )
-                                .child(
-                                    div()
-                                        .text_size(px(chrome::DETAIL_TEXT_SIZE))
-                                        .font_family(chrome::CHROME_FONT)
-                                        .font_weight(FontWeight::NORMAL)
-                                        .line_height(px(chrome::DETAIL_LINE_HEIGHT))
-                                        .text_color(theme::ash())
-                                        .child(format!(
-                                            "{} terminal{}{}",
-                                            count,
-                                            if count == 1 { "" } else { "s" },
-                                            self.projects
-                                                .get(index)
-                                                .and_then(|project| project.project_kind)
-                                                .map_or_else(String::new, |kind| format!(
-                                                    " · {kind}"
-                                                ))
-                                        )),
-                                ),
+                                .absolute()
+                                .left_0()
+                                .top(px(10.0))
+                                .bottom(px(10.0))
+                                .w(px(2.0))
+                                .rounded(px(1.0))
+                                .bg(theme::focus()),
                         )
-                        .child({
-                            let owner = cx.weak_entity();
-                            Button::new(("project-actions", index))
-                                .label("⋯")
-                                .ghost()
-                                .w(px(28.0))
-                                .h(px(32.0))
-                                .tooltip("Project actions")
-                                .on_click(|_, _, cx| cx.stop_propagation())
-                                .dropdown_menu(move |menu, _, _| {
-                                    let open_owner = owner.clone();
-                                    let remove_owner = owner.clone();
-                                    menu.item(PopupMenuItem::new("Open project").on_click(
-                                        move |_, window, cx| {
-                                            let owner = open_owner.clone();
-                                            window.defer(cx, move |window, cx| {
-                                                let _ = owner.update(cx, |view, cx| {
-                                                    view.select_project(index, window, cx)
-                                                });
-                                            });
-                                        },
-                                    ))
-                                    .item(
-                                        PopupMenuItem::new("Remove project")
-                                            .disabled(!can_remove)
-                                            .on_click(move |_, window, cx| {
-                                                let owner = remove_owner.clone();
-                                                window.defer(cx, move |window, cx| {
-                                                    let _ = owner.update(cx, |view, cx| {
-                                                        view.remove_project(index, window, cx)
-                                                    });
-                                                });
-                                            }),
-                                    )
-                                })
-                        }),
-                );
+                    })
+                    .child(
+                        svg()
+                            .path("icons/folder.svg")
+                            .size(px(chrome::ICON_SIZE))
+                            .flex_shrink_0()
+                            .text_color(if selected {
+                                theme::bone()
+                            } else {
+                                theme::ash()
+                            }),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .gap(px(chrome::ROW_DETAIL_GAP))
+                            .child(
+                                div()
+                                    .text_ellipsis()
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .font_weight(if selected {
+                                        FontWeight::MEDIUM
+                                    } else {
+                                        FontWeight::NORMAL
+                                    })
+                                    .child(project_name(&project.path)),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(chrome::DETAIL_TEXT_SIZE))
+                                    .font_family(chrome::CHROME_FONT)
+                                    .font_weight(FontWeight::NORMAL)
+                                    .line_height(px(chrome::DETAIL_LINE_HEIGHT))
+                                    .text_color(theme::ash())
+                                    .child(format!(
+                                        "{} terminal{}{}",
+                                        count,
+                                        if count == 1 { "" } else { "s" },
+                                        self.projects
+                                            .get(index)
+                                            .and_then(|project| project.project_kind)
+                                            .map_or_else(String::new, |kind| format!(" · {kind}"))
+                                    )),
+                            ),
+                    )
+                    .child({
+                        let owner = cx.weak_entity();
+                        let path = project.path.clone();
+                        Button::new(("project-actions", index))
+                            .label("⋯")
+                            .ghost()
+                            .w(px(28.0))
+                            .h(px(32.0))
+                            .tooltip("Project actions")
+                            .on_click(|_, _, cx| cx.stop_propagation())
+                            .dropdown_menu(move |menu, _, _| {
+                                project_menu(menu, owner.clone(), index, path.clone(), can_remove)
+                            })
+                    });
+                // Wrap each row so its context menu keeps per-row element state.
+                rows.push(div().id(("project-row", index)).child(row.context_menu(
+                    move |menu, _, _| {
+                        project_menu(
+                            menu,
+                            menu_owner.clone(),
+                            index,
+                            menu_path.clone(),
+                            can_remove,
+                        )
+                    },
+                )));
             }
         }
         div()
@@ -2337,6 +2387,11 @@ impl TerminalManager {
                     }
                     "enter" if view.sidebar_focus.is_focused(window) => {
                         view.focus_active(window, cx)
+                    }
+                    "delete" => {
+                        if let Some(active) = view.workspace.as_ref().map(|w| w.active) {
+                            view.remove_project(active, window, cx);
+                        }
                     }
                     _ => return,
                 }
@@ -2400,22 +2455,23 @@ impl TerminalManager {
                             if self.picker_pending {
                                 "Opening…"
                             } else {
-                                "Add folder"
+                                "Add project…"
                             },
                             can_add,
                         )
                         .w_full()
                         .justify_center()
                         .bg(theme::panel_hover())
+                        .tooltip(text_tooltip("Open a folder as a project · Ctrl+Shift+O"))
+                        .child(
+                            svg()
+                                .path("icons/plus.svg")
+                                .size(px(chrome::ICON_SIZE))
+                                .text_color(theme::ash()),
+                        )
                         .when(can_add, |button| {
                             button.on_click(cx.listener(Self::choose_project_click))
                         }),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(11.0))
-                            .text_color(theme::ash())
-                            .child("Project actions are in the row menu."),
                     ),
             )
     }
@@ -2428,6 +2484,64 @@ impl TerminalManager {
     ) {
         self.choose_project(window, cx);
     }
+}
+
+/// Shared by the row's ⋯ button and its right-click menu.
+fn project_menu(
+    menu: PopupMenu,
+    owner: gpui::WeakEntity<TerminalManager>,
+    index: usize,
+    path: PathBuf,
+    can_remove: bool,
+) -> PopupMenu {
+    let open_owner = owner.clone();
+    let terminal_owner = owner.clone();
+    let reveal_path = path.clone();
+    menu.item(
+        PopupMenuItem::new("Open project").on_click(move |_, window, cx| {
+            let owner = open_owner.clone();
+            window.defer(cx, move |window, cx| {
+                let _ = owner.update(cx, |view, cx| view.select_project(index, window, cx));
+            });
+        }),
+    )
+    .item(
+        PopupMenuItem::new("New terminal").on_click(move |_, window, cx| {
+            let owner = terminal_owner.clone();
+            window.defer(cx, move |window, cx| {
+                let _ = owner.update(cx, |view, cx| {
+                    if view.interaction_locked() {
+                        return;
+                    }
+                    view.select_project(index, window, cx);
+                    if let Some(terminal) = view.active_terminal() {
+                        terminal.update(cx, |terminal, cx| terminal.add_tab(window, cx));
+                    }
+                });
+            });
+        }),
+    )
+    .separator()
+    .item(
+        PopupMenuItem::new("Reveal in File Explorer")
+            .on_click(move |_, _, cx| cx.reveal_path(&reveal_path)),
+    )
+    .item(PopupMenuItem::new("Copy path").on_click(move |_, _, cx| {
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+            path.to_string_lossy().into_owned(),
+        ))
+    }))
+    .separator()
+    .item(
+        PopupMenuItem::new("Remove from Pideck…")
+            .disabled(!can_remove)
+            .on_click(move |_, window, cx| {
+                let owner = owner.clone();
+                window.defer(cx, move |window, cx| {
+                    let _ = owner.update(cx, |view, cx| view.remove_project(index, window, cx));
+                });
+            }),
+    )
 }
 
 fn project_name(path: &std::path::Path) -> String {
@@ -2492,6 +2606,22 @@ fn picker_popup(menu: impl IntoElement) -> impl IntoElement {
         .top(px(chrome::MAIN_CONTROL_HEIGHT + chrome::MENU_GAP))
         .left_0()
         .child(deferred(anchored().snap_to_window().child(menu)).with_priority(1))
+}
+
+/// Status bar item that acts on click; keyboard-reachable with a visible focus state.
+fn status_segment(id: &'static str) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(id)
+        .h(px(22.0))
+        .px(px(6.0))
+        .flex()
+        .items_center()
+        .gap(px(chrome::COMPACT_GAP))
+        .rounded(px(chrome::CONTROL_RADIUS))
+        .tab_index(0)
+        .cursor_pointer()
+        .hover(|style| style.bg(theme::panel_hover()).text_color(theme::bone()))
+        .focus(|style| style.bg(theme::selection()).text_color(theme::bone()))
 }
 
 fn button(id: &'static str, label: &'static str, enabled: bool) -> gpui::Stateful<gpui::Div> {
@@ -2696,6 +2826,13 @@ impl Render for TerminalManager {
         let changed = self
             .active_project()
             .and_then(|project| project.git.read(cx).change_count());
+        let sync = self
+            .active_project()
+            .and_then(|project| project.git.read(cx).sync_counts());
+        let line_stats = self
+            .active_project()
+            .and_then(|project| project.git.read(cx).status())
+            .and_then(crate::services::project_git::GitStatus::line_stats);
         let terminal_count = terminal
             .as_ref()
             .map_or(0, |terminal| terminal.read(cx).terminal_count());
@@ -2709,16 +2846,17 @@ impl Render for TerminalManager {
             })
             .or_else(|| self.notice.clone());
         let update_footer = self.update_footer(cx);
+        // Saved is the normal state, so only transitional or failed states are shown.
         let save_status = if self.workspace.is_none() {
-            "Loading layout…"
-        } else if self.restore_warning.is_some() {
-            "Saved layout preserved"
+            Some("Loading layout…")
+        } else if self.restore_warning.is_some() || self.save_failed {
+            None
         } else if self.saving {
-            "Saving layout…"
-        } else if !self.save_failed && self.revision == self.saved_revision {
-            "Layout saved"
+            Some("Saving layout…")
+        } else if self.revision != self.saved_revision {
+            Some("Unsaved layout")
         } else {
-            "Unsaved layout"
+            None
         };
         div()
             .id("terminal-manager")
@@ -3049,20 +3187,6 @@ impl Render for TerminalManager {
                     .text_size(px(chrome::DETAIL_TEXT_SIZE))
                     .line_height(px(chrome::DETAIL_LINE_HEIGHT))
                     .text_color(theme::ash())
-                    .tooltip(text_tooltip(
-                        self.active_project()
-                            .and_then(|project| project.git.read(cx).status())
-                            .and_then(crate::services::project_git::GitStatus::line_stats)
-                            .map_or_else(
-                                || save_status.to_owned(),
-                                |stats| {
-                                    format!(
-                                        "{save_status} · +{} additions · −{} deletions",
-                                        stats.additions, stats.deletions
-                                    )
-                                },
-                            ),
-                    ))
                     .child(
                         div()
                             .w(px(if sidebar_visible {
@@ -3079,26 +3203,71 @@ impl Render for TerminalManager {
                             .items_center()
                             .gap(px(chrome::COMPACT_GAP))
                             .child(
-                                svg()
-                                    .path("icons/branch.svg")
-                                    .w(px(12.0))
-                                    .h(px(14.0))
-                                    .flex_shrink_0()
-                                    .text_color(theme::ash()),
-                            )
-                            .child(
-                                div()
+                                status_segment("status-branch")
                                     .min_w_0()
-                                    .truncate()
-                                    .font_family(theme::mono())
-                                    .child(branch),
+                                    .tooltip(text_tooltip(format!("Branch {branch} · Open Git")))
+                                    .on_click(cx.listener(|view, _, window, cx| {
+                                        view.open_git_sidebar(window, cx)
+                                    }))
+                                    .child(
+                                        svg()
+                                            .path("icons/branch.svg")
+                                            .w(px(12.0))
+                                            .h(px(14.0))
+                                            .flex_shrink_0()
+                                            .text_color(theme::ash()),
+                                    )
+                                    .child(
+                                        div()
+                                            .min_w_0()
+                                            .truncate()
+                                            .font_family(theme::mono())
+                                            .child(branch),
+                                    )
+                                    .when_some(
+                                        sync.filter(|(ahead, behind)| *ahead + *behind > 0),
+                                        |segment, (ahead, behind)| {
+                                            segment.child(
+                                                div()
+                                                    .flex_shrink_0()
+                                                    .font_family(theme::mono())
+                                                    .when(ahead > 0, |sync| {
+                                                        sync.child(format!("↑{ahead}"))
+                                                    })
+                                                    .when(ahead > 0 && behind > 0, |sync| {
+                                                        sync.child(" ")
+                                                    })
+                                                    .when(behind > 0, |sync| {
+                                                        sync.child(format!("↓{behind}"))
+                                                    }),
+                                            )
+                                        },
+                                    ),
                             )
                             .child(div().flex_1())
                             .when_some(changed.filter(|_| sidebar_visible), |footer, count| {
-                                footer.child(div().flex_shrink_0().child(format!(
-                                    "{count} change{}",
-                                    if count == 1 { "" } else { "s" }
-                                )))
+                                footer.child(
+                                    status_segment("status-changes")
+                                        .flex_shrink_0()
+                                        .tooltip(text_tooltip(match line_stats {
+                                            Some(stats) if count > 0 => format!(
+                                                "+{} additions · −{} deletions · Open Git",
+                                                stats.additions, stats.deletions
+                                            ),
+                                            _ => "Open Git".to_owned(),
+                                        }))
+                                        .on_click(cx.listener(|view, _, window, cx| {
+                                            view.open_git_sidebar(window, cx)
+                                        }))
+                                        .child(if count == 0 {
+                                            "Clean".to_owned()
+                                        } else {
+                                            format!(
+                                                "{count} change{}",
+                                                if count == 1 { "" } else { "s" }
+                                            )
+                                        }),
+                                )
                             }),
                     )
                     .child(
@@ -3110,15 +3279,26 @@ impl Render for TerminalManager {
                             .items_center()
                             .gap(px(chrome::GAP))
                             .child(
-                                svg()
-                                    .path("icons/terminal.svg")
-                                    .size(px(12.0))
-                                    .text_color(theme::ash()),
+                                status_segment("status-terminals")
+                                    .flex_shrink_0()
+                                    .tooltip(text_tooltip("Focus terminal"))
+                                    .on_click(cx.listener(|view, _, window, cx| {
+                                        view.focus_active(window, cx)
+                                    }))
+                                    .child(
+                                        svg()
+                                            .path("icons/terminal.svg")
+                                            .size(px(12.0))
+                                            .text_color(theme::ash()),
+                                    )
+                                    .child(format!(
+                                        "{terminal_count} terminal{}",
+                                        if terminal_count == 1 { "" } else { "s" }
+                                    )),
                             )
-                            .child(div().flex_shrink_0().child(format!(
-                                "{terminal_count} terminal{}",
-                                if terminal_count == 1 { "" } else { "s" }
-                            )))
+                            .when_some(save_status, |footer, status| {
+                                footer.child(div().flex_shrink_0().child(status))
+                            })
                             .child(div().flex_1())
                             .when_some(update_footer, |footer, update| footer.child(update)),
                     ),

@@ -1086,6 +1086,115 @@ impl GitPanel {
             .into_any_element()
     }
 
+    /// Empty change list: confirm the tree is clean and offer the next useful step.
+    fn clean_state(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let busy = self.git_busy();
+        let repository = self.repository.as_ref();
+        let behind = repository.and_then(|repo| repo.behind).unwrap_or(0);
+        let ahead = repository.and_then(|repo| repo.ahead).unwrap_or(0);
+        let sync = match (ahead, behind) {
+            _ if repository.is_some_and(|repo| repo.remotes.is_empty()) => {
+                "No remote configured.".to_owned()
+            }
+            _ if repository.is_some_and(|repo| repo.upstream.is_none()) => {
+                "This branch is not published yet.".to_owned()
+            }
+            (0, 0) => repository
+                .and_then(|repo| repo.upstream.as_ref())
+                .map_or_else(String::new, |upstream| {
+                    format!("In sync with {}.", upstream.label)
+                }),
+            (ahead, 0) => format!("{ahead} commit{} to push.", plural(ahead)),
+            (0, behind) => format!("{behind} commit{} to pull.", plural(behind)),
+            (ahead, behind) => format!("{ahead} to push · {behind} to pull."),
+        };
+        div()
+            .flex_1()
+            .min_h_0()
+            .px(px(24.0))
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .gap(px(4.0))
+            .text_center()
+            .when(self.loading, |state| {
+                state
+                    .text_size(px(12.0))
+                    .text_color(theme::ash())
+                    .child("Reading Git status…")
+            })
+            .when(!self.loading, |state| {
+                state
+                    .child(
+                        svg()
+                            .path("icons/check.svg")
+                            .mb(px(4.0))
+                            .size(px(20.0))
+                            .text_color(theme::success()),
+                    )
+                    .child(div().font_weight(FontWeight::MEDIUM).child("No changes"))
+                    .child(
+                        div()
+                            .text_size(px(chrome::DETAIL_TEXT_SIZE))
+                            .line_height(px(chrome::DETAIL_LINE_HEIGHT))
+                            .text_color(theme::ash())
+                            .child("Edits in this project will appear here."),
+                    )
+                    .when(!sync.is_empty(), |state| {
+                        state.child(
+                            div()
+                                .text_size(px(chrome::DETAIL_TEXT_SIZE))
+                                .line_height(px(chrome::DETAIL_LINE_HEIGHT))
+                                .text_color(theme::ash())
+                                .child(sync),
+                        )
+                    })
+                    .when(repository.is_some(), |state| {
+                        state.child(
+                            div()
+                                .mt(px(12.0))
+                                .flex()
+                                .flex_wrap()
+                                .justify_center()
+                                .gap(px(6.0))
+                                .child(
+                                    git_control(
+                                        "git-clean-history",
+                                        "View history",
+                                        Some("icons/history.svg"),
+                                        true,
+                                    )
+                                    .on_click(cx.listener(
+                                        |view, _, window, cx| view.toggle_history(window, cx),
+                                    )),
+                                )
+                                .when(
+                                    repository.is_some_and(|repo| repo.upstream.is_some()),
+                                    |actions| {
+                                        actions.child(
+                                            git_control(
+                                                "git-clean-fetch",
+                                                "Fetch",
+                                                Some("icons/refresh.svg"),
+                                                !busy,
+                                            )
+                                            .on_click(
+                                                cx.listener(|view, _, window, cx| {
+                                                    if !view.git_busy() {
+                                                        view.fetch_current(window, cx);
+                                                    }
+                                                }),
+                                            ),
+                                        )
+                                    },
+                                ),
+                        )
+                    })
+            })
+            .into_any_element()
+    }
+
     pub(super) fn render_git_panel(
         &self,
         _: &mut Window,
@@ -1154,22 +1263,24 @@ impl GitPanel {
                             .gap(px(2.0))
                             .when(!self.history.visible, |group| {
                                 group
-                                    .child(
-                                        git_icon_button(
-                                            "collapse-git",
-                                            Some("icons/collapse-all.svg"),
-                                            true,
+                                    .when(count > 0, |group| {
+                                        group.child(
+                                            git_icon_button(
+                                                "collapse-git",
+                                                Some("icons/collapse-all.svg"),
+                                                true,
+                                            )
+                                            .size(px(28.0))
+                                            .tooltip(text_tooltip("Collapse all folders"))
+                                            .on_click(
+                                                cx.listener(|view, _, _, cx| view.collapse_all(cx)),
+                                            ),
                                         )
-                                        .size(px(28.0))
-                                        .tooltip(text_tooltip("Collapse all folders"))
-                                        .on_click(
-                                            cx.listener(|view, _, _, cx| view.collapse_all(cx)),
-                                        ),
-                                    )
+                                    })
                                     .child(
                                         git_icon_button(
                                             "git-history",
-                                            Some("icons/sessions.svg"),
+                                            Some("icons/history.svg"),
                                             self.repository.is_some(),
                                         )
                                         .size(px(28.0))
@@ -1260,21 +1371,7 @@ impl GitPanel {
             .child(if self.history.visible {
                 self.render_history_list(cx)
             } else if count == 0 && self.error.is_none() {
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    .flex()
-                    .items_center()
-                    .px(px(12.0))
-                    .text_size(px(12.0))
-                    .line_height(px(20.0))
-                    .text_color(theme::ash())
-                    .child(if self.loading {
-                        "Reading Git status…"
-                    } else {
-                        "No working changes"
-                    })
-                    .into_any_element()
+                self.clean_state(cx)
             } else {
                 div()
                     .flex_1()
@@ -1331,6 +1428,10 @@ impl GitPanel {
             })
             .into_any_element()
     }
+}
+
+fn plural(count: usize) -> &'static str {
+    if count == 1 { "" } else { "s" }
 }
 
 fn line_stats(stats: Option<project_git::GitLineStats>, conflict: bool) -> gpui::AnyElement {
