@@ -458,6 +458,14 @@ pub(crate) fn error() -> Rgba {
 pub(crate) fn error_wash() -> Rgba {
     rgba(palette().error_wash)
 }
+/// Dims the workbench behind a modal dialog.
+pub(crate) fn scrim() -> Rgba {
+    if appearance().is_dark() {
+        rgba(0x000000b8)
+    } else {
+        rgba(0x00000066)
+    }
+}
 pub(crate) fn selection() -> Rgba {
     rgba(palette().selection)
 }

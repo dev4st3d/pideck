@@ -64,7 +64,7 @@ impl ChecklistView {
     pub(super) fn bind_keys(cx: &mut gpui::App) {
         cx.bind_keys([
             gpui::KeyBinding::new("tab", IndentReminder, Some("Checklist")),
-            gpui::KeyBinding::new("shift-tab", OutdentReminder, Some("Checklist")),
+            gpui::KeyBinding::new("ctrl-[", OutdentReminder, Some("Checklist")),
         ]);
     }
 

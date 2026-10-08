@@ -28,7 +28,7 @@ From the repository, launch with:
 cargo run --locked
 ```
 
-Pideck embeds DM Sans interface text, Instrument Serif for the wordmark, and IBM Plex Mono for terminals, code, and counts. The four neutral themes follow the [final design handoff](design/pideck-reimagined/README.md). No font preparation step, Node.js, or Pi installation is required to build or launch the app. Tools you run inside its terminals have their own installation requirements.
+Pideck embeds DM Sans interface text, Instrument Serif for the wordmark, and IBM Plex Mono for terminals, code, and counts. The terminal font can be changed in Settings. The four neutral themes follow the [final design handoff](design/pideck-reimagined/README.md). No font preparation step, Node.js, or Pi installation is required to build or launch the app. Tools you run inside its terminals have their own installation requirements.
 
 A release build uses:
 
@@ -66,13 +66,13 @@ Use the **checklist icon** in the toolbar or `Ctrl+Shift+L` to toggle the right 
 
 Click **Add a reminder**, type, and press Enter to save. The adjacent **+** creates a section. Reminder menus contain only **Add subtask**, **Rename**, and **Delete**; section menus contain **Rename** and **Delete**. Indenting and outdenting remain available from the keyboard. Completing a parent completes its subtree; parent checkboxes and counts follow their children. Deleting a subtree or section offers **Undo**, and `Ctrl+Z` restores recent edits while the checklist is focused. Removing a project also removes its saved checklist, as stated in the removal prompt.
 
-With the checklist tree focused: arrows navigate and fold branches, Space checks, Enter adds a reminder, `Ctrl+Enter` adds a subtask, `Tab` / `Shift+Tab` indent or outdent, F2 renames, Delete removes, and `Ctrl+Shift+N` creates a section. Escape cancels text editing; `Ctrl+\`` returns to the terminal. Long labels show their full text in a tooltip. On compact windows, opening the inspector temporarily hides the left sidebar to reserve terminal space; the sidebar preference is preserved. Below 720 logical pixels the inspector is temporarily hidden as well.
+With the checklist tree focused: arrows navigate and fold branches, Space checks, Enter adds a reminder, `Ctrl+Enter` adds a subtask, `Tab` indents, `Ctrl+[` outdents, F2 renames, Delete removes, and `Ctrl+Shift+N` creates a section. Escape cancels text editing; `Ctrl+\`` returns to the terminal. Long labels show their full text in a tooltip. On compact windows, opening the inspector temporarily hides the left sidebar to reserve terminal space; the sidebar preference is preserved. Below 720 logical pixels the inspector is temporarily hidden as well.
 
 ## Terminal input
 
 Drag to select text, double-click to select a word, or triple-click to select a line. Hold `Alt` while dragging for a rectangular selection. When a terminal application captures the mouse, hold `Shift` to select text or scroll the terminal history instead.
 
-The terminal supports native Unicode/IME composition, bracketed paste, application mouse input, and scrollback. Copy uses the selected text, or the visible screen when nothing is selected. With the terminal focused, `Tab` and `Shift+Tab` are sent to the running program; `Shift+F6` moves to the previous control.
+The terminal supports native Unicode/IME composition, bracketed paste, application mouse input, and scrollback. Copy uses the selected text, or the visible screen when nothing is selected. With the terminal focused, `Tab` is sent to the running program. `Shift+Tab` is intentionally unused everywhere, so it never moves focus or reaches a program; `Ctrl+Shift+Tab` still switches tabs and `Shift+F6` moves to the previous control.
 
 ## Keyboard
 
@@ -104,6 +104,19 @@ Filesystem changes refresh the explorer and Git status automatically; `F5` refre
 | Select all terminal history | `Ctrl+Shift+A` |
 | Paste into terminal | `Ctrl+Shift+V` |
 | Scroll terminal history up / down | `Shift+PageUp` / `Shift+PageDown` |
+| Open settings | `Ctrl+,` |
+
+The shortcuts for projects, terminal tabs, the sidebar, reminders, Save, terminal copy/paste/select-all, and settings can be changed in **Settings**. The rest (explorer, diff, and checklist keys, `Shift+F6`, and the terminal scrolling keys) are fixed.
+
+## Settings
+
+Open **Settings** from the gear in the titlebar, the status bar's **⋯** menu, or `Ctrl+,`. Esc, **Done**, or a click outside closes it, and focus returns to your terminal.
+
+**Terminal** chooses the terminal font, size (9–24 px), and line height (1.0–1.8×) from IBM Plex Mono and the fixed-width families installed on your PC. Changes apply to every open terminal immediately and resize its grid and PTY. A preview shows ambiguous glyphs such as `0O` and `1lI`. If a saved font is later uninstalled, terminals use IBM Plex Mono and say so; the saved choice is kept until you change a setting. Other text keeps its design fonts.
+
+**Keyboard** lists each rebindable shortcut. Use ↑/↓ to select a row, `Enter` (or **Change**) and press the new chord, `Delete` (or **Reset**) to restore the default. Esc cancels recording. A chord must include Ctrl, Alt, or Win (or be a function key), and cannot be Esc, Tab, `Shift+F6`, `Alt+F4`, or plain Ctrl+letter, which terminal programs and text editing need (Save may use other Ctrl+letters). A chord already used by another shortcut is refused with that shortcut's name. Setting a new chord replaces all of a shortcut's defaults, so `New terminal` stops answering to `` Ctrl+` `` as well as `Ctrl+Shift+T`.
+
+Font and shortcut choices are stored beside the settings file as `terminal-font.json` and `keybindings.json` (normally under `%APPDATA%\Pideck`). A file that cannot be read is left untouched and defaults are used until you change a setting; delete it to start over.
 
 ## Appearance
 

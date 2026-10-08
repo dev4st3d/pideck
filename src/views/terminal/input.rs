@@ -5,10 +5,12 @@ use gpui::{
     MouseMoveEvent, MouseUpEvent, Pixels, Point, ScrollWheelEvent, UTF16Selection, Window, px,
 };
 
-use super::{TERMINAL_LINE_HEIGHT, TerminalSession, TerminalStatus, terminal_key_bytes};
+use super::{TerminalSession, TerminalStatus, terminal_key_bytes};
+use crate::services::keymap::{Keymap, Shortcut};
 use crate::services::terminal_engine::{
     MouseAction, MouseButton as TerminalMouseButton, MouseModifiers, SelectionKind,
 };
+use crate::services::terminal_font::TerminalFont;
 
 impl TerminalSession {
     pub(super) fn on_key_down(
@@ -18,23 +20,26 @@ impl TerminalSession {
         cx: &mut Context<Self>,
     ) {
         let modifiers = event.keystroke.modifiers;
-        if modifiers.control && modifiers.shift && event.keystroke.key == "a" {
-            self.engine.select_all();
-            cx.stop_propagation();
-            cx.notify();
-            return;
-        }
-        if modifiers.control && modifiers.shift && event.keystroke.key == "c" {
-            self.copy_selection(cx);
-            cx.stop_propagation();
-            return;
-        }
-        if modifiers.control && modifiers.shift && event.keystroke.key == "v" {
-            if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-                self.send_input(paste_bytes(&text, self.engine.modes().bracketed_paste), cx);
+        match Keymap::global(cx).terminal_shortcut(&event.keystroke) {
+            Some(Shortcut::TerminalSelectAll) => {
+                self.engine.select_all();
+                cx.stop_propagation();
+                cx.notify();
+                return;
             }
-            cx.stop_propagation();
-            return;
+            Some(Shortcut::TerminalCopy) => {
+                self.copy_selection(cx);
+                cx.stop_propagation();
+                return;
+            }
+            Some(Shortcut::TerminalPaste) => {
+                if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
+                    self.send_input(paste_bytes(&text, self.engine.modes().bracketed_paste), cx);
+                }
+                cx.stop_propagation();
+                return;
+            }
+            _ => {}
         }
         if modifiers.shift
             && !modifiers.control
@@ -50,16 +55,17 @@ impl TerminalSession {
             cx.notify();
             return;
         }
-        // Tab and Shift+Tab belong to the running program. Claude Code cycles
-        // permission mode on Shift+Tab, and a reported key_char must not let
-        // that chord bubble into workspace focus movement.
+        // Tab belongs to the running program. Shift+Tab is deliberately unused:
+        // it is dropped here so it neither reaches the program nor bubbles into
+        // workspace focus movement.
         if event.keystroke.key == "tab"
             && !modifiers.alt
             && !modifiers.control
             && !modifiers.platform
         {
-            if let Some(bytes) =
-                terminal_key_bytes(&event.keystroke, self.engine.modes().app_cursor)
+            if !modifiers.shift
+                && let Some(bytes) =
+                    terminal_key_bytes(&event.keystroke, self.engine.modes().app_cursor)
             {
                 self.send_input(bytes, cx);
             }
@@ -251,11 +257,12 @@ impl TerminalSession {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let delta = event.delta.pixel_delta(px(TERMINAL_LINE_HEIGHT)).y;
+        let row_height = TerminalFont::global(cx).line_height_px();
+        let delta = event.delta.pixel_delta(px(row_height)).y;
         if delta == px(0.0) {
             return;
         }
-        let lines = (f32::from(delta) / TERMINAL_LINE_HEIGHT)
+        let lines = (f32::from(delta) / row_height)
             .abs()
             .ceil()
             .clamp(1.0, 20.0) as i32;

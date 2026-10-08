@@ -4,9 +4,9 @@ use std::borrow::Cow;
 use std::env;
 use std::path::PathBuf;
 
-use gpui::{App, SharedString};
+use gpui::{App, SharedString, px};
 
-const DEFAULT_MONO: &str = "IBM Plex Mono";
+const DEFAULT_MONO: &str = crate::services::terminal_font::DEFAULT_FAMILY;
 pub(crate) struct FontCatalog {
     pub(crate) settings_path: PathBuf,
 }
@@ -48,6 +48,60 @@ pub(crate) fn initialize(cx: &App) -> FontCatalog {
 pub(crate) fn mono() -> SharedString {
     // Legacy font overrides must not replace the supplied design faces.
     DEFAULT_MONO.into()
+}
+
+/// Name fragments that make a family worth probing; the width check decides.
+const FIXED_PITCH_HINTS: [&str; 11] = [
+    "mono",
+    "code",
+    "consol",
+    "courier",
+    "terminal",
+    "typewriter",
+    "fixed",
+    "menlo",
+    "monaco",
+    "hack",
+    "iosevka",
+];
+
+/// The bundled face first, then installed families that keep a fixed cell width.
+pub(crate) fn terminal_families(cx: &App) -> Vec<SharedString> {
+    let system = cx.text_system();
+    let mut families: Vec<SharedString> = vec![DEFAULT_MONO.into()];
+    for name in system.all_font_names() {
+        let lower = name.to_lowercase();
+        if name.starts_with('.')
+            || name == DEFAULT_MONO
+            || !FIXED_PITCH_HINTS.iter().any(|hint| lower.contains(hint))
+        {
+            continue;
+        }
+        // A grid needs equal advances; compare the narrowest and widest common glyphs.
+        let id = system.resolve_font(&gpui::font(name.clone()));
+        let probe = px(100.0);
+        let fixed = match (
+            system.advance(id, probe, 'i'),
+            system.advance(id, probe, 'M'),
+        ) {
+            (Ok(narrow), Ok(wide)) => f32::from(narrow.width - wide.width).abs() < 0.5,
+            _ => false,
+        };
+        if fixed {
+            families.push(name.into());
+        }
+    }
+    families
+}
+
+/// Whether the platform still offers this family, so a missing font never reaches the grid.
+pub(crate) fn is_installed(cx: &App, family: &str) -> bool {
+    family == DEFAULT_MONO
+        || cx
+            .text_system()
+            .all_font_names()
+            .iter()
+            .any(|name| name == family)
 }
 
 fn settings_path() -> PathBuf {

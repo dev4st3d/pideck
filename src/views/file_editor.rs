@@ -4,12 +4,13 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use gpui::{
-    App, Context, Entity, EventEmitter, FontWeight, IntoElement, KeyBinding, Render, Subscription,
-    Task, Window, actions, div, prelude::*, px,
+    App, Context, Entity, EventEmitter, FontWeight, IntoElement, Render, Subscription, Task,
+    Window, actions, div, prelude::*, px,
 };
 use gpui_component::input::{Input, InputEvent, InputState, Rope};
 use gpui_component::{Theme, ThemeMode};
 
+use crate::services::keymap::{Keymap, Shortcut};
 use crate::services::project_files::{self, FileError, FileSnapshot, LineEnding};
 use crate::theme;
 use crate::theme::terminal_manager as chrome;
@@ -53,7 +54,7 @@ impl FileEditor {
     pub(crate) fn initialize(cx: &mut App) {
         gpui_component::init(cx);
         Self::apply_appearance(cx);
-        cx.bind_keys([KeyBinding::new("ctrl-s", SaveFile, Some("FileEditor"))]);
+        super::shortcuts::bind(cx, Shortcut::SaveFile);
     }
 
     pub(crate) fn apply_appearance(cx: &mut App) {
@@ -612,7 +613,10 @@ impl Render for FileEditor {
                                         }),
                                     )
                             })
-                            .child("Save · Ctrl+S"),
+                            .child(format!(
+                                "Save · {}",
+                                Keymap::global(cx).hint(Shortcut::SaveFile)
+                            )),
                     ),
             )
     }
