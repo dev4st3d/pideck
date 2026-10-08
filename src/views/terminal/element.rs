@@ -5,11 +5,12 @@ use gpui::{
     TextStyle, UnderlineStyle, Window, fill, point, px, relative, size,
 };
 
-use super::{TERMINAL_LINE_HEIGHT, TerminalSession};
+use super::TerminalSession;
 use crate::services::terminal::TerminalSize;
 use crate::services::terminal_engine::{
     TerminalCell, TerminalColor, TerminalCursorShape, xterm_color,
 };
+use crate::services::terminal_font::TerminalFont;
 use crate::theme;
 
 pub(super) struct TerminalElement {
@@ -109,12 +110,14 @@ impl Element for TerminalElement {
     ) -> PrepaintState {
         let session = self.session.read(cx);
         let snapshot = session.engine.snapshot();
-        let font_size = theme::text_size(theme::T_MONO).to_pixels(window.rem_size());
+        let font = TerminalFont::global(cx);
+        let (family, row_height) = (font.family.clone(), font.line_height_px());
+        let font_size = theme::text_size(font.size).to_pixels(window.rem_size());
         // Measure through the same shaping path and explicit style used for
         // cells, including platform font fallback. Chrome styles must not
         // change the terminal's advance or weight.
         let default_style = TextStyle {
-            font_family: theme::mono(),
+            font_family: family,
             font_size: font_size.into(),
             ..TextStyle::default()
         };
@@ -125,9 +128,7 @@ impl Element for TerminalElement {
             None,
         );
         let cell_width = metrics.width.max(px(1.0));
-        let cell_height = (font_size * (TERMINAL_LINE_HEIGHT / theme::T_MONO))
-            .max(metrics.ascent + metrics.descent)
-            .ceil();
+        let cell_height = px(row_height).max(metrics.ascent + metrics.descent).ceil();
         let baseline = (cell_height + metrics.ascent - metrics.descent) / 2.0;
         let cursor_cell = snapshot.cursor.unwrap_or((0, 0));
         let cursor_width = snapshot

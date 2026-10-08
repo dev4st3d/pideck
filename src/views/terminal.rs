@@ -15,8 +15,10 @@ use gpui::{
 use super::file_editor::{FileEditor, FileEditorEvent};
 use super::image_viewer::{ImageViewer, ImageViewerEvent};
 use super::terminal_manager::text_tooltip;
+use crate::services::keymap::{Keymap, Shortcut};
 use crate::services::terminal::{TerminalEvent, TerminalSize, TerminalWorker};
 use crate::services::terminal_engine::TerminalEngine;
+use crate::services::terminal_font::TerminalFont;
 use crate::theme;
 use crate::theme::terminal_manager as chrome;
 
@@ -26,7 +28,6 @@ use diff::DiffView;
 mod input;
 use element::{TerminalElement, TerminalGeometry};
 
-pub(crate) const TERMINAL_LINE_HEIGHT: f32 = 18.0;
 const OUTPUT_BATCH_INTERVAL: Duration = Duration::from_millis(8);
 const MAX_TERMINAL_TABS: usize = 8;
 
@@ -410,6 +411,16 @@ impl TerminalView {
                 }),
                 TabContent::File { tab, .. } => tab.notify(cx),
                 TabContent::Diff { view, .. } => view.update(cx, |_, cx| cx.notify()),
+            }
+        }
+        cx.notify();
+    }
+
+    /// Repaint every terminal so the new font metrics resize its grid and PTY.
+    pub(crate) fn apply_terminal_font(&mut self, cx: &mut Context<Self>) {
+        for tab in &self.tabs {
+            if let TabContent::Terminal(session) = &tab.content {
+                session.update(cx, |_, cx| cx.notify());
             }
         }
         cx.notify();
@@ -957,8 +968,11 @@ fn active_index_after_close(active: usize, removed: usize, remaining: usize) -> 
 fn terminal_key_bytes(keystroke: &Keystroke, application_cursor: bool) -> Option<Vec<u8>> {
     let modifiers = keystroke.modifiers;
     // Project and tab shortcuts belong to the manager, as do F6 and Shift+F6.
-    // Ordinary control keys (especially Ctrl+C), Tab, and Shift+Tab belong to
-    // the running terminal program.
+    // Ordinary control keys (especially Ctrl+C) and Tab belong to the running
+    // terminal program. Shift+Tab is deliberately unused and never sent.
+    if keystroke.key == "tab" && modifiers.shift {
+        return None;
+    }
     if keystroke.key == "f6"
         || (modifiers.control
             && (matches!(keystroke.key.as_str(), "`" | "tab")
@@ -995,7 +1009,6 @@ fn terminal_key_bytes(keystroke: &Keystroke, application_cursor: bool) -> Option
         "space" => Some(b" ".as_slice()),
         "enter" => Some(b"\r".as_slice()),
         "backspace" => Some(b"\x7f".as_slice()),
-        "tab" if modifiers.shift => Some(b"\x1b[Z".as_slice()),
         "tab" => Some(b"\t".as_slice()),
         "escape" => Some(b"\x1b".as_slice()),
         "up" if application_cursor => Some(b"\x1bOA".as_slice()),
@@ -1073,6 +1086,9 @@ impl Render for TerminalSession {
             TerminalStatus::Failed(summary) => summary.clone(),
             status => status.label(),
         };
+        let font = TerminalFont::global(cx);
+        let (font_family, font_size, row_height) =
+            (font.family.clone(), font.size, font.line_height_px());
 
         div()
             .id("terminal-session")
@@ -1093,9 +1109,9 @@ impl Render for TerminalSession {
                     .p(px(chrome::INSET))
                     .bg(theme::canvas())
                     .cursor(CursorStyle::IBeam)
-                    .font_family(theme::mono())
-                    .text_size(theme::text_size(theme::T_MONO))
-                    .line_height(px(TERMINAL_LINE_HEIGHT))
+                    .font_family(font_family)
+                    .text_size(theme::text_size(font_size))
+                    .line_height(px(row_height))
                     .text_color(theme::bone_dim())
                     .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
                     .on_mouse_down(MouseButton::Middle, cx.listener(Self::on_mouse_down))
@@ -1498,7 +1514,10 @@ fn workspace_tab(
                     cx.stop_propagation();
                     view.close_tab(close_id, window, cx)
                 }))
-                .tooltip(text_tooltip("Close tab · Ctrl+Shift+W"))
+                .tooltip(text_tooltip(format!(
+                    "Close tab · {}",
+                    Keymap::global(cx).hint(Shortcut::CloseTerminal)
+                )))
                 .child(if dirty {
                     div()
                         .size(px(10.0))
@@ -1883,20 +1902,23 @@ mod tests {
             terminal_key_bytes(&key("tab", None, Modifiers::default()), false),
             Some(vec![9])
         );
-        assert_eq!(
-            terminal_key_bytes(
-                &key(
-                    "tab",
-                    Some("\t"),
-                    Modifiers {
-                        shift: true,
-                        ..Default::default()
-                    },
+        // Shift+Tab is unused: nothing reaches the program, with or without text.
+        for text in [None, Some("\t")] {
+            assert_eq!(
+                terminal_key_bytes(
+                    &key(
+                        "tab",
+                        text,
+                        Modifiers {
+                            shift: true,
+                            ..Default::default()
+                        },
+                    ),
+                    false,
                 ),
-                false,
-            ),
-            Some(b"\x1b[Z".to_vec())
-        );
+                None
+            );
+        }
         for name in ["up", "down"] {
             assert_eq!(
                 terminal_key_bytes(

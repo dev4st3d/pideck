@@ -8,16 +8,21 @@ use gpui_component::{
 use std::path::PathBuf;
 
 use gpui::{
-    App, Bounds, Context, Entity, FocusHandle, FontWeight, IntoElement, KeyBinding, KeyDownEvent,
+    App, Bounds, Context, Entity, FocusHandle, FontWeight, IntoElement, KeyDownEvent,
     PathPromptOptions, Pixels, PromptLevel, Render, ScrollHandle, SharedString, Subscription,
     Window, WindowControlArea, actions, anchored, deferred, div, prelude::*, px, svg,
 };
 
 use super::checklist::ChecklistView;
 use super::project_panels::{FilesPanel, GitPanel, ProjectPanelEvent};
+use super::settings::{SettingsEvent, SettingsPanel};
+use super::shortcuts;
 use super::terminal::{TerminalPanelEvent, TerminalView};
+use crate::fonts;
 use crate::services::{
     app_update::{self, CheckOutcome, PrepareOutcome, ScheduleOutcome},
+    keymap::{self, Keymap, Shortcut, ShortcutGroup},
+    terminal_font::{self, TerminalFont},
     terminal_workspace::{MAX_TERMINAL_TABS, TerminalWorkspace},
 };
 use crate::theme;
@@ -27,6 +32,12 @@ const APPEARANCE_SAVE_ERROR: &str =
     "The theme changed, but its preference could not be saved. Choose the theme again to retry.";
 const APPEARANCE_LOAD_ERROR: &str =
     "The saved theme could not be read. Choose a theme to save a new preference.";
+const FONT_LOAD_ERROR: &str =
+    "The saved terminal font could not be read. Choose a font to save a new preference.";
+const KEYMAP_LOAD_ERROR: &str =
+    "The saved shortcuts could not be read. Change a shortcut to save a new set.";
+const PREFERENCES_SAVE_ERROR: &str =
+    "A setting changed, but it could not be saved. Change a setting again to retry.";
 
 actions!(
     terminal_manager,
@@ -41,6 +52,7 @@ actions!(
         ToggleProjects,
         ToggleChecklist,
         FocusProjects,
+        OpenSettings,
     ]
 );
 
@@ -69,6 +81,17 @@ enum UpdateState {
     Scheduling,
     Unavailable,
     Error(String),
+}
+
+/// Revisions of the terminal font and shortcut preferences. A file is written
+/// when its revision is ahead of the last revision known to be on disk.
+#[derive(Default)]
+struct PreferenceSaves {
+    font_revision: u64,
+    font_saved: u64,
+    keymap_revision: u64,
+    keymap_saved: u64,
+    saving: bool,
 }
 
 struct ProjectTerminals {
@@ -115,6 +138,9 @@ pub(crate) struct TerminalManager {
     appearance_selected: usize,
     appearance_revision: u64,
     appearance_saving: bool,
+    settings: Option<Entity<SettingsPanel>>,
+    _settings_subscription: Option<Subscription>,
+    preferences: PreferenceSaves,
     discard_on_close: bool,
     pending_close: Option<PendingClose>,
     update_state: UpdateState,
@@ -127,19 +153,9 @@ pub(crate) struct TerminalManager {
 impl TerminalManager {
     pub(crate) fn bind_keys(cx: &mut App) {
         ChecklistView::bind_keys(cx);
-        cx.bind_keys([
-            KeyBinding::new("ctrl-shift-o", AddProject, Some("TerminalManager")),
-            KeyBinding::new("ctrl-shift-t", NewTerminal, Some("TerminalManager")),
-            KeyBinding::new("ctrl-`", NewTerminal, Some("TerminalManager")),
-            KeyBinding::new("ctrl-shift-w", CloseTerminal, Some("TerminalManager")),
-            KeyBinding::new("ctrl-tab", NextTerminal, Some("TerminalManager")),
-            KeyBinding::new("ctrl-shift-tab", PreviousTerminal, Some("TerminalManager")),
-            KeyBinding::new("ctrl-alt-down", NextProject, Some("TerminalManager")),
-            KeyBinding::new("ctrl-alt-up", PreviousProject, Some("TerminalManager")),
-            KeyBinding::new("ctrl-shift-b", ToggleProjects, Some("TerminalManager")),
-            KeyBinding::new("ctrl-shift-l", ToggleChecklist, Some("TerminalManager")),
-            KeyBinding::new("f6", FocusProjects, Some("TerminalManager")),
-        ]);
+        shortcuts::bind_group(cx, ShortcutGroup::Workbench);
+        SettingsPanel::bind_keys(cx);
+        shortcuts::disable_shift_tab(cx);
     }
 
     pub(crate) fn new(
@@ -150,14 +166,18 @@ impl TerminalManager {
     ) -> Self {
         let load_path = storage_path.clone();
         let appearance_path = storage_path.with_file_name("appearance.json");
+        let font_path = storage_path.with_file_name("terminal-font.json");
+        let keymap_path = storage_path.with_file_name("keybindings.json");
         let load = cx.background_executor().spawn(async move {
             (
                 TerminalWorkspace::load(&load_path, &initial),
                 crate::services::appearance::load(&appearance_path),
+                terminal_font::load(&font_path),
+                keymap::load(&keymap_path),
             )
         });
         cx.spawn_in(window, async move |view, cx| {
-            let ((workspace, warning), appearance) = load.await;
+            let ((workspace, warning), appearance, font, keymap) = load.await;
             let _ = cx.update(|window, cx| {
                 let _ = view.update(cx, |view, cx| {
                     if view.appearance_revision == 0 {
@@ -169,6 +189,25 @@ impl TerminalManager {
                             Err(error) => {
                                 eprintln!("Appearance preference could not be read: {error}");
                                 view.notice = Some(APPEARANCE_LOAD_ERROR.into());
+                            }
+                        }
+                    }
+                    // A setting changed before the files arrived wins over the saved one.
+                    if view.preferences.font_revision == 0 {
+                        match font {
+                            Ok(font) => view.install_font(font, cx),
+                            Err(error) => {
+                                eprintln!("Terminal font preference could not be read: {error}");
+                                view.add_notice(FONT_LOAD_ERROR);
+                            }
+                        }
+                    }
+                    if view.preferences.keymap_revision == 0 {
+                        match keymap {
+                            Ok(keymap) => view.apply_keymap(keymap, cx),
+                            Err(error) => {
+                                eprintln!("Shortcut preference could not be read: {error}");
+                                view.add_notice(KEYMAP_LOAD_ERROR);
                             }
                         }
                     }
@@ -216,6 +255,9 @@ impl TerminalManager {
             appearance_selected: 0,
             appearance_revision: 0,
             appearance_saving: false,
+            settings: None,
+            _settings_subscription: None,
+            preferences: PreferenceSaves::default(),
             discard_on_close: false,
             pending_close: None,
             update_state: UpdateState::Unavailable,
@@ -419,8 +461,9 @@ impl TerminalManager {
         self.pending_close = None;
     }
 
+    /// An update restart or the settings dialog owns input until it finishes.
     fn interaction_locked(&self) -> bool {
-        self.update_scheduling
+        self.update_scheduling || self.settings.is_some()
     }
 
     fn restore_terminals(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -508,6 +551,184 @@ impl TerminalManager {
         .detach();
     }
 
+    fn add_notice(&mut self, message: &str) {
+        match &mut self.notice {
+            Some(existing) if existing.contains(message) => {}
+            Some(existing) => {
+                existing.push(' ');
+                existing.push_str(message);
+            }
+            None => self.notice = Some(message.to_owned()),
+        }
+    }
+
+    fn remove_notice(&mut self, message: &str) {
+        let Some(existing) = &mut self.notice else {
+            return;
+        };
+        *existing = existing.replace(message, "").trim().to_owned();
+        if existing.is_empty() {
+            self.notice = None;
+        }
+    }
+
+    /// Use a saved font, falling back for this session when it is no longer installed.
+    /// The file is left alone until the user changes a setting.
+    fn install_font(&mut self, font: TerminalFont, cx: &mut Context<Self>) {
+        let font = if fonts::is_installed(cx, &font.family) {
+            font
+        } else {
+            self.add_notice(&format!(
+                "The terminal font “{}” is not installed, so terminals use {}.",
+                font.family,
+                terminal_font::DEFAULT_FAMILY
+            ));
+            font.with_family(terminal_font::DEFAULT_FAMILY.into())
+        };
+        self.apply_font(font, cx);
+    }
+
+    fn apply_font(&mut self, font: TerminalFont, cx: &mut Context<Self>) {
+        cx.set_global(font);
+        for project in &self.projects {
+            project
+                .terminal
+                .update(cx, |pane, cx| pane.apply_terminal_font(cx));
+        }
+    }
+
+    fn apply_keymap(&mut self, keymap: Keymap, cx: &mut Context<Self>) {
+        let previous = Keymap::global(cx).clone();
+        let current = keymap.clone();
+        cx.set_global(keymap);
+        shortcuts::rebind(cx, &previous, &current);
+    }
+
+    fn set_font(&mut self, font: TerminalFont, window: &mut Window, cx: &mut Context<Self>) {
+        self.preferences.font_revision = self.preferences.font_revision.wrapping_add(1);
+        self.apply_font(font, cx);
+        self.save_preferences(window, cx);
+        cx.notify();
+    }
+
+    fn set_keymap(&mut self, keymap: Keymap, window: &mut Window, cx: &mut Context<Self>) {
+        self.preferences.keymap_revision = self.preferences.keymap_revision.wrapping_add(1);
+        self.apply_keymap(keymap, cx);
+        self.save_preferences(window, cx);
+        cx.notify();
+    }
+
+    /// Write whichever preference files are behind. Writes are serialized, so a
+    /// slow earlier write cannot overwrite a newer choice.
+    fn save_preferences(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let saves = &mut self.preferences;
+        let font_dirty = saves.font_revision != saves.font_saved;
+        let keymap_dirty = saves.keymap_revision != saves.keymap_saved;
+        if saves.saving || !(font_dirty || keymap_dirty) {
+            return;
+        }
+        saves.saving = true;
+        let (font_revision, keymap_revision) = (saves.font_revision, saves.keymap_revision);
+        let font = font_dirty.then(|| TerminalFont::global(cx).clone());
+        let keymap = keymap_dirty.then(|| Keymap::global(cx).clone());
+        let font_path = self.storage_path.with_file_name("terminal-font.json");
+        let keymap_path = self.storage_path.with_file_name("keybindings.json");
+        let save = cx.background_executor().spawn(async move {
+            (
+                font.map(|font| terminal_font::save(&font_path, &font)),
+                keymap.map(|keymap| keymap::save(&keymap_path, &keymap)),
+            )
+        });
+        cx.spawn_in(window, async move |view, cx| {
+            let (font, keymap) = save.await;
+            let _ = cx.update(|window, cx| {
+                let _ = view.update(cx, |view, cx| {
+                    let mut failed = false;
+                    view.preferences.saving = false;
+                    match font {
+                        Some(Ok(())) => view.preferences.font_saved = font_revision,
+                        Some(Err(error)) => {
+                            eprintln!("Terminal font preference could not be saved: {error}");
+                            failed = true;
+                        }
+                        None => {}
+                    }
+                    match keymap {
+                        Some(Ok(())) => view.preferences.keymap_saved = keymap_revision,
+                        Some(Err(error)) => {
+                            eprintln!("Shortcut preference could not be saved: {error}");
+                            failed = true;
+                        }
+                        None => {}
+                    }
+                    if failed {
+                        view.add_notice(PREFERENCES_SAVE_ERROR);
+                    } else {
+                        view.remove_notice(PREFERENCES_SAVE_ERROR);
+                        view.save_preferences(window, cx);
+                    }
+                    cx.notify();
+                });
+            });
+        })
+        .detach();
+    }
+
+    fn open_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.workspace.is_none()
+            || self.interaction_locked()
+            || self.prompt_pending
+            || self.picker_pending
+            || self.close_after_save
+            || self.pending_close.is_some()
+        {
+            return;
+        }
+        self.selector_open = false;
+        self.appearance_menu_open = false;
+        let panel = cx.new(SettingsPanel::new);
+        self._settings_subscription = Some(cx.subscribe_in(
+            &panel,
+            window,
+            |view, _, event: &SettingsEvent, window, cx| view.on_settings_event(event, window, cx),
+        ));
+        let focus = panel.read(cx).focus_handle().clone();
+        self.settings = Some(panel);
+        window.focus(&focus);
+        cx.notify();
+    }
+
+    fn close_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.settings.take().is_none() {
+            return;
+        }
+        self._settings_subscription = None;
+        self.focus_active(window, cx);
+        cx.notify();
+    }
+
+    fn on_settings_event(
+        &mut self,
+        event: &SettingsEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let mut keymap = Keymap::global(cx).clone();
+        match event {
+            SettingsEvent::FontChanged(font) => return self.set_font(font.clone(), window, cx),
+            SettingsEvent::Closed => return self.close_settings(window, cx),
+            SettingsEvent::ShortcutChanged(shortcut, keystroke) => {
+                // The dialog checked this chord already; a late conflict keeps the old binding.
+                if keymap.assign(*shortcut, keystroke).is_err() {
+                    return;
+                }
+            }
+            SettingsEvent::ShortcutReset(shortcut) => keymap.reset(*shortcut),
+            SettingsEvent::AllShortcutsReset => keymap.reset_all(),
+        }
+        self.set_keymap(keymap, window, cx);
+    }
+
     fn appearance_menu(&self, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .id("appearance-menu")
@@ -549,14 +770,8 @@ impl TerminalManager {
                         view.appearance_selected = (view.appearance_selected + count - 1) % count
                     }
                     "down" => view.appearance_selected = (view.appearance_selected + 1) % count,
-                    "tab" => {
-                        view.appearance_selected = (view.appearance_selected
-                            + if event.keystroke.modifiers.shift {
-                                count - 1
-                            } else {
-                                1
-                            })
-                            % count
+                    "tab" if !event.keystroke.modifiers.shift => {
+                        view.appearance_selected = (view.appearance_selected + 1) % count
                     }
                     "enter" | "space" => view.choose_appearance(
                         theme::Appearance::ALL[view.appearance_selected],
@@ -1113,11 +1328,11 @@ impl TerminalManager {
             .border_color(gpui::transparent_black())
             .bg(theme::panel())
             .when(selected, |b| b.bg(theme::panel_hover()))
-            .tooltip(text_tooltip(if selected {
-                "Hide project checklist · Ctrl+Shift+L"
-            } else {
-                "Show project checklist · Ctrl+Shift+L"
-            }))
+            .tooltip(text_tooltip(format!(
+                "{} project checklist · {}",
+                if selected { "Hide" } else { "Show" },
+                Keymap::global(cx).hint(Shortcut::ToggleChecklist)
+            )))
             .when(enabled, |b| {
                 b.tab_index(0)
                     .cursor_pointer()
@@ -1322,6 +1537,18 @@ impl TerminalManager {
                     .text_size(px(chrome::TITLEBAR_TEXT_SIZE))
                     .text_color(theme::ash())
                     .child(div().truncate().child(title)),
+            )
+            .child(
+                window_control(
+                    "open-settings",
+                    format!(
+                        "Settings · {}",
+                        Keymap::global(cx).hint(Shortcut::OpenSettings)
+                    ),
+                    "icons/cog.svg",
+                    false,
+                )
+                .on_click(cx.listener(|view, _, window, cx| view.open_settings(window, cx))),
             )
             .child(
                 window_control(
@@ -1571,11 +1798,14 @@ impl TerminalManager {
                             .line_height(px(chrome::CONTROL_LINE_HEIGHT))
                             .font_weight(FontWeight::SEMIBOLD)
                             .tooltip(text_tooltip(if can_add_terminal {
-                                "Open a terminal in this project · Ctrl+` or Ctrl+Shift+T"
+                                format!(
+                                    "Open a terminal in this project · {}",
+                                    Keymap::global(cx).hint(Shortcut::NewTerminal)
+                                )
                             } else if available {
-                                "This project has eight terminal tabs"
+                                "This project has eight terminal tabs".to_owned()
                             } else {
-                                "Wait for the workspace to be ready"
+                                "Wait for the workspace to be ready".to_owned()
                             }))
                             .when(!can_add_terminal, |button| button.opacity(0.55))
                             .when(can_add_terminal, |button| {
@@ -1611,7 +1841,13 @@ impl TerminalManager {
                                     div()
                                         .font_family(theme::mono())
                                         .text_size(px(chrome::DETAIL_TEXT_SIZE))
-                                        .child("Ctrl ⇧ T"),
+                                        .child(
+                                            Keymap::global(cx)
+                                                .bindings(Shortcut::NewTerminal)
+                                                .first()
+                                                .map(keymap::compact)
+                                                .unwrap_or_default(),
+                                        ),
                                 )
                             }),
                     )
@@ -1689,6 +1925,7 @@ impl TerminalManager {
                         .tooltip("Version and updates")
                         .dropdown_menu(move |menu, _, _| {
                             let owner = owner.clone();
+                            let settings_owner = owner.clone();
                             let menu = menu.item(
                                 PopupMenuItem::new(format!(
                                     "Pideck {}",
@@ -1696,6 +1933,15 @@ impl TerminalManager {
                                 ))
                                 .disabled(true),
                             );
+                            let menu = menu.item(PopupMenuItem::new("Settings…").on_click(
+                                move |_, window, cx| {
+                                    let owner = settings_owner.clone();
+                                    window.defer(cx, move |window, cx| {
+                                        let _ = owner
+                                            .update(cx, |view, cx| view.open_settings(window, cx));
+                                    });
+                                },
+                            ));
                             let (label, enabled) = match state {
                                 UpdateState::Available(_) => ("Update and restart", true),
                                 UpdateState::Prepared(_) => ("Restart to update", true),
@@ -1867,14 +2113,8 @@ impl TerminalManager {
                 match event.keystroke.key.as_str() {
                     "up" => view.selector_selected = (view.selector_selected + count) % (count + 1),
                     "down" => view.selector_selected = (view.selector_selected + 1) % (count + 1),
-                    "tab" => {
-                        view.selector_selected = (view.selector_selected
-                            + if event.keystroke.modifiers.shift {
-                                count
-                            } else {
-                                1
-                            })
-                            % (count + 1);
+                    "tab" if !event.keystroke.modifiers.shift => {
+                        view.selector_selected = (view.selector_selected + 1) % (count + 1);
                     }
                     "enter" | "space" => {
                         if view.selector_selected < count {
@@ -2462,7 +2702,10 @@ impl TerminalManager {
                         .w_full()
                         .justify_center()
                         .bg(theme::panel_hover())
-                        .tooltip(text_tooltip("Open a folder as a project · Ctrl+Shift+O"))
+                        .tooltip(text_tooltip(format!(
+                            "Open a folder as a project · {}",
+                            Keymap::global(cx).hint(Shortcut::AddProject)
+                        )))
                         .child(
                             svg()
                                 .path("icons/plus.svg")
@@ -2624,7 +2867,11 @@ fn status_segment(id: &'static str) -> gpui::Stateful<gpui::Div> {
         .focus(|style| style.bg(theme::selection()).text_color(theme::bone()))
 }
 
-fn button(id: &'static str, label: &'static str, enabled: bool) -> gpui::Stateful<gpui::Div> {
+pub(super) fn button(
+    id: &'static str,
+    label: &'static str,
+    enabled: bool,
+) -> gpui::Stateful<gpui::Div> {
     div()
         .id(id)
         .h(px(chrome::CONTROL_HEIGHT))
@@ -2668,7 +2915,10 @@ fn sidebar_toggle(enabled: bool, cx: &mut Context<TerminalManager>) -> impl Into
         .rounded(px(chrome::CONTROL_RADIUS))
         .border_1()
         .border_color(gpui::rgba(0x00000000))
-        .tooltip(text_tooltip("Toggle project sidebar · Ctrl+Shift+B"))
+        .tooltip(text_tooltip(format!(
+            "Toggle project sidebar · {}",
+            Keymap::global(cx).hint(Shortcut::ToggleProjects)
+        )))
         .when(enabled, |control| {
             control
                 .tab_index(0)
@@ -2688,7 +2938,7 @@ fn sidebar_toggle(enabled: bool, cx: &mut Context<TerminalManager>) -> impl Into
 
 fn window_control(
     id: &'static str,
-    label: &'static str,
+    label: impl Into<SharedString>,
     icon: &'static str,
     close: bool,
 ) -> gpui::Stateful<gpui::Div> {
@@ -2907,9 +3157,7 @@ impl Render for TerminalManager {
                     return;
                 }
                 let modifiers = event.keystroke.modifiers;
-                // A focused terminal consumes Tab and Shift+Tab before they bubble.
-                // Shift+F6 is the reverse-focus chord so Shift+Tab can reach programs
-                // such as Claude Code, which cycles permission mode on that key.
+                // Shift+Tab is unused everywhere, so Shift+F6 is the reverse-focus chord.
                 if event.keystroke.key == "tab"
                     && !modifiers.shift
                     && !modifiers.control
@@ -2971,6 +3219,9 @@ impl Render for TerminalManager {
             .on_action(cx.listener(|view, _: &ToggleChecklist, window, cx| {
                 view.toggle_checklist(window, cx)
             }))
+            .on_action(
+                cx.listener(|view, _: &OpenSettings, window, cx| view.open_settings(window, cx)),
+            )
             .on_action(cx.listener(|view, _: &FocusProjects, window, cx| {
                 if !view.interaction_locked()
                     && let Some(workspace) = &mut view.workspace
@@ -3303,6 +3554,9 @@ impl Render for TerminalManager {
                             .when_some(update_footer, |footer, update| footer.child(update)),
                     ),
             )
+            .when_some(self.settings.clone(), |root, settings| {
+                root.child(deferred(settings).with_priority(2))
+            })
     }
 }
 
@@ -3345,6 +3599,9 @@ mod tests {
             appearance_selected: 0,
             appearance_revision: 0,
             appearance_saving: false,
+            settings: None,
+            _settings_subscription: None,
+            preferences: PreferenceSaves::default(),
             discard_on_close: false,
             pending_close: None,
             update_state: UpdateState::Unavailable,
@@ -3604,10 +3861,11 @@ mod tests {
         let menu = cx.debug_bounds("project-selector-menu").unwrap();
         assert_eq!(menu.left(), project.left());
         assert!(menu.top() >= project.bottom());
+        // Shift+Tab is unused; only Tab moves the highlight.
         cx.simulate_keystrokes("shift-tab");
-        assert_eq!(view.read_with(cx, |view, _| view.selector_selected), 1);
-        cx.simulate_keystrokes("tab");
         assert_eq!(view.read_with(cx, |view, _| view.selector_selected), 0);
+        cx.simulate_keystrokes("tab");
+        assert_eq!(view.read_with(cx, |view, _| view.selector_selected), 1);
         cx.simulate_click(picker.center(), gpui::Modifiers::none());
         assert!(view.read_with(cx, |view, _| view.appearance_menu_open
             && !view.selector_open));
@@ -3829,6 +4087,227 @@ mod tests {
                 assert!(view.restore_warning.is_some());
                 view.start_save(window, cx);
                 assert!(!view.saving);
+            })
+            .unwrap();
+    }
+
+    fn manager_with_one_terminal(
+        cx: &mut gpui::TestAppContext,
+    ) -> (
+        Entity<TerminalManager>,
+        Entity<TerminalView>,
+        &mut gpui::VisualTestContext,
+    ) {
+        cx.update(super::super::file_editor::FileEditor::initialize);
+        let (root, cx) = cx.add_window_view(|window, cx| {
+            let manager = cx.new(|cx| {
+                let mut view = fixture(cx);
+                TerminalManager::bind_keys(cx);
+                view.saving = true;
+                view.push_terminal("synthetic-project-one".into(), 1, 0, window, cx);
+                window.focus(&view.focus_handle);
+                view
+            });
+            gpui_component::Root::new(manager, window, cx)
+        });
+        let manager = root.read_with(cx, |root, _| {
+            root.view()
+                .clone()
+                .downcast::<TerminalManager>()
+                .ok()
+                .unwrap()
+        });
+        let terminal = manager.read_with(cx, |view, _| view.active_terminal().unwrap());
+        (manager, terminal, cx)
+    }
+
+    #[gpui::test]
+    fn shift_tab_does_nothing_and_ctrl_shift_tab_still_switches_tabs(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (_manager, terminal, cx) = manager_with_one_terminal(cx);
+        cx.simulate_keystrokes("ctrl-`");
+        cx.update(|window, app| {
+            terminal.update(app, |terminal, cx| terminal.focus(window, cx));
+        });
+        let focused =
+            |cx: &mut gpui::VisualTestContext| cx.update(|window, app| window.focused(app));
+        let before = focused(cx);
+        assert!(before.is_some());
+        // GPUI Component would move focus backward here without the NoAction binding.
+        cx.simulate_keystrokes("shift-tab");
+        assert_eq!(focused(cx), before);
+        assert_eq!(
+            terminal.read_with(cx, |view, _| view.layout_snapshot()),
+            (2, 1)
+        );
+        cx.simulate_keystrokes("ctrl-shift-tab");
+        assert_eq!(
+            terminal.read_with(cx, |view, _| view.layout_snapshot()),
+            (2, 0)
+        );
+    }
+
+    #[gpui::test]
+    fn settings_dialog_owns_input_until_it_closes(cx: &mut gpui::TestAppContext) {
+        let (manager, terminal, cx) = manager_with_one_terminal(cx);
+        cx.simulate_keystrokes("ctrl-,");
+        assert!(manager.read_with(cx, |view, _| view.settings.is_some()));
+        // Workbench shortcuts must not act on the terminals behind the dialog.
+        cx.simulate_keystrokes("ctrl-` ctrl-shift-t");
+        assert_eq!(
+            terminal.read_with(cx, |view, _| view.layout_snapshot()),
+            (1, 0)
+        );
+        // Tab cycles through the dialog and wraps; focus never reaches the workbench behind it.
+        for _ in 0..14 {
+            cx.simulate_keystrokes("tab");
+            let inside = cx.update(|window, app| {
+                manager.read(app).settings.as_ref().is_some_and(|panel| {
+                    panel.read(app).focus_handle().contains_focused(window, app)
+                })
+            });
+            assert!(inside);
+        }
+        cx.simulate_keystrokes("escape");
+        assert!(manager.read_with(cx, |view, _| view.settings.is_none()));
+        cx.simulate_keystrokes("ctrl-`");
+        assert_eq!(
+            terminal.read_with(cx, |view, _| view.layout_snapshot()),
+            (2, 1)
+        );
+    }
+
+    #[gpui::test]
+    fn rebinding_moves_a_shortcut_and_frees_its_old_chords(cx: &mut gpui::TestAppContext) {
+        let (manager, terminal, cx) = manager_with_one_terminal(cx);
+        manager.update(cx, |view, cx| {
+            let mut keymap = Keymap::default();
+            keymap
+                .assign(
+                    Shortcut::NewTerminal,
+                    &gpui::Keystroke::parse("ctrl-alt-n").unwrap(),
+                )
+                .unwrap();
+            view.apply_keymap(keymap, cx);
+        });
+        cx.simulate_keystrokes("ctrl-` ctrl-shift-t");
+        assert_eq!(
+            terminal.read_with(cx, |view, _| view.layout_snapshot()),
+            (1, 0)
+        );
+        cx.simulate_keystrokes("ctrl-alt-n");
+        assert_eq!(
+            terminal.read_with(cx, |view, _| view.layout_snapshot()),
+            (2, 1)
+        );
+        // Restoring the defaults brings both original chords back.
+        manager.update(cx, |view, cx| view.apply_keymap(Keymap::default(), cx));
+        cx.simulate_keystrokes("ctrl-`");
+        assert_eq!(
+            terminal.read_with(cx, |view, _| view.layout_snapshot()),
+            (3, 2)
+        );
+        cx.simulate_keystrokes("ctrl-shift-t");
+        assert_eq!(
+            terminal.read_with(cx, |view, _| view.layout_snapshot()),
+            (4, 3)
+        );
+        cx.simulate_keystrokes("ctrl-alt-n");
+        assert_eq!(
+            terminal.read_with(cx, |view, _| view.layout_snapshot()),
+            (4, 3)
+        );
+    }
+
+    #[gpui::test]
+    fn swapping_two_shortcuts_in_one_change_binds_both(cx: &mut gpui::TestAppContext) {
+        let (manager, terminal, cx) = manager_with_one_terminal(cx);
+        manager.update(cx, |view, cx| {
+            let mut keymap = Keymap::default();
+            keymap
+                .assign(
+                    Shortcut::CloseTerminal,
+                    &gpui::Keystroke::parse("ctrl-alt-w").unwrap(),
+                )
+                .unwrap();
+            keymap
+                .assign(
+                    Shortcut::AddProject,
+                    &gpui::Keystroke::parse("ctrl-shift-w").unwrap(),
+                )
+                .unwrap();
+            view.apply_keymap(keymap, cx);
+        });
+        // Closing a live shell asks first, so check GPUI's effective bindings
+        // rather than the tab count. An unbound key forces a fresh frame.
+        cx.simulate_keystrokes("f9");
+        cx.update(|window, _| {
+            let chords = |action: &dyn gpui::Action| {
+                window
+                    .bindings_for_action(action)
+                    .iter()
+                    .map(|binding| {
+                        binding
+                            .keystrokes()
+                            .iter()
+                            .map(|keystroke| keystroke.unparse())
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    })
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(chords(&CloseTerminal), ["ctrl-alt-w"]);
+            assert_eq!(chords(&AddProject), ["ctrl-shift-w"]);
+        });
+        assert_eq!(
+            terminal.read_with(cx, |view, _| view.layout_snapshot()),
+            (1, 0)
+        );
+    }
+
+    #[gpui::test]
+    fn font_changes_reach_the_global_and_a_missing_saved_font_falls_back(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (manager, _, cx) = manager_with_one_terminal(cx);
+        let larger = TerminalFont::default().stepped_size(1).unwrap();
+        manager.update(cx, |view, cx| view.apply_font(larger.clone(), cx));
+        cx.update(|_, app| assert_eq!(TerminalFont::global(app), &larger));
+        // The headless platform has no installed fonts, so a named family is "missing".
+        manager.update(cx, |view, cx| {
+            view.install_font(larger.with_family("Synthetic Mono".into()), cx);
+            assert!(
+                view.notice
+                    .as_deref()
+                    .is_some_and(|notice| notice.contains("Synthetic Mono"))
+            );
+        });
+        cx.update(|_, app| {
+            assert_eq!(
+                TerminalFont::global(app).family,
+                terminal_font::DEFAULT_FAMILY
+            );
+            assert_eq!(TerminalFont::global(app).size, larger.size);
+        });
+    }
+
+    #[gpui::test]
+    fn preference_notices_combine_and_clear_independently(cx: &mut gpui::TestAppContext) {
+        let window = cx.add_window(|_, cx| fixture(cx));
+        window
+            .update(cx, |view, _, _| {
+                view.add_notice(FONT_LOAD_ERROR);
+                view.add_notice(PREFERENCES_SAVE_ERROR);
+                view.add_notice(PREFERENCES_SAVE_ERROR);
+                assert_eq!(
+                    view.notice.as_deref(),
+                    Some(format!("{FONT_LOAD_ERROR} {PREFERENCES_SAVE_ERROR}").as_str())
+                );
+                view.remove_notice(PREFERENCES_SAVE_ERROR);
+                assert_eq!(view.notice.as_deref(), Some(FONT_LOAD_ERROR));
+                view.remove_notice(FONT_LOAD_ERROR);
+                assert_eq!(view.notice, None);
             })
             .unwrap();
     }

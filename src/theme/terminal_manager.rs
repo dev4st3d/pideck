@@ -53,6 +53,16 @@ pub(crate) const TECH_LINE_HEIGHT: f32 = 23.0;
 pub(crate) const WIDE_TOOLBAR_MIN_WIDTH: f32 = 1100.0;
 pub(crate) const TOOLTIP_MAX_WIDTH: f32 = 480.0;
 
+// Modal settings dialog.
+pub(crate) const DIALOG_WIDTH: f32 = 720.0;
+pub(crate) const DIALOG_HEIGHT: f32 = 560.0;
+pub(crate) const DIALOG_MARGIN: f32 = 48.0;
+pub(crate) const FONT_LIST_WIDTH: f32 = 252.0;
+pub(crate) const FONT_ROW_HEIGHT: f32 = 32.0;
+pub(crate) const SHORTCUT_ROW_HEIGHT: f32 = 36.0;
+pub(crate) const STEPPER_BUTTON: f32 = 28.0;
+pub(crate) const SCROLLBAR_GUTTER: f32 = 10.0;
+
 pub(crate) const SIDEBAR_MIN: f32 = 256.0;
 pub(crate) const SIDEBAR_MAX: f32 = 420.0;
 
