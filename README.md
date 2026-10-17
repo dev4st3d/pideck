@@ -72,7 +72,7 @@ With the checklist tree focused: arrows navigate and fold branches, Space checks
 
 Drag to select text, double-click to select a word, or triple-click to select a line. Hold `Alt` while dragging for a rectangular selection. When a terminal application captures the mouse, hold `Shift` to select text or scroll the terminal history instead.
 
-The terminal supports native Unicode/IME composition, bracketed paste, application mouse input, and scrollback. Copy uses the selected text, or the visible screen when nothing is selected. With the terminal focused, `Tab` is sent to the running program. `Shift+Tab` is intentionally unused everywhere, so it never moves focus or reaches a program; `Ctrl+Shift+Tab` still switches tabs and `Shift+F6` moves to the previous control.
+The terminal supports native Unicode/IME composition, bracketed paste, application mouse input, and scrollback. Copy uses the selected text, or the visible screen when nothing is selected. With the terminal focused, `Tab` and `Shift+Tab` are sent to the running program (for example, `Shift+Tab` cycles modes in Claude Code). Outside the terminal `Shift+Tab` does nothing, so it never moves focus; `Ctrl+Shift+Tab` still switches tabs and `Shift+F6` moves to the previous control.
 
 ## Keyboard
 

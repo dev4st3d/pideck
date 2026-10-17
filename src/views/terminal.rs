@@ -968,11 +968,9 @@ fn active_index_after_close(active: usize, removed: usize, remaining: usize) -> 
 fn terminal_key_bytes(keystroke: &Keystroke, application_cursor: bool) -> Option<Vec<u8>> {
     let modifiers = keystroke.modifiers;
     // Project and tab shortcuts belong to the manager, as do F6 and Shift+F6.
-    // Ordinary control keys (especially Ctrl+C) and Tab belong to the running
-    // terminal program. Shift+Tab is deliberately unused and never sent.
-    if keystroke.key == "tab" && modifiers.shift {
-        return None;
-    }
+    // Ordinary control keys (especially Ctrl+C), Tab, and Shift+Tab belong to
+    // the running terminal program. Claude Code cycles its permission mode on
+    // Shift+Tab.
     if keystroke.key == "f6"
         || (modifiers.control
             && (matches!(keystroke.key.as_str(), "`" | "tab")
@@ -1009,6 +1007,7 @@ fn terminal_key_bytes(keystroke: &Keystroke, application_cursor: bool) -> Option
         "space" => Some(b" ".as_slice()),
         "enter" => Some(b"\r".as_slice()),
         "backspace" => Some(b"\x7f".as_slice()),
+        "tab" if modifiers.shift => Some(b"\x1b[Z".as_slice()),
         "tab" => Some(b"\t".as_slice()),
         "escape" => Some(b"\x1b".as_slice()),
         "up" if application_cursor => Some(b"\x1bOA".as_slice()),
@@ -1902,7 +1901,7 @@ mod tests {
             terminal_key_bytes(&key("tab", None, Modifiers::default()), false),
             Some(vec![9])
         );
-        // Shift+Tab is unused: nothing reaches the program, with or without text.
+        // Shift+Tab is back-tab for the program, with or without reported text.
         for text in [None, Some("\t")] {
             assert_eq!(
                 terminal_key_bytes(
@@ -1916,7 +1915,7 @@ mod tests {
                     ),
                     false,
                 ),
-                None
+                Some(b"\x1b[Z".to_vec())
             );
         }
         for name in ["up", "down"] {
