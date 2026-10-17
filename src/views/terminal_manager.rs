@@ -3157,7 +3157,7 @@ impl Render for TerminalManager {
                     return;
                 }
                 let modifiers = event.keystroke.modifiers;
-                // Shift+Tab is unused everywhere, so Shift+F6 is the reverse-focus chord.
+                // Shift+Tab belongs to the terminal, so Shift+F6 is the reverse-focus chord.
                 if event.keystroke.key == "tab"
                     && !modifiers.shift
                     && !modifiers.control
@@ -3861,7 +3861,7 @@ mod tests {
         let menu = cx.debug_bounds("project-selector-menu").unwrap();
         assert_eq!(menu.left(), project.left());
         assert!(menu.top() >= project.bottom());
-        // Shift+Tab is unused; only Tab moves the highlight.
+        // Shift+Tab never moves the highlight; only Tab does.
         cx.simulate_keystrokes("shift-tab");
         assert_eq!(view.read_with(cx, |view, _| view.selector_selected), 0);
         cx.simulate_keystrokes("tab");
@@ -4122,7 +4122,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn shift_tab_does_nothing_and_ctrl_shift_tab_still_switches_tabs(
+    fn shift_tab_keeps_terminal_focus_and_ctrl_shift_tab_still_switches_tabs(
         cx: &mut gpui::TestAppContext,
     ) {
         let (_manager, terminal, cx) = manager_with_one_terminal(cx);
@@ -4134,7 +4134,8 @@ mod tests {
             |cx: &mut gpui::VisualTestContext| cx.update(|window, app| window.focused(app));
         let before = focused(cx);
         assert!(before.is_some());
-        // GPUI Component would move focus backward here without the NoAction binding.
+        // GPUI Component would move focus backward here without the NoAction
+        // binding; the terminal's key listener sends back-tab to the program.
         cx.simulate_keystrokes("shift-tab");
         assert_eq!(focused(cx), before);
         assert_eq!(

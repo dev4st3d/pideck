@@ -77,11 +77,13 @@ pub(crate) fn bind_group(cx: &mut App, group: ShortcutGroup) {
     }
 }
 
-/// Plain Shift+Tab is unused on purpose. GPUI Component binds it to "focus
-/// previous" (and its editor to "outdent"), which pulled focus out of the
-/// terminal. A context-free `NoAction` outranks every context-bound binding
-/// added before it, so call this after those libraries and views have bound
-/// their keys. Ctrl+Shift+Tab is a different chord and is unaffected.
+/// Plain Shift+Tab has no GPUI action on purpose. GPUI Component binds it to
+/// "focus previous" (and its editor to "outdent"), and bindings run before key
+/// listeners, so that pulled focus out of the terminal before it could send
+/// back-tab to its program. A context-free `NoAction` outranks every
+/// context-bound binding added before it, so call this after those libraries
+/// and views have bound their keys. Ctrl+Shift+Tab is a different chord and is
+/// unaffected.
 pub(crate) fn disable_shift_tab(cx: &mut App) {
     cx.bind_keys([KeyBinding::new("shift-tab", NoAction, None)]);
 }

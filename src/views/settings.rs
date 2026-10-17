@@ -267,7 +267,7 @@ impl SettingsPanel {
     }
 
     /// Keep focus movement inside the dialog: Tab and Shift+F6 wrap at either
-    /// end instead of reaching the workbench. Shift+Tab is unused app-wide.
+    /// end instead of reaching the workbench. Shift+Tab never moves focus.
     fn focus_next_control(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         window.focus_next();
         if !self.focus.contains_focused(window, cx) {

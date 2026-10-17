@@ -55,17 +55,16 @@ impl TerminalSession {
             cx.notify();
             return;
         }
-        // Tab belongs to the running program. Shift+Tab is deliberately unused:
-        // it is dropped here so it neither reaches the program nor bubbles into
-        // workspace focus movement.
+        // Tab and Shift+Tab belong to the running program. Claude Code cycles
+        // permission mode on Shift+Tab, and a reported key_char must not let
+        // that chord bubble into workspace focus movement.
         if event.keystroke.key == "tab"
             && !modifiers.alt
             && !modifiers.control
             && !modifiers.platform
         {
-            if !modifiers.shift
-                && let Some(bytes) =
-                    terminal_key_bytes(&event.keystroke, self.engine.modes().app_cursor)
+            if let Some(bytes) =
+                terminal_key_bytes(&event.keystroke, self.engine.modes().app_cursor)
             {
                 self.send_input(bytes, cx);
             }
