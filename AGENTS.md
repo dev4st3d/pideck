@@ -57,3 +57,11 @@ For code changes, run the smallest relevant final checks: `cargo fmt --all -- --
 - Do not commit, push, rewrite history, or discard work unless explicitly asked. Edit source inputs, not generated outputs; never add `target/`, PDBs, caches, local logs, or editor state. Never use destructive Git commands to make checks pass.
 - Commit subjects follow this repository's existing Conventional Commits style: `<type>: <imperative summary>`; use specific types such as `feat`, `fix`, `refactor`, `perf`, `test`, `docs`, or `chore`. Keep the subject short and do not invent another format.
 - Before handoff, review the focused diff, preserve unrelated changes, and report touched paths, validation or skips, and real blockers.
+
+## Cursor Cloud specific instructions
+
+Cloud agents run Linux. The crate builds and `cargo test --all-targets --locked` runs here; the README's Windows launch steps are for desktop installs.
+
+- Run Cargo from the repository root so `rust-toolchain.toml` selects stable. The image default can be older than edition 2024.
+- `cargo run --locked` opens the window on the existing desktop (`DISPLAY` is already set). The process working directory is the initial project. `PI_GUI_SETTINGS_PATH` relocates settings and the workspace layout for an isolated run.
+- If the window fails to open on a GPU-less VM, point Vulkan at lavapipe: `VK_DRIVER_FILES=/usr/share/vulkan/icd.d/lvp_icd.json`.
