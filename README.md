@@ -1,86 +1,92 @@
 # Pideck
 
-A native Windows project and terminal workspace, built with Rust and GPUI 0.2.2. Its neutral workbench follows the [Pideck reimagined handoff](design/pideck-reimagined/README.md).
+A native Windows workspace for files, Git, and terminals. Several project folders stay open at once, and each one keeps its own tree, review, reminders, and shells. Pideck is written in Rust with [GPUI 0.2.2](https://docs.rs/crate/gpui/0.2.2/source/).
 
-Switch projects with the top project selector. The sidebar has **Projects**, **Files**, and **Git** tabs; the main pane combines editable files, terminals, and read-only diffs in one tab strip.
+Switch projects from the selector in the toolbar. The sidebar is **Files**, **Projects**, and **Git**. Editors, terminals, and read-only diffs share one tab strip.
 
-Each terminal starts in its project's directory. Run `codex`, `claude`, or another command after installing that CLI independently. Terminals continue running when their tab or project is hidden.
+![Pideck on the Light theme, with ripgrep, bat, fd, and xsv open and ripgrep's main.rs in the editor](docs/images/projects.png)
 
-## Files and Git
+These screenshots are from a development build. The folders are fresh clones of [ripgrep](https://github.com/BurntSushi/ripgrep), [bat](https://github.com/sharkdp/bat), [fd](https://github.com/sharkdp/fd), and [xsv](https://github.com/BurntSushi/xsv). The Git review is an uncommitted edit in that ripgrep clone.
 
-Open files from the tree, edit them, and choose **Save** or press `Ctrl+S`. Changed tabs show a dirty marker. Closing changed files offers Save, Discard, or Cancel; closing a project or window offers **Save all and close**. Saves check for external changes and report conflicts while keeping your edits open.
+## Install
 
-The Git sidebar keeps the directory tree and shows added/deleted line counts, including new text files. Use **+** to stage a file and **−** to unstage it. Undo opens a discard confirmation; tracked files restore their staged version, and new files go to the Recycle Bin. The diff also supports discarding individual text hunks. Changed files are checked again before a discard is applied.
+**Windows installer.** Download [PiDeck Setup](https://github.com/dev4st3d/pideck/releases/latest) (`PiDeck-win-Setup.exe`). Installed copies check GitHub Releases on startup. Use **Check for updates** in the status bar’s **⋯** menu, then **Update and restart**.
 
-The commit box stays below the tree. **Commit** or `Ctrl+Enter` commits only staged changes; failures keep the message. **Push** sends the reviewed branch without forcing, and **Publish** lets you choose a remote for a new branch. A failed push keeps the local commit. Fetch is available for reviewing remote changes; merging and conflict resolution remain explicit Git operations. Commits respect your configured Git hooks and signing setup.
-
-**History** opens a compact, paginated commit timeline in the sidebar. Select a commit and then one of its visible changed files to review the historical diff. The view identifies HEAD, known unpushed commits, and the remote tip; **Details** reveals commit metadata and the comparison parent picker for merge commits. **Changed files** expands the commit's file list. **Changes** returns to the working tree and preserves the commit draft. History is read-only. Choose Unified or Split, move between files with Alt+Up/Down, and jump between hunks with F7/Shift+F7. Hunk navigation wraps at either end of the file. Long lines scroll inside the code area, keeping line numbers and the split divider visible; split panes scroll horizontally together.
-
-The editor accepts UTF-8 text files up to 2 MiB. PNG, JPEG, GIF, WebP, BMP, and TIFF files open in a read-only viewer (32 MiB or 50 megapixels). Each directory listing is capped at 2,000 entries; the sidebar reports truncation.
-
-## Run from source
-
-Use Windows with the stable Rust MSVC toolchain and Windows SDK/build tools. The declared Rust syntax floor is 1.88. Cargo.lock pins GPUI 0.2.2.
-
-From the repository, launch with:
+**From source.** Use Windows with the stable Rust MSVC toolchain and the Windows SDK. The declared Rust syntax floor is 1.88.
 
 ```powershell
 cargo run --locked
 ```
 
-Pideck embeds DM Sans interface text, Instrument Serif for the wordmark, and IBM Plex Mono for terminals, code, and counts. The terminal font can be changed in Settings. The four neutral themes follow the [final design handoff](design/pideck-reimagined/README.md). No font preparation step, Node.js, or Pi installation is required to build or launch the app. Tools you run inside its terminals have their own installation requirements.
-
-A release build uses:
+A release build:
 
 ```powershell
 cargo build --release --locked
 ```
 
-## App updates
+Pideck embeds DM Sans for interface text, Instrument Serif for the wordmark and reminder headings, and IBM Plex Mono for terminals, code, and counts. The terminal font can be changed in Settings. No font-preparation step, Node.js, or separate Pi install is required to build or launch. Programs you start inside a terminal have their own install requirements.
 
-Windows copies installed with **PiDeck Setup** check GitHub Releases for updates on startup. Use **Check for updates** in the status bar’s **⋯** menu to check manually, then **Update and restart** to download and verify a new version.
+## A look around
 
-Before restarting, Pideck asks about unsaved files and stopping running terminals, then saves the workspace layout. Cancelling keeps the app open; a downloaded update can be applied later with **Restart to update**. File or layout save failures must be resolved before the update can restart the app. Restarting creates fresh shells, not resumed commands or terminal history.
+### Projects
 
-Source builds and unpackaged executables do not support in-app updates. Downloading an update does not silently apply it on the next launch; restarting to apply it remains an explicit action.
+Add a folder with `Ctrl+Shift+O` or **Add project**. `Ctrl+Alt+Up` and `Ctrl+Alt+Down` move between projects. Each row menu holds that project's actions. Removing a project closes its terminals and deletes its saved checklist; files on disk stay where they are. Changed editor files go through their save flow first.
 
-## Project state and restoration
+The project list, the file tree, and the Git tree have separate filters. File search stops at 20,000 visited entries and 2,000 matches, and it never follows directory links. An incomplete search says so. Filtering keeps matching ancestors. Clearing the Files or Git filter restores the previous expansion, selection, and scroll position.
 
-While the app stays open, each project retains its sidebar selection, expanded directories and scroll position, open file buffers and cursor positions, active tab, and terminal sessions. Switching projects reuses those views and processes.
+### Files
 
-Across app restarts, project folders, terminal layout, selected terminal/project, sidebar visibility, chosen sidebar width, project checklists, and checklist visibility are restored. This data is stored in `terminal-workspace.json` beside the settings file, normally under `%APPDATA%\Pideck`. `PI_GUI_SETTINGS_PATH` relocates the settings file and adjacent layout file.
+![The ripgrep tree on the Stone theme, with crates/core/main.rs open](docs/images/editor.png)
 
-Restarting creates fresh shells. Open files, file buffers and cursor positions, expanded directories, terminal output, running processes, and CLI conversations are not restored from disk. Save files before closing; use each CLI's own session features when available.
+Open a file from the tree, edit it, and choose **Save** or press `Ctrl+S`. A changed tab shows a dirty marker. Closing a changed file offers Save, Discard, or Cancel. Closing a project or the window offers **Save all and close**. A save checks for edits made outside Pideck and reports a conflict while keeping your buffer open.
 
-If a saved layout cannot be read or restored, automatic saving pauses to preserve it. Repair the file and reopen the app, or choose **Replace saved layout** to save the current workspace instead. Closing without saving keeps the previous file.
+The editor accepts UTF-8 text up to 2 MiB. PNG, JPEG, GIF, WebP, BMP, and TIFF open in a read-only viewer, up to 32 MiB or 50 megapixels. Each directory listing stops at 2,000 entries, and the sidebar says when a folder was cut short.
 
-Workspace settings stay local. Pideck adds no telemetry, analytics, or remote reporting; commands you run have their own network and privacy behavior.
+Click a row to select it. Double-click or Enter opens it. Ctrl-click toggles a multi-selection and Shift-click selects a range. Right-click for file operations, copying a path, hidden files, and reveal in Windows Explorer. New file and folder names are edited in the panel.
 
-Files, projects, and Git changes have independent filters. File search is bounded to 20,000 visited entries and 2,000 matches and never follows directory links; incomplete searches show a notice. Filtering keeps matching ancestors. Clearing Files or Git filters restores the previous expansion, selection, and scroll position.
+With the explorer focused: `Ctrl+C`, `Ctrl+X`, and `Ctrl+V` copy, cut, and paste; `Ctrl+A` selects the visible rows; `Ctrl+D` duplicates; `F2` renames; `Delete` asks before moving items to the Recycle Bin; `Ctrl+N` creates a file; `Ctrl+Shift+N` creates a folder. Drag inside the tree to move, and hold Ctrl to copy. Drops from outside Pideck, and pastes from the Windows file clipboard, copy into the selected folder. Cut stays inside Pideck. Existing destinations are left in place. An interrupted copy can leave a finished or partial destination, and the source is kept. Directory links are not copied recursively. A move across drives copies first.
 
-Drag the sidebar divider between 256 and 420 logical pixels. Keyboard focus on the divider supports Left/Right to resize and Home to reset. The default is 288 pixels, 336 for Git, and 256 in compact windows. Project actions live in each project's row menu.
+The explorer and Git status refresh when the filesystem changes. `F5` refreshes manually.
 
-## Project checklist
+### Terminals
 
-Use the **checklist icon** in the toolbar or `Ctrl+Shift+L` to toggle the right inspector. It uses the headerless outline with numbered Instrument Serif section headings. Each project has its own reminders; committed edits and collapsed branches save locally with the workspace. New projects start with an empty Workspace section.
+![A shell in the ripgrep clone, showing git log, status, and a one-file diff stat](docs/images/terminal.png)
 
-Click **Add a reminder**, type, and press Enter to save. The adjacent **+** creates a section. Reminder menus contain only **Add subtask**, **Rename**, and **Delete**; section menus contain **Rename** and **Delete**. Indenting and outdenting remain available from the keyboard. Completing a parent completes its subtree; parent checkboxes and counts follow their children. Deleting a subtree or section offers **Undo**, and `Ctrl+Z` restores recent edits while the checklist is focused. Removing a project also removes its saved checklist, as stated in the removal prompt.
+Every terminal starts in its project's directory. Run `codex`, `claude`, or any other command after that program is installed on its own. Shells keep running when their tab or project is hidden. `` Ctrl+` `` or `Ctrl+Shift+T` opens another terminal, up to eight per project. `Ctrl+Shift+W` closes the active tab. `Ctrl+Tab` and `Ctrl+Shift+Tab` move along the strip.
 
-With the checklist tree focused: arrows navigate and fold branches, Space checks, Enter adds a reminder, `Ctrl+Enter` adds a subtask, `Tab` indents, `Ctrl+[` outdents, F2 renames, Delete removes, and `Ctrl+Shift+N` creates a section. Escape cancels text editing; `Ctrl+\`` returns to the terminal. Long labels show their full text in a tooltip. On compact windows, opening the inspector temporarily hides the left sidebar to reserve terminal space; the sidebar preference is preserved. Below 720 logical pixels the inspector is temporarily hidden as well.
+Drag to select text, double-click a word, or triple-click a line. Hold Alt while dragging for a rectangle. When a program has captured the mouse, hold Shift to select text or to scroll history. Copy uses the selection, or the visible screen when nothing is selected. Unicode and IME composition, bracketed paste, application mouse input, and scrollback are supported.
 
-## Terminal input
+With the terminal focused, `Tab` and `Shift+Tab` go to the running program, so `Shift+Tab` can cycle modes in Claude Code. Outside the terminal, `Shift+Tab` does not move focus. `Ctrl+Shift+Tab` still changes tabs, and `Shift+F6` moves to the previous control.
 
-Drag to select text, double-click to select a word, or triple-click to select a line. Hold `Alt` while dragging for a rectangular selection. When a terminal application captures the mouse, hold `Shift` to select text or scroll the terminal history instead.
+### Git
 
-The terminal supports native Unicode/IME composition, bracketed paste, application mouse input, and scrollback. Copy uses the selected text, or the visible screen when nothing is selected. With the terminal focused, `Tab` and `Shift+Tab` are sent to the running program (for example, `Shift+Tab` cycles modes in Claude Code). Outside the terminal `Shift+Tab` does nothing, so it never moves focus; `Ctrl+Shift+Tab` still switches tabs and `Shift+F6` moves to the previous control.
+![Unified diff of a local edit to ripgrep's main.rs, with the commit box under the change tree](docs/images/git.png)
+
+The Git sidebar is a directory tree with added and deleted line counts, including new text files. **+** stages a file and **−** unstages it. Undo asks before discarding: tracked files return to their staged version, and new files go to the Recycle Bin. The diff can also discard one text hunk. Changed files are read again before a discard is applied.
+
+The commit box sits under the tree. **Commit** or `Ctrl+Enter` commits only what is staged, and a failed commit keeps the message. **Push** sends the reviewed branch and does not force. **Publish** asks which remote should receive a new branch. A failed push keeps the local commit. Fetch is there for reading remote changes. Merging and conflict resolution stay explicit Git operations. Commits use your configured hooks and signing.
+
+Click the branch name, or press `B` with the Git panel focused, to pick a local branch. Tab and Enter confirm. Switching keeps Git's conflict checks. It does not force, stash, or fetch, and it does not run Git hooks. Save dirty editor buffers first.
+
+**History** opens a compact, paginated commit list in the sidebar. Select a commit, then one of its changed files, to read that historical diff. The list marks HEAD, known unpushed commits, and the remote tip. **Details** shows commit metadata and, for a merge, the parent used for comparison. **Changed files** expands the file list. **Changes** returns to the working tree and keeps the commit draft. History is read-only.
+
+Choose Unified or Split. `Alt+Up` and `Alt+Down` move between files. `F7` and `Shift+F7` move between hunks and wrap at either end of the file. `Alt+U` and `Alt+S` switch the layout. Long lines scroll inside the code, leaving line numbers and the split divider in place. Split panes scroll horizontally together. `Shift+wheel`, `Ctrl+Shift+Left`, and `Ctrl+Shift+Right` pan. `F5` refreshes the open diff.
+
+### Reminders
+
+![The ripgrep checklist beside main.rs](docs/images/checklist.png)
+
+The checklist button in the toolbar, or `Ctrl+Shift+L`, opens the right inspector. Headings use Instrument Serif. Each project has its own reminders. Edits and collapsed branches are saved with the workspace. A new project starts with an empty Workspace section.
+
+**Add a reminder**, type, and press Enter. The adjacent **+** creates a section. A reminder menu has **Add subtask**, **Rename**, and **Delete**. A section menu has **Rename** and **Delete**. Indent and outdent stay on the keyboard. Completing a parent completes its children, and a parent's checkbox and count follow those children. Deleting a subtree or section offers **Undo**, and `Ctrl+Z` restores recent edits while the checklist is focused. Removing a project removes its checklist; the removal prompt says so.
+
+With the checklist focused: arrows move and fold, Space checks, Enter adds a reminder, `Ctrl+Enter` adds a subtask, `Tab` indents, `Ctrl+[` outdents, `F2` renames, `Delete` removes, and `Ctrl+Shift+N` creates a section. Escape cancels editing. `` Ctrl+` `` returns to the terminal. A long label shows its full text in a tooltip.
+
+On a compact window, opening the inspector hides the left sidebar for that moment and remembers whether you wanted the sidebar. Below 720 logical pixels the inspector hides as well.
+
+Drag the sidebar divider between 256 and 420 logical pixels. With the divider focused, Left and Right resize it and Home resets it. The default is 288 pixels, and 256 in a compact window. Files, Projects, and Git share that width.
 
 ## Keyboard
-
-The explorer uses neutral outline icons with separate disclosure, filename, and status columns. Click to select a file; double-click or Enter to open. Ctrl-click toggles selection and Shift-click selects a range. Right-click for file operations, path copying, hidden files, and reveal in Windows Explorer. New file/folder naming stays inside the panel.
-
-With explorer focus: `Ctrl+C/X/V` copies/cuts/pastes files, `Ctrl+A` selects visible entries, `Ctrl+D` duplicates, `F2` renames, `Delete` asks to move items to the Recycle Bin, `Ctrl+N` creates a file, and `Ctrl+Shift+N` creates a folder. Drag within the tree to move; hold Ctrl to copy. External drops and Windows file-clipboard pastes copy into the selected folder. Cut is internal to Pideck. Existing destinations are never intentionally overwritten; interrupted copies may leave completed or partial destination files, with the source retained. Directory links are not recursively copied. Cross-drive moves require copying first.
-
-Filesystem changes refresh the explorer and Git status automatically; `F5` refreshes manually. The compact Git tree separates unstaged and staged changes. Click the branch name (or press `B` with Git-panel focus) to choose a local branch, then use Tab/Enter to select it. Switching preserves Git's conflict checks and never forces, stashes, or fetches. Save dirty editor buffers first. Git hooks are disabled for this operation.
 
 | Action | Keys |
 |---|---|
@@ -106,36 +112,62 @@ Filesystem changes refresh the explorer and Git status automatically; `F5` refre
 | Scroll terminal history up / down | `Shift+PageUp` / `Shift+PageDown` |
 | Open settings | `Ctrl+,` |
 
-The shortcuts for projects, terminal tabs, the sidebar, reminders, Save, terminal copy/paste/select-all, and settings can be changed in **Settings**. The rest (explorer, diff, and checklist keys, `Shift+F6`, and the terminal scrolling keys) are fixed.
+Projects, terminal tabs, the sidebar, reminders, Save, terminal copy/paste/select-all, and Settings can be changed in **Settings**. Explorer keys, diff keys, checklist keys, `Shift+F6`, and the terminal scrolling keys stay fixed.
 
 ## Settings
 
-Open **Settings** from the gear in the titlebar, the status bar's **⋯** menu, or `Ctrl+,`. Esc, **Done**, or a click outside closes it, and focus returns to your terminal.
+Open **Settings** from the gear in the title bar, the status bar’s **⋯** menu, or `Ctrl+,`. Esc, **Done**, or a click outside closes it and returns focus to the terminal.
 
-**Terminal** chooses the terminal font, size (9–24 px), and line height (1.0–1.8×) from IBM Plex Mono and the fixed-width families installed on your PC. Changes apply to every open terminal immediately and resize its grid and PTY. A preview shows ambiguous glyphs such as `0O` and `1lI`. If a saved font is later uninstalled, terminals use IBM Plex Mono and say so; the saved choice is kept until you change a setting. Other text keeps its design fonts.
+**Terminal** chooses the font, size (9–24 px), and line height (1.0–1.8×) from IBM Plex Mono and the fixed-width families installed on the PC. The change applies to every open terminal immediately and resizes its grid and PTY. A preview shows ambiguous glyphs such as `0O` and `1lI`. If a saved font is later uninstalled, terminals use IBM Plex Mono and say so. The saved choice is kept until you change a setting. Other text keeps its design fonts.
 
-**Keyboard** lists each rebindable shortcut. Use ↑/↓ to select a row, `Enter` (or **Change**) and press the new chord, `Delete` (or **Reset**) to restore the default. Esc cancels recording. A chord must include Ctrl, Alt, or Win (or be a function key), and cannot be Esc, Tab, `Shift+F6`, `Alt+F4`, or plain Ctrl+letter, which terminal programs and text editing need (Save may use other Ctrl+letters). A chord already used by another shortcut is refused with that shortcut's name. Setting a new chord replaces all of a shortcut's defaults, so `New terminal` stops answering to `` Ctrl+` `` as well as `Ctrl+Shift+T`.
+**Keyboard** lists each rebindable shortcut. Up and Down select a row, Enter or **Change** records the next chord, and Delete or **Reset** restores the default. Esc cancels recording. A chord must include Ctrl, Alt, or Win, or be a function key. Esc, Tab, `Shift+F6`, `Alt+F4`, and plain Ctrl+letter are reserved for terminal programs and text editing. Save may use other Ctrl+letter chords. A chord already used by another shortcut is refused, and the message names that shortcut. A new chord replaces every default for that action, so **New terminal** stops answering to `` Ctrl+` `` as well as `Ctrl+Shift+T`.
 
-Font and shortcut choices are stored beside the settings file as `terminal-font.json` and `keybindings.json` (normally under `%APPDATA%\Pideck`). A file that cannot be read is left untouched and defaults are used until you change a setting; delete it to start over.
+Font and shortcut choices are stored as `terminal-font.json` and `keybindings.json` beside the settings file, normally under `%APPDATA%\Pideck`. A file that cannot be read is left untouched, and defaults are used until you change a setting. Delete the file to start over.
 
 ## Appearance
 
-Choose a theme from the appearance picker beside **New terminal**:
+The theme picker sits beside **New terminal**. Tab, the arrow keys, Enter, and Escape operate it. A change applies to open files, diffs, and terminals without restarting shells or clearing their history.
 
-- **Black** — near-black surfaces.
-- **Light** — neutral white surfaces.
-- **Graphite** — dark gray surfaces.
-- **Charcoal** — softer charcoal surfaces.
-- **Flint** — warm dark, a step below Stone.
-- **Stone** — warm, lifted dark (the default).
+| Theme | Character |
+|---|---|
+| Black | Near-black surfaces |
+| Light | Neutral white surfaces |
+| Graphite | Dark gray surfaces |
+| Charcoal | Softer charcoal surfaces |
+| Flint | Warm dark, a step below Stone |
+| Stone | Warm, lifted dark. This is the default |
+| Slate | Cool blue-gray, with a muted steel-blue accent |
+| Moss | Green-black, with a sage accent |
+| Kiln | Warm dark, with a terracotta accent |
+| Iris | Indigo-black, with a lavender accent |
 
-Theme changes apply to open files, diffs, and terminals without restarting shells or clearing their history. The preference stays local in `appearance.json` beside the workspace layout. A malformed preference is preserved until you explicitly choose a theme. The picker supports Tab, arrow keys, Enter, and Escape.
+The choice is stored in `appearance.json` beside the workspace layout. A file that cannot be read is preserved until you explicitly choose a theme.
+
+## Updates
+
+Installed copies ask before an update restarts the app. Pideck asks about unsaved files and about stopping running terminals, then saves the workspace layout. Cancelling leaves the app open. A downloaded update can be applied later with **Restart to update**. A file or layout save that fails has to be resolved before the update can restart the app. The new process starts fresh shells. It does not resume commands or terminal history.
+
+Source builds and unpackaged executables do not update from inside the app. Downloading an update does not apply it on the next launch by itself. Restarting to apply it is an explicit action.
+
+## What is saved
+
+While the app stays open, each project keeps its sidebar selection, expanded directories and scroll position, open file buffers and cursor positions, active tab, and terminal sessions. Switching projects reuses those views and processes.
+
+Across restarts, Pideck restores project folders, the terminal layout, the selected terminal and project, sidebar visibility, the chosen sidebar width, project checklists, and whether the checklist was open. That data lives in `terminal-workspace.json` next to the settings file, normally under `%APPDATA%\Pideck`. `PI_GUI_SETTINGS_PATH` moves the settings file and the layout file beside it.
+
+A restart creates new shells. Open files, buffers, cursor positions, expanded directories, terminal output, running processes, and CLI conversations are not read back from disk. Save files before closing, and use each CLI's own session feature when it has one.
+
+If a saved layout cannot be read or restored, automatic saving pauses so the file is kept. Repair it and reopen the app, or choose **Replace saved layout** to store the current workspace instead. Closing without that choice keeps the previous file.
+
+## Privacy
+
+Workspace settings stay on the machine. Pideck adds no telemetry, analytics, or remote reporting. Commands you run have their own network and privacy behavior.
 
 ## Development
 
-The app reuses [GPUI 0.2.2](https://docs.rs/crate/gpui/0.2.2/source/) for native rendering, [GPUI Component 0.5.1](https://docs.rs/crate/gpui-component/0.5.1/source/) for the editor, and [Alacritty Terminal 0.26.0](https://docs.rs/crate/alacritty_terminal/0.26.0/source/) with `portable-pty` for terminals. GPUI Component brings in Zed's [sum-tree 0.2.0](https://docs.rs/crate/zed-sum-tree/0.2.0/source/) transitively. These linked crates are Apache-2.0 licensed; no GPL-licensed Zed editor source was copied for this integration.
+Rendering uses [GPUI 0.2.2](https://docs.rs/crate/gpui/0.2.2/source/). The editor uses [GPUI Component 0.5.1](https://docs.rs/crate/gpui-component/0.5.1/source/). Terminals use [Alacritty Terminal 0.26.0](https://docs.rs/crate/alacritty_terminal/0.26.0/source/) and `portable-pty`. GPUI Component brings in Zed's [sum-tree 0.2.0](https://docs.rs/crate/zed-sum-tree/0.2.0/source/) transitively. Those crates are Apache-2.0. No GPL-licensed Zed editor source was copied for this integration.
 
-For code changes, finish implementation before running the relevant final checks:
+Finish an implementation before the final checks:
 
 ```powershell
 cargo fmt --all -- --check
@@ -143,4 +175,8 @@ cargo check --all-targets
 cargo test --all-targets
 ```
 
-See [AGENTS.md](AGENTS.md) for contributor rules and [GPUI.md](GPUI.md) for the version-specific native UI reference.
+Contributor rules are in [AGENTS.md](AGENTS.md). The neutral theme direction is in the [design handoff](design/pideck-reimagined/README.md).
+
+## License
+
+[MIT](LICENSE).
