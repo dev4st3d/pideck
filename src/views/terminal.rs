@@ -1727,7 +1727,7 @@ mod tests {
         }
         let project = std::env::temp_dir();
         let source = TestSource(project.join(format!(
-            "pideck-mixed-tabs-{}-{}.txt",
+            "zideck-mixed-tabs-{}-{}.txt",
             std::process::id(),
             NEXT_SOURCE.fetch_add(1, Ordering::Relaxed)
         )));
@@ -1815,7 +1815,7 @@ mod tests {
         ];
         let project = std::env::temp_dir();
         let source = TestSource(project.join(format!(
-            "pideck-image-tab-{}-{}.png",
+            "zideck-image-tab-{}-{}.png",
             std::process::id(),
             NEXT_SOURCE.fetch_add(1, Ordering::Relaxed)
         )));

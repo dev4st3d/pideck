@@ -1,4 +1,4 @@
-# Pideck UI icons
+# ZiDeck UI icons
 
 The 49 SVGs in this directory are the app's custom, monochrome control icons.
 `src/assets.rs` embeds the complete set under `icons/<name>.svg`.

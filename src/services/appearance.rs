@@ -56,7 +56,7 @@ mod tests {
     impl TestDirectory {
         fn new() -> Self {
             let path = std::env::temp_dir().join(format!(
-                "pideck-appearance-{}-{}",
+                "zideck-appearance-{}-{}",
                 std::process::id(),
                 NEXT_TEST.fetch_add(1, Ordering::Relaxed),
             ));

@@ -1,4 +1,4 @@
-# Pideck — desktop Pi harness design specification
+# ZiDeck — desktop Pi harness design specification
 
 > Handoff inventory, 2026-09-06: this package contains SIX original 1440 x 960 PNGs, indexed in README.md. The seven Figma screens described below are historical authoring context; Porcelain has no supplied PNG. The former design/source/ SVGs and token JSON have intentionally been removed from this design handoff. PNGs take precedence over conflicting historical prose. See README.md for the Midnight toolbar export defect and the visual acceptance rule.
 
@@ -7,7 +7,7 @@ Version: 2026-09-06. This document describes the final aligned Figma designs, in
 
 ## 1. Product and design direction
 
-Pideck is a native desktop GUI for the Pi AI harness. Its primary surface is a conversation document with agent activity embedded in the conversation. It is not an analytics dashboard or a separate tool-execution console.
+ZiDeck is a native desktop GUI for the Pi AI harness. Its primary surface is a conversation document with agent activity embedded in the conversation. It is not an analytics dashboard or a separate tool-execution console.
 
 Preserve these decisions:
 
@@ -86,7 +86,7 @@ These are the **design fonts**. The current Rust app's default font preferences 
 
 | Element | Family | Size | Weight |
 |---|---|---:|---:|
-| Sidebar Pideck wordmark | DM Sans | 25 | 600 |
+| Sidebar ZiDeck wordmark | DM Sans | 25 | 600 |
 | Sidebar project name | DM Sans | 16 | 600 |
 | Session title in toolbar | Instrument Serif | 24 | 400 |
 | Rail `p.` mark | Instrument Serif | 28 | 400 |
@@ -245,7 +245,7 @@ The design uses a recurring 4/8/12/16/20/24/32 px spacing vocabulary, with optic
 - The branch-selector icon uses 1.5 px strokes.
 - Window-control strokes are 1.2 px.
 - Repository toolbar icons keep their own source stroke weights and are scaled from a 16 px viewBox to 20 px; their effective stroke widths scale with the vectors.
-- There are no drop shadows, backdrop blurs, textures, or gradients in the final screen artwork. Shadows around Figma's editor UI are not part of Pideck.
+- There are no drop shadows, backdrop blurs, textures, or gradients in the final screen artwork. Shadows around Figma's editor UI are not part of ZiDeck.
 
 ## 7. Native titlebar and revised conversation toolbar
 
@@ -293,7 +293,7 @@ The sidebar starts at X=64. Content begins at X=88 and ends at X=280.
 
 | Element | Reference geometry / baselines |
 |---|---|
-| Pideck wordmark | X=88, baseline 87 |
+| ZiDeck wordmark | X=88, baseline 87 |
 | Project name | X=88, baseline 138 |
 | Project chevron | 16 px slot at X=256, Y=122 |
 | Local workspace eyebrow | X=88, baseline 160 |

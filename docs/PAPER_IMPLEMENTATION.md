@@ -23,7 +23,7 @@ Existing unrelated work was preserved. No commits, pushes, package changes or de
 - `cargo fmt --all -- --check`: passed.
 - `cargo check --all-targets`: passed.
 - `cargo test --all-targets`: 77 passed, 0 failed, 1 ignored manual benchmark.
-- `cargo rustc --bin pi-gui -- -o target/debug/pideck-design.exe`: passed; the separate output avoids replacing the user's running executable.
+- `cargo rustc --bin pi-gui -- -o target/debug/zideck-design.exe`: passed; the separate output avoids replacing the user's running executable.
 - Focused whitespace review: passed. Font source hashes were verified.
 
 The tests cover palette contrast, preference corruption/round trips, repeated theme choices, terminal state preservation, explicit RGB/extended color preservation, save notifications, real ConPTY input/output, Git paths/statistics, configured Git patch formatting, aligned diffs, conflicts, Unicode and EOF newline changes.
@@ -34,4 +34,4 @@ Clippy and documentation builds were not run. The existing manual performance be
 
 An isolated Paper preview was opened with a synthetic project and separate session settings. Its shared window appearance was inspected, and the initially oversized window was corrected to fit the display. The user stopped Computer Use with Escape before the Files/Git interaction and final theme/resize checks could be completed. No further computer interaction was performed. Full pixel-for-pixel fidelity and the final themes have therefore not been visually certified.
 
-`target/debug/pideck-design.exe` is the final build including themes. The earlier `pideck-paper.exe` preview does not include them. Generated executables, logs and the synthetic project remain in ignored `target/` and `temp/` directories.
+`target/debug/zideck-design.exe` is the final build including themes. The earlier `zideck-paper.exe` preview does not include them. Generated executables, logs and the synthetic project remain in ignored `target/` and `temp/` directories.

@@ -1,6 +1,6 @@
-# PiDeck image references
+# ZiDeck image references
 
-These six supplied PNGs are the visual targets for the native PiDeck rework. Every image is 1440 x 960 pixels. They were inspected, extracted or renamed without re-encoding. Duplicate exports are omitted.
+These six supplied PNGs are the visual targets for the native ZiDeck rework. Every image is 1440 x 960 pixels. They were inspected, extracted or renamed without re-encoding. Duplicate exports are omitted.
 
 | Image | Appearance and state |
 |---|---|
@@ -25,6 +25,6 @@ fonts/ contains DM Sans variable, Instrument Serif Regular, and IBM Plex Mono Re
 
 ## Package use
 
-Extract pideck-source.zip, then extract pideck-design.zip beside it. The archives yield sibling pideck/ and design/ directories. The implementation may move fonts and any necessary assets into pideck/assets/ and update build/runtime asset loading. The source ZIP contains the existing Rust application and Node bridge, not a browser frontend.
+Extract zideck-source.zip, then extract zideck-design.zip beside it. The archives yield sibling zideck/ and design/ directories. The implementation may move fonts and any necessary assets into zideck/assets/ and update build/runtime asset loading. The source ZIP contains the existing Rust application and Node bridge, not a browser frontend.
 
 Local originals, duplicate PNGs, input ZIPs and former source/ files are preserved outside this handoff in temp/design-originals-20260906/. They are not additional design targets.

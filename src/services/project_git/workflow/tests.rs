@@ -18,7 +18,7 @@ impl Repo {
             .unwrap()
             .as_nanos();
         let path = std::env::temp_dir().join(format!(
-            "pideck-workflow-{}-{stamp}-{}",
+            "zideck-workflow-{}-{stamp}-{}",
             std::process::id(),
             FIXTURE_ID.fetch_add(1, Ordering::Relaxed)
         ));

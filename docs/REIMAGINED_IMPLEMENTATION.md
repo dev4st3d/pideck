@@ -1,7 +1,7 @@
-# Pideck reimagined implementation
+# ZiDeck reimagined implementation
 
 Implemented from all 14 exports and the editable Pen master linked in
-[the handoff](../design/pideck-reimagined/README.md).
+[the handoff](../design/zideck-reimagined/README.md).
 
 ## Workbench
 

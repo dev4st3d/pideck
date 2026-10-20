@@ -588,7 +588,7 @@ fn replace_preserving_permissions(
     let mut backup = loop {
         let mut name = filename.to_os_string();
         name.push(format!(
-            ".pideck-{}-{}.backup",
+            ".zideck-{}-{}.backup",
             std::process::id(),
             NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
         ));
@@ -665,7 +665,7 @@ pub(crate) fn save_text_file(
     let (temporary, mut file) = loop {
         let mut name = name.to_os_string();
         name.push(format!(
-            ".pideck-{}-{}.tmp",
+            ".zideck-{}-{}.tmp",
             std::process::id(),
             NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
         ));
@@ -717,7 +717,7 @@ mod tests {
     impl TestDirectory {
         fn new() -> Self {
             let path = std::env::temp_dir().join(format!(
-                "pideck-files-{}-{}",
+                "zideck-files-{}-{}",
                 std::process::id(),
                 NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
             ));

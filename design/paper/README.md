@@ -1,4 +1,4 @@
-# Pideck: final Paper reference
+# ZiDeck: final Paper reference
 
 These are the user's approved screenshots from the Paper design session. They supersede the older Graphite conversation reference for the native project workspace.
 

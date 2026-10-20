@@ -1,4 +1,4 @@
-//! Embedded typography from the supplied Pideck design references.
+//! Embedded typography from the supplied ZiDeck design references.
 
 use std::borrow::Cow;
 use std::env;
@@ -23,7 +23,7 @@ pub(crate) fn initialize(cx: &App) -> FontCatalog {
         Cow::Borrowed(include_bytes!("../design/fonts/IBMPlexMono-Medium.ttf")),
     ];
     if let Err(error) = cx.text_system().add_fonts(fonts) {
-        eprintln!("Pideck design fonts could not be registered: {error}");
+        eprintln!("ZiDeck design fonts could not be registered: {error}");
     }
     // The headless test platform has no font collection. On the native platform,
     // Check the registered collection, not resolve_font's requested descriptor:
@@ -37,7 +37,7 @@ pub(crate) fn initialize(cx: &App) -> FontCatalog {
             DEFAULT_MONO,
         ] {
             if !registered.iter().any(|name| name == family) {
-                eprintln!("Pideck could not register its bundled font family: {family}");
+                eprintln!("ZiDeck could not register its bundled font family: {family}");
             }
         }
     }
@@ -109,15 +109,15 @@ fn settings_path() -> PathBuf {
         return PathBuf::from(path);
     }
     if let Some(root) = env::var_os("APPDATA") {
-        return PathBuf::from(root).join("Pideck").join("settings.json");
+        return PathBuf::from(root).join("ZiDeck").join("settings.json");
     }
     if let Some(root) = env::var_os("XDG_CONFIG_HOME") {
-        return PathBuf::from(root).join("pideck").join("settings.json");
+        return PathBuf::from(root).join("zideck").join("settings.json");
     }
     if let Some(root) = env::var_os("HOME") {
         return PathBuf::from(root)
             .join(".config")
-            .join("pideck")
+            .join("zideck")
             .join("settings.json");
     }
     PathBuf::from("settings.json")

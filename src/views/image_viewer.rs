@@ -432,7 +432,7 @@ mod tests {
             }
         }
         let directory = TestDirectory(std::env::temp_dir().join(format!(
-            "pideck-image-{}-{}",
+            "zideck-image-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)

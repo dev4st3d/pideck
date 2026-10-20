@@ -1,4 +1,4 @@
-# Pideck
+# ZiDeck
 
 A native workspace for project folders, files, Git, and terminals. Rust and GPUI, for Windows.
 
@@ -18,7 +18,7 @@ Stone is the default. Flint and Light are below.
 - Terminals start in the project directory and keep running when you switch tabs or projects.
 - A checklist for each project. Main shortcuts can be changed in Settings.
 
-The theme, font, shortcuts, and layout stay on your machine. Pideck does not send telemetry.
+The theme, font, shortcuts, and layout stay on your machine. ZiDeck does not send telemetry.
 
 ## Run
 
@@ -32,7 +32,7 @@ cargo run --locked
 cargo build --release --locked
 ```
 
-**PiDeck Setup** can check GitHub Releases. Applying an update restarts only after you confirm.
+**ZiDeck Setup** can check GitHub Releases. Applying an update restarts only after you confirm.
 
 ## Shortcuts
 

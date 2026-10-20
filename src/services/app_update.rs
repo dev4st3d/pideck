@@ -175,14 +175,14 @@ fn pending_update(manager: &UpdateManager) -> Result<Option<VelopackAsset>, Upda
 }
 
 fn package_id_is_valid(package_id: &str) -> bool {
-    package_id.eq_ignore_ascii_case("PiDeck")
+    package_id.eq_ignore_ascii_case("ZiDeck")
 }
 
 #[cfg(windows)]
 fn validate_asset(asset: &VelopackAsset) -> Result<(), UpdateFailure> {
     if !package_id_is_valid(&asset.PackageId) {
         return Err(UpdateFailure::new(
-            "The update package does not belong to Pideck. Nothing was installed.",
+            "The update package does not belong to ZiDeck. Nothing was installed.",
         ));
     }
     if asset.Version.trim().is_empty() || asset.FileName.trim().is_empty() {
@@ -195,12 +195,12 @@ fn validate_asset(asset: &VelopackAsset) -> Result<(), UpdateFailure> {
 
 #[cfg(windows)]
 fn map_error(stage: Stage, error: Error) -> UpdateFailure {
-    eprintln!("Pideck update {stage:?} failed: {error}");
+    eprintln!("ZiDeck update {stage:?} failed: {error}");
     let message = match (stage, error) {
         (Stage::Check, Error::Network(_)) => {
-            "Pideck couldn't reach GitHub. Check your connection and try again."
+            "ZiDeck couldn't reach GitHub. Check your connection and try again."
         }
-        (Stage::Check, _) => "Pideck couldn't check for updates. Try again in a moment.",
+        (Stage::Check, _) => "ZiDeck couldn't check for updates. Try again in a moment.",
         (Stage::Prepare, Error::Network(_)) => {
             "The update couldn't be downloaded. Check your connection and try again."
         }
@@ -208,7 +208,7 @@ fn map_error(stage: Stage, error: Error) -> UpdateFailure {
             "The update couldn't be verified or prepared. Nothing was installed."
         }
         (Stage::Schedule, _) => {
-            "The update is ready, but Pideck couldn't start it. Try restarting to update again."
+            "The update is ready, but ZiDeck couldn't start it. Try restarting to update again."
         }
     };
     UpdateFailure::new(message)
@@ -220,9 +220,9 @@ mod tests {
 
     #[test]
     fn package_identity_is_case_insensitive_and_rejects_other_products() {
-        assert!(package_id_is_valid("PiDeck"));
-        assert!(package_id_is_valid("pideck"));
-        assert!(!package_id_is_valid("PiDeck Preview"));
+        assert!(package_id_is_valid("ZiDeck"));
+        assert!(package_id_is_valid("zideck"));
+        assert!(!package_id_is_valid("ZiDeck Preview"));
         assert!(!package_id_is_valid("OtherApp"));
     }
 
@@ -243,9 +243,9 @@ mod tests {
     #[test]
     fn validates_package_identity_and_required_asset_fields() {
         let valid = VelopackAsset {
-            PackageId: "pideck".into(),
+            PackageId: "zideck".into(),
             Version: "1.2.3".into(),
-            FileName: "PiDeck-1.2.3-full.nupkg".into(),
+            FileName: "ZiDeck-1.2.3-full.nupkg".into(),
             ..VelopackAsset::default()
         };
         assert!(validate_asset(&valid).is_ok());
