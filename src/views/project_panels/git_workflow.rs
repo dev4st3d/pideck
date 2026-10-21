@@ -376,9 +376,25 @@ fn git_icon_button(
     icon: Option<&'static str>,
     enabled: bool,
 ) -> gpui::Stateful<gpui::Div> {
-    git_quiet(git_control(id, "", icon, enabled))
-        .size(px(24.0))
+    git_quiet(git_control(id, "", None, enabled))
+        .size(px(28.0))
+        .flex_shrink_0()
         .px_0()
+        .when_some(icon, |control, icon| {
+            control.child(svg().path(icon).size(px(16.0)).text_color(if enabled {
+                theme::bone_dim()
+            } else {
+                theme::smoke()
+            }))
+        })
+}
+
+fn stage_icon(kind: DiffKind) -> &'static str {
+    if kind == DiffKind::WorkingTree {
+        "icons/plus.svg"
+    } else {
+        "icons/minus.svg"
+    }
 }
 
 impl GitPanel {
@@ -515,16 +531,11 @@ impl GitPanel {
                         item.child(
                             git_icon_button(
                                 ("git-section-stage", index),
-                                None,
+                                Some(stage_icon(kind)),
                                 enabled
                                     && !section_entries.is_empty()
                                     && self.status.as_ref().is_some_and(|s| !s.truncated),
                             )
-                            .child(if kind == DiffKind::WorkingTree {
-                                "+"
-                            } else {
-                                "−"
-                            })
                             .tooltip(text_tooltip(format!(
                                 "{stage_label} all files in this section"
                             )))
@@ -577,23 +588,23 @@ impl GitPanel {
                                         }))
                                         .into_any_element()
                                     } else {
-                                        div().w(px(24.0)).flex_shrink_0().into_any_element()
+                                        div().w(px(28.0)).flex_shrink_0().into_any_element()
                                     })
                                     .child(
-                                        git_icon_button(("git-stage", index), None, enabled)
-                                            .child(if kind == DiffKind::WorkingTree {
-                                                "+"
-                                            } else {
-                                                "−"
-                                            })
-                                            .tooltip(text_tooltip(format!(
-                                                "{stage_label} {}",
-                                                entry.relative_path.display()
-                                            )))
-                                            .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                                                cx.stop_propagation()
-                                            })
-                                            .on_click(cx.listener(move |view, _, window, cx| {
+                                        git_icon_button(
+                                            ("git-stage", index),
+                                            Some(stage_icon(kind)),
+                                            enabled,
+                                        )
+                                        .tooltip(text_tooltip(format!(
+                                            "{stage_label} {}",
+                                            entry.relative_path.display()
+                                        )))
+                                        .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                            cx.stop_propagation()
+                                        })
+                                        .on_click(
+                                            cx.listener(move |view, _, window, cx| {
                                                 cx.stop_propagation();
                                                 view.stage_entries(
                                                     vec![entry.clone()],
@@ -601,7 +612,8 @@ impl GitPanel {
                                                     window,
                                                     cx,
                                                 );
-                                            })),
+                                            }),
+                                        ),
                                     ),
                             )
                     }),
@@ -648,169 +660,216 @@ impl GitPanel {
 
     fn push_button(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         git_control("git-push", "", Some("icons/arrow-up.svg"), self.can_push())
+            .h(px(28.0))
             .child(self.push_label())
             .tooltip(text_tooltip(self.push_tooltip()))
             .on_click(cx.listener(|view, _, window, cx| view.push_current(None, window, cx)))
             .into_any_element()
     }
 
-    fn branch_controls(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+    /// Branch select in the panel header; the option list floats over the panel.
+    fn branch_select(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let enabled = !self.git_busy() && !self.loading;
         let branch = self.branch().unwrap_or("No repository").to_owned();
         let open = self.branch_picker;
-        let busy = self.git_busy();
         div()
-            .px(px(12.0))
-            .pb(px(8.0))
-            .flex_shrink_0()
-            .flex()
-            .items_start()
-            .gap(px(8.0))
+            .relative()
+            .flex_1()
+            .min_w_0()
+            .on_children_prepainted(cx.processor(|view, bounds: Vec<Bounds<Pixels>>, _, _| {
+                view.branch_bounds = bounds.first().copied();
+            }))
             .child(
                 div()
-                    .flex_1()
+                    .id("choose-branch")
+                    .h(px(28.0))
+                    .w_full()
                     .min_w_0()
+                    .pl(px(6.0))
+                    .pr(px(8.0))
                     .flex()
-                    .flex_col()
-                    .overflow_hidden()
+                    .items_center()
+                    .gap(px(8.0))
                     .rounded(px(4.0))
-                    .bg(theme::chrome())
                     .border_1()
-                    .border_color(if open {
-                        theme::edge_hard()
-                    } else {
-                        theme::edge()
+                    .border_color(if open { theme::edge_hard() } else { rgba(0) })
+                    .bg(if open { theme::selection() } else { rgba(0) })
+                    .when(enabled, |control| {
+                        control
+                            .tab_index(0)
+                            .cursor_pointer()
+                            .hover(move |style| {
+                                style.bg(if open {
+                                    theme::selection()
+                                } else {
+                                    theme::panel_hover()
+                                })
+                            })
+                            .active(|style| style.bg(theme::selection()))
+                            .focus(|style| style.border_color(theme::focus()))
                     })
+                    .tooltip(text_tooltip(format!("Switch branch · B\n{branch}")))
+                    .on_click(cx.listener(|view, _, window, cx| {
+                        if view.git_busy() || view.loading {
+                            return;
+                        }
+                        view.toggle_branch_picker();
+                        window.focus(&view.focus);
+                        cx.notify();
+                    }))
+                    .child(panel_icon("icons/branch.svg"))
                     .child(
                         div()
-                            .id("choose-branch")
-                            .h(px(32.0))
-                            .w_full()
-                            .px(px(10.0))
-                            .flex()
-                            .items_center()
-                            .gap(px(8.0))
-                            .when(open, |header| {
-                                header.border_b_1().border_color(theme::edge())
-                            })
-                            .when(enabled, |control| {
-                                control
-                                    .tab_index(0)
-                                    .cursor_pointer()
-                                    .hover(|style| style.bg(theme::panel_hover()))
-                                    .active(|style| style.bg(theme::selection()))
-                                    .focus(|style| style.bg(theme::selection()))
-                            })
-                            .tooltip(text_tooltip(format!("Choose branch · B\n{branch}")))
-                            .on_click(cx.listener(|view, _, _, cx| {
-                                if !view.git_busy() && !view.loading {
-                                    view.branch_picker = !view.branch_picker;
-                                    cx.notify();
-                                }
-                            }))
-                            .child(panel_icon("icons/branch.svg"))
-                            .child(
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .font_family(theme::mono())
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_size(px(12.0))
+                            .line_height(px(20.0))
+                            .child(branch),
+                    )
+                    .when_some(
+                        self.repository
+                            .as_ref()
+                            .and_then(|repo| repo.ahead)
+                            .filter(|ahead| *ahead > 0),
+                        |control, ahead| {
+                            control.child(
                                 div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .truncate()
+                                    .flex_shrink_0()
                                     .font_family(theme::mono())
-                                    .text_size(px(12.0))
-                                    .line_height(px(20.0))
-                                    .child(branch),
+                                    .text_size(px(11.0))
+                                    .line_height(px(16.0))
+                                    .text_color(theme::success())
+                                    .child(format!("↑{ahead}")),
                             )
-                            .when_some(
-                                self.repository
-                                    .as_ref()
-                                    .and_then(|repo| repo.ahead)
-                                    .filter(|ahead| *ahead > 0),
-                                |control, ahead| {
-                                    control.child(
-                                        div()
-                                            .flex_shrink_0()
-                                            .text_size(px(11.0))
-                                            .line_height(px(16.0))
-                                            .text_color(theme::success())
-                                            .child(format!("↑ {ahead}")),
-                                    )
-                                },
-                            )
-                            .child(panel_icon(if open {
+                        },
+                    )
+                    .child(
+                        svg()
+                            .path(if open {
                                 "icons/chevron-up.svg"
                             } else {
                                 "icons/chevron-down.svg"
-                            })),
-                    )
-                    .when(open, |menu| {
-                        menu.child(
-                            div()
-                                .id("branch-list")
-                                .max_h(px(180.0))
-                                .overflow_y_scroll()
-                                .p(px(4.0))
-                                .flex()
-                                .flex_col()
-                                .gap(px(2.0))
-                                .children(self.branches.iter().enumerate().map(|(index, name)| {
-                                    let name = name.clone();
-                                    let chosen = name.clone();
-                                    let current = self.branch() == Some(name.as_str());
-                                    div()
-                                        .id(("branch-option", index))
-                                        .h(px(28.0))
-                                        .w_full()
-                                        .px(px(8.0))
-                                        .flex()
-                                        .items_center()
-                                        .gap(px(8.0))
-                                        .rounded(px(4.0))
-                                        .font_family(theme::mono())
-                                        .text_size(px(12.0))
-                                        .line_height(px(20.0))
-                                        .text_color(theme::bone())
-                                        .bg(if current { theme::selection() } else { rgba(0) })
-                                        .when(enabled && !busy, |row| {
-                                            row.tab_index(0)
-                                                .cursor_pointer()
-                                                .hover(move |style| {
-                                                    style.bg(if current {
-                                                        theme::selection()
-                                                    } else {
-                                                        theme::panel_hover()
-                                                    })
-                                                })
-                                                .on_click(cx.listener(move |view, _, _, cx| {
-                                                    view.choose_branch(chosen.clone(), cx)
-                                                }))
-                                        })
-                                        .child(
-                                            div().flex_1().min_w_0().truncate().child(name.clone()),
-                                        )
-                                        .when(current, |row| {
-                                            row.child(
-                                                div()
-                                                    .flex_shrink_0()
-                                                    .text_size(px(12.0))
-                                                    .text_color(theme::ash())
-                                                    .child("✓"),
-                                            )
-                                        })
-                                }))
-                                .when(self.branches.is_empty(), |list| {
-                                    list.child(
-                                        div()
-                                            .px(px(8.0))
-                                            .py(px(6.0))
-                                            .text_size(px(12.0))
-                                            .text_color(theme::ash())
-                                            .child("No local branches yet."),
-                                    )
-                                }),
-                        )
-                    }),
+                            })
+                            .size(px(12.0))
+                            .flex_shrink_0()
+                            .text_color(theme::ash()),
+                    ),
             )
-            .when(self.history.visible, |row| row.child(self.push_button(cx)))
+            .when(open, |select| {
+                select.child(
+                    div()
+                        .absolute()
+                        .top(px(28.0 + chrome::MENU_GAP))
+                        .left_0()
+                        .child(
+                            deferred(anchored().snap_to_window().child(self.branch_menu(cx)))
+                                .with_priority(1),
+                        ),
+                )
+            })
             .into_any_element()
+    }
+
+    fn branch_menu(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let enabled = !self.git_busy() && !self.loading;
+        let width = self
+            .branch_bounds
+            .map_or(chrome::MENU_WIDTH, |bounds| f32::from(bounds.size.width))
+            .max(chrome::MENU_WIDTH);
+        div()
+            .id("branch-list")
+            .occlude()
+            .w(px(width))
+            .max_h(px(chrome::MENU_MAX_HEIGHT))
+            .overflow_y_scroll()
+            .p(px(chrome::MENU_INSET))
+            .flex()
+            .flex_col()
+            .gap(px(2.0))
+            .font_family(chrome::CHROME_FONT)
+            .text_color(theme::bone())
+            .bg(theme::panel_lift())
+            .border_1()
+            .border_color(theme::edge_hard())
+            .rounded(px(chrome::CONTROL_RADIUS))
+            .on_mouse_down_out(cx.listener(|view, event: &gpui::MouseDownEvent, _, cx| {
+                // The trigger toggles on its own; closing here would reopen it.
+                if view
+                    .branch_bounds
+                    .is_some_and(|bounds| bounds.contains(&event.position))
+                {
+                    return;
+                }
+                view.branch_picker = false;
+                cx.notify();
+            }))
+            .child(
+                div()
+                    .px(px(8.0))
+                    .pt(px(4.0))
+                    .pb(px(2.0))
+                    .text_size(px(chrome::DETAIL_TEXT_SIZE))
+                    .line_height(px(chrome::DETAIL_LINE_HEIGHT))
+                    .text_color(theme::ash())
+                    .child("Switch branch"),
+            )
+            .children(self.branches.iter().enumerate().map(|(index, name)| {
+                let chosen = name.clone();
+                let current = self.branch() == Some(name.as_str());
+                let highlighted = index == self.branch_selected;
+                div()
+                    .id(("branch-option", index))
+                    .h(px(chrome::OPTION_ROW_HEIGHT))
+                    .w_full()
+                    .flex_shrink_0()
+                    .px(px(8.0))
+                    .flex()
+                    .items_center()
+                    .gap(px(8.0))
+                    .rounded(px(4.0))
+                    .border_1()
+                    .border_color(if highlighted {
+                        theme::edge_hard()
+                    } else {
+                        rgba(0)
+                    })
+                    .font_family(theme::mono())
+                    .text_size(px(12.0))
+                    .line_height(px(20.0))
+                    .text_color(if current {
+                        theme::bone()
+                    } else {
+                        theme::bone_dim()
+                    })
+                    .bg(if highlighted {
+                        theme::selection()
+                    } else {
+                        rgba(0)
+                    })
+                    .when(enabled, |row| {
+                        row.cursor_pointer()
+                            .hover(|style| style.bg(theme::panel_hover()).text_color(theme::bone()))
+                            .on_click(cx.listener(move |view, _, window, cx| {
+                                window.focus(&view.focus);
+                                view.choose_branch(chosen.clone(), cx)
+                            }))
+                    })
+                    .child(div().flex_1().min_w_0().truncate().child(name.clone()))
+                    .when(current, |row| row.child(check_mark()))
+            }))
+            .when(self.branches.is_empty(), |list| {
+                list.child(
+                    div()
+                        .px(px(8.0))
+                        .py(px(6.0))
+                        .text_size(px(12.0))
+                        .text_color(theme::ash())
+                        .child("No local branches yet."),
+                )
+            })
     }
 
     fn operation_feedback(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
@@ -962,7 +1021,6 @@ impl GitPanel {
         });
         let can_commit = self.can_commit(cx);
         let can_push = self.can_push();
-        let show_shortcut = !self.git_busy();
         let commit_label = if self.operation == Some("Committing…") {
             "Committing…".to_string()
         } else if staged == 0 {
@@ -1007,7 +1065,7 @@ impl GitPanel {
                             .px(px(12.0))
                             .flex()
                             .items_center()
-                            .justify_between()
+                            .justify_center()
                             .gap(px(8.0))
                             .border_r_1()
                             .border_color(theme::edge())
@@ -1033,36 +1091,16 @@ impl GitPanel {
                                         view.commit_staged(window, cx)
                                     }))
                             })
-                            .child(
-                                div()
-                                    .min_w_0()
-                                    .flex()
-                                    .items_center()
-                                    .gap(px(6.0))
-                                    .when(can_commit, |label| {
-                                        label.child(
-                                            svg()
-                                                .path("icons/check.svg")
-                                                .size(px(14.0))
-                                                .flex_shrink_0()
-                                                .text_color(theme::on_accent()),
-                                        )
-                                    })
-                                    .child(div().min_w_0().truncate().child(commit_label)),
-                            )
-                            .when(show_shortcut, |button| {
+                            .when(can_commit, |button| {
                                 button.child(
-                                    div()
+                                    svg()
+                                        .path("icons/check.svg")
+                                        .size(px(14.0))
                                         .flex_shrink_0()
-                                        .text_size(px(11.0))
-                                        .text_color(if can_commit {
-                                            theme::on_accent()
-                                        } else {
-                                            theme::ash()
-                                        })
-                                        .child("Ctrl+Enter"),
+                                        .text_color(theme::on_accent()),
                                 )
-                            }),
+                            })
+                            .child(div().min_w_0().truncate().child(commit_label)),
                     )
                     .child(
                         div()
@@ -1126,6 +1164,7 @@ impl GitPanel {
             .flex_1()
             .min_h_0()
             .px(px(24.0))
+            .pb(px(40.0))
             .flex()
             .flex_col()
             .items_center()
@@ -1148,13 +1187,6 @@ impl GitPanel {
                             .text_color(theme::success()),
                     )
                     .child(div().font_weight(FontWeight::MEDIUM).child("No changes"))
-                    .child(
-                        div()
-                            .text_size(px(chrome::DETAIL_TEXT_SIZE))
-                            .line_height(px(chrome::DETAIL_LINE_HEIGHT))
-                            .text_color(theme::ash())
-                            .child("Edits in this project will appear here."),
-                    )
                     .when(!sync.is_empty(), |state| {
                         state.child(
                             div()
@@ -1172,17 +1204,6 @@ impl GitPanel {
                                 .flex_wrap()
                                 .justify_center()
                                 .gap(px(6.0))
-                                .child(
-                                    git_control(
-                                        "git-clean-history",
-                                        "View history",
-                                        Some("icons/history.svg"),
-                                        true,
-                                    )
-                                    .on_click(cx.listener(
-                                        |view, _, window, cx| view.toggle_history(window, cx),
-                                    )),
-                                )
                                 .when(
                                     repository.is_some_and(|repo| repo.upstream.is_some()),
                                     |actions| {
@@ -1235,106 +1256,77 @@ impl GitPanel {
             .on_key_down(cx.listener(Self::on_key))
             .child(
                 div()
-                    .h(px(40.0))
-                    .px(px(12.0))
+                    .h(px(44.0))
+                    .px(px(8.0))
                     .flex_shrink_0()
                     .flex()
                     .items_center()
-                    .gap(px(8.0))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .font_weight(FontWeight::MEDIUM)
-                            .line_height(px(20.0))
-                            .child(if self.history.visible {
-                                "History"
-                            } else {
-                                "Working changes"
-                            }),
+                    .gap(px(4.0))
+                    .when(self.history.visible, |header| {
+                        header.child(
+                            git_icon_button(
+                                "git-back-to-changes",
+                                Some("icons/chevron-left.svg"),
+                                true,
+                            )
+                            .tooltip(text_tooltip("Back to changes"))
+                            .on_click(cx.listener(|view, _, window, cx| {
+                                view.toggle_history(window, cx)
+                            })),
+                        )
+                    })
+                    .child(self.branch_select(cx))
+                    .when_some(
+                        self.operation
+                            .or((self.loading && self.operation.is_none()).then_some("Refreshing…")),
+                        |header, status| {
+                            header.child(
+                                div()
+                                    .flex_shrink_0()
+                                    .text_size(px(chrome::DETAIL_TEXT_SIZE))
+                                    .text_color(theme::ash())
+                                    .child(status),
+                            )
+                        },
                     )
-                    .when_some(self.operation, |header, operation| {
+                    .when(self.history.visible, |header| {
+                        header.child(self.push_button(cx))
+                    })
+                    .when(!self.history.visible && count > 0, |header| {
                         header.child(
-                            div()
-                                .text_size(px(10.0))
-                                .text_color(theme::ash())
-                                .child(operation),
+                            git_icon_button(
+                                "collapse-git",
+                                Some("icons/collapse-all.svg"),
+                                true,
+                            )
+                            .tooltip(text_tooltip("Collapse all folders"))
+                            .on_click(cx.listener(|view, _, _, cx| view.collapse_all(cx))),
                         )
                     })
-                    .when(self.loading && self.operation.is_none(), |header| {
+                    .when(!self.history.visible, |header| {
                         header.child(
-                            div()
-                                .text_size(px(10.0))
-                                .text_color(theme::ash())
-                                .child("Refreshing…"),
+                            git_icon_button(
+                                "git-history",
+                                Some("icons/history.svg"),
+                                self.repository.is_some(),
+                            )
+                            .tooltip(text_tooltip("History"))
+                            .on_click(cx.listener(|view, _, window, cx| {
+                                view.toggle_history(window, cx)
+                            })),
                         )
                     })
                     .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(2.0))
-                            .when(!self.history.visible, |group| {
-                                group
-                                    .when(count > 0, |group| {
-                                        group.child(
-                                            git_icon_button(
-                                                "collapse-git",
-                                                Some("icons/collapse-all.svg"),
-                                                true,
-                                            )
-                                            .size(px(28.0))
-                                            .tooltip(text_tooltip("Collapse all folders"))
-                                            .on_click(
-                                                cx.listener(|view, _, _, cx| view.collapse_all(cx)),
-                                            ),
-                                        )
-                                    })
-                                    .child(
-                                        git_icon_button(
-                                            "git-history",
-                                            Some("icons/history.svg"),
-                                            self.repository.is_some(),
-                                        )
-                                        .size(px(28.0))
-                                        .tooltip(text_tooltip("History"))
-                                        .on_click(
-                                            cx.listener(|view, _, window, cx| {
-                                                view.toggle_history(window, cx)
-                                            }),
-                                        ),
-                                    )
-                            })
-                            .when(self.history.visible, |group| {
-                                group.child(
-                                    git_quiet(git_control(
-                                        "git-back-to-changes",
-                                        "Changes",
-                                        Some("icons/chevron-left.svg"),
-                                        true,
-                                    ))
-                                    .h(px(28.0))
-                                    .px(px(8.0))
-                                    .on_click(cx.listener(
-                                        |view, _, window, cx| view.toggle_history(window, cx),
-                                    )),
-                                )
-                            })
-                            .child(
-                                git_icon_button("refresh-git", Some("icons/refresh.svg"), !busy)
-                                    .size(px(28.0))
-                                    .tooltip(text_tooltip("Refresh · F5"))
-                                    .on_click(cx.listener(|view, _, _, cx| {
-                                        view.refresh(cx);
-                                        if view.history.visible {
-                                            view.load_history(false, cx);
-                                        }
-                                    })),
-                            ),
+                        git_icon_button("refresh-git", Some("icons/refresh.svg"), !busy)
+                            .tooltip(text_tooltip("Refresh · F5"))
+                            .on_click(cx.listener(|view, _, _, cx| {
+                                view.refresh(cx);
+                                if view.history.visible {
+                                    view.load_history(false, cx);
+                                }
+                            })),
                     ),
             )
-            .child(self.branch_controls(cx))
             .when(self.publish_picker, |panel| {
                 panel.child(
                     div()

@@ -766,16 +766,27 @@ impl FilesPanel {
             .child({
                 let owner = cx.weak_entity();
                 let show_hidden = !self.hide_hidden;
-                Button::new("file-tree-actions")
-                    .label("⋯")
-                    .ghost()
-                    .w(px(24.0))
-                    .h(px(28.0))
-                    .tooltip("More actions")
-                    .on_click(|_, _, cx| cx.stop_propagation())
-                    .dropdown_menu(move |menu, _, _| {
-                        Self::menu(menu, owner.clone(), MenuTarget::Panel, false, show_hidden)
-                    })
+                // The wrapper owns the tooltip so it follows the workbench reveal delay.
+                div()
+                    .id("file-tree-actions-tip")
+                    .tooltip(text_tooltip("More actions"))
+                    .child(
+                        Button::new("file-tree-actions")
+                            .ghost()
+                            .size(px(28.0))
+                            .p_0()
+                            .child(panel_icon("icons/overflow.svg"))
+                            .on_click(|_, _, cx| cx.stop_propagation())
+                            .dropdown_menu(move |menu, _, _| {
+                                Self::menu(
+                                    menu,
+                                    owner.clone(),
+                                    MenuTarget::Panel,
+                                    false,
+                                    show_hidden,
+                                )
+                            }),
+                    )
             })
             .when(pending, |bar| {
                 bar.child(control(

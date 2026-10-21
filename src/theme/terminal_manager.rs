@@ -17,7 +17,8 @@ pub(crate) const TITLEBAR_INSET: f32 = 16.0;
 pub(crate) const TITLEBAR_TEXT_SIZE: f32 = 12.0;
 pub(crate) const WORDMARK_SIZE: f32 = 24.0;
 pub(crate) const COLLAPSED_BRAND_WIDTH: f32 = 128.0;
-pub(crate) const WINDOW_CONTROL_WIDTH: f32 = 28.0;
+// Matches the native Windows caption button width; controls run flush to the edge.
+pub(crate) const WINDOW_CONTROL_WIDTH: f32 = 46.0;
 pub(crate) const DETAIL_TEXT_SIZE: f32 = 11.0;
 pub(crate) const DETAIL_LINE_HEIGHT: f32 = 16.0;
 pub(crate) const CONTROL_TEXT_SIZE: f32 = 13.0;
@@ -47,11 +48,18 @@ pub(crate) const MENU_ROW_HEIGHT: f32 = 34.0;
 pub(crate) const MENU_MAX_HEIGHT: f32 = 360.0;
 pub(crate) const MENU_GAP: f32 = 6.0;
 pub(crate) const TAB_INSET: f32 = 16.0;
+pub(crate) const TAB_LIST_BUTTON: f32 = 28.0;
+pub(crate) const TAB_LIST_MENU_WIDTH: f32 = 280.0;
+// Floating select menus: inner padding and option rows.
+pub(crate) const MENU_INSET: f32 = 4.0;
+pub(crate) const OPTION_ROW_HEIGHT: f32 = 30.0;
 pub(crate) const ROW_DETAIL_GAP: f32 = 2.0;
 pub(crate) const CHROME_LINE_HEIGHT: f32 = 20.0;
 pub(crate) const TECH_LINE_HEIGHT: f32 = 23.0;
 pub(crate) const WIDE_TOOLBAR_MIN_WIDTH: f32 = 1100.0;
 pub(crate) const TOOLTIP_MAX_WIDTH: f32 = 480.0;
+// Added to GPUI's fixed 500 ms delay for a total of two seconds.
+pub(crate) const TOOLTIP_EXTRA_DELAY: std::time::Duration = std::time::Duration::from_millis(1500);
 
 // Modal settings dialog.
 pub(crate) const DIALOG_WIDTH: f32 = 720.0;

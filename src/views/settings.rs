@@ -10,7 +10,7 @@ use gpui::{
 };
 use gpui_component::scroll::{Scrollbar, ScrollbarShow};
 
-use super::terminal_manager::{button, text_tooltip};
+use super::terminal_manager::{button, check_mark, text_tooltip};
 use crate::fonts;
 use crate::services::keymap::{self, Keymap, Shortcut, ShortcutGroup};
 use crate::services::terminal_font::{
@@ -473,7 +473,9 @@ impl SettingsPanel {
                                                         .w(px(chrome::ICON_SIZE))
                                                         .flex_shrink_0()
                                                         .text_color(theme::focus())
-                                                        .when(current, |mark| mark.child("✓")),
+                                                        .when(current, |mark| {
+                                                            mark.child(check_mark())
+                                                        }),
                                                 )
                                         },
                                     )),

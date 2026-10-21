@@ -7,14 +7,14 @@ use std::{
 };
 
 use gpui::{
-    ClipboardItem, Context, CursorStyle, Entity, EventEmitter, FocusHandle, FontWeight,
-    IntoElement, Keystroke, MouseButton, Render, SharedString, Subscription, Task, Window, div,
-    prelude::*, px, svg,
+    Bounds, ClipboardItem, Context, Corner, CursorStyle, Entity, EventEmitter, FocusHandle,
+    FontWeight, IntoElement, KeyDownEvent, Keystroke, MouseButton, Pixels, Render, SharedString,
+    Subscription, Task, Window, anchored, deferred, div, prelude::*, px, svg,
 };
 
 use super::file_editor::{FileEditor, FileEditorEvent};
 use super::image_viewer::{ImageViewer, ImageViewerEvent};
-use super::terminal_manager::text_tooltip;
+use super::terminal_manager::{check_mark, text_tooltip};
 use crate::services::keymap::{Keymap, Shortcut};
 use crate::services::terminal::{TerminalEvent, TerminalSize, TerminalWorker};
 use crate::services::terminal_engine::TerminalEngine;
@@ -378,6 +378,9 @@ pub(crate) struct TerminalView {
     fallback_focus: FocusHandle,
     close_pending: bool,
     files_locked: bool,
+    tab_list_open: bool,
+    tab_list_focus: FocusHandle,
+    tab_list_bounds: Option<Bounds<Pixels>>,
 }
 
 impl TerminalView {
@@ -398,6 +401,9 @@ impl TerminalView {
             fallback_focus: cx.focus_handle(),
             close_pending: false,
             files_locked: false,
+            tab_list_open: false,
+            tab_list_focus: cx.focus_handle(),
+            tab_list_bounds: None,
         }
     }
 
@@ -1176,6 +1182,216 @@ impl Render for TerminalSession {
     }
 }
 
+impl TerminalView {
+    fn set_tab_list_open(&mut self, open: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.tab_list_open = open;
+        if open {
+            window.focus(&self.tab_list_focus);
+        } else if self.tab_list_focus.is_focused(window) {
+            self.focus(window, cx);
+        }
+        cx.notify();
+    }
+
+    /// Overflow list of every open tab: choose one, or close it in place.
+    fn tab_list(&self, entries: Vec<TabEntry>, cx: &mut Context<Self>) -> impl IntoElement {
+        let open = self.tab_list_open;
+        let active_id = self.tabs.get(self.active).map(|tab| tab.id);
+        div()
+            .relative()
+            .flex_shrink_0()
+            .on_children_prepainted(cx.processor(|view, bounds: Vec<Bounds<Pixels>>, _, _| {
+                view.tab_list_bounds = bounds.first().copied();
+            }))
+            .child(
+                div()
+                    .id("tab-list")
+                    .size(px(chrome::TAB_LIST_BUTTON))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(chrome::CONTROL_RADIUS))
+                    .border_1()
+                    .border_color(gpui::rgba(0))
+                    .bg(if open {
+                        theme::selection()
+                    } else {
+                        gpui::rgba(0)
+                    })
+                    .tab_index(0)
+                    .cursor_pointer()
+                    .hover(|button| button.bg(theme::panel_hover()))
+                    .focus(|button| button.border_color(theme::focus()))
+                    .tooltip(text_tooltip(format!("Open tabs · {}", entries.len())))
+                    .on_click(cx.listener(|view, _, window, cx| {
+                        view.set_tab_list_open(!view.tab_list_open, window, cx)
+                    }))
+                    .child(
+                        svg()
+                            .path(if open {
+                                "icons/chevron-up.svg"
+                            } else {
+                                "icons/chevron-down.svg"
+                            })
+                            .size(px(chrome::ICON_SIZE))
+                            .text_color(if open { theme::bone() } else { theme::ash() }),
+                    ),
+            )
+            .when(open, |wrapper| {
+                // A zero-width anchor at the trigger's right edge right-aligns the popup.
+                wrapper.child(
+                    div()
+                        .absolute()
+                        .top(px(chrome::TAB_LIST_BUTTON + chrome::MENU_GAP))
+                        .right_0()
+                        .child(
+                            deferred(
+                                anchored()
+                                    .anchor(Corner::TopRight)
+                                    .snap_to_window()
+                                    .child(self.tab_list_menu(entries, active_id, cx)),
+                            )
+                            .with_priority(1),
+                        ),
+                )
+            })
+    }
+
+    fn tab_list_menu(
+        &self,
+        entries: Vec<TabEntry>,
+        active_id: Option<u64>,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        div()
+            .id("tab-list-menu")
+            .track_focus(&self.tab_list_focus)
+            .tab_group()
+            .occlude()
+            .w(px(chrome::TAB_LIST_MENU_WIDTH))
+            .max_h(px(chrome::MENU_MAX_HEIGHT))
+            .overflow_y_scroll()
+            .p(px(chrome::MENU_INSET))
+            .flex()
+            .flex_col()
+            .gap(px(2.0))
+            .font_family(chrome::CHROME_FONT)
+            .text_size(px(chrome::CONTROL_TEXT_SIZE))
+            .line_height(px(chrome::CONTROL_LINE_HEIGHT))
+            .text_color(theme::bone())
+            .bg(theme::panel_lift())
+            .border_1()
+            .border_color(theme::edge_hard())
+            .rounded(px(chrome::CONTROL_RADIUS))
+            .on_mouse_down_out(
+                cx.listener(|view, event: &gpui::MouseDownEvent, window, cx| {
+                    // The trigger toggles on its own; closing here would reopen it.
+                    if view
+                        .tab_list_bounds
+                        .is_some_and(|bounds| bounds.contains(&event.position))
+                    {
+                        return;
+                    }
+                    view.set_tab_list_open(false, window, cx);
+                }),
+            )
+            .on_key_down(cx.listener(|view, event: &KeyDownEvent, window, cx| {
+                if event.keystroke.key == "escape" {
+                    cx.stop_propagation();
+                    view.set_tab_list_open(false, window, cx);
+                }
+            }))
+            .children(entries.into_iter().map(|entry| {
+                let id = entry.id;
+                let current = active_id == Some(id);
+                div()
+                    .id(SharedString::from(format!("tab-list-item-{id}")))
+                    .group("tab-list-item")
+                    .h(px(chrome::OPTION_ROW_HEIGHT))
+                    .w_full()
+                    .pl(px(chrome::COMPACT_GAP))
+                    .pr(px(4.0))
+                    .flex()
+                    .items_center()
+                    .gap(px(chrome::COMPACT_GAP))
+                    .rounded(px(chrome::CONTROL_RADIUS))
+                    .border_1()
+                    .border_color(gpui::rgba(0))
+                    .bg(if current {
+                        theme::selection()
+                    } else {
+                        gpui::rgba(0)
+                    })
+                    .tab_index(0)
+                    .cursor_pointer()
+                    .hover(move |row| {
+                        row.bg(if current {
+                            theme::selection()
+                        } else {
+                            theme::panel_hover()
+                        })
+                    })
+                    .focus(|row| row.border_color(theme::focus()))
+                    .on_click(cx.listener(move |view, _, window, cx| {
+                        view.tab_list_open = false;
+                        view.select_tab(id, window, cx);
+                    }))
+                    .child(
+                        svg()
+                            .path(entry.icon)
+                            .size(px(chrome::ICON_SIZE))
+                            .flex_shrink_0()
+                            .text_color(if current {
+                                theme::focus()
+                            } else {
+                                theme::ash()
+                            }),
+                    )
+                    .child(div().flex_1().min_w_0().truncate().child(entry.label))
+                    .when(current, |row| row.child(check_mark()))
+                    .child(
+                        div()
+                            .id(SharedString::from(format!("tab-list-close-{id}")))
+                            .size(px(22.0))
+                            .flex_shrink_0()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded(px(chrome::CONTROL_RADIUS))
+                            .cursor_pointer()
+                            .hover(|button| button.bg(theme::panel_hover()))
+                            .tooltip(text_tooltip("Close tab"))
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                            .on_click(cx.listener(move |view, _, window, cx| {
+                                cx.stop_propagation();
+                                view.close_tab(id, window, cx);
+                                if view.tabs.len() <= 1 {
+                                    view.set_tab_list_open(false, window, cx);
+                                }
+                            }))
+                            .child(
+                                svg()
+                                    .path("icons/close.svg")
+                                    .size(px(12.0))
+                                    .text_color(theme::smoke())
+                                    .group_hover("tab-list-item", |icon| {
+                                        icon.text_color(theme::ash())
+                                    }),
+                            ),
+                    )
+            }))
+    }
+}
+
+#[derive(Clone)]
+struct TabEntry {
+    id: u64,
+    label: String,
+    tooltip: String,
+    icon: &'static str,
+    status: Option<(String, gpui::Rgba)>,
+}
+
 impl EventEmitter<TerminalPanelEvent> for TerminalView {}
 
 impl Render for TerminalView {
@@ -1187,11 +1403,10 @@ impl Render for TerminalView {
                 TabContent::Diff { view, .. } => view.clone().into(),
             });
         let mut terminal_index = 0;
-        let tabs = self
+        let entries = self
             .tabs
             .iter()
-            .enumerate()
-            .map(|(index, tab)| {
+            .map(|tab| {
                 let (label, tooltip, icon, status) = match &tab.content {
                     TabContent::Terminal(session) => {
                         terminal_index += 1;
@@ -1248,16 +1463,20 @@ impl Render for TerminalView {
                         None,
                     ),
                 };
-                workspace_tab(
-                    tab.id,
+                TabEntry {
+                    id: tab.id,
                     label,
                     tooltip,
                     icon,
                     status,
-                    index == self.active,
-                    cx,
-                )
-                .into_any_element()
+                }
+            })
+            .collect::<Vec<_>>();
+        let tabs = entries
+            .iter()
+            .enumerate()
+            .map(|(index, entry)| {
+                workspace_tab(entry.clone(), index == self.active, cx).into_any_element()
             })
             .collect::<Vec<_>>();
 
@@ -1292,51 +1511,8 @@ impl Render for TerminalView {
                             .items_center()
                             .children(tabs),
                     )
-                    .child({
-                        use gpui_component::{
-                            button::{Button, ButtonVariants},
-                            menu::{DropdownMenu, PopupMenuItem},
-                        };
-                        let owner = cx.weak_entity();
-                        let items: Vec<_> = self
-                            .tabs
-                            .iter()
-                            .map(|tab| {
-                                (
-                                    tab.id,
-                                    match &tab.content {
-                                        TabContent::Terminal(session) => {
-                                            session.read(cx).shell.clone()
-                                        }
-                                        TabContent::File { tab, .. } => tab.title(cx),
-                                        TabContent::Diff { title, .. } => title.clone(),
-                                    },
-                                )
-                            })
-                            .collect();
-                        Button::new("tab-list")
-                            .label("⌄")
-                            .ghost()
-                            .w(px(28.0))
-                            .h(px(32.0))
-                            .tooltip("Open tabs")
-                            .dropdown_menu(move |mut menu, _, _| {
-                                for (id, title) in &items {
-                                    let owner = owner.clone();
-                                    let id = *id;
-                                    menu = menu.item(PopupMenuItem::new(title.clone()).on_click(
-                                        move |_, window, cx| {
-                                            let owner = owner.clone();
-                                            window.defer(cx, move |window, cx| {
-                                                let _ = owner.update(cx, |view, cx| {
-                                                    view.select_tab(id, window, cx)
-                                                });
-                                            });
-                                        },
-                                    ));
-                                }
-                                menu
-                            })
+                    .when(entries.len() > 1, |header| {
+                        header.child(self.tab_list(entries, cx))
                     }),
             )
             .when_some(active_content, |panel, content| {
@@ -1385,14 +1561,17 @@ fn terminal_tab_title(title: &str, index: usize) -> String {
 }
 
 fn workspace_tab(
-    id: u64,
-    label: String,
-    tooltip: String,
-    icon: &'static str,
-    status: Option<(String, gpui::Rgba)>,
+    entry: TabEntry,
     selected: bool,
     cx: &mut Context<TerminalView>,
 ) -> impl IntoElement {
+    let TabEntry {
+        id,
+        label,
+        tooltip,
+        icon,
+        status,
+    } = entry;
     let select_id = id;
     let close_id = id;
     let dirty = status.as_ref().is_some_and(|(label, _)| label == "●");

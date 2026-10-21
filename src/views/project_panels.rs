@@ -13,12 +13,12 @@ mod git_history;
 mod git_workflow;
 
 use gpui::{
-    Context, EventEmitter, FocusHandle, FontWeight, IntoElement, KeyDownEvent, Render,
-    ScrollStrategy, SharedString, UniformListScrollHandle, Window, div, img, prelude::*, px, rgba,
-    svg, uniform_list,
+    Bounds, Context, EventEmitter, FocusHandle, FontWeight, IntoElement, KeyDownEvent, Pixels,
+    Render, ScrollStrategy, SharedString, UniformListScrollHandle, Window, anchored, deferred, div,
+    img, prelude::*, px, rgba, svg, uniform_list,
 };
 
-use super::terminal_manager::text_tooltip;
+use super::terminal_manager::{check_mark, text_tooltip};
 use crate::services::project_files::{self, DirectoryEntry, DirectoryListing};
 use crate::services::project_git::{
     self, DiffContent, DiffKind, GitEntry, GitStatus, ReviewFile, workflow,
@@ -917,6 +917,8 @@ pub(super) struct GitPanel {
     collapsed: HashSet<(DiffKind, PathBuf)>,
     branches: Vec<String>,
     branch_picker: bool,
+    branch_selected: usize,
+    branch_bounds: Option<Bounds<Pixels>>,
     switching: bool,
     status: Option<GitStatus>,
     loading: bool,
@@ -964,7 +966,7 @@ impl GitPanel {
             InputState::new(window, cx)
                 .multi_line(true)
                 .rows(2)
-                .placeholder("Commit message")
+                .placeholder("Commit message · Ctrl+Enter")
         });
         let subscription = cx.subscribe_in(
             &commit_input,
@@ -994,6 +996,8 @@ impl GitPanel {
             collapsed: HashSet::new(),
             branches: Vec::new(),
             branch_picker: false,
+            branch_selected: 0,
+            branch_bounds: None,
             switching: false,
             status: None,
             loading: false,
@@ -1315,10 +1319,48 @@ impl GitPanel {
         cx.notify();
     }
 
+    /// Opens the branch select with the current branch highlighted, or closes it.
+    fn toggle_branch_picker(&mut self) {
+        self.branch_picker = !self.branch_picker;
+        if self.branch_picker {
+            self.branch_selected = self
+                .branch()
+                .and_then(|branch| self.branches.iter().position(|name| name == branch))
+                .unwrap_or(0);
+        }
+    }
+
+    /// Keyboard handling while the branch select is open; returns whether the key was used.
+    fn branch_picker_key(&mut self, key: &str, cx: &mut Context<Self>) -> bool {
+        let last = self.branches.len().saturating_sub(1);
+        match key {
+            "up" => self.branch_selected = self.branch_selected.saturating_sub(1),
+            "down" => self.branch_selected = (self.branch_selected + 1).min(last),
+            "home" => self.branch_selected = 0,
+            "end" => self.branch_selected = last,
+            "enter" | "space" => {
+                if let Some(branch) = self.branches.get(self.branch_selected).cloned() {
+                    self.choose_branch(branch, cx);
+                }
+            }
+            "escape" | "b" => self.branch_picker = false,
+            _ => return false,
+        }
+        true
+    }
+
     fn on_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         if self.pending_discard.is_some() && event.keystroke.key == "escape" {
             self.pending_discard = None;
             window.focus(&self.focus);
+            cx.stop_propagation();
+            cx.notify();
+            return;
+        }
+        if self.branch_picker
+            && self.focus.is_focused(window)
+            && self.branch_picker_key(&event.keystroke.key, cx)
+        {
             cx.stop_propagation();
             cx.notify();
             return;
@@ -1332,8 +1374,7 @@ impl GitPanel {
         }
         match event.keystroke.key.as_str() {
             "f5" => self.refresh(cx),
-            "b" => self.branch_picker = !self.branch_picker,
-            "escape" => self.branch_picker = false,
+            "b" if !self.git_busy() => self.toggle_branch_picker(),
             "up" => self.selected = self.selected.saturating_sub(1),
             "down" => self.selected = (self.selected + 1).min(self.rows.len().saturating_sub(1)),
             "home" => self.selected = 0,

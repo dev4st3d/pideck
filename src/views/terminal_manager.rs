@@ -825,7 +825,9 @@ impl TerminalManager {
                                     .border_color(appearance.swatch_accent()),
                             )
                             .child(div().flex_1().min_w_0().child(appearance.label()))
-                            .when(appearance == theme::appearance(), |row| row.child("✓"))
+                            .when(appearance == theme::appearance(), |row| {
+                                row.child(check_mark())
+                            })
                     }),
             )
     }
@@ -1508,7 +1510,6 @@ impl TerminalManager {
             .bg(theme::chrome())
             .border_b_1()
             .border_color(theme::edge())
-            .pr(px(chrome::TITLEBAR_INSET))
             .child(
                 div()
                     .flex_shrink_0()
@@ -1557,6 +1558,9 @@ impl TerminalManager {
                     "icons/window-min.svg",
                     false,
                 )
+                // Native hit areas keep the Windows caption behavior; the
+                // click handler remains the keyboard activation path.
+                .window_control_area(WindowControlArea::Min)
                 .on_click(|_, window, _| window.minimize_window()),
             )
             .child(
@@ -1570,6 +1574,8 @@ impl TerminalManager {
                     "icons/window-max.svg",
                     false,
                 )
+                // Reporting the maximize hit area enables Windows 11 snap layouts.
+                .window_control_area(WindowControlArea::Max)
                 .on_click(|_, window, _| window.zoom_window()),
             )
             .child(
@@ -1917,63 +1923,72 @@ impl TerminalManager {
                         .child(div().min_w_0().truncate().child(status))
                 })
                 .child(
-                    Button::new("status-menu")
-                        .label("⋯")
-                        .ghost()
-                        .w(px(24.0))
-                        .h(px(24.0))
-                        .tooltip("Version and updates")
-                        .dropdown_menu(move |menu, _, _| {
-                            let owner = owner.clone();
-                            let settings_owner = owner.clone();
-                            let menu = menu.item(
-                                PopupMenuItem::new(format!(
-                                    "Pideck {}",
-                                    app_update::CURRENT_VERSION
-                                ))
-                                .disabled(true),
-                            );
-                            let menu = menu.item(PopupMenuItem::new("Settings…").on_click(
-                                move |_, window, cx| {
-                                    let owner = settings_owner.clone();
-                                    window.defer(cx, move |window, cx| {
-                                        let _ = owner
-                                            .update(cx, |view, cx| view.open_settings(window, cx));
-                                    });
-                                },
-                            ));
-                            let (label, enabled) = match state {
-                                UpdateState::Available(_) => ("Update and restart", true),
-                                UpdateState::Prepared(_) => ("Restart to update", true),
-                                UpdateState::Current | UpdateState::Error(_) => {
-                                    ("Check for updates", true)
-                                }
-                                UpdateState::Unavailable => {
-                                    ("Updates are available in installed builds", false)
-                                }
-                                _ => ("Update in progress…", false),
-                            };
-                            menu.item(PopupMenuItem::new(label).disabled(!enabled).on_click(
-                                move |_, window, cx| {
+                    div()
+                        .id("status-menu-tip")
+                        .tooltip(text_tooltip("Version and updates"))
+                        .child(
+                            Button::new("status-menu")
+                                .ghost()
+                                .size(px(24.0))
+                                .p_0()
+                                .child(overflow_icon())
+                                .dropdown_menu(move |menu, _, _| {
                                     let owner = owner.clone();
-                                    window.defer(cx, move |window, cx| {
-                                        let _ =
-                                            owner.update(cx, |view, cx| match view.update_state {
-                                                UpdateState::Available(_) => {
-                                                    view.prepare_and_restart(window, cx)
-                                                }
-                                                UpdateState::Prepared(_) => {
-                                                    view.request_update_restart(window, cx)
-                                                }
-                                                UpdateState::Current | UpdateState::Error(_) => {
-                                                    view.check_for_updates(window, cx)
-                                                }
-                                                _ => {}
+                                    let settings_owner = owner.clone();
+                                    let menu = menu.item(
+                                        PopupMenuItem::new(format!(
+                                            "Pideck {}",
+                                            app_update::CURRENT_VERSION
+                                        ))
+                                        .disabled(true),
+                                    );
+                                    let menu = menu.item(PopupMenuItem::new("Settings…").on_click(
+                                        move |_, window, cx| {
+                                            let owner = settings_owner.clone();
+                                            window.defer(cx, move |window, cx| {
+                                                let _ = owner.update(cx, |view, cx| {
+                                                    view.open_settings(window, cx)
+                                                });
                                             });
-                                    });
-                                },
-                            ))
-                        }),
+                                        },
+                                    ));
+                                    let (label, enabled) = match state {
+                                        UpdateState::Available(_) => ("Update and restart", true),
+                                        UpdateState::Prepared(_) => ("Restart to update", true),
+                                        UpdateState::Current | UpdateState::Error(_) => {
+                                            ("Check for updates", true)
+                                        }
+                                        UpdateState::Unavailable => {
+                                            ("Updates are available in installed builds", false)
+                                        }
+                                        _ => ("Update in progress…", false),
+                                    };
+                                    menu.item(
+                                        PopupMenuItem::new(label).disabled(!enabled).on_click(
+                                            move |_, window, cx| {
+                                                let owner = owner.clone();
+                                                window.defer(cx, move |window, cx| {
+                                                    let _ = owner.update(cx, |view, cx| match view
+                                                        .update_state
+                                                    {
+                                                        UpdateState::Available(_) => {
+                                                            view.prepare_and_restart(window, cx)
+                                                        }
+                                                        UpdateState::Prepared(_) => {
+                                                            view.request_update_restart(window, cx)
+                                                        }
+                                                        UpdateState::Current
+                                                        | UpdateState::Error(_) => {
+                                                            view.check_for_updates(window, cx)
+                                                        }
+                                                        _ => {}
+                                                    });
+                                                });
+                                            },
+                                        ),
+                                    )
+                                }),
+                        ),
                 )
                 .into_any_element(),
         )
@@ -1983,9 +1998,11 @@ impl TerminalManager {
         let tab = self
             .active_project()
             .map_or(SidebarTab::Projects, |project| project.sidebar_tab);
+        // A clean tree needs no badge; "Git 0" only adds noise.
         let changed = self
             .active_project()
-            .and_then(|project| project.git.read(cx).change_count());
+            .and_then(|project| project.git.read(cx).change_count())
+            .filter(|count| *count > 0);
         let content = match (tab, self.active_project()) {
             (SidebarTab::Files, Some(project)) => project.files.clone().into_any_element(),
             (SidebarTab::Git, Some(project)) => project.git.clone().into_any_element(),
@@ -2202,7 +2219,7 @@ impl TerminalManager {
                         div()
                             .w(px(chrome::ICON_SIZE))
                             .flex_shrink_0()
-                            .when(active, |mark| mark.child("✓")),
+                            .when(active, |mark| mark.child(check_mark())),
                     )
             }))
             .child(
@@ -2576,16 +2593,26 @@ impl TerminalManager {
                     .child({
                         let owner = cx.weak_entity();
                         let path = project.path.clone();
-                        Button::new(("project-actions", index))
-                            .label("⋯")
-                            .ghost()
-                            .w(px(28.0))
-                            .h(px(32.0))
-                            .tooltip("Project actions")
-                            .on_click(|_, _, cx| cx.stop_propagation())
-                            .dropdown_menu(move |menu, _, _| {
-                                project_menu(menu, owner.clone(), index, path.clone(), can_remove)
-                            })
+                        div()
+                            .id(("project-actions-tip", index))
+                            .tooltip(text_tooltip("Project actions"))
+                            .child(
+                                Button::new(("project-actions", index))
+                                    .ghost()
+                                    .size(px(28.0))
+                                    .p_0()
+                                    .child(overflow_icon())
+                                    .on_click(|_, _, cx| cx.stop_propagation())
+                                    .dropdown_menu(move |menu, _, _| {
+                                        project_menu(
+                                            menu,
+                                            owner.clone(),
+                                            index,
+                                            path.clone(),
+                                            can_remove,
+                                        )
+                                    }),
+                            )
                     });
                 // Wrap each row so its context menu keeps per-row element state.
                 rows.push(div().id(("project-row", index)).child(row.context_menu(
@@ -2946,7 +2973,7 @@ fn window_control(
         .id(id)
         .group(id)
         .w(px(chrome::WINDOW_CONTROL_WIDTH))
-        .h(px(chrome::TITLEBAR_HEIGHT))
+        .h_full()
         .flex_shrink_0()
         .flex()
         .items_center()
@@ -2988,10 +3015,20 @@ fn window_control(
         )
 }
 
-struct WorkbenchTooltip(SharedString);
+/// GPUI 0.2.2 hard-codes a 500 ms tooltip delay. The view stays empty for
+/// `TOOLTIP_EXTRA_DELAY` longer so labels appear only on a deliberate hover;
+/// leaving the target drops the view and cancels the reveal.
+struct WorkbenchTooltip {
+    label: SharedString,
+    visible: bool,
+    _reveal: gpui::Task<()>,
+}
 
 impl Render for WorkbenchTooltip {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        if !self.visible {
+            return div();
+        }
         div()
             .max_w(px(chrome::TOOLTIP_MAX_WIDTH))
             .px(px(chrome::INSET))
@@ -3006,7 +3043,7 @@ impl Render for WorkbenchTooltip {
             .line_height(px(chrome::CHROME_LINE_HEIGHT))
             .text_color(theme::bone())
             .whitespace_normal()
-            .child(self.0.clone())
+            .child(self.label.clone())
     }
 }
 
@@ -3014,7 +3051,38 @@ pub(super) fn text_tooltip(
     label: impl Into<SharedString>,
 ) -> impl Fn(&mut Window, &mut App) -> gpui::AnyView + 'static {
     let label = label.into();
-    move |_, cx| cx.new(|_| WorkbenchTooltip(label.clone())).into()
+    move |_, cx| {
+        cx.new(|cx: &mut Context<WorkbenchTooltip>| WorkbenchTooltip {
+            label: label.clone(),
+            visible: false,
+            _reveal: cx.spawn(async move |tooltip, cx| {
+                cx.background_executor()
+                    .timer(chrome::TOOLTIP_EXTRA_DELAY)
+                    .await;
+                let _ = tooltip.update(cx, |tooltip: &mut WorkbenchTooltip, cx| {
+                    tooltip.visible = true;
+                    cx.notify();
+                });
+            }),
+        })
+        .into()
+    }
+}
+
+fn overflow_icon() -> impl IntoElement {
+    svg()
+        .path("icons/overflow.svg")
+        .size(px(chrome::ICON_SIZE))
+        .text_color(theme::ash())
+}
+
+/// Selected-option mark shared by every select menu.
+pub(super) fn check_mark() -> impl IntoElement {
+    svg()
+        .path("icons/check.svg")
+        .size(px(14.0))
+        .flex_shrink_0()
+        .text_color(theme::focus())
 }
 
 impl Render for TerminalManager {

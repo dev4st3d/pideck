@@ -786,28 +786,38 @@ impl ChecklistView {
                             .items_center()
                             .gap(px(2.0))
                             .child(
-                                Button::new("checklist-save")
-                                    .ghost()
-                                    .child(icon("queue-return", 14.0))
-                                    .size(px(chrome::CHECKLIST_CONTROL_SIZE))
-                                    .p_0()
-                                    .tooltip(save_tooltip)
-                                    .on_click(
-                                        cx.listener(|view, _, window, cx| view.submit(window, cx)),
+                                div()
+                                    .id("checklist-save-tip")
+                                    .tooltip(super::terminal_manager::text_tooltip(save_tooltip))
+                                    .child(
+                                        Button::new("checklist-save")
+                                            .ghost()
+                                            .child(icon("queue-return", 14.0))
+                                            .size(px(chrome::CHECKLIST_CONTROL_SIZE))
+                                            .p_0()
+                                            .on_click(cx.listener(|view, _, window, cx| {
+                                                view.submit(window, cx)
+                                            })),
                                     ),
                             )
                             .child(
-                                Button::new("checklist-cancel")
-                                    .ghost()
-                                    .child(icon("close", 12.0))
-                                    .size(px(chrome::CHECKLIST_CONTROL_SIZE))
-                                    .p_0()
-                                    .tooltip("Cancel · Escape")
-                                    .on_click(cx.listener(|view, _, window, cx| {
-                                        view.editing = None;
-                                        window.focus(&view.focus);
-                                        cx.notify();
-                                    })),
+                                div()
+                                    .id("checklist-cancel-tip")
+                                    .tooltip(super::terminal_manager::text_tooltip(
+                                        "Cancel · Escape",
+                                    ))
+                                    .child(
+                                        Button::new("checklist-cancel")
+                                            .ghost()
+                                            .child(icon("close", 12.0))
+                                            .size(px(chrome::CHECKLIST_CONTROL_SIZE))
+                                            .p_0()
+                                            .on_click(cx.listener(|view, _, window, cx| {
+                                                view.editing = None;
+                                                window.focus(&view.focus);
+                                                cx.notify();
+                                            })),
+                                    ),
                             ),
                     ),
             )

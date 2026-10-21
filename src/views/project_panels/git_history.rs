@@ -327,7 +327,7 @@ impl GitPanel {
             "home" => self.select_history(0, cx),
             "end" => self.select_history(self.history.commits.len().saturating_sub(1), cx),
             "enter" => self.select_history(self.history.selected, cx),
-            "b" if !self.git_busy() => self.branch_picker = !self.branch_picker,
+            "b" if !self.git_busy() => self.toggle_branch_picker(),
             _ => return,
         }
         cx.stop_propagation();
