@@ -16,7 +16,7 @@ The commit box stays below the tree. **Commit** or `Ctrl+Enter` commits only sta
 
 **History** opens a compact, paginated commit timeline in the sidebar. Select a commit and then one of its visible changed files to review the historical diff. The view identifies HEAD, known unpushed commits, and the remote tip; **Details** reveals commit metadata and the comparison parent picker for merge commits. **Changed files** expands the commit's file list. **Changes** returns to the working tree and preserves the commit draft. History is read-only. Choose Unified or Split, move between files with Alt+Up/Down, and jump between hunks with F7/Shift+F7. Hunk navigation wraps at either end of the file. Long lines scroll inside the code area, keeping line numbers and the split divider visible; split panes scroll horizontally together.
 
-The editor accepts UTF-8 text files up to 2 MiB. PNG, JPEG, GIF, WebP, BMP, and TIFF files open in a read-only viewer (32 MiB or 50 megapixels). Each directory listing is capped at 2,000 entries; the sidebar reports truncation.
+The editor accepts UTF-8 text files up to 2 MiB. Source files in the editor and in diffs are syntax-highlighted by file name or extension (Rust, JavaScript/TypeScript, Python, Go, C/C++, C#, Java, Ruby, Swift, Scala, Zig, Elixir, HTML/CSS, Markdown, JSON, TOML, YAML, SQL, Protobuf, GraphQL, shell, Make/CMake, and more) using tree-sitter grammars bundled with GPUI Component; other files stay plain. Diff highlighting appears a moment after a diff opens and follows the selected theme. PNG, JPEG, GIF, WebP, BMP, and TIFF files open in a read-only viewer (32 MiB or 50 megapixels). Each directory listing is capped at 2,000 entries; the sidebar reports truncation.
 
 ## Run from source
 

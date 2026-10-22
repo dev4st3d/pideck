@@ -3,12 +3,15 @@
 use std::{ops::Range, path::PathBuf};
 
 use gpui::{
-    ClipboardItem, Context, EventEmitter, FocusHandle, FontWeight, IntoElement, KeyDownEvent,
-    MouseButton, Render, ScrollHandle, ScrollStrategy, SharedString, UniformListScrollHandle,
-    Window, div, point, prelude::*, px, relative, svg, uniform_list,
+    App, ClipboardItem, Context, EventEmitter, FocusHandle, FontWeight, HighlightStyle,
+    IntoElement, KeyDownEvent, MouseButton, Render, ScrollHandle, ScrollStrategy, SharedString,
+    StyledText, Task, UniformListScrollHandle, Window, div, point, prelude::*, px, relative, svg,
+    uniform_list,
 };
+use gpui_component::Theme;
 
 use crate::services::project_git::{DiffContent, DiffKind, ReviewAction, ReviewFile};
+use crate::syntax::{self, LineHighlights, LineSource};
 use crate::theme::{self, terminal_manager as chrome};
 use crate::views::terminal_manager::text_tooltip;
 
@@ -272,6 +275,40 @@ fn parse(text: &str) -> Vec<Section> {
     sections
 }
 
+/// Both versions of the active section, parsed once per snapshot. Line
+/// indexes match `Section::rows`.
+struct DiffSyntax {
+    before: LineHighlights,
+    after: LineHighlights,
+}
+
+/// `Line::display` widens each tab to four spaces; shift highlight ranges by
+/// the same three extra bytes per tab. Ranges must be ascending, as
+/// `LineHighlights::styles` returns them.
+fn expand_tabs(
+    text: &str,
+    spans: Vec<(Range<usize>, HighlightStyle)>,
+) -> Vec<(Range<usize>, HighlightStyle)> {
+    if !text.contains('\t') {
+        return spans;
+    }
+    let (mut scanned, mut tabs) = (0, 0);
+    let mut shift = |offset: usize| {
+        if let Some(skipped) = text.as_bytes().get(scanned..offset) {
+            tabs += skipped.iter().filter(|&&byte| byte == b'\t').count();
+            scanned = offset;
+        }
+        offset + tabs * 3
+    };
+    spans
+        .into_iter()
+        .map(|(range, style)| {
+            let start = shift(range.start);
+            (start..shift(range.end), style)
+        })
+        .collect()
+}
+
 #[derive(Clone)]
 pub(super) enum DiffEvent {
     OpenFile,
@@ -362,6 +399,9 @@ pub(super) struct DiffView {
     copied_hash: bool,
     copy_generation: u64,
     files_scroll: UniformListScrollHandle,
+    syntax: Option<DiffSyntax>,
+    syntax_generation: u64,
+    _syntax_task: Option<Task<()>>,
 }
 
 impl DiffView {
@@ -395,6 +435,9 @@ impl DiffView {
             copied_hash: false,
             copy_generation: 0,
             files_scroll: UniformListScrollHandle::new(),
+            syntax: None,
+            syntax_generation: 0,
+            _syntax_task: None,
         };
         view.update_snapshot(file, content, cx);
         view
@@ -447,8 +490,77 @@ impl DiffView {
         self.active = self.sections.len().saturating_sub(1);
         self.folds = folds(&self.sections[self.active].rows);
         self.rebuild_display();
+        self.start_syntax(cx);
         self.content = content;
         cx.notify();
+    }
+
+    /// Parses the active section's old and new text in the background. Rows
+    /// render plain until the result lands; a newer snapshot discards it.
+    fn start_syntax(&mut self, cx: &mut Context<Self>) {
+        self.syntax = None;
+        self._syntax_task = None;
+        self.syntax_generation = self.syntax_generation.wrapping_add(1);
+        let generation = self.syntax_generation;
+        let Some(language) = syntax::language_for_path(&self.file.path) else {
+            return;
+        };
+        let rows = &self.sections[self.active].rows;
+        if rows.is_empty() {
+            return;
+        }
+        let before = LineSource::new(
+            rows.iter()
+                .map(|row| row.before.as_ref().map(|line| line.text.as_str())),
+        );
+        let after = LineSource::new(
+            rows.iter()
+                .map(|row| row.after.as_ref().map(|line| line.text.as_str())),
+        );
+        let work = cx.background_executor().spawn(async move {
+            DiffSyntax {
+                before: before.highlight(language),
+                after: after.highlight(language),
+            }
+        });
+        self._syntax_task = Some(cx.spawn(async move |view, cx| {
+            let parsed = work.await;
+            let _ = view.update(cx, |view, cx| {
+                if view.syntax_generation != generation {
+                    return;
+                }
+                view.syntax = Some(parsed);
+                cx.notify();
+            });
+        }));
+    }
+
+    /// Colors resolve at paint time from the shared component theme, so a
+    /// theme change recolors open diffs without another parse.
+    fn code_text(
+        &self,
+        index: usize,
+        right: bool,
+        line: Option<&Line>,
+        cx: &App,
+    ) -> gpui::AnyElement {
+        let Some(line) = line else {
+            return SharedString::new_static("").into_any_element();
+        };
+        let spans = match (&self.syntax, cx.try_global::<Theme>()) {
+            (Some(syntax), Some(theme)) => {
+                let side = if right { &syntax.after } else { &syntax.before };
+                expand_tabs(&line.text, side.styles(index, &theme.highlight_theme))
+            }
+            _ => Vec::new(),
+        };
+        if spans.is_empty() {
+            line.display.clone().into_any_element()
+        } else {
+            StyledText::new(line.display.clone())
+                .with_highlights(spans)
+                .into_any_element()
+        }
     }
 
     fn set_split(&mut self, split: bool, cx: &mut Context<Self>) {
@@ -700,10 +812,7 @@ impl DiffView {
                             .w(px(self.sections[self.active].code_width))
                             .pl(px(8.0))
                             .whitespace_nowrap()
-                            .child(line.map_or_else(
-                                || SharedString::new_static(""),
-                                |line| line.display.clone(),
-                            )),
+                            .child(self.code_text(index, right, line, cx)),
                     );
                 // GPUI otherwise turns a plain vertical wheel into horizontal
                 // movement on an x-only scroll element inside the vertical list.
@@ -1287,5 +1396,119 @@ mod tests {
         );
         assert_eq!(hunk_start("@@ invalid @@"), None);
         assert_eq!(parse("")[0].rows.len(), 0);
+    }
+
+    #[test]
+    fn tabs_shift_highlight_ranges_to_the_widened_display_text() {
+        let style = HighlightStyle {
+            color: Some(gpui::red()),
+            ..Default::default()
+        };
+        let text = "\tfn\t(x)";
+        let spans = expand_tabs(text, vec![(1..3, style), (4..7, style)]);
+        let display = text.replace('\t', "    ");
+        assert_eq!(&display[spans[0].0.clone()], "fn");
+        assert_eq!(&display[spans[1].0.clone()], "(x)");
+        assert_eq!(expand_tabs("plain", vec![(0..5, style)])[0].0, 0..5);
+        // Out-of-order input must not panic while painting.
+        assert_eq!(
+            expand_tabs(text, vec![(4..7, style), (1..3, style)]).len(),
+            2
+        );
+    }
+
+    fn review_file(path: &str) -> ReviewFile {
+        ReviewFile {
+            path: path.into(),
+            kind: DiffKind::WorkingTree,
+            position: 0,
+            total: 1,
+            marker: "M",
+            commit: None,
+        }
+    }
+
+    fn replacement(after: &str) -> DiffContent {
+        DiffContent::Ready(format!("@@ -1 +1 @@\n-// old\n+{after}\n"))
+    }
+
+    #[gpui::test]
+    fn highlights_arrive_after_the_background_parse_and_stale_ones_are_dropped(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            crate::fonts::initialize(cx);
+            crate::views::file_editor::FileEditor::initialize(cx);
+        });
+        let file = review_file("project/file.rs");
+        let (view, cx) = cx.add_window_view(|_, cx| {
+            DiffView::new(
+                "project".into(),
+                file.clone(),
+                replacement("\tlet s = \"héllo\"; fn"),
+                cx,
+            )
+        });
+        cx.run_until_parked();
+        assert!(view.read_with(cx, |view, _| view.syntax.is_some()));
+        // Painting styled text with tabs and multibyte characters must hold up.
+        cx.simulate_resize(gpui::size(px(800.0), px(400.0)));
+        cx.refresh().unwrap();
+        assert!(cx.debug_bounds("diff-text-0-true").is_some());
+
+        let styles = |cx: &mut gpui::VisualTestContext, after: bool| {
+            view.read_with(cx, |view, cx| {
+                let syntax = view.syntax.as_ref().unwrap();
+                let side = if after { &syntax.after } else { &syntax.before };
+                let theme = &cx.global::<Theme>().highlight_theme;
+                side.styles(0, theme)
+            })
+        };
+        let comment = view.read_with(cx, |_, cx| {
+            cx.global::<Theme>().highlight_theme.style("comment")
+        });
+        assert!(
+            styles(cx, false)
+                .iter()
+                .any(|(range, style)| *range == (0.."// old".len()) && Some(*style) == comment)
+        );
+
+        view.update(cx, |view, cx| {
+            view.update_snapshot(file.clone(), replacement("fn first() {}"), cx);
+            assert!(
+                view.syntax.is_none(),
+                "old highlights must not outlive rows"
+            );
+            view.update_snapshot(file.clone(), replacement("// second"), cx);
+        });
+        cx.run_until_parked();
+        assert!(
+            styles(cx, true)
+                .iter()
+                .any(|(range, style)| *range == (0.."// second".len()) && Some(*style) == comment)
+        );
+    }
+
+    #[gpui::test]
+    fn plain_text_and_empty_diffs_skip_the_parse(cx: &mut gpui::TestAppContext) {
+        let (view, cx) = cx.add_window_view(|_, cx| {
+            DiffView::new(
+                "project".into(),
+                review_file("project/notes.txt"),
+                replacement("text"),
+                cx,
+            )
+        });
+        cx.run_until_parked();
+        assert!(view.read_with(cx, |view, _| view.syntax.is_none()));
+        view.update(cx, |view, cx| {
+            view.update_snapshot(
+                review_file("project/file.rs"),
+                DiffContent::Ready(String::new()),
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        assert!(view.read_with(cx, |view, _| view.syntax.is_none()));
     }
 }

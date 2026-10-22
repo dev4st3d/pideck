@@ -1,6 +1,6 @@
 //! Native file buffers backed by the Apache-licensed GPUI Component editor.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use gpui::{
@@ -10,8 +10,9 @@ use gpui::{
 use gpui_component::input::{Input, InputEvent, InputState, Rope};
 use gpui_component::{Theme, ThemeMode};
 
-use crate::services::keymap::{Keymap, Shortcut};
-use crate::services::project_files::{self, FileError, FileSnapshot, LineEnding};
+use crate::services::keymap::Shortcut;
+use crate::services::project_files::{self, FileError, FileSnapshot};
+use crate::syntax;
 use crate::theme;
 use crate::theme::terminal_manager as chrome;
 
@@ -29,6 +30,10 @@ struct Source {
     path: PathBuf,
 }
 
+fn editor_language(path: &Path) -> &'static str {
+    syntax::language_for_path(path).unwrap_or("text")
+}
+
 pub(crate) struct FileEditor {
     source: Source,
     input: Entity<InputState>,
@@ -43,9 +48,7 @@ pub(crate) struct FileEditor {
     prompt_pending: bool,
     close_after_save: bool,
     generation: u64,
-    cursor_position: gpui_component::input::Position,
     _input_subscription: Subscription,
-    _input_observation: Subscription,
     _load_task: Option<Task<()>>,
     _save_task: Option<Task<()>>,
 }
@@ -95,6 +98,8 @@ impl FileEditor {
         highlight.style.editor_active_line = Some(theme::panel().into());
         highlight.style.editor_line_number = Some(theme::ash().into());
         highlight.style.editor_active_line_number = Some(theme::bone().into());
+        // The diff view reads these colors too, so both stay in step.
+        highlight.style.syntax = theme::syntax::colors();
     }
 
     pub(crate) fn open(
@@ -109,15 +114,7 @@ impl FileEditor {
     }
 
     fn new(source: Source, text: &str, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let language = if source
-            .path
-            .extension()
-            .is_some_and(|extension| extension == "json")
-        {
-            "json"
-        } else {
-            "text"
-        };
+        let language = editor_language(&source.path);
         let input = cx.new(|cx| {
             InputState::new(window, cx)
                 .code_editor(language)
@@ -126,19 +123,11 @@ impl FileEditor {
                 .default_value(text.to_owned())
         });
         let saved_text = input.read(cx).text().clone();
-        let cursor_position = input.read(cx).cursor_position();
         let subscription = cx.subscribe(&input, |editor, input, event, cx| {
             if matches!(event, InputEvent::Change) {
                 editor.dirty =
                     editor.snapshot.is_some() && input.read(cx).text() != &editor.saved_text;
                 cx.emit(FileEditorEvent::Changed);
-                cx.notify();
-            }
-        });
-        let observation = cx.observe(&input, |editor, input, cx| {
-            let position = input.read(cx).cursor_position();
-            if editor.cursor_position != position {
-                editor.cursor_position = position;
                 cx.notify();
             }
         });
@@ -156,9 +145,7 @@ impl FileEditor {
             prompt_pending: false,
             close_after_save: false,
             generation: 0,
-            cursor_position,
             _input_subscription: subscription,
-            _input_observation: observation,
             _load_task: None,
             _save_task: None,
         }
@@ -193,6 +180,11 @@ impl FileEditor {
     }
 
     pub(crate) fn retarget(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        let language = editor_language(&path);
+        if language != editor_language(&self.source.path) {
+            self.input
+                .update(cx, |input, cx| input.set_highlighter(language, cx));
+        }
         self.source.path = path.clone();
         if let Some(snapshot) = &mut self.snapshot {
             snapshot.path = path;
@@ -392,32 +384,6 @@ impl FileEditor {
         })
         .detach();
     }
-
-    fn status(&self) -> String {
-        if self.saves_locked {
-            return "File operation in progress…".to_owned();
-        }
-        if self.loading {
-            return "Opening file…".to_owned();
-        }
-        if self.saving {
-            return "Saving…".to_owned();
-        }
-        if self.dirty {
-            return "Unsaved changes".to_owned();
-        }
-        if let Some(snapshot) = &self.snapshot {
-            let ending = match snapshot.line_ending {
-                LineEnding::Lf => "LF",
-                LineEnding::CrLf => "CRLF",
-            };
-            return format!(
-                "Saved · UTF-8{} · {ending}",
-                if snapshot.bom { " BOM" } else { "" }
-            );
-        }
-        "File unavailable".to_owned()
-    }
 }
 
 impl EventEmitter<FileEditorEvent> for FileEditor {}
@@ -425,8 +391,6 @@ impl EventEmitter<FileEditorEvent> for FileEditor {}
 impl Render for FileEditor {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let ready = self.snapshot.is_some();
-        let can_save = self.dirty && !self.loading && !self.saving && !self.saves_locked;
-        let position = self.cursor_position;
         div()
             .id("file-editor")
             .key_context("FileEditor")
@@ -539,92 +503,13 @@ impl Render for FileEditor {
                         ),
                 )
             })
-            .child(
-                div()
-                    .h(px(chrome::CONTROL_HEIGHT + chrome::SMALL_GAP * 2.0))
-                    .flex_shrink_0()
-                    .px(px(chrome::CONTENT_INSET))
-                    .flex()
-                    .items_center()
-                    .gap(px(chrome::GAP))
-                    .border_t_1()
-                    .border_color(theme::edge_soft())
-                    .bg(theme::floor())
-                    .font_family(theme::mono())
-                    .font_weight(FontWeight::NORMAL)
-                    .text_size(px(chrome::DETAIL_TEXT_SIZE))
-                    .line_height(px(chrome::DETAIL_LINE_HEIGHT))
-                    .text_color(theme::ash())
-                    .child(div().flex_1().min_w_0().truncate().child(self.status()))
-                    .when(ready, |bar| {
-                        bar.child(format!(
-                            "Ln {}, Col {}",
-                            position.line + 1,
-                            position.character + 1
-                        ))
-                    })
-                    .child(
-                        div()
-                            .id("save-file")
-                            .h(px(chrome::CONTROL_HEIGHT))
-                            .px(px(chrome::INSET))
-                            .flex()
-                            .items_center()
-                            .flex_shrink_0()
-                            .rounded(px(chrome::CONTROL_RADIUS))
-                            .border_1()
-                            .border_color(if can_save {
-                                theme::focus()
-                            } else {
-                                theme::edge_soft()
-                            })
-                            .bg(if can_save {
-                                theme::focus()
-                            } else {
-                                theme::canvas()
-                            })
-                            .font_family(chrome::CHROME_FONT)
-                            .text_size(px(chrome::CONTROL_TEXT_SIZE))
-                            .line_height(px(chrome::CONTROL_LINE_HEIGHT))
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(if can_save {
-                                theme::on_accent()
-                            } else {
-                                theme::ash()
-                            })
-                            .when(can_save, |button| {
-                                button
-                                    .tab_index(0)
-                                    .cursor_pointer()
-                                    .hover(|button| {
-                                        button
-                                            .border_color(theme::accent_hover())
-                                            .bg(theme::accent_hover())
-                                    })
-                                    .focus(|button| {
-                                        button
-                                            .border_color(theme::bone())
-                                            .bg(theme::accent_pressed())
-                                            .text_color(theme::on_accent())
-                                    })
-                                    .on_click(
-                                        cx.listener(|editor, _, window, cx| {
-                                            editor.save(window, cx)
-                                        }),
-                                    )
-                            })
-                            .child(format!(
-                                "Save · {}",
-                                Keymap::global(cx).hint(Shortcut::SaveFile)
-                            )),
-                    ),
-            )
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::services::project_files::LineEnding;
     use gpui::TestAppContext;
     use gpui_component::Root;
 

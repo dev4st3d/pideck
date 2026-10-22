@@ -5,6 +5,7 @@ use std::cell::Cell;
 
 use gpui::{Rems, Rgba, SharedString, rems, rgba};
 
+pub(crate) mod syntax;
 pub(crate) mod terminal_manager;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
