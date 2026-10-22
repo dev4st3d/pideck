@@ -1,6 +1,6 @@
 # Paper redesign implementation
 
-The native workbench now follows the user's final Paper references in `design/paper/`. The shared header, compact tabs, Explorer, Git sidebar, status bar and side-by-side diff use the authored geometry and bundled Geist, Newsreader and JetBrains Mono fonts. Terminal content and Git counts remain real data.
+The native workbench now follows the user's final Paper references. The shared header, compact tabs, Explorer, Git sidebar, status bar and side-by-side diff use the authored geometry and bundled Geist, Newsreader and JetBrains Mono fonts. Terminal content and Git counts remain real data.
 
 The appearance picker adds Paper, Linen, Graphite and Midnight. Preferences are saved atomically in a separate local `appearance.json`; repeated choices are serialized. Theme changes preserve open terminal sessions, history, selection, modes and file buffers. Corrupt preferences are preserved until a user chooses a replacement theme.
 
@@ -10,11 +10,11 @@ The appearance picker adds Paper, Linen, Graphite and Midnight. Preferences are 
 | --- | --- |
 | Window and shared layout | `src/app.rs`, `src/views/terminal_manager.rs`, `src/theme/terminal_manager.rs` |
 | Palettes and persistence | `src/theme.rs`, `src/services/appearance.rs`, `src/services/mod.rs` |
-| Fonts and icons | `src/fonts.rs`, `src/assets.rs`, `design/fonts/` |
+| Fonts and icons | `src/fonts.rs`, `src/assets.rs`, `assets/embedded-fonts/` |
 | Files and Git sidebars | `src/views/project_panels.rs`, `src/services/project_git.rs` |
 | Terminal and diff presentation | `src/views/terminal.rs`, `src/views/terminal/element.rs`, `src/views/terminal/diff.rs` |
 | Editor theme and save notifications | `src/views/file_editor.rs` |
-| Reference and handoff | `design/paper/`, `README.md`, `docs/STYLE_MAPPING.md`, this document |
+| Reference and handoff | `README.md`, `docs/STYLE_MAPPING.md`, this document |
 
 Existing unrelated work was preserved. No commits, pushes, package changes or dependency additions were made by this redesign.
 

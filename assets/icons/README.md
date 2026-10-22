@@ -27,17 +27,6 @@ bundle; its source and version are documented in `../catppuccin/README.md`.
 
 ## Review and validation
 
-Open the [icon specimen](../../design/icons.html) through a local HTTP server to
-compare every asset at 12, 16, 20, 24 and 32px on Paper and Graphite surfaces:
-
-```powershell
-python -m http.server 8765 --bind 127.0.0.1
-# Open http://127.0.0.1:8765/design/icons.html
-```
-
-The specimen reads the embedded inventory from `src/assets.rs` and masks the
-actual SVG files, so it previews the same artwork and tinting model as GPUI.
-
 `cargo test assets::tests` checks inventory completeness, asset resolution and
 GPUI rasterization at the supported sizes, including nonempty alpha masks and
 clear image edges. Native window/DPI inspection remains a separate visual check.

@@ -1,7 +1,6 @@
 # ZiDeck reimagined implementation
 
-Implemented from all 14 exports and the editable Pen master linked in
-[the handoff](../design/zideck-reimagined/README.md).
+Implemented from all 14 exports and the editable Pen master of the ZiDeck reimagined handoff.
 
 ## Workbench
 
@@ -23,7 +22,7 @@ Terminal sessions, editor buffers, file-operation checks, branch-switch checks, 
 
 The downloaded static DM Sans faces contain `DM Sans 9pt` in the SFNT name table, but Windows DirectWrite registers them as `DM Sans 9pt 14pt` after applying the STAT optical-size naming. The Windows UI must request that registered family. Merely inspecting `resolve_font`'s returned descriptor does not prove that the correct face was used: an unknown family can retain the requested descriptor while shaping Segoe UI.
 
-A native DirectWrite probe confirmed the registered family and measured the 12 px sample `Files Projects New terminal`: DM Sans widths are 150.120, 153.072, and 156.756 px at weights 400, 500, and 600. The incorrect family and Segoe UI both measured 142.189 px at weight 400. Startup validation now checks the registered collection itself. Static font provenance, hashes, and the Windows family name are recorded in `design/fonts/sources.json`.
+A native DirectWrite probe confirmed the registered family and measured the 12 px sample `Files Projects New terminal`: DM Sans widths are 150.120, 153.072, and 156.756 px at weights 400, 500, and 600. The incorrect family and Segoe UI both measured 142.189 px at weight 400. Startup validation now checks the registered collection itself. Static font provenance, hashes, and the Windows family name are recorded in `assets/embedded-fonts/sources.json`.
 
 ## Validation boundary
 

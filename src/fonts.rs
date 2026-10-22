@@ -13,14 +13,22 @@ pub(crate) struct FontCatalog {
 
 pub(crate) fn initialize(cx: &App) -> FontCatalog {
     let fonts: Vec<Cow<'static, [u8]>> = vec![
-        Cow::Borrowed(include_bytes!("../design/fonts/DMSans-Regular.ttf")),
-        Cow::Borrowed(include_bytes!("../design/fonts/DMSans-Medium.ttf")),
-        Cow::Borrowed(include_bytes!("../design/fonts/DMSans-SemiBold.ttf")),
         Cow::Borrowed(include_bytes!(
-            "../design/fonts/InstrumentSerif-Regular.ttf"
+            "../assets/embedded-fonts/DMSans-Regular.ttf"
         )),
-        Cow::Borrowed(include_bytes!("../design/fonts/IBMPlexMono-Regular.ttf")),
-        Cow::Borrowed(include_bytes!("../design/fonts/IBMPlexMono-Medium.ttf")),
+        Cow::Borrowed(include_bytes!("../assets/embedded-fonts/DMSans-Medium.ttf")),
+        Cow::Borrowed(include_bytes!(
+            "../assets/embedded-fonts/DMSans-SemiBold.ttf"
+        )),
+        Cow::Borrowed(include_bytes!(
+            "../assets/embedded-fonts/InstrumentSerif-Regular.ttf"
+        )),
+        Cow::Borrowed(include_bytes!(
+            "../assets/embedded-fonts/IBMPlexMono-Regular.ttf"
+        )),
+        Cow::Borrowed(include_bytes!(
+            "../assets/embedded-fonts/IBMPlexMono-Medium.ttf"
+        )),
     ];
     if let Err(error) = cx.text_system().add_fonts(fonts) {
         eprintln!("ZiDeck design fonts could not be registered: {error}");
@@ -193,27 +201,27 @@ mod tests {
     fn embedded_faces_have_the_requested_family_names() {
         for (bytes, family) in [
             (
-                include_bytes!("../design/fonts/DMSans-Regular.ttf").as_slice(),
+                include_bytes!("../assets/embedded-fonts/DMSans-Regular.ttf").as_slice(),
                 "DM Sans 9pt",
             ),
             (
-                include_bytes!("../design/fonts/DMSans-Medium.ttf").as_slice(),
+                include_bytes!("../assets/embedded-fonts/DMSans-Medium.ttf").as_slice(),
                 "DM Sans 9pt",
             ),
             (
-                include_bytes!("../design/fonts/DMSans-SemiBold.ttf").as_slice(),
+                include_bytes!("../assets/embedded-fonts/DMSans-SemiBold.ttf").as_slice(),
                 "DM Sans 9pt",
             ),
             (
-                include_bytes!("../design/fonts/InstrumentSerif-Regular.ttf").as_slice(),
+                include_bytes!("../assets/embedded-fonts/InstrumentSerif-Regular.ttf").as_slice(),
                 crate::theme::terminal_manager::HEADING_FONT,
             ),
             (
-                include_bytes!("../design/fonts/IBMPlexMono-Regular.ttf").as_slice(),
+                include_bytes!("../assets/embedded-fonts/IBMPlexMono-Regular.ttf").as_slice(),
                 DEFAULT_MONO,
             ),
             (
-                include_bytes!("../design/fonts/IBMPlexMono-Medium.ttf").as_slice(),
+                include_bytes!("../assets/embedded-fonts/IBMPlexMono-Medium.ttf").as_slice(),
                 DEFAULT_MONO,
             ),
         ] {
