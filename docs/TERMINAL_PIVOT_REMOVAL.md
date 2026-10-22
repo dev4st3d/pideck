@@ -174,7 +174,7 @@ Refresh `Cargo.lock` through Cargo dependency resolution after changing the mani
 
 ## Retained material and scope
 
-This manifest does not delete design references, reference images, embedded fonts or icons, app resources, packaging configuration, `AGENTS.md`, `GPUI.md`, `README.md`, local settings, saved projects, terminal layouts, shell history, or other user data. Parent-task work on scripts, CI, and documentation is separate from this exact source-removal manifest.
+This manifest does not delete design references, reference images, embedded fonts or icons, app resources, packaging configuration, `AGENTS.md`, `README.md`, local settings, saved projects, terminal layouts, shell history, or other user data. Parent-task work on scripts, CI, and documentation is separate from this exact source-removal manifest.
 
 ## Final validation
 

@@ -54,4 +54,8 @@ Settings can replace these. Explorer, diff, and checklist keys stay fixed.
 
 Black, Light, Graphite, Charcoal, Flint, Stone, Slate, Moss, Kiln, and Iris. Pick one beside **New terminal**. Open files, diffs, and terminals update immediately.
 
+## Contributing
+
+Pull requests are not being accepted right now. There is no time to review and manage them.
+
 MIT

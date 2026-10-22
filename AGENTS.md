@@ -17,7 +17,6 @@ Ask before irreversible, security-sensitive, product-defining, or major scope-ex
 - `src/main.rs`: entry point; `src/app.rs`: app/window setup.
 - `src/lib.rs`: crate surface; `src/state.rs`: UI-independent state.
 - `src/theme.rs`: shared visual tokens; `src/views/`: screens and large UI regions.
-- `GPUI.md` is authoritative for version-sensitive GPUI behavior. Prefer its guidance and code that compiles here over newer examples.
 
 ## Working rules
 
