@@ -66,7 +66,7 @@ mod tests {
 
     fn directory(label: &str) -> PathBuf {
         let root = std::env::temp_dir().join(format!(
-            "pideck-atomic-{label}-{}-{}",
+            "zideck-atomic-{label}-{}-{}",
             std::process::id(),
             NEXT_TEMP.fetch_add(1, Ordering::Relaxed),
         ));

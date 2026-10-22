@@ -1,4 +1,4 @@
-//! Neutral palettes from design/pideck-reimagined, plus Stone and Flint as warmer darks.
+//! Neutral palettes from design/zideck-reimagined, plus Stone and Flint as warmer darks.
 //! Slate, Moss, Kiln, and Iris tint a near-black base and pair it with one muted accent.
 
 use std::cell::Cell;

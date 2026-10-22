@@ -40,11 +40,11 @@ pub fn run() {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
                     window_min_size: Some(size(px(800.0), px(540.0))),
                     titlebar: Some(TitlebarOptions {
-                        title: Some("Pideck — Terminals".into()),
+                        title: Some("ZiDeck — Terminals".into()),
                         appears_transparent: true,
                         ..Default::default()
                     }),
-                    app_id: Some("pideck".into()),
+                    app_id: Some("zideck".into()),
                     ..Default::default()
                 },
                 move |window, cx| {

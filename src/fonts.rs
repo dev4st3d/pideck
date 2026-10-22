@@ -1,8 +1,8 @@
-//! Embedded typography from the supplied Pideck design references.
+//! Embedded typography from the supplied ZiDeck design references.
 
 use std::borrow::Cow;
 use std::env;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use gpui::{App, SharedString, px};
 
@@ -23,7 +23,7 @@ pub(crate) fn initialize(cx: &App) -> FontCatalog {
         Cow::Borrowed(include_bytes!("../design/fonts/IBMPlexMono-Medium.ttf")),
     ];
     if let Err(error) = cx.text_system().add_fonts(fonts) {
-        eprintln!("Pideck design fonts could not be registered: {error}");
+        eprintln!("ZiDeck design fonts could not be registered: {error}");
     }
     // The headless test platform has no font collection. On the native platform,
     // Check the registered collection, not resolve_font's requested descriptor:
@@ -37,7 +37,7 @@ pub(crate) fn initialize(cx: &App) -> FontCatalog {
             DEFAULT_MONO,
         ] {
             if !registered.iter().any(|name| name == family) {
-                eprintln!("Pideck could not register its bundled font family: {family}");
+                eprintln!("ZiDeck could not register its bundled font family: {family}");
             }
         }
     }
@@ -104,20 +104,32 @@ pub(crate) fn is_installed(cx: &App, family: &str) -> bool {
             .any(|name| name == family)
 }
 
+/// New installs use `ZiDeck`. A `Pideck` folder from before the rename stays
+/// in use until a `ZiDeck` one exists, so settings, layout, and shortcuts carry over.
+fn app_data_dir(root: &Path) -> PathBuf {
+    let current = root.join("ZiDeck");
+    let legacy = root.join("Pideck");
+    if !current.exists() && legacy.is_dir() {
+        legacy
+    } else {
+        current
+    }
+}
+
 fn settings_path() -> PathBuf {
     if let Some(path) = env::var_os("PI_GUI_SETTINGS_PATH") {
         return PathBuf::from(path);
     }
     if let Some(root) = env::var_os("APPDATA") {
-        return PathBuf::from(root).join("Pideck").join("settings.json");
+        return app_data_dir(Path::new(&root)).join("settings.json");
     }
     if let Some(root) = env::var_os("XDG_CONFIG_HOME") {
-        return PathBuf::from(root).join("pideck").join("settings.json");
+        return PathBuf::from(root).join("zideck").join("settings.json");
     }
     if let Some(root) = env::var_os("HOME") {
         return PathBuf::from(root)
             .join(".config")
-            .join("pideck")
+            .join("zideck")
             .join("settings.json");
     }
     PathBuf::from("settings.json")
@@ -126,6 +138,21 @@ fn settings_path() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn app_data_keeps_a_pre_rename_folder_until_a_new_one_exists() {
+        let root = env::temp_dir().join(format!("zideck-app-data-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+
+        assert_eq!(app_data_dir(&root), root.join("ZiDeck"));
+        std::fs::create_dir(root.join("Pideck")).unwrap();
+        assert_eq!(app_data_dir(&root), root.join("Pideck"));
+        std::fs::create_dir(root.join("ZiDeck")).unwrap();
+        assert_eq!(app_data_dir(&root), root.join("ZiDeck"));
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
 
     // GPUI's headless platform uses NoopTextSystem. Check the actual SFNT
     // family records here; the native startup check below covers DirectWrite.

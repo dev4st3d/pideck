@@ -60,7 +60,7 @@ jobs:
 
           "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
           "tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
-          "artifact_name=pideck-$tag-windows-x64" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "artifact_name=zideck-$tag-windows-x64" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
           Write-Host "Publishing $tag"
 
       - name: Build release
@@ -87,12 +87,14 @@ jobs:
           New-Item -ItemType Directory -Force -Path "dist/app" | Out-Null
           Copy-Item "target/release/pi-gui.exe" "dist/app/pi-gui.exe"
 
+          # packId and the repo URL stay as they were before the ZiDeck rename:
+          # installed copies match updates by package id and read this feed.
           vpk pack `
             --packId "PiDeck" `
             --packVersion "${{ steps.meta.outputs.version }}" `
             --packDir "dist/app" `
             --mainExe "pi-gui.exe" `
-            --packTitle "PiDeck" `
+            --packTitle "ZiDeck" `
             --packAuthors "dev4st3d" `
             --icon "assets/app.ico" `
             --shortcuts "Desktop,StartMenuRoot" `
@@ -116,7 +118,7 @@ jobs:
         uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ steps.meta.outputs.tag }}
-          name: PiDeck ${{ steps.meta.outputs.tag }}
+          name: ZiDeck ${{ steps.meta.outputs.tag }}
           target_commitish: ${{ github.sha }}
           generate_release_notes: true
           make_latest: true

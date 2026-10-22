@@ -2,7 +2,7 @@
 
 The selected direction combines B's bottom-pinned commit panel with A's sidebar
 history. The other directions, comparison board, and their exports were removed
-at the user's request. Preserve compactness and Pideck's existing Flint style.
+at the user's request. Preserve compactness and ZiDeck's existing Flint style.
 The images are editable Pencil references for the native implementation. Their
 commit history, authors, timestamps, outgoing counts, and `notes.md` are synthetic
 examples. The application uses real repository data and its existing file icons.

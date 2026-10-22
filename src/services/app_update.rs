@@ -174,6 +174,8 @@ fn pending_update(manager: &UpdateManager) -> Result<Option<VelopackAsset>, Upda
     Ok(Some(asset))
 }
 
+/// Velopack package id, kept from before the ZiDeck rename so installed copies
+/// still accept updates from the existing release feed.
 fn package_id_is_valid(package_id: &str) -> bool {
     package_id.eq_ignore_ascii_case("PiDeck")
 }
@@ -182,7 +184,7 @@ fn package_id_is_valid(package_id: &str) -> bool {
 fn validate_asset(asset: &VelopackAsset) -> Result<(), UpdateFailure> {
     if !package_id_is_valid(&asset.PackageId) {
         return Err(UpdateFailure::new(
-            "The update package does not belong to Pideck. Nothing was installed.",
+            "The update package does not belong to ZiDeck. Nothing was installed.",
         ));
     }
     if asset.Version.trim().is_empty() || asset.FileName.trim().is_empty() {
@@ -195,12 +197,12 @@ fn validate_asset(asset: &VelopackAsset) -> Result<(), UpdateFailure> {
 
 #[cfg(windows)]
 fn map_error(stage: Stage, error: Error) -> UpdateFailure {
-    eprintln!("Pideck update {stage:?} failed: {error}");
+    eprintln!("ZiDeck update {stage:?} failed: {error}");
     let message = match (stage, error) {
         (Stage::Check, Error::Network(_)) => {
-            "Pideck couldn't reach GitHub. Check your connection and try again."
+            "ZiDeck couldn't reach GitHub. Check your connection and try again."
         }
-        (Stage::Check, _) => "Pideck couldn't check for updates. Try again in a moment.",
+        (Stage::Check, _) => "ZiDeck couldn't check for updates. Try again in a moment.",
         (Stage::Prepare, Error::Network(_)) => {
             "The update couldn't be downloaded. Check your connection and try again."
         }
@@ -208,7 +210,7 @@ fn map_error(stage: Stage, error: Error) -> UpdateFailure {
             "The update couldn't be verified or prepared. Nothing was installed."
         }
         (Stage::Schedule, _) => {
-            "The update is ready, but Pideck couldn't start it. Try restarting to update again."
+            "The update is ready, but ZiDeck couldn't start it. Try restarting to update again."
         }
     };
     UpdateFailure::new(message)

@@ -1,4 +1,4 @@
-# Pideck reimagined: final design handoff
+# ZiDeck reimagined: final design handoff
 
 Completed editable design handoff, 2026-09-11. The package covers Files, Projects, a nested Git tree with unified and split diffs, compact layout, reusable components, and recovery states. Every screen uses Black, Light, Graphite, or Charcoal.
 

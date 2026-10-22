@@ -1,4 +1,4 @@
-# Pideck — technical notes
+# ZiDeck — technical notes
 
 Companion to the root [README](../README.md). This page covers launch policy, keyboard shortcuts, shell capabilities, and where code lives.
 
@@ -17,7 +17,7 @@ If Cargo is not on `PATH` on Windows:
 & "$env:USERPROFILE\.cargo\bin\cargo.exe" run --locked
 ```
 
-The launch folder is added to the persistent project sidebar. The app reopens the last available active project and stores project expansion and last-thread state in `pideck-projects.json` under Pi's agent directory.
+The launch folder is added to the persistent project sidebar. The app reopens the last available active project and stores project expansion and last-thread state in `zideck-projects.json` under Pi's agent directory.
 
 The active project connects with:
 

@@ -1,6 +1,6 @@
-# Pideck
+# ZiDeck
 
-A native Windows project and terminal workspace, built with Rust and GPUI 0.2.2. Its neutral workbench follows the [Pideck reimagined handoff](design/pideck-reimagined/README.md).
+A native Windows project and terminal workspace, built with Rust and GPUI 0.2.2. Its neutral workbench follows the [ZiDeck reimagined handoff](design/zideck-reimagined/README.md).
 
 Switch projects with the top project selector. The sidebar has **Projects**, **Files**, and **Git** tabs; the main pane combines editable files, terminals, and read-only diffs in one tab strip.
 
@@ -28,7 +28,7 @@ From the repository, launch with:
 cargo run --locked
 ```
 
-Pideck embeds DM Sans interface text, Instrument Serif for the wordmark, and IBM Plex Mono for terminals, code, and counts. The terminal font can be changed in Settings. The four neutral themes follow the [final design handoff](design/pideck-reimagined/README.md). No font preparation step, Node.js, or Pi installation is required to build or launch the app. Tools you run inside its terminals have their own installation requirements.
+ZiDeck embeds DM Sans interface text, Instrument Serif for the wordmark, and IBM Plex Mono for terminals, code, and counts. The terminal font can be changed in Settings. The four neutral themes follow the [final design handoff](design/zideck-reimagined/README.md). No font preparation step, Node.js, or Pi installation is required to build or launch the app. Tools you run inside its terminals have their own installation requirements.
 
 A release build uses:
 
@@ -38,9 +38,9 @@ cargo build --release --locked
 
 ## App updates
 
-Windows copies installed with **PiDeck Setup** check GitHub Releases for updates on startup. Use **Check for updates** in the status bar’s **⋯** menu to check manually, then **Update and restart** to download and verify a new version.
+Windows copies installed with **ZiDeck Setup** check GitHub Releases for updates on startup. Use **Check for updates** in the status bar’s **⋯** menu to check manually, then **Update and restart** to download and verify a new version.
 
-Before restarting, Pideck asks about unsaved files and stopping running terminals, then saves the workspace layout. Cancelling keeps the app open; a downloaded update can be applied later with **Restart to update**. File or layout save failures must be resolved before the update can restart the app. Restarting creates fresh shells, not resumed commands or terminal history.
+Before restarting, ZiDeck asks about unsaved files and stopping running terminals, then saves the workspace layout. Cancelling keeps the app open; a downloaded update can be applied later with **Restart to update**. File or layout save failures must be resolved before the update can restart the app. Restarting creates fresh shells, not resumed commands or terminal history.
 
 Source builds and unpackaged executables do not support in-app updates. Downloading an update does not silently apply it on the next launch; restarting to apply it remains an explicit action.
 
@@ -48,13 +48,13 @@ Source builds and unpackaged executables do not support in-app updates. Download
 
 While the app stays open, each project retains its sidebar selection, expanded directories and scroll position, open file buffers and cursor positions, active tab, and terminal sessions. Switching projects reuses those views and processes.
 
-Across app restarts, project folders, terminal layout, selected terminal/project, sidebar visibility, chosen sidebar width, project checklists, and checklist visibility are restored. This data is stored in `terminal-workspace.json` beside the settings file, normally under `%APPDATA%\Pideck`. `PI_GUI_SETTINGS_PATH` relocates the settings file and adjacent layout file.
+Across app restarts, project folders, terminal layout, selected terminal/project, sidebar visibility, chosen sidebar width, project checklists, and checklist visibility are restored. This data is stored in `terminal-workspace.json` beside the settings file, normally under `%APPDATA%\ZiDeck`; a `%APPDATA%\Pideck` folder from before the rename keeps being used until a `ZiDeck` folder exists. `PI_GUI_SETTINGS_PATH` relocates the settings file and adjacent layout file.
 
 Restarting creates fresh shells. Open files, file buffers and cursor positions, expanded directories, terminal output, running processes, and CLI conversations are not restored from disk. Save files before closing; use each CLI's own session features when available.
 
 If a saved layout cannot be read or restored, automatic saving pauses to preserve it. Repair the file and reopen the app, or choose **Replace saved layout** to save the current workspace instead. Closing without saving keeps the previous file.
 
-Workspace settings stay local. Pideck adds no telemetry, analytics, or remote reporting; commands you run have their own network and privacy behavior.
+Workspace settings stay local. ZiDeck adds no telemetry, analytics, or remote reporting; commands you run have their own network and privacy behavior.
 
 Files, projects, and Git changes have independent filters. File search is bounded to 20,000 visited entries and 2,000 matches and never follows directory links; incomplete searches show a notice. Filtering keeps matching ancestors. Clearing Files or Git filters restores the previous expansion, selection, and scroll position.
 
@@ -78,7 +78,7 @@ The terminal supports native Unicode/IME composition, bracketed paste, applicati
 
 The explorer uses neutral outline icons with separate disclosure, filename, and status columns. Click to select a file; double-click or Enter to open. Ctrl-click toggles selection and Shift-click selects a range. Right-click for file operations, path copying, hidden files, and reveal in Windows Explorer. New file/folder naming stays inside the panel.
 
-With explorer focus: `Ctrl+C/X/V` copies/cuts/pastes files, `Ctrl+A` selects visible entries, `Ctrl+D` duplicates, `F2` renames, `Delete` asks to move items to the Recycle Bin, `Ctrl+N` creates a file, and `Ctrl+Shift+N` creates a folder. Drag within the tree to move; hold Ctrl to copy. External drops and Windows file-clipboard pastes copy into the selected folder. Cut is internal to Pideck. Existing destinations are never intentionally overwritten; interrupted copies may leave completed or partial destination files, with the source retained. Directory links are not recursively copied. Cross-drive moves require copying first.
+With explorer focus: `Ctrl+C/X/V` copies/cuts/pastes files, `Ctrl+A` selects visible entries, `Ctrl+D` duplicates, `F2` renames, `Delete` asks to move items to the Recycle Bin, `Ctrl+N` creates a file, and `Ctrl+Shift+N` creates a folder. Drag within the tree to move; hold Ctrl to copy. External drops and Windows file-clipboard pastes copy into the selected folder. Cut is internal to ZiDeck. Existing destinations are never intentionally overwritten; interrupted copies may leave completed or partial destination files, with the source retained. Directory links are not recursively copied. Cross-drive moves require copying first.
 
 Filesystem changes refresh the explorer and Git status automatically; `F5` refreshes manually. The compact Git tree separates unstaged and staged changes. Click the branch name (or press `B` with Git-panel focus) to choose a local branch, then use Tab/Enter to select it. Switching preserves Git's conflict checks and never forces, stashes, or fetches. Save dirty editor buffers first. Git hooks are disabled for this operation.
 
@@ -116,7 +116,7 @@ Open **Settings** from the gear in the titlebar, the status bar's **⋯** menu, 
 
 **Keyboard** lists each rebindable shortcut. Use ↑/↓ to select a row, `Enter` (or **Change**) and press the new chord, `Delete` (or **Reset**) to restore the default. Esc cancels recording. A chord must include Ctrl, Alt, or Win (or be a function key), and cannot be Esc, Tab, `Shift+F6`, `Alt+F4`, or plain Ctrl+letter, which terminal programs and text editing need (Save may use other Ctrl+letters). A chord already used by another shortcut is refused with that shortcut's name. Setting a new chord replaces all of a shortcut's defaults, so `New terminal` stops answering to `` Ctrl+` `` as well as `Ctrl+Shift+T`.
 
-Font and shortcut choices are stored beside the settings file as `terminal-font.json` and `keybindings.json` (normally under `%APPDATA%\Pideck`). A file that cannot be read is left untouched and defaults are used until you change a setting; delete it to start over.
+Font and shortcut choices are stored beside the settings file as `terminal-font.json` and `keybindings.json` (normally under `%APPDATA%\ZiDeck`). A file that cannot be read is left untouched and defaults are used until you change a setting; delete it to start over.
 
 ## Appearance
 

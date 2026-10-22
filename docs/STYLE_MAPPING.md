@@ -2,7 +2,7 @@
 
 Visual authority: [final Paper references](../design/paper/README.md), including the user's terminal and Git screenshots. These supersede the historical Graphite conversation design. The manager keeps its project selector, Projects / Files / Git panel tabs, editable files, diffs, and terminals.
 
-The reference uses a 256px sidebar with 16px insets and a 24px main inset. The project selector, tab strip and content share the main x=280 guide. The shared header has a 30px titlebar, 52px toolbar and 28px serif Pideck wordmark. The primary action is 30px high with 4px corners. Bottom navigation is 42px high, with an underline for the selected tab; the global status bar is 30px high.
+The reference uses a 256px sidebar with 16px insets and a 24px main inset. The project selector, tab strip and content share the main x=280 guide. The shared header has a 30px titlebar, 52px toolbar and 28px serif ZiDeck wordmark. The primary action is 30px high with 4px corners. Bottom navigation is 42px high, with an underline for the selected tab; the global status bar is 30px high.
 
 Static Geist regular/medium, Newsreader 16pt regular/medium and JetBrains Mono regular/medium faces are embedded from their official upstream sources. Font licenses and hashes are recorded alongside the assets. Legacy font preferences do not override the reference's monospace face. The saved settings file is not modified.
 

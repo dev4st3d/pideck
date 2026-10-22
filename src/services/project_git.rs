@@ -401,7 +401,7 @@ fn run_git_with_input(
                 return Err(GitError::ReadFailed);
             };
             match thread::Builder::new()
-                .name("pideck-git-input".into())
+                .name("zideck-git-input".into())
                 .spawn(move || stdin.write_all(&bytes))
             {
                 Ok(writer) => Some(writer),
@@ -417,7 +417,7 @@ fn run_git_with_input(
     let output_exceeded = Arc::new(AtomicBool::new(false));
     let error_exceeded = Arc::new(AtomicBool::new(false));
     let output_reader = thread::Builder::new()
-        .name("pideck-git-output".into())
+        .name("zideck-git-output".into())
         .spawn({
             let exceeded = Arc::clone(&output_exceeded);
             move || read_pipe(stdout, MAX_OUTPUT_BYTES, &exceeded)
@@ -431,7 +431,7 @@ fn run_git_with_input(
         }
     };
     let error_reader = thread::Builder::new()
-        .name("pideck-git-error".into())
+        .name("zideck-git-error".into())
         .spawn({
             let exceeded = Arc::clone(&error_exceeded);
             move || read_pipe(stderr, 16 * 1024, &exceeded)
@@ -1006,7 +1006,7 @@ mod tests {
     #[test]
     fn branch_switch_preserves_conflicting_local_changes() {
         let root = std::env::temp_dir().join(format!(
-            "pideck-branches-{}-{}",
+            "zideck-branches-{}-{}",
             std::process::id(),
             NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed)
         ));
@@ -1143,7 +1143,7 @@ mod tests {
     #[test]
     fn reads_staged_and_worktree_diffs_in_a_synthetic_nested_project_without_changing_index() {
         let root = std::env::temp_dir().join(format!(
-            "pideck-git-{}-{}",
+            "zideck-git-{}-{}",
             std::process::id(),
             NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed)
         ));

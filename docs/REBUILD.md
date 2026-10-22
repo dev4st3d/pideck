@@ -1,4 +1,4 @@
-# PiDeck native UI rebuild
+# ZiDeck native UI rebuild
 
 ## Delivery status
 
@@ -72,7 +72,7 @@ The reference demonstration data is not injected into normal sessions. Real sess
 From the extracted source on a configured Windows machine:
 
 ```powershell
-node scripts/prepare-fonts.mjs --zip "C:\path\to\pideck-design.zip"
+node scripts/prepare-fonts.mjs --zip "C:\path\to\zideck-design.zip"
 cargo fmt --all
 .\scripts\validate.ps1
 cargo run --locked
@@ -87,11 +87,11 @@ Capture each actual state with its corresponding filename:
   -Output "visual-artifacts\native\03-original-ongoing-expanded.png"
 ```
 
-The capture script reads the native client area, refuses other dimensions and refuses to overwrite an existing image. The supplied process ID must belong to the running PiDeck instance. Capture all six states, then compare:
+The capture script reads the native client area, refuses other dimensions and refuses to overwrite an existing image. The supplied process ID must belong to the running ZiDeck instance. Capture all six states, then compare:
 
 ```powershell
 python -m pip install Pillow
-python scripts/compare-native.py --design-zip "C:\path\to\pideck-design.zip" `
+python scripts/compare-native.py --design-zip "C:\path\to\zideck-design.zip" `
   --captures visual-artifacts/native --output visual-artifacts/comparison
 ```
 
