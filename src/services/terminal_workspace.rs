@@ -16,6 +16,8 @@ pub(crate) struct TerminalProject {
     pub(crate) active_tab: usize,
     #[serde(default)]
     pub(crate) checklist: super::checklist::Checklist,
+    #[serde(default)]
+    pub(crate) grid: super::terminal_grid::TerminalGrid,
 }
 
 impl TerminalProject {
@@ -25,6 +27,7 @@ impl TerminalProject {
             tab_count: 1,
             active_tab: 0,
             checklist: super::checklist::Checklist::default(),
+            grid: super::terminal_grid::TerminalGrid::default(),
         }
     }
 
@@ -160,6 +163,7 @@ impl TerminalWorkspace {
                 continue;
             }
             project.update_layout(project.tab_count, project.active_tab);
+            project.grid.normalize();
             for section in &mut project.checklist.sections {
                 section.normalize();
             }
@@ -209,6 +213,7 @@ fn same_path(left: &Path, right: &Path) -> bool {
 mod tests {
     use super::*;
     use crate::services::checklist;
+    use crate::services::terminal_grid::{Axis, TerminalGrid};
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static NEXT_TEST: AtomicU64 = AtomicU64::new(1);
@@ -242,6 +247,7 @@ mod tests {
         assert!(warning.is_none());
         assert_eq!(workspace.sidebar_width, None);
         assert!(!workspace.inspector_visible);
+        assert_eq!(workspace.projects[0].grid, TerminalGrid::default());
         assert_eq!(
             workspace.projects[0].checklist,
             checklist::Checklist::default()
@@ -262,6 +268,7 @@ mod tests {
             tab_count: 3,
             active_tab: 2,
             checklist: checklist::Checklist::default(),
+            grid: TerminalGrid::new(2, 2),
         });
         workspace.active = 1;
         workspace.sidebar_visible = false;
@@ -278,6 +285,33 @@ mod tests {
         let (loaded, warning) = TerminalWorkspace::load(&path, &root.0);
         assert_eq!(loaded, workspace);
         assert_eq!(warning, None);
+    }
+
+    #[test]
+    fn grid_layout_roundtrips_and_invalid_grids_are_repaired_on_load() {
+        let root = TestDirectory::new();
+        let mut workspace = TerminalWorkspace::new(root.0.clone());
+        workspace.projects[0].grid = TerminalGrid::new(2, 2);
+        assert!(
+            workspace.projects[0]
+                .grid
+                .move_divider(Axis::Column, 0, 0.35, 0.1)
+        );
+        let path = root.0.join("layout.json");
+        workspace.save(&path).unwrap();
+        let (loaded, warning) = TerminalWorkspace::load(&path, &root.0);
+        assert_eq!(warning, None);
+        assert_eq!(loaded.projects[0].grid, workspace.projects[0].grid);
+        assert_eq!(loaded.projects[0].grid.column_fractions(), [0.35, 0.65]);
+
+        fs::write(
+            &path,
+            br#"{"version":1,"projects":[{"path":"synthetic","tab_count":1,"active_tab":0,"grid":{"cols":9,"rows":9,"col_sizes":[5]}}],"active":0,"sidebar_visible":true}"#,
+        )
+        .unwrap();
+        let (repaired, warning) = TerminalWorkspace::load(&path, &root.0);
+        assert_eq!(warning, None);
+        assert_eq!(repaired.projects[0].grid, TerminalGrid::new(2, 2));
     }
 
     #[test]
@@ -303,18 +337,21 @@ mod tests {
                     tab_count: 0,
                     active_tab: 90,
                     checklist: checklist::Checklist::default(),
+                    grid: TerminalGrid::default(),
                 },
                 TerminalProject {
                     path: "one".into(),
                     tab_count: 2,
                     active_tab: 1,
                     checklist: checklist::Checklist::default(),
+                    grid: TerminalGrid::default(),
                 },
                 TerminalProject {
                     path: "two".into(),
                     tab_count: 90,
                     active_tab: 90,
                     checklist: checklist::Checklist::default(),
+                    grid: TerminalGrid::default(),
                 },
             ],
             active: 2,

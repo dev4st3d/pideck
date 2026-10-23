@@ -11,4 +11,5 @@ pub(crate) mod project_git;
 pub mod terminal;
 pub(crate) mod terminal_engine;
 pub(crate) mod terminal_font;
+pub(crate) mod terminal_grid;
 pub(crate) mod terminal_workspace;

@@ -50,6 +50,14 @@ pub(crate) const MENU_GAP: f32 = 6.0;
 pub(crate) const TAB_INSET: f32 = 16.0;
 pub(crate) const TAB_LIST_BUTTON: f32 = 28.0;
 pub(crate) const TAB_LIST_MENU_WIDTH: f32 = 280.0;
+// Terminal pane grid: pane title bars, draggable dividers, and layout glyphs.
+pub(crate) const PANE_HEADER_HEIGHT: f32 = 30.0;
+pub(crate) const PANE_CLOSE_SIZE: f32 = 22.0;
+pub(crate) const DIVIDER_HIT: f32 = 6.0;
+pub(crate) const MIN_PANE_WIDTH: f32 = 200.0;
+pub(crate) const MIN_PANE_HEIGHT: f32 = 120.0;
+pub(crate) const LAYOUT_GLYPH_WIDTH: f32 = 18.0;
+pub(crate) const LAYOUT_GLYPH_HEIGHT: f32 = 14.0;
 // Floating select menus: inner padding and option rows.
 pub(crate) const MENU_INSET: f32 = 4.0;
 pub(crate) const OPTION_ROW_HEIGHT: f32 = 30.0;

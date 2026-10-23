@@ -840,9 +840,16 @@ impl TerminalManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let grid = self
+            .workspace
+            .as_ref()
+            .and_then(|workspace| workspace.projects.iter().find(|p| p.path == path))
+            .map(|project| project.grid.clone())
+            .unwrap_or_default();
         let terminal = cx.new(|cx| {
             let mut terminal = TerminalView::new(path.clone(), cx);
             terminal.restore_layout(count, active, cx);
+            terminal.restore_grid(grid, cx);
             terminal
         });
         let project_path = path.clone();
@@ -881,6 +888,7 @@ impl TerminalManager {
                     terminal.update(cx, |terminal, cx| terminal.activate(cx));
                 }
                 let (count, active) = terminal.read(cx).layout_snapshot();
+                let grid = terminal.read(cx).grid_snapshot();
                 if let Some(workspace) = &mut view.workspace
                     && let Some(project) = workspace
                         .projects
@@ -888,6 +896,7 @@ impl TerminalManager {
                         .find(|project| project.path == path)
                 {
                     project.update_layout(count, active);
+                    project.grid = grid;
                 }
                 view.persist(window, cx);
                 cx.notify();

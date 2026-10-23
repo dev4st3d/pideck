@@ -19,12 +19,14 @@ use crate::services::keymap::{Keymap, Shortcut};
 use crate::services::terminal::{TerminalEvent, TerminalSize, TerminalWorker};
 use crate::services::terminal_engine::TerminalEngine;
 use crate::services::terminal_font::TerminalFont;
+use crate::services::terminal_grid::{self, TerminalGrid};
 use crate::theme;
 use crate::theme::terminal_manager as chrome;
 
 mod diff;
 mod element;
 use diff::DiffView;
+mod grid;
 mod input;
 use element::{TerminalElement, TerminalGeometry};
 
@@ -381,6 +383,18 @@ pub(crate) struct TerminalView {
     tab_list_open: bool,
     tab_list_focus: FocusHandle,
     tab_list_bounds: Option<Bounds<Pixels>>,
+    grid: TerminalGrid,
+    /// Tab shown in each grid cell, row by row. `None` is an empty pane; tabs
+    /// in no cell keep running and stay reachable from the tab strip.
+    cells: Vec<Option<u64>>,
+    /// A divider moved since the layout was last reported for saving.
+    grid_resized: bool,
+    /// One title-bar focus handle per cell, so keyboard moves can follow a pane.
+    pane_focus: Vec<FocusHandle>,
+    layout_menu_open: bool,
+    layout_menu_focus: FocusHandle,
+    layout_menu_selected: usize,
+    layout_menu_bounds: Option<Bounds<Pixels>>,
 }
 
 impl TerminalView {
@@ -404,6 +418,16 @@ impl TerminalView {
             tab_list_open: false,
             tab_list_focus: cx.focus_handle(),
             tab_list_bounds: None,
+            grid: TerminalGrid::default(),
+            cells: vec![Some(1)],
+            grid_resized: false,
+            pane_focus: (0..terminal_grid::MAX_CELLS)
+                .map(|_| cx.focus_handle())
+                .collect(),
+            layout_menu_open: false,
+            layout_menu_focus: cx.focus_handle(),
+            layout_menu_selected: 0,
+            layout_menu_bounds: None,
         }
     }
 
@@ -457,6 +481,7 @@ impl TerminalView {
             .get(self.active)
             .filter(|tab| matches!(tab.content, TabContent::Terminal(_)))
             .map(|tab| tab.id);
+        self.sync_cells();
         cx.notify();
     }
 
@@ -789,21 +814,39 @@ impl TerminalView {
         if self.tabs.is_empty() {
             return;
         }
+        // With several panes the shortcut walks the panes in reading order.
+        if !self.grid.is_single()
+            && let Some(next) = terminal_grid::cycle(&self.cells, self.focused_cell(), reverse)
+            && let Some(id) = self.cells[next]
+        {
+            self.select_tab(id, window, cx);
+            return;
+        }
         let index = next_tab_index(self.active, self.tabs.len(), reverse);
         self.select_tab(self.tabs[index].id, window, cx);
     }
 
+    /// Start the shell of every terminal that is on screen, not just the focused one.
     pub(crate) fn activate(&mut self, cx: &mut Context<Self>) {
-        if let Some(tab) = self.tabs.get(self.active)
-            && let TabContent::Terminal(session) = &tab.content
-        {
+        let sessions = self
+            .tabs
+            .iter()
+            .enumerate()
+            .filter(|(index, tab)| *index == self.active || self.is_shown(tab.id))
+            .filter_map(|(_, tab)| match &tab.content {
+                TabContent::Terminal(session) => Some(session.clone()),
+                TabContent::File { .. } | TabContent::Diff { .. } => None,
+            })
+            .collect::<Vec<_>>();
+        for session in sessions {
             session.update(cx, |session, cx| session.activate(cx));
         }
     }
 
-    fn push_tab(&mut self, cx: &mut Context<Self>) -> bool {
+    /// Create a terminal tab without selecting it; `None` once the tab limit is reached.
+    fn spawn_terminal(&mut self, cx: &mut Context<Self>) -> Option<u64> {
         if self.terminal_count() >= MAX_TERMINAL_TABS {
-            return false;
+            return None;
         }
         let id = self.next_id;
         self.next_id = self.next_id.wrapping_add(1).max(1);
@@ -823,6 +866,14 @@ impl TerminalView {
             content: TabContent::Terminal(session),
             _subscription: subscription,
         });
+        Some(id)
+    }
+
+    fn push_tab(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(id) = self.spawn_terminal(cx) else {
+            return false;
+        };
+        self.show_tab(id);
         self.active = self.tabs.len() - 1;
         self.last_terminal_id = Some(id);
         true
@@ -841,6 +892,8 @@ impl TerminalView {
         let Some(index) = self.tabs.iter().position(|tab| tab.id == id) else {
             return;
         };
+        // The focused pane is looked up through the outgoing tab, so show first.
+        self.show_tab(id);
         self.active = index;
         if matches!(self.tabs[index].content, TabContent::Terminal(_)) {
             self.last_terminal_id = Some(id);
@@ -903,6 +956,7 @@ impl TerminalView {
         let Some(index) = self.tabs.iter().position(|tab| tab.id == id) else {
             return;
         };
+        let vacated = self.cells.iter().position(|cell| *cell == Some(id));
         self.tabs.remove(index);
         if self.last_terminal_id == Some(id) {
             self.last_terminal_id = self
@@ -913,6 +967,7 @@ impl TerminalView {
         }
         if self.tabs.is_empty() {
             self.active = 0;
+            self.cells.fill(None);
             cx.emit(TerminalPanelEvent::LayoutChanged);
             cx.emit(TerminalPanelEvent::ContentChanged);
             cx.emit(TerminalPanelEvent::CloseRequested);
@@ -920,6 +975,19 @@ impl TerminalView {
             return;
         }
         self.active = active_index_after_close(self.active, index, self.tabs.len());
+        if let Some(slot) = vacated {
+            self.cells[slot] = None;
+        }
+        // The closed pane hands its place to the new active tab unless that tab
+        // is already on screen; any other gap fills from the hidden tabs.
+        let active_id = self.tabs[self.active].id;
+        if !self.is_shown(active_id) {
+            let slot = vacated
+                .or_else(|| self.cells.iter().position(Option::is_none))
+                .unwrap_or(0);
+            self.cells[slot] = Some(active_id);
+        }
+        self.sync_cells();
         self.focus(window, cx);
         cx.emit(TerminalPanelEvent::LayoutChanged);
         cx.emit(TerminalPanelEvent::ContentChanged);
@@ -1186,6 +1254,7 @@ impl TerminalView {
     fn set_tab_list_open(&mut self, open: bool, window: &mut Window, cx: &mut Context<Self>) {
         self.tab_list_open = open;
         if open {
+            self.layout_menu_open = false;
             window.focus(&self.tab_list_focus);
         } else if self.tab_list_focus.is_focused(window) {
             self.focus(window, cx);
@@ -1390,18 +1459,26 @@ struct TabEntry {
     tooltip: String,
     icon: &'static str,
     status: Option<(String, gpui::Rgba)>,
+    /// On screen in one of several grid panes.
+    shown: bool,
 }
 
 impl EventEmitter<TerminalPanelEvent> for TerminalView {}
 
+impl TabContent {
+    fn view(&self) -> gpui::AnyView {
+        match self {
+            Self::Terminal(session) => session.clone().into(),
+            Self::File { tab, .. } => tab.into_any_view(),
+            Self::Diff { view, .. } => view.clone().into(),
+        }
+    }
+}
+
 impl Render for TerminalView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let active_content: Option<gpui::AnyView> =
-            self.tabs.get(self.active).map(|tab| match &tab.content {
-                TabContent::Terminal(session) => session.clone().into(),
-                TabContent::File { tab, .. } => tab.into_any_view(),
-                TabContent::Diff { view, .. } => view.clone().into(),
-            });
+            self.tabs.get(self.active).map(|tab| tab.content.view());
         let mut terminal_index = 0;
         let entries = self
             .tabs
@@ -1469,16 +1546,20 @@ impl Render for TerminalView {
                     tooltip,
                     icon,
                     status,
+                    shown: !self.grid.is_single() && self.is_shown(tab.id),
                 }
             })
             .collect::<Vec<_>>();
+        let draggable = !self.grid.is_single();
         let tabs = entries
             .iter()
             .enumerate()
             .map(|(index, entry)| {
-                workspace_tab(entry.clone(), index == self.active, cx).into_any_element()
+                workspace_tab(entry.clone(), index == self.active, draggable, cx).into_any_element()
             })
             .collect::<Vec<_>>();
+        let panes = (draggable && !self.tabs.is_empty()).then(|| self.pane_grid(&entries, cx));
+        let layout_picker = self.layout_picker(cx);
 
         div()
             .id("workspace-terminal")
@@ -1511,13 +1592,16 @@ impl Render for TerminalView {
                             .items_center()
                             .children(tabs),
                     )
+                    .child(layout_picker)
                     .when(entries.len() > 1, |header| {
                         header.child(self.tab_list(entries, cx))
                     }),
             )
-            .when_some(active_content, |panel, content| {
-                panel.child(div().flex_1().min_w_0().min_h_0().child(content))
-            })
+            .when_some(
+                active_content.filter(|_| panes.is_none()),
+                |panel, content| panel.child(div().flex_1().min_w_0().min_h_0().child(content)),
+            )
+            .when_some(panes, |panel, panes| panel.child(panes))
             .when(self.tabs.is_empty(), |panel| {
                 panel.child(
                     div()
@@ -1563,6 +1647,7 @@ fn terminal_tab_title(title: &str, index: usize) -> String {
 fn workspace_tab(
     entry: TabEntry,
     selected: bool,
+    draggable: bool,
     cx: &mut Context<TerminalView>,
 ) -> impl IntoElement {
     let TabEntry {
@@ -1571,10 +1656,12 @@ fn workspace_tab(
         tooltip,
         icon,
         status,
+        shown,
     } = entry;
     let select_id = id;
     let close_id = id;
     let dirty = status.as_ref().is_some_and(|(label, _)| label == "●");
+    let drag = grid::PaneDrag::new(id, &label, icon);
     div()
         .id(SharedString::from(format!("terminal-tab-{id}")))
         .h_full()
@@ -1595,12 +1682,15 @@ fn workspace_tab(
             gpui::rgba(0x0000_0000)
         })
         .border_b_2()
+        // A tab on screen keeps a quiet underline, so it reads without relying on color alone.
         .border_color(if selected {
             theme::focus()
+        } else if shown {
+            theme::edge_hard()
         } else {
             gpui::rgba(0x00000000)
         })
-        .text_color(if selected {
+        .text_color(if selected || shown {
             theme::bone()
         } else {
             theme::ash()
@@ -1615,7 +1705,14 @@ fn workspace_tab(
             }
         })
         .focus(|tab| tab.text_color(theme::focus()))
-        .tooltip(text_tooltip(tooltip))
+        .tooltip(text_tooltip(if shown && !selected {
+            format!("{tooltip} · In a pane")
+        } else {
+            tooltip
+        }))
+        .when(draggable, |tab| {
+            tab.on_drag(drag, |drag, _, _, cx| cx.new(|_| drag.clone()))
+        })
         .on_click(cx.listener(move |view, _, window, cx| view.select_tab(select_id, window, cx)))
         .child(if icon == "rs" {
             div()
