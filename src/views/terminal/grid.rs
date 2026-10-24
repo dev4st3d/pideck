@@ -14,7 +14,7 @@ use crate::theme::terminal_manager as chrome;
 use crate::views::terminal_manager::{check_mark, text_tooltip};
 
 /// Labels for [`SHAPES`], in the same order.
-const SHAPE_LABELS: [&str; SHAPES.len()] = [
+pub(super) const SHAPE_LABELS: [&str; SHAPES.len()] = [
     "Single pane",
     "Two columns",
     "Two rows",
@@ -30,7 +30,7 @@ const KEY_MIN_FRACTION: f32 = 0.15;
 /// A tab being moved between panes, from the tab strip or a pane title bar.
 #[derive(Clone)]
 pub(super) struct PaneDrag {
-    tab: u64,
+    pub(super) tab: u64,
     label: SharedString,
     icon: &'static str,
 }
@@ -96,7 +96,7 @@ struct PaneSlot {
     focused: bool,
 }
 
-fn wash(color: Rgba, alpha: f32) -> Rgba {
+pub(super) fn wash(color: Rgba, alpha: f32) -> Rgba {
     Rgba { a: alpha, ..color }
 }
 
@@ -133,7 +133,7 @@ impl TerminalView {
         cx.notify();
     }
 
-    fn tab_ids(&self) -> Vec<u64> {
+    pub(super) fn tab_ids(&self) -> Vec<u64> {
         self.tabs.iter().map(|tab| tab.id).collect()
     }
 
@@ -176,17 +176,21 @@ impl TerminalView {
         self.layout_menu_open = false;
         if self.grid.set_shape(cols, rows) {
             self.sync_cells();
-            // A new layout opens with a terminal in every pane no tab fills.
-            while let Some(slot) = self.cells.iter().position(Option::is_none) {
-                let Some(id) = self.spawn_terminal(cx) else {
-                    break;
-                };
-                self.cells[slot] = Some(id);
-            }
+            self.fill_empty_panes(cx);
             cx.emit(TerminalPanelEvent::LayoutChanged);
         }
         self.focus(window, cx);
         cx.notify();
+    }
+
+    /// A new layout opens with a terminal in every pane no tab fills.
+    pub(super) fn fill_empty_panes(&mut self, cx: &mut Context<Self>) {
+        while let Some(slot) = self.cells.iter().position(Option::is_none) {
+            let Some(id) = self.spawn_terminal(cx) else {
+                break;
+            };
+            self.cells[slot] = Some(id);
+        }
     }
 
     fn set_layout_menu_open(&mut self, open: bool, window: &mut Window, cx: &mut Context<Self>) {
@@ -225,11 +229,6 @@ impl TerminalView {
         } else {
             self.select_tab(id, window, cx);
         }
-    }
-
-    fn drop_pane(&mut self, index: usize, tab: u64, window: &mut Window, cx: &mut Context<Self>) {
-        terminal_grid::place(&mut self.cells, index, tab);
-        self.select_tab(tab, window, cx);
     }
 
     /// Swap a pane with its neighbour, keeping keyboard focus on the moved title bar.
@@ -562,23 +561,6 @@ impl TerminalView {
             )
             .child(header)
             .child(body)
-            .child(
-                div()
-                    .id(("pane-drop", index))
-                    .absolute()
-                    .top_0()
-                    .left_0()
-                    .size_full()
-                    .drag_over::<PaneDrag>(|style, _, _, _| {
-                        style
-                            .bg(wash(theme::focus(), 0.16))
-                            .border_2()
-                            .border_color(theme::focus())
-                    })
-                    .on_drop(cx.listener(move |view, drag: &PaneDrag, window, cx| {
-                        view.drop_pane(index, drag.tab, window, cx)
-                    })),
-            )
             .into_any_element()
     }
 
@@ -896,6 +878,7 @@ mod tests {
     use gpui::{Entity, Modifiers, MouseMoveEvent, TestAppContext, VisualTestContext, point, size};
 
     use super::*;
+    use crate::services::terminal_grid::DropTarget;
 
     /// A view with `count` dormant terminals in a `cols` × `rows` grid. The
     /// project folder does not exist, so no shell ever starts.
@@ -1007,10 +990,10 @@ mod tests {
         let (view, cx) = grid_view(cx, 3, 2, 1);
         let ids = view.read_with(cx, |view, _| view.tab_ids());
         view.update_in(cx, |view, window, cx| {
-            view.drop_pane(1, ids[0], window, cx);
+            view.apply_drop(ids[0], DropTarget::Pane(1), window, cx);
             assert_eq!(view.cells, [Some(ids[1]), Some(ids[0])]);
             assert_eq!(view.tabs[view.active].id, ids[0]);
-            view.drop_pane(0, ids[2], window, cx);
+            view.apply_drop(ids[2], DropTarget::Pane(0), window, cx);
             assert_eq!(view.cells, [Some(ids[2]), Some(ids[0])]);
             assert_eq!(view.tabs[view.active].id, ids[2]);
             // The replaced tab is hidden, not closed.

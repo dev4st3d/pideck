@@ -58,6 +58,24 @@ pub(crate) const MIN_PANE_WIDTH: f32 = 200.0;
 pub(crate) const MIN_PANE_HEIGHT: f32 = 120.0;
 pub(crate) const LAYOUT_GLYPH_WIDTH: f32 = 18.0;
 pub(crate) const LAYOUT_GLYPH_HEIGHT: f32 = 14.0;
+// Drag-to-snap overlay: the side zones that open a row or column, the layout tray, and preview tiles.
+// A side zone is this share of a pane's width or height, kept between the two limits in pixels.
+pub(crate) const SNAP_SIDE_FRACTION: f32 = 0.25;
+pub(crate) const SNAP_SIDE_MIN: f32 = 40.0;
+pub(crate) const SNAP_SIDE_MAX: f32 = 160.0;
+// How long the pointer must stay in a side zone or the tray before it counts as aimed there.
+pub(crate) const SNAP_DWELL: std::time::Duration = std::time::Duration::from_millis(200);
+// Extra reach an engaged zone or tray keeps, so a small drift does not drop the choice.
+pub(crate) const SNAP_HOLD: f32 = 16.0;
+pub(crate) const SNAP_TRAY_TOP: f32 = 48.0;
+pub(crate) const SNAP_TRAY_PAD: f32 = 8.0;
+pub(crate) const SNAP_TRAY_GAP: f32 = 4.0;
+pub(crate) const SNAP_TRAY_FOOTER: f32 = 20.0;
+pub(crate) const SNAP_THUMB_WIDTH: f32 = 56.0;
+pub(crate) const SNAP_THUMB_HEIGHT: f32 = 36.0;
+pub(crate) const SNAP_THUMB_GAP: f32 = 8.0;
+pub(crate) const SNAP_TILE_INSET: f32 = 6.0;
+pub(crate) const SNAP_TILE_RADIUS: f32 = 6.0;
 // Floating select menus: inner padding and option rows.
 pub(crate) const MENU_INSET: f32 = 4.0;
 pub(crate) const OPTION_ROW_HEIGHT: f32 = 30.0;

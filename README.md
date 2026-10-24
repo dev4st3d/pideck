@@ -16,7 +16,7 @@ Stone is the default. Flint and Light are below.
 - Text editing, image viewing, and diffs in one tab strip.
 - Stage, commit, push, and history, including unified and split diffs.
 - Terminals start in the project directory and keep running when you switch tabs or projects.
-- A pane grid of one to four panes. Drag tabs between panes and drag the dividers to resize them.
+- A pane grid of one to four panes. Rest a dragged tab toward the side of a pane to open a row or column there, or on a layout in the snap tray. Drag the dividers to resize.
 - A checklist for each project. Main shortcuts can be changed in Settings.
 
 The theme, font, shortcuts, and layout stay on your machine. ZiDeck does not send telemetry.
@@ -53,9 +53,17 @@ Settings can replace these. Explorer, diff, and checklist keys stay fixed.
 
 ## Pane grid
 
-Use the layout button at the right of the tab strip to choose one pane, two or three columns, two or three rows, or a 2 × 2 grid. A new layout opens a terminal in each empty pane. Tabs that do not fit stay open in the tab strip and keep running.
+Drag a tab from the tab strip or a pane title over the pane area and a snap overlay appears. It previews the result before you let go, and releasing does exactly what the preview shows. Releasing outside the pane area does nothing.
 
-- Drag a tab or a pane title onto another pane to swap them. With a pane title focused, `Alt+Arrow` moves it.
+- Drop a tab on the middle of a pane to swap them, or to replace the pane's tab if it was hidden. This is the default, and it follows the pointer at once. With a pane title focused, `Alt+Arrow` moves it.
+- Rest a tab toward the left, right, top, or bottom of any pane to open a column or row on that side. Where the pointer leans in the pane decides it: toward the left or right is a column, toward the top or bottom is a row, and in a corner the side you are deeper in wins. Beside two panes, the gap between them is the same place from either one.
+- Tabs that are already open move the same way. Drag a pane's title below another pane and they stack; the row or column it left closes up, so no terminal is added or lost.
+- Rest a tab on a layout in the snap tray at the top of the pane area to switch to that layout with the tab in the cell you chose.
+
+A side is offered only when the grid can take it: up to three across, three down, and four panes. In a full grid the whole pane is the target. The sides and the tray take over only after the pointer rests in them for a moment, so dragging across them never rearranges anything. Once one has taken over it reaches a little past its edge, so a small drift keeps your choice, and moving between tray layouts responds at once. Until then the pane under the pointer is the target.
+
+The layout button at the right of the tab strip reaches the same layouts from the keyboard: one pane, two or three columns, two or three rows, or a 2 × 2 grid. Any layout change opens a terminal in each pane no tab fills. Tabs that do not fit stay open in the tab strip and keep running; dragging never closes a terminal.
+
 - Drag a divider to resize the panes beside it. With a divider focused, the arrow keys nudge it and `Home` makes the panes equal. Double-clicking a divider does the same.
 - With several panes, the next and previous tab shortcuts move between panes.
 - Each project saves its own layout and pane sizes.

@@ -28,6 +28,7 @@ mod element;
 use diff::DiffView;
 mod grid;
 mod input;
+mod snap;
 use element::{TerminalElement, TerminalGeometry};
 
 const OUTPUT_BATCH_INTERVAL: Duration = Duration::from_millis(8);
@@ -391,6 +392,8 @@ pub(crate) struct TerminalView {
     grid_resized: bool,
     /// One title-bar focus handle per cell, so keyboard moves can follow a pane.
     pane_focus: Vec<FocusHandle>,
+    /// A tab dragged over the pane area, with the drop it would make.
+    snap: Option<snap::SnapDrag>,
     layout_menu_open: bool,
     layout_menu_focus: FocusHandle,
     layout_menu_selected: usize,
@@ -424,6 +427,7 @@ impl TerminalView {
             pane_focus: (0..terminal_grid::MAX_CELLS)
                 .map(|_| cx.focus_handle())
                 .collect(),
+            snap: None,
             layout_menu_open: false,
             layout_menu_focus: cx.focus_handle(),
             layout_menu_selected: 0,
@@ -1550,16 +1554,30 @@ impl Render for TerminalView {
                 }
             })
             .collect::<Vec<_>>();
-        let draggable = !self.grid.is_single();
         let tabs = entries
             .iter()
             .enumerate()
             .map(|(index, entry)| {
-                workspace_tab(entry.clone(), index == self.active, draggable, cx).into_any_element()
+                workspace_tab(entry.clone(), index == self.active, cx).into_any_element()
             })
             .collect::<Vec<_>>();
-        let panes = (draggable && !self.tabs.is_empty()).then(|| self.pane_grid(&entries, cx));
+        let panes =
+            (!self.grid.is_single() && !self.tabs.is_empty()).then(|| self.pane_grid(&entries, cx));
         let layout_picker = self.layout_picker(cx);
+        // One host takes snap drags whether the tab is shown alone or among panes.
+        let body = (!self.tabs.is_empty()).then(|| {
+            let content = match (panes, active_content) {
+                (Some(panes), _) => panes,
+                (None, Some(content)) => div()
+                    .flex_1()
+                    .min_w_0()
+                    .min_h_0()
+                    .child(content)
+                    .into_any_element(),
+                (None, None) => div().flex_1().into_any_element(),
+            };
+            self.snap_host(content, cx)
+        });
 
         div()
             .id("workspace-terminal")
@@ -1597,11 +1615,7 @@ impl Render for TerminalView {
                         header.child(self.tab_list(entries, cx))
                     }),
             )
-            .when_some(
-                active_content.filter(|_| panes.is_none()),
-                |panel, content| panel.child(div().flex_1().min_w_0().min_h_0().child(content)),
-            )
-            .when_some(panes, |panel, panes| panel.child(panes))
+            .when_some(body, |panel, body| panel.child(body))
             .when(self.tabs.is_empty(), |panel| {
                 panel.child(
                     div()
@@ -1647,7 +1661,6 @@ fn terminal_tab_title(title: &str, index: usize) -> String {
 fn workspace_tab(
     entry: TabEntry,
     selected: bool,
-    draggable: bool,
     cx: &mut Context<TerminalView>,
 ) -> impl IntoElement {
     let TabEntry {
@@ -1664,6 +1677,7 @@ fn workspace_tab(
     let drag = grid::PaneDrag::new(id, &label, icon);
     div()
         .id(SharedString::from(format!("terminal-tab-{id}")))
+        .debug_selector(move || format!("terminal-tab-{id}"))
         .h_full()
         .max_w(px(250.0))
         .min_w(px(180.0))
@@ -1710,9 +1724,7 @@ fn workspace_tab(
         } else {
             tooltip
         }))
-        .when(draggable, |tab| {
-            tab.on_drag(drag, |drag, _, _, cx| cx.new(|_| drag.clone()))
-        })
+        .on_drag(drag, |drag, _, _, cx| cx.new(|_| drag.clone()))
         .on_click(cx.listener(move |view, _, window, cx| view.select_tab(select_id, window, cx)))
         .child(if icon == "rs" {
             div()
