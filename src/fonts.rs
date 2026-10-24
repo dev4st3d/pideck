@@ -2,7 +2,7 @@
 
 use std::borrow::Cow;
 use std::env;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use gpui::{App, SharedString, px};
 
@@ -112,26 +112,12 @@ pub(crate) fn is_installed(cx: &App, family: &str) -> bool {
             .any(|name| name == family)
 }
 
-/// New installs use `Zeod`. A `ZiDeck` or `Pideck` folder from before a rename
-/// stays in use until a `Zeod` one exists, so settings, layout, and shortcuts carry over.
-fn app_data_dir(root: &Path) -> PathBuf {
-    let current = root.join("Zeod");
-    if current.exists() {
-        return current;
-    }
-    ["ZiDeck", "Pideck"]
-        .into_iter()
-        .map(|name| root.join(name))
-        .find(|legacy| legacy.is_dir())
-        .unwrap_or(current)
-}
-
 fn settings_path() -> PathBuf {
     if let Some(path) = env::var_os("ZEOD_SETTINGS_PATH") {
         return PathBuf::from(path);
     }
     if let Some(root) = env::var_os("APPDATA") {
-        return app_data_dir(Path::new(&root)).join("settings.json");
+        return PathBuf::from(root).join("Zeod").join("settings.json");
     }
     if let Some(root) = env::var_os("XDG_CONFIG_HOME") {
         return PathBuf::from(root).join("zeod").join("settings.json");
@@ -148,23 +134,6 @@ fn settings_path() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn app_data_keeps_a_pre_rename_folder_until_a_new_one_exists() {
-        let root = env::temp_dir().join(format!("zeod-app-data-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(&root).unwrap();
-
-        assert_eq!(app_data_dir(&root), root.join("Zeod"));
-        std::fs::create_dir(root.join("Pideck")).unwrap();
-        assert_eq!(app_data_dir(&root), root.join("Pideck"));
-        std::fs::create_dir(root.join("ZiDeck")).unwrap();
-        assert_eq!(app_data_dir(&root), root.join("ZiDeck"));
-        std::fs::create_dir(root.join("Zeod")).unwrap();
-        assert_eq!(app_data_dir(&root), root.join("Zeod"));
-
-        std::fs::remove_dir_all(&root).unwrap();
-    }
 
     // GPUI's headless platform uses NoopTextSystem. Check the actual SFNT
     // family records here; the native startup check below covers DirectWrite.
