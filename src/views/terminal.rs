@@ -2015,7 +2015,7 @@ mod tests {
         }
         let project = std::env::temp_dir();
         let source = TestSource(project.join(format!(
-            "zideck-mixed-tabs-{}-{}.txt",
+            "zeod-mixed-tabs-{}-{}.txt",
             std::process::id(),
             NEXT_SOURCE.fetch_add(1, Ordering::Relaxed)
         )));
@@ -2103,7 +2103,7 @@ mod tests {
         ];
         let project = std::env::temp_dir();
         let source = TestSource(project.join(format!(
-            "zideck-image-tab-{}-{}.png",
+            "zeod-image-tab-{}-{}.png",
             std::process::id(),
             NEXT_SOURCE.fetch_add(1, Ordering::Relaxed)
         )));

@@ -388,7 +388,7 @@ impl TerminalManager {
     fn begin_update_persistence(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.restore_warning.is_some() || self.save_failed {
             self.notice = Some(
-                "ZiDeck needs to save the latest layout before restarting. Resolve the layout warning and try again."
+                "Zeod needs to save the latest layout before restarting. Resolve the layout warning and try again."
                     .into(),
             );
             return;
@@ -997,7 +997,7 @@ impl TerminalManager {
         }
         if let Some(workspace) = &self.workspace {
             let name = project_name(&workspace.projects[workspace.active].path);
-            window.set_window_title(&format!("{name} — ZiDeck"));
+            window.set_window_title(&format!("{name} — Zeod"));
         }
     }
 
@@ -1532,7 +1532,7 @@ impl TerminalManager {
                     .font_weight(FontWeight::NORMAL)
                     .text_size(px(chrome::WORDMARK_SIZE))
                     .text_color(theme::focus())
-                    .child("ZiDeck."),
+                    .child("Zeod."),
             )
             .child(
                 div()
@@ -1873,10 +1873,10 @@ impl TerminalManager {
     fn update_footer(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         let status = match &self.update_state {
             UpdateState::Unavailable => {
-                format!("ZiDeck {} · dev build", app_update::CURRENT_VERSION)
+                format!("Zeod {} · dev build", app_update::CURRENT_VERSION)
             }
             UpdateState::Checking => "Checking for updates…".to_owned(),
-            UpdateState::Current => format!("ZiDeck {}", app_update::CURRENT_VERSION),
+            UpdateState::Current => format!("Zeod {}", app_update::CURRENT_VERSION),
             UpdateState::Available(version) => format!("Update {version} available"),
             UpdateState::Downloading => "Preparing update…".to_owned(),
             UpdateState::Prepared(version) => format!("Update {version} ready"),
@@ -1900,7 +1900,7 @@ impl TerminalManager {
                             | UpdateState::Error(_)
                     );
                     let tooltip = match &self.update_state {
-                        UpdateState::Current => "ZiDeck is up to date".to_owned(),
+                        UpdateState::Current => "Zeod is up to date".to_owned(),
                         UpdateState::Available(_) => "Download, then restart to update".to_owned(),
                         UpdateState::Prepared(_) => "Restart to finish updating".to_owned(),
                         UpdateState::Error(_) => "Check for updates again".to_owned(),
@@ -1946,7 +1946,7 @@ impl TerminalManager {
                                     let settings_owner = owner.clone();
                                     let menu = menu.item(
                                         PopupMenuItem::new(format!(
-                                            "ZiDeck {}",
+                                            "Zeod {}",
                                             app_update::CURRENT_VERSION
                                         ))
                                         .disabled(true),
@@ -2436,7 +2436,7 @@ impl TerminalManager {
             PendingClose::UpdateRestart => {
                 if self.restore_warning.is_some() || self.save_failed {
                     self.notice = Some(
-                        "ZiDeck needs to save the latest layout before restarting. Resolve the layout warning and try again."
+                        "Zeod needs to save the latest layout before restarting. Resolve the layout warning and try again."
                             .into(),
                     );
                     self.discard_on_close = false;
@@ -2453,7 +2453,7 @@ impl TerminalManager {
                 self.prompt_pending = true;
                 let prompt = window.prompt(
                     PromptLevel::Warning,
-                    "Restart ZiDeck to install the update?",
+                    "Restart Zeod to install the update?",
                     Some("Running shells and commands will stop after the latest workspace layout is saved."),
                     &["Cancel", "Restart to update"],
                     cx,
@@ -2812,7 +2812,7 @@ fn project_menu(
     }))
     .separator()
     .item(
-        PopupMenuItem::new("Remove from ZiDeck…")
+        PopupMenuItem::new("Remove from Zeod…")
             .disabled(!can_remove)
             .on_click(move |_, window, cx| {
                 let owner = owner.clone();

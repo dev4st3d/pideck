@@ -89,7 +89,7 @@ impl TerminalWorker {
         let shutdown_requested = Arc::new(AtomicBool::new(false));
         let worker_events = event_tx.clone();
         if thread::Builder::new()
-            .name("zideck-terminal".to_owned())
+            .name("zeod-terminal".to_owned())
             .spawn({
                 let shutdown_requested = Arc::clone(&shutdown_requested);
                 move || {
@@ -224,7 +224,7 @@ fn run_terminal(
 
     let reader_events = events.clone();
     let _ = thread::Builder::new()
-        .name("zideck-terminal-output".to_owned())
+        .name("zeod-terminal-output".to_owned())
         .spawn(move || {
             let mut buffer = [0_u8; READ_BUFFER_BYTES];
             loop {
@@ -252,7 +252,7 @@ fn run_terminal(
 
     let wait_events = events.clone();
     let _ = thread::Builder::new()
-        .name("zideck-terminal-wait".to_owned())
+        .name("zeod-terminal-wait".to_owned())
         .spawn(move || match child.wait() {
             Ok(status) => send_event(
                 &wait_events,
@@ -416,21 +416,21 @@ mod tests {
         let workspace = std::env::current_dir().unwrap();
         let worker = TerminalWorker::spawn(workspace, TerminalSize::new(8, 80));
         let mut engine = super::super::terminal_engine::TerminalEngine::new(8, 80);
-        assert!(worker.write_line("echo ZIDECK_TERMINAL_READY"));
+        assert!(worker.write_line("echo ZEOD_TERMINAL_READY"));
         wait_for_terminal_marker(
             &worker,
             &mut engine,
-            "ZIDECK_TERMINAL_READY",
+            "ZEOD_TERMINAL_READY",
             Instant::now() + Duration::from_secs(15),
         );
         // Exercise a real PTY resize and subsequent output, using the same process.
         assert!(worker.resize(TerminalSize::new(12, 96)));
         engine.resize(12, 96);
-        assert!(worker.write_line("echo ZIDECK_TERMINAL_RESIZED"));
+        assert!(worker.write_line("echo ZEOD_TERMINAL_RESIZED"));
         wait_for_terminal_marker(
             &worker,
             &mut engine,
-            "ZIDECK_TERMINAL_RESIZED",
+            "ZEOD_TERMINAL_RESIZED",
             Instant::now() + Duration::from_secs(15),
         );
         assert!(worker.write_line("exit"));
@@ -444,28 +444,28 @@ mod tests {
         let second = TerminalWorker::spawn(workspace, TerminalSize::new(8, 80));
         let mut first_engine = super::super::terminal_engine::TerminalEngine::new(8, 80);
         let mut second_engine = super::super::terminal_engine::TerminalEngine::new(8, 80);
-        assert!(first.write_line("echo ZIDECK_FIRST_TERMINAL"));
-        assert!(second.write_line("echo ZIDECK_SECOND_TERMINAL"));
+        assert!(first.write_line("echo ZEOD_FIRST_TERMINAL"));
+        assert!(second.write_line("echo ZEOD_SECOND_TERMINAL"));
         let first_text = wait_for_terminal_marker(
             &first,
             &mut first_engine,
-            "ZIDECK_FIRST_TERMINAL",
+            "ZEOD_FIRST_TERMINAL",
             Instant::now() + Duration::from_secs(15),
         );
         let second_text = wait_for_terminal_marker(
             &second,
             &mut second_engine,
-            "ZIDECK_SECOND_TERMINAL",
+            "ZEOD_SECOND_TERMINAL",
             Instant::now() + Duration::from_secs(15),
         );
-        assert!(!first_text.contains("ZIDECK_SECOND_TERMINAL"));
-        assert!(!second_text.contains("ZIDECK_FIRST_TERMINAL"));
+        assert!(!first_text.contains("ZEOD_SECOND_TERMINAL"));
+        assert!(!second_text.contains("ZEOD_FIRST_TERMINAL"));
         assert!(first.write_line("exit"));
-        assert!(second.write_line("echo ZIDECK_SECOND_STILL_RUNNING"));
+        assert!(second.write_line("echo ZEOD_SECOND_STILL_RUNNING"));
         wait_for_terminal_marker(
             &second,
             &mut second_engine,
-            "ZIDECK_SECOND_STILL_RUNNING",
+            "ZEOD_SECOND_STILL_RUNNING",
             Instant::now() + Duration::from_secs(15),
         );
         assert!(second.write_line("exit"));

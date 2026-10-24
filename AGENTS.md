@@ -1,6 +1,6 @@
 # AGENTS.md
 
-Repository-wide instructions for `pi-gui`; they apply to this directory and its descendants. A deeper `AGENTS.md` applies only to its subtree and overrides this file there. User instructions take precedence.
+Repository-wide instructions for `zeod`; they apply to this directory and its descendants. A deeper `AGENTS.md` applies only to its subtree and overrides this file there. User instructions take precedence.
 
 ## Priorities
 

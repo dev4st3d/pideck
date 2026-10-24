@@ -1,11 +1,11 @@
 [package]
-name = "pi-gui"
+name = "zeod"
 version = "0.2.12"
 edition = "2024"
 rust-version = "1.88"
-description = "ZiDeck — a native multi-project terminal manager (GPUI)"
+description = "Zeod — a native multi-project terminal manager (GPUI)"
 license = "MIT"
-repository = "https://github.com/dev4st3d/pideck"
+repository = "https://github.com/dev4st3d/zeod"
 readme = "README.md"
 
 [dependencies]

@@ -152,7 +152,7 @@ mod tests {
     impl TestDirectory {
         fn new() -> Self {
             let path = std::env::temp_dir().join(format!(
-                "zideck-terminal-font-{}-{}",
+                "zeod-terminal-font-{}-{}",
                 std::process::id(),
                 NEXT_TEST.fetch_add(1, Ordering::Relaxed),
             ));

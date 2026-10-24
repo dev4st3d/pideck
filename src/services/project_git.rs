@@ -401,7 +401,7 @@ fn run_git_with_input(
                 return Err(GitError::ReadFailed);
             };
             match thread::Builder::new()
-                .name("zideck-git-input".into())
+                .name("zeod-git-input".into())
                 .spawn(move || stdin.write_all(&bytes))
             {
                 Ok(writer) => Some(writer),
@@ -417,7 +417,7 @@ fn run_git_with_input(
     let output_exceeded = Arc::new(AtomicBool::new(false));
     let error_exceeded = Arc::new(AtomicBool::new(false));
     let output_reader = thread::Builder::new()
-        .name("zideck-git-output".into())
+        .name("zeod-git-output".into())
         .spawn({
             let exceeded = Arc::clone(&output_exceeded);
             move || read_pipe(stdout, MAX_OUTPUT_BYTES, &exceeded)
@@ -430,12 +430,10 @@ fn run_git_with_input(
             return Err(GitError::ReadFailed);
         }
     };
-    let error_reader = thread::Builder::new()
-        .name("zideck-git-error".into())
-        .spawn({
-            let exceeded = Arc::clone(&error_exceeded);
-            move || read_pipe(stderr, 16 * 1024, &exceeded)
-        });
+    let error_reader = thread::Builder::new().name("zeod-git-error".into()).spawn({
+        let exceeded = Arc::clone(&error_exceeded);
+        move || read_pipe(stderr, 16 * 1024, &exceeded)
+    });
     let error_reader = match error_reader {
         Ok(reader) => reader,
         Err(_) => {
@@ -1006,7 +1004,7 @@ mod tests {
     #[test]
     fn branch_switch_preserves_conflicting_local_changes() {
         let root = std::env::temp_dir().join(format!(
-            "zideck-branches-{}-{}",
+            "zeod-branches-{}-{}",
             std::process::id(),
             NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed)
         ));
@@ -1143,7 +1141,7 @@ mod tests {
     #[test]
     fn reads_staged_and_worktree_diffs_in_a_synthetic_nested_project_without_changing_index() {
         let root = std::env::temp_dir().join(format!(
-            "zideck-git-{}-{}",
+            "zeod-git-{}-{}",
             std::process::id(),
             NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed)
         ));

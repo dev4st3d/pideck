@@ -1,4 +1,4 @@
-//! Embedded typography from the supplied ZiDeck design references.
+//! Embedded typography.
 
 use std::borrow::Cow;
 use std::env;
@@ -31,7 +31,7 @@ pub(crate) fn initialize(cx: &App) -> FontCatalog {
         )),
     ];
     if let Err(error) = cx.text_system().add_fonts(fonts) {
-        eprintln!("ZiDeck design fonts could not be registered: {error}");
+        eprintln!("Zeod design fonts could not be registered: {error}");
     }
     // The headless test platform has no font collection. On the native platform,
     // Check the registered collection, not resolve_font's requested descriptor:
@@ -45,7 +45,7 @@ pub(crate) fn initialize(cx: &App) -> FontCatalog {
             DEFAULT_MONO,
         ] {
             if !registered.iter().any(|name| name == family) {
-                eprintln!("ZiDeck could not register its bundled font family: {family}");
+                eprintln!("Zeod could not register its bundled font family: {family}");
             }
         }
     }
@@ -112,32 +112,34 @@ pub(crate) fn is_installed(cx: &App, family: &str) -> bool {
             .any(|name| name == family)
 }
 
-/// New installs use `ZiDeck`. A `Pideck` folder from before the rename stays
-/// in use until a `ZiDeck` one exists, so settings, layout, and shortcuts carry over.
+/// New installs use `Zeod`. A `ZiDeck` or `Pideck` folder from before a rename
+/// stays in use until a `Zeod` one exists, so settings, layout, and shortcuts carry over.
 fn app_data_dir(root: &Path) -> PathBuf {
-    let current = root.join("ZiDeck");
-    let legacy = root.join("Pideck");
-    if !current.exists() && legacy.is_dir() {
-        legacy
-    } else {
-        current
+    let current = root.join("Zeod");
+    if current.exists() {
+        return current;
     }
+    ["ZiDeck", "Pideck"]
+        .into_iter()
+        .map(|name| root.join(name))
+        .find(|legacy| legacy.is_dir())
+        .unwrap_or(current)
 }
 
 fn settings_path() -> PathBuf {
-    if let Some(path) = env::var_os("PI_GUI_SETTINGS_PATH") {
+    if let Some(path) = env::var_os("ZEOD_SETTINGS_PATH") {
         return PathBuf::from(path);
     }
     if let Some(root) = env::var_os("APPDATA") {
         return app_data_dir(Path::new(&root)).join("settings.json");
     }
     if let Some(root) = env::var_os("XDG_CONFIG_HOME") {
-        return PathBuf::from(root).join("zideck").join("settings.json");
+        return PathBuf::from(root).join("zeod").join("settings.json");
     }
     if let Some(root) = env::var_os("HOME") {
         return PathBuf::from(root)
             .join(".config")
-            .join("zideck")
+            .join("zeod")
             .join("settings.json");
     }
     PathBuf::from("settings.json")
@@ -149,15 +151,17 @@ mod tests {
 
     #[test]
     fn app_data_keeps_a_pre_rename_folder_until_a_new_one_exists() {
-        let root = env::temp_dir().join(format!("zideck-app-data-{}", std::process::id()));
+        let root = env::temp_dir().join(format!("zeod-app-data-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
 
-        assert_eq!(app_data_dir(&root), root.join("ZiDeck"));
+        assert_eq!(app_data_dir(&root), root.join("Zeod"));
         std::fs::create_dir(root.join("Pideck")).unwrap();
         assert_eq!(app_data_dir(&root), root.join("Pideck"));
         std::fs::create_dir(root.join("ZiDeck")).unwrap();
         assert_eq!(app_data_dir(&root), root.join("ZiDeck"));
+        std::fs::create_dir(root.join("Zeod")).unwrap();
+        assert_eq!(app_data_dir(&root), root.join("Zeod"));
 
         std::fs::remove_dir_all(&root).unwrap();
     }

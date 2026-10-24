@@ -1,4 +1,4 @@
-# ZiDeck
+# Zeod
 
 A native workspace for project folders, files, Git, and terminals. Rust and GPUI, for Windows.
 
@@ -19,7 +19,7 @@ Stone is the default. Flint and Light are below.
 - A pane grid of one to four panes. Rest a dragged tab toward the side of a pane to open a row or column there, or on a layout in the snap tray. Drag the dividers to resize.
 - A checklist for each project. Main shortcuts can be changed in Settings.
 
-The theme, font, shortcuts, and layout stay on your machine. ZiDeck does not send telemetry.
+The theme, font, shortcuts, and layout stay on your machine. Zeod does not send telemetry.
 
 ## Run
 
@@ -33,7 +33,7 @@ cargo run --locked
 cargo build --release --locked
 ```
 
-**ZiDeck Setup** can check GitHub Releases. Applying an update restarts only after you confirm.
+**Zeod Setup** can check GitHub Releases. Applying an update restarts only after you confirm.
 
 ## Shortcuts
 

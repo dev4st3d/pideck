@@ -7,7 +7,7 @@ use velopack::{Error, UpdateCheck, UpdateManager, VelopackAsset, sources::HttpSo
 
 pub const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 #[cfg(windows)]
-const UPDATE_BASE_URL: &str = "https://github.com/dev4st3d/pideck/releases/latest/download";
+const UPDATE_BASE_URL: &str = "https://github.com/dev4st3d/zeod/releases/latest/download";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CheckOutcome {
@@ -174,17 +174,16 @@ fn pending_update(manager: &UpdateManager) -> Result<Option<VelopackAsset>, Upda
     Ok(Some(asset))
 }
 
-/// Velopack package id, kept from before the ZiDeck rename so installed copies
-/// still accept updates from the existing release feed.
+/// Velopack package id; it must match `--packId` in the release workflow.
 fn package_id_is_valid(package_id: &str) -> bool {
-    package_id.eq_ignore_ascii_case("PiDeck")
+    package_id.eq_ignore_ascii_case("Zeod")
 }
 
 #[cfg(windows)]
 fn validate_asset(asset: &VelopackAsset) -> Result<(), UpdateFailure> {
     if !package_id_is_valid(&asset.PackageId) {
         return Err(UpdateFailure::new(
-            "The update package does not belong to ZiDeck. Nothing was installed.",
+            "The update package does not belong to Zeod. Nothing was installed.",
         ));
     }
     if asset.Version.trim().is_empty() || asset.FileName.trim().is_empty() {
@@ -197,12 +196,12 @@ fn validate_asset(asset: &VelopackAsset) -> Result<(), UpdateFailure> {
 
 #[cfg(windows)]
 fn map_error(stage: Stage, error: Error) -> UpdateFailure {
-    eprintln!("ZiDeck update {stage:?} failed: {error}");
+    eprintln!("Zeod update {stage:?} failed: {error}");
     let message = match (stage, error) {
         (Stage::Check, Error::Network(_)) => {
-            "ZiDeck couldn't reach GitHub. Check your connection and try again."
+            "Zeod couldn't reach GitHub. Check your connection and try again."
         }
-        (Stage::Check, _) => "ZiDeck couldn't check for updates. Try again in a moment.",
+        (Stage::Check, _) => "Zeod couldn't check for updates. Try again in a moment.",
         (Stage::Prepare, Error::Network(_)) => {
             "The update couldn't be downloaded. Check your connection and try again."
         }
@@ -210,7 +209,7 @@ fn map_error(stage: Stage, error: Error) -> UpdateFailure {
             "The update couldn't be verified or prepared. Nothing was installed."
         }
         (Stage::Schedule, _) => {
-            "The update is ready, but ZiDeck couldn't start it. Try restarting to update again."
+            "The update is ready, but Zeod couldn't start it. Try restarting to update again."
         }
     };
     UpdateFailure::new(message)
@@ -222,9 +221,9 @@ mod tests {
 
     #[test]
     fn package_identity_is_case_insensitive_and_rejects_other_products() {
-        assert!(package_id_is_valid("PiDeck"));
-        assert!(package_id_is_valid("pideck"));
-        assert!(!package_id_is_valid("PiDeck Preview"));
+        assert!(package_id_is_valid("Zeod"));
+        assert!(package_id_is_valid("zeod"));
+        assert!(!package_id_is_valid("Zeod Preview"));
         assert!(!package_id_is_valid("OtherApp"));
     }
 
@@ -245,9 +244,9 @@ mod tests {
     #[test]
     fn validates_package_identity_and_required_asset_fields() {
         let valid = VelopackAsset {
-            PackageId: "pideck".into(),
+            PackageId: "zeod".into(),
             Version: "1.2.3".into(),
-            FileName: "PiDeck-1.2.3-full.nupkg".into(),
+            FileName: "Zeod-1.2.3-full.nupkg".into(),
             ..VelopackAsset::default()
         };
         assert!(validate_asset(&valid).is_ok());

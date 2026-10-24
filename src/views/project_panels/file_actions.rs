@@ -927,7 +927,7 @@ mod tests {
     #[gpui::test]
     fn context_menu_clicks_outside_sidebar_dispatch_and_keep_name_focus(cx: &mut TestAppContext) {
         cx.update(super::super::super::file_editor::FileEditor::initialize);
-        let root = std::env::temp_dir().join(format!("zideck-menu-test-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("zeod-menu-test-{}", std::process::id()));
         std::fs::create_dir_all(root.join("folder")).unwrap();
         std::fs::write(root.join("a.txt"), "fixture").unwrap();
         let entries = project_files::list_directory(&root, &root).unwrap().entries;

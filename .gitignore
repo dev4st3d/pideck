@@ -7,7 +7,5 @@ GPUI.md
 order.md
 pi.md
 
-# Supplied design fonts are prepared locally and embedded by build.rs.
-/assets/fonts/*.ttf
 /visual-artifacts/
 .muxel/

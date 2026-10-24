@@ -163,7 +163,7 @@ fn recycle(path: &Path) -> Result<(), String> {
     {
         let path = path.to_path_buf();
         std::thread::Builder::new()
-            .name("zideck-recycle".into())
+            .name("zeod-recycle".into())
             .spawn(move || trash::delete(path))
             .map_err(|_| ERROR.to_owned())?
             .join()
@@ -322,7 +322,7 @@ mod tests {
                 unsafe { CoInitializeEx(std::ptr::null(), COINIT_MULTITHREADED as u32) };
             assert!(initialized >= 0);
             let root = std::env::temp_dir().join(format!(
-                "zideck-recycle-{}-{}",
+                "zeod-recycle-{}-{}",
                 std::process::id(),
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
@@ -331,7 +331,7 @@ mod tests {
             ));
             fs::create_dir(&root).unwrap();
             let path = root.join("disposable.txt");
-            fs::write(&path, "ZiDeck recycle regression fixture").unwrap();
+            fs::write(&path, "Zeod recycle regression fixture").unwrap();
             let cancelled = run(
                 &root,
                 Operation::Trash(vec![path.clone()]),
@@ -375,7 +375,7 @@ mod tests {
     }
     #[test]
     fn copy_collision_move_and_self_nesting() {
-        let root = std::env::temp_dir().join(format!("zideck-operations-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("zeod-operations-{}", std::process::id()));
         fs::create_dir_all(root.join("src")).unwrap();
         fs::write(root.join("src/a.txt"), "original").unwrap();
         let cancel = AtomicBool::new(false);

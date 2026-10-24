@@ -1,4 +1,4 @@
-# ZiDeck UI icons
+# Zeod UI icons
 
 The 50 SVGs in this directory are the app's custom, monochrome control icons.
 `src/assets.rs` embeds the complete set under `icons/<name>.svg`.
@@ -23,7 +23,6 @@ The 50 SVGs in this directory are the app's custom, monochrome control icons.
 
 The user-selected Catppuccin explorer theme is a separately licensed upstream
 bundle; its source and version are documented in `../catppuccin/README.md`.
-`info/assets/icons` contains the older reference artwork, not runtime assets.
 
 ## Review and validation
 
