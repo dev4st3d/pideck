@@ -1,46 +1,53 @@
 # Zeod
 
-A native workspace for project folders, files, Git, and terminals. Rust and GPUI, for Windows.
+A native workspace for your project folders, files, Git, and terminals. Written in Rust with GPUI, for Windows.
 
 ![File tree and an open source file on the Stone theme](assets/screenshots/stone.png)
 
-Stone is the default. Flint and Light are below.
+## Download
 
-![Git history and a split diff on the Flint theme](assets/screenshots/flint.png)
+Grab `Zeod-win-Setup.exe` from the [latest release](https://github.com/dev4st3d/zeod/releases/latest) and run it.
 
-![A project terminal with Pi open, on the Light theme](assets/screenshots/light.png)
+The installer isn't code-signed yet, so Windows SmartScreen may warn before it starts. Choose **More info**, then **Run anyway**.
+
+Installed builds check GitHub Releases for updates. Zeod restarts to apply one only after you confirm.
 
 ## What you get
 
-- Several project folders. Each keeps its own files, Git state, and terminals.
-- Text editing, image viewing, and diffs in one tab strip.
-- Stage, commit, push, and history, including unified and split diffs.
-- Terminals start in the project directory and keep running when you switch tabs or projects.
-- A pane grid of one to four panes. Rest a dragged tab toward the side of a pane to open a row or column there, or on a layout in the snap tray. Drag the dividers to resize.
-- A checklist for each project. Main shortcuts can be changed in Settings.
+- **Several projects at once.** Each project folder keeps its own files, Git state, and terminals.
+- **One tab strip for everything.** Edit text, view images, and review diffs next to your terminals.
+- **Git without leaving the app.** Stage, commit, push, and browse history, with unified and split diffs.
+- **Terminals that stay put.** They start in the project directory and keep running when you switch tabs or projects.
+- **A pane grid.** Show one to four panes, drag tabs to rearrange them, and drag the dividers to resize.
+- **A checklist per project.** Keep small to-dos next to the work they belong to.
+- **Ten themes** and shortcuts you can change in Settings.
 
-The theme, font, shortcuts, and layout stay on your machine. Zeod does not send telemetry.
+Your theme, font, shortcuts, and layout stay on your machine. Zeod has no telemetry or analytics.
 
-## Run
+![Git history and a split diff on the Flint theme](assets/screenshots/flint.png)
 
-Windows, stable Rust (syntax floor 1.88):
+![A project terminal on the Light theme](assets/screenshots/light.png)
+
+## Build from source
+
+You need Windows and stable Rust 1.88 or newer.
 
 ```powershell
 cargo run --locked
 ```
 
+For an optimized build:
+
 ```powershell
 cargo build --release --locked
 ```
-
-**Zeod Setup** can check GitHub Releases. Applying an update restarts only after you confirm.
 
 ## Shortcuts
 
 | Action | Keys |
 | --- | --- |
 | Add a project | `Ctrl+Shift+O` |
-| New terminal | `` Ctrl+` `` |
+| New terminal | `Ctrl+Shift+T` or `` Ctrl+` `` |
 | Close the active tab | `Ctrl+Shift+W` |
 | Next / previous tab | `Ctrl+Tab` / `Ctrl+Shift+Tab` |
 | Save the active file | `Ctrl+S` |
@@ -49,20 +56,20 @@ cargo build --release --locked
 | Settings | `Ctrl+,` |
 | Copy / paste in the terminal | `Ctrl+Shift+C` / `Ctrl+Shift+V` |
 
-Settings can replace these. Explorer, diff, and checklist keys stay fixed.
+Settings can replace the main shortcuts. Explorer, diff, and checklist keys stay fixed.
 
 ## Pane grid
 
-Drag a tab from the tab strip or a pane title over the pane area and a snap overlay appears. It previews the result before you let go, and releasing does exactly what the preview shows. Releasing outside the pane area does nothing.
+Drag a tab from the tab strip, or a pane's title, over the pane area. A snap overlay previews the result, and releasing does exactly what it shows. Releasing outside the pane area does nothing.
 
-- Drop a tab on the middle of a pane to swap them, or to replace the pane's tab if it was hidden. This is the default, and it follows the pointer at once. With a pane title focused, `Alt+Arrow` moves it.
-- Rest a tab toward the left, right, top, or bottom of any pane to open a column or row on that side. Where the pointer leans in the pane decides it: toward the left or right is a column, toward the top or bottom is a row, and in a corner the side you are deeper in wins. Beside two panes, the gap between them is the same place from either one.
-- Tabs that are already open move the same way. Drag a pane's title below another pane and they stack; the row or column it left closes up, so no terminal is added or lost.
-- Rest a tab on a layout in the snap tray at the top of the pane area to switch to that layout with the tab in the cell you chose.
+- **Middle of a pane:** swap the two tabs, or replace the pane's tab if it was hidden. This is the default. With a pane title focused, `Alt+Arrow` moves it.
+- **Near a side:** open a column (left or right) or a row (top or bottom) there. In a corner, the side you are deeper in wins. Between two panes, the gap is the same target from either one.
+- **Snap tray:** rest the tab on a layout at the top of the pane area to switch to it, with the tab in the cell you chose.
+- **Tabs already open** move the same way. Drag a pane's title below another pane and they stack; the row or column it left closes up, so no terminal is added or lost.
 
-A side is offered only when the grid can take it: up to three across, three down, and four panes. In a full grid the whole pane is the target. The sides and the tray take over only after the pointer rests in them for a moment, so dragging across them never rearranges anything. Once one has taken over it reaches a little past its edge, so a small drift keeps your choice, and moving between tray layouts responds at once. Until then the pane under the pointer is the target.
+The grid takes up to three columns, three rows, and four panes. A side is offered only when the grid can take it, and in a full grid the whole pane is the target. Sides and the tray take over only after the pointer rests in them for a moment, so dragging across them never rearranges anything. Once one is active it reaches a little past its edge, so a small drift keeps your choice.
 
-The layout button at the right of the tab strip reaches the same layouts from the keyboard: one pane, two or three columns, two or three rows, or a 2 × 2 grid. Any layout change opens a terminal in each pane no tab fills. Tabs that do not fit stay open in the tab strip and keep running; dragging never closes a terminal.
+The layout button at the right of the tab strip offers the same layouts from the keyboard: one pane, two or three columns, two or three rows, or a 2 × 2 grid. A layout change opens a terminal in each pane no tab fills. Tabs that do not fit stay open in the tab strip and keep running. Dragging never closes a terminal.
 
 - Drag a divider to resize the panes beside it. With a divider focused, the arrow keys nudge it and `Home` makes the panes equal. Double-clicking a divider does the same.
 - With several panes, the next and previous tab shortcuts move between panes.
@@ -74,6 +81,8 @@ Black, Light, Graphite, Charcoal, Flint, Stone, Slate, Moss, Kiln, and Iris. Pic
 
 ## Contributing
 
-Pull requests are not being accepted right now. There is no time to review and manage them.
+Zeod is a small one-person project, and I can't review pull requests properly right now, so they're closed for the moment. Bug reports and ideas are very welcome in [Issues](https://github.com/dev4st3d/zeod/issues). Thanks for understanding!
 
-MIT
+## License
+
+MIT. See [LICENSE](LICENSE).
